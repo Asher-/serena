@@ -114,9 +114,19 @@ class Language(str, Enum):
     Requires PHP 8.1+ on the system. Fully open-source (MIT license).
     """
     MARKDOWN = "markdown"
-    """Marksman language server for Markdown (experimental).
+    """Serena's in-house Markdown language server (experimental).
+    Backed by :class:`MarkdownStructuralLanguage` (markdown-it-py), so the LSP
+    symbol surface and the structural-edit surface share one parse tree.
+    v1 provides hierarchical ``textDocument/documentSymbol`` only.
     Must be explicitly specified as the main language, not auto-detected.
     This is an edge case primarily useful when working on documentation-heavy projects.
+    """
+    MARKSMAN = "marksman"
+    """Marksman language server for Markdown (experimental).
+    Preserved alternative implementation, retained for parity with older Serena
+    projects that relied on Marksman's richer feature set (references,
+    definitions, completion). Must be explicitly specified as the main
+    language, not auto-detected.
     """
     YAML = "yaml"
     """YAML language server (experimental).
@@ -173,6 +183,7 @@ class Language(str, Enum):
             self.RUBY_SOLARGRAPH,
             self.PHP_PHPACTOR,
             self.MARKDOWN,
+            self.MARKSMAN,
             self.YAML,
             self.TOML,
             self.GROOVY,
@@ -272,7 +283,7 @@ class Language(str, Enum):
                 return FilenameMatcher("*.fs", "*.fsx", "*.fsi")
             case self.REGO:
                 return FilenameMatcher("*.rego")
-            case self.MARKDOWN:
+            case self.MARKDOWN | self.MARKSMAN:
                 return FilenameMatcher("*.md", "*.markdown")
             case self.SCALA:
                 return FilenameMatcher("*.scala", "*.sbt")
@@ -485,6 +496,10 @@ class Language(str, Enum):
 
                 return RegalLanguageServer
             case self.MARKDOWN:
+                from solidlsp.language_servers.serena_markdown_language_server import SerenaMarkdownLanguageServer
+
+                return SerenaMarkdownLanguageServer
+            case self.MARKSMAN:
                 from solidlsp.language_servers.marksman import Marksman
 
                 return Marksman
