@@ -55,7 +55,6 @@ read_only: false
 #       for example by saying that the information retrieved from a memory file is no longer correct
 #       or no longer relevant for the project.
 #  * `edit_memory`: Replaces content matching a regular expression in a memory.
-#  * `execute_shell_command`: Executes a shell command.
 #  * `find_file`: Finds files in the given relative paths
 #  * `find_referencing_symbols`: Finds symbols that reference the given symbol using the language server backend
 #  * `find_symbol`: Performs a global (or local) search using the language server backend.

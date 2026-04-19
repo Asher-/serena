@@ -13,7 +13,6 @@ prompt: |
   
 
 excluded_tools:
-  - execute_shell_command
   - search_for_pattern
 
 tool_description_overrides: {}

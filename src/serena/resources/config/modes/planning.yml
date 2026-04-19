@@ -12,5 +12,4 @@ excluded_tools:
   - cursor_insert_after
   - cursor_insert_before
   - cursor_rename
-  - execute_shell_command
 

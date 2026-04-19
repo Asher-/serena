@@ -84,7 +84,6 @@ In your project’s `.serena/project.yml` or global config, you can disable tool
 
 ```yaml
 excluded_tools:
-  - execute_shell_command
   - ...
 read_only: true
 ```

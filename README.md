@@ -167,7 +167,6 @@ since the surrounding harness already provides overlapping file, search, and she
 - **`replace_content`** – agent-optimised regex-based and literal text replacement
 - **`list_dir` / `find_file`** – directory listing and file search
 - **`read_file`** – read files or file chunks
-- **`execute_shell_command`** – run shell commands (e.g. builds, tests, linters)
 
 ### Memory Management
 

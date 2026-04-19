@@ -11,8 +11,7 @@ prompt: |
   Make sure to first activate the working directory as using Serena's `activate_project` tool and to read initial
   instructions (if not done so already) with the `initial_instructions` tool.
 
-excluded_tools:
-  - execute_shell_command
+excluded_tools: []
 
 tool_description_overrides: {}
 
