@@ -242,6 +242,12 @@ tmp/
 /test/resources/repos/swift/test_repo/.build
 /test/resources/repos/swift/test_repo/.swiftpm
 
+# Swift bridge build artefacts
+/src/solidlsp/structural/backends/swift_bridge/.build
+/src/solidlsp/structural/backends/swift_bridge/.swiftpm
+/src/solidlsp/structural/backends/swift_bridge/Package.resolved
+/src/solidlsp/structural/backends/swift_bridge/.build.lock
+
 # OCaml
 /test/resources/repos/ocaml/test_repo/_build
 
