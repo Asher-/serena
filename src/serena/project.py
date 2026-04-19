@@ -23,6 +23,7 @@ from serena.util.text_utils import ContentReplacer, MatchedConsecutiveLines, sea
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import Language
 from solidlsp.ls_utils import FileUtils
+from solidlsp.structural.backends.markdown import MarkdownStructuralLanguage
 
 if TYPE_CHECKING:
     from serena.agent import SerenaAgent
@@ -55,6 +56,10 @@ class MemoriesManager:
         self._encoding = SERENA_FILE_ENCODING
         self._read_only_memory_patterns = [re.compile(pattern) for pattern in set(read_only_memory_patterns)]
         self._ignored_memory_patterns = [re.compile(pattern) for pattern in set(ignored_memory_patterns)]
+        # all memory content I/O is mediated by the markdown structural backend so that
+        # memory files flow through the same surface the cursor tools will use once a
+        # markdown LSP wrapping this backend lands (see cutover step 8 / future M5).
+        self._markdown_backend = MarkdownStructuralLanguage()
 
     def _is_read_only_memory(self, name: str) -> bool:
         for pattern in self._read_only_memory_patterns:
@@ -115,20 +120,33 @@ class MemoriesManager:
         if is_tool_context and self._is_read_only_memory(name):
             raise PermissionError(f"Attempted to write to read_only memory: '{name}')")
 
+    def _mediate(self, content: str) -> str:
+        """
+        Route *content* through the markdown structural backend so every memory
+        byte that reaches disk (or a caller) has been parsed and re-serialized
+        by the same backend the cursor surface will eventually consume.
+
+        The current backend keeps source verbatim, so this is a passthrough at
+        the byte level. Its presence is the invariant: memory I/O is always
+        backend-mediated.
+        """
+        return self._markdown_backend.serialize(self._markdown_backend.parse(content))
+
     def load_memory(self, name: str) -> str:
         self._check_not_ignored(name)
         memory_file_path = self.get_memory_file_path(name)
         if not memory_file_path.exists():
             return f"Memory file {name} not found, consider creating it with the `write_memory` tool if you need it."
         with open(memory_file_path, encoding=self._encoding) as f:
-            return f.read()
+            raw = f.read()
+        return self._mediate(raw)
 
     def save_memory(self, name: str, content: str, is_tool_context: bool) -> str:
         self._check_not_ignored(name)
         self._check_write_access(name, is_tool_context)
         memory_file_path = self.get_memory_file_path(name)
         with open(memory_file_path, "w", encoding=self._encoding) as f:
-            f.write(content)
+            f.write(self._mediate(content))
         return f"Memory {name} written."
 
     class MemoriesList:
@@ -254,11 +272,12 @@ class MemoriesManager:
         if not memory_file_path.exists():
             raise FileNotFoundError(f"Memory {name} not found.")
         with open(memory_file_path, encoding=self._encoding) as f:
-            original_content = f.read()
+            raw = f.read()
+        original_content = self._mediate(raw)
         replacer = ContentReplacer(mode=mode, allow_multiple_occurrences=allow_multiple_occurrences)
         updated_content = replacer.replace(original_content, needle, repl)
         with open(memory_file_path, "w", encoding=self._encoding) as f:
-            f.write(updated_content)
+            f.write(self._mediate(updated_content))
         return f"Memory {name} edited successfully."
 
 
