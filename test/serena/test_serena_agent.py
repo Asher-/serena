@@ -16,7 +16,6 @@ from serena.tools import (
     SUCCESS_RESULT,
     FindReferencingSymbolsTool,
     FindSymbolTool,
-    ReplaceContentTool,
     ReplaceSymbolBodyTool,
     SafeDeleteSymbol,
 )
@@ -538,106 +537,6 @@ class TestSerenaAgent:
         [
             pytest.param(
                 Language.TYPESCRIPT,
-                marks=pytest.mark.typescript,
-            ),
-        ],
-        indirect=["serena_agent"],
-    )
-    def test_replace_content_regex_with_wildcard_ok(self, serena_agent: SerenaAgent):
-        """
-        Tests a regex-based content replacement that has a unique match
-        """
-        relative_path = "ws_manager.js"
-        with project_file_modification_context(serena_agent, relative_path):
-            replace_content_tool = serena_agent.get_tool(ReplaceContentTool)
-            result = replace_content_tool.apply(
-                needle=r'catch \(error\) \{\s*console.error\("Failed to connect.*?\}',
-                repl='catch(error) { console.log("Never mind"); }',
-                relative_path=relative_path,
-                mode="regex",
-            )
-            assert result == SUCCESS_RESULT
-
-    @pytest.mark.parametrize(
-        "serena_agent",
-        [
-            pytest.param(
-                Language.TYPESCRIPT,
-                marks=pytest.mark.typescript,
-            ),
-        ],
-        indirect=["serena_agent"],
-    )
-    @pytest.mark.parametrize("mode", ["literal", "regex"])
-    def test_replace_content_with_backslashes(self, serena_agent: SerenaAgent, mode: Literal["literal", "regex"]):
-        """
-        Tests a content replacement where the needle and replacement strings contain backslashes.
-        This is a regression test for escaping issues.
-        """
-        relative_path = "ws_manager.js"
-        needle = r'console.log("WebSocketManager initializing\nStatus OK");'
-        repl = r'console.log("WebSocketManager initialized\nAll systems go!");'
-        replace_content_tool = serena_agent.get_tool(ReplaceContentTool)
-        with project_file_modification_context(serena_agent, relative_path):
-            result = replace_content_tool.apply(
-                needle=re.escape(needle) if mode == "regex" else needle,
-                repl=repl,
-                relative_path=relative_path,
-                mode=mode,
-            )
-            assert result == SUCCESS_RESULT
-            new_content = read_project_file(serena_agent.get_active_project(), relative_path)
-            assert repl in new_content
-
-    @pytest.mark.parametrize(
-        "serena_agent",
-        [
-            pytest.param(
-                Language.TYPESCRIPT,
-                marks=pytest.mark.typescript,
-            ),
-        ],
-        indirect=["serena_agent"],
-    )
-    def test_replace_content_regex_with_wildcard_ambiguous(self, serena_agent: SerenaAgent):
-        """
-        Tests that an ambiguous replacement where there is a larger match that internally contains
-        a smaller match triggers an exception
-        """
-        replace_content_tool = serena_agent.get_tool(ReplaceContentTool)
-        with pytest.raises(ValueError, match="ambiguous"):
-            replace_content_tool.apply(
-                needle=r'catch \(error\) \{.*?this\.updateConnectionStatus\("Connection failed", false\);.*?\}',
-                repl='catch(error) { console.log("Never mind"); }',
-                relative_path="ws_manager.js",
-                mode="regex",
-            )
-
-    @pytest.mark.parametrize(
-        "serena_agent,name_path,relative_path",
-        [
-            pytest.param(
-                Language.PYTHON,
-                "User",
-                os.path.join("test_repo", "models.py"),
-                marks=pytest.mark.python,
-            ),
-            pytest.param(
-                Language.JAVA,
-                "Model",
-                os.path.join("src", "main", "java", "test_repo", "Model.java"),
-                marks=pytest.mark.java,
-            ),
-            pytest.param(
-                Language.KOTLIN,
-                "Model",
-                os.path.join("src", "main", "kotlin", "test_repo", "Model.kt"),
-                marks=[pytest.mark.kotlin] + ([pytest.mark.skip(reason="Kotlin LSP JVM crashes on restart in CI")] if is_ci else []),
-            ),
-            pytest.param(
-                Language.TYPESCRIPT,
-                "helperFunction",
-                "index.ts",
                 marks=pytest.mark.typescript,
             ),
         ],

@@ -43,7 +43,6 @@ from serena.tools import (
     GetCurrentConfigTool,
     OpenDashboardTool,
     ReadMemoryTool,
-    ReplaceContentTool,
     Tool,
     ToolMarker,
     ToolRegistry,
@@ -103,7 +102,7 @@ class ToolSet:
     Represents a set of tools by their names.
     """
 
-    LEGACY_TOOL_NAME_MAPPING = {"replace_regex": ReplaceContentTool.get_name_from_cls()}
+    LEGACY_TOOL_NAME_MAPPING: dict[str, str] = {}
     """
     maps legacy tool names to their new names for backward compatibility
     """

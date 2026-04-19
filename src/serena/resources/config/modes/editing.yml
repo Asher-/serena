@@ -39,7 +39,4 @@ prompt: |
   You are extremely good at regex, so you never need to check whether the replacement produced the correct result.
   In particular, you know how to use wildcards effectively in order to avoid specifying the full original text to be replaced!
   {% endif %}
-excluded_tools:
- - replace_lines
- - insert_at_line
- - delete_lines
+excluded_tools: []

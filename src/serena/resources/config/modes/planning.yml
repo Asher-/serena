@@ -12,8 +12,5 @@ excluded_tools:
   - cursor_insert_after
   - cursor_insert_before
   - cursor_rename
-  - delete_lines
-  - replace_lines
-  - insert_at_line
   - execute_shell_command
-  - replace_content
+
