@@ -10,33 +10,25 @@ prompt: |
   {%- endif %}
   
   {% if 'jet_brains_move' in available_tools -%}
-  Apart from refactoring tools
+  Apart from refactoring tools, symbol-level editing goes through the cursor.
+  {%- else -%}
+  Symbol-level editing goes through the cursor.
   {%- endif %}
-  you have two main approaches for editing code: (a) editing at the symbol level and (b) file-based editing.
-  The symbol-based approach is appropriate if you need to adjust an entire symbol, e.g. a method, a class, a function, etc.
-  It is not appropriate if you need to adjust just a few lines of code within a larger symbol.
 
   **Symbolic editing via the cursor**
-  Symbol-level navigation, search and editing go through the cursor: position a cursor on the symbol you want
-  to work on with `cursor_start` (exact match) or `cursor_find` (pattern / substring search), navigate with
-  `cursor_move` / `cursor_look` / `cursor_configure` along LSP graph edges (contains, references, referenced-by,
-  calls, called-by, inherits, inherited-by), and perform edits at the cursor's position:
+  Position a cursor on the symbol you want to work on with `cursor_start` (exact match) or
+  `cursor_find` (pattern / substring search), navigate with `cursor_move` / `cursor_look` /
+  `cursor_configure` along LSP graph edges (contains, references, referenced-by, calls,
+  called-by, inherits, inherited-by), and perform edits at the cursor's position:
     * `cursor_replace_body` replaces the body of the symbol at the cursor
     * `cursor_insert_before` / `cursor_insert_after` insert code around the symbol at the cursor
     * `cursor_rename` renames the symbol at the cursor throughout the codebase
-  `cursor_overview` lists top-level symbols in a file (cursor-first form of the old `get_symbols_overview`).
+  `cursor_overview` lists top-level symbols in a file.
   Use `cursor_configure` with `edge_types: ["referenced-by"]` to understand usage before editing.
+  For sub-symbol changes (adjusting a few lines within a larger method), use `cursor_replace_body`
+  with the full updated body; there is no separate file-based editing surface.
   If not explicitly requested otherwise by the user, make sure that when you edit a symbol, the change is either
   backward-compatible or you find and update all references as needed.
   You can assume that all cursor editing operations are reliable, so you never need to verify the results if the
   tool returns without error.
-
-  {% if 'replace_content' in available_tools %}
-  **File-based editing**
-  The `replace_content` tool allows you to perform regex-based replacements within files (as well as simple string replacements).
-  This is your primary tool for editing code whenever replacing or deleting a whole symbol would be a more expensive operation,
-  e.g. if you need to adjust just a few lines of code within a method.
-  You are extremely good at regex, so you never need to check whether the replacement produced the correct result.
-  In particular, you know how to use wildcards effectively in order to avoid specifying the full original text to be replaced!
-  {% endif %}
 excluded_tools: []

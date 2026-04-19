@@ -50,8 +50,8 @@ ignored_memory_patterns: ["_archive/.*", "_episodes/.*"]
 ```
 
 Ignored memories are completely excluded — they cannot be accessed via `read_memory`, `write_memory`,
-or any other memory tool. To read an ignored memory file, use the `read_file` tool on the raw file path
-(e.g., `.serena/memories/_archive/2026-03/some-topic.md`).
+or any other memory tool. To inspect or restore an ignored memory, open the file directly on disk
+(e.g., `.serena/memories/_archive/2026-03/some-topic.md`) or via the [Serena Dashboard](060_dashboard).
 
 Like `read_only_memory_patterns`, patterns from the global and project-level configurations are merged additively.
 

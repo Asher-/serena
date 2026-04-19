@@ -45,7 +45,8 @@ class MemoriesManager:
         :param read_only_memory_patterns: whether to allow writing global memories in tool execution contexts
         :param ignored_memory_patterns: regex patterns for memories to completely exclude from listing, reading, and writing.
             Matching memories will not appear in list_memories or activate_project output and cannot be accessed
-            via read_memory or write_memory. Use read_file on the raw path to access ignored memory files.
+            via read_memory or write_memory. To inspect or restore an ignored memory, open the file directly on
+            disk or via the Serena Dashboard.
         """
         self._project_memory_dir: Path | None = None
         if serena_data_folder is not None:
@@ -71,7 +72,7 @@ class MemoriesManager:
         if self._is_ignored_memory(name):
             raise ValueError(
                 f"Memory '{name}' matches an ignored_memory_patterns pattern and cannot be accessed. "
-                f"Use the read_file tool on the raw file path instead."
+                f"Open the file directly on disk or via the Serena Dashboard instead."
             )
 
     def _is_global(self, name: str) -> bool:

@@ -191,12 +191,12 @@ Claude Code settings file (`.claude/settings.json` in your project directory, or
 The hooks will:
 
 - **`remind`**: Nudge the agent to use Serena's symbolic tools when it makes too many consecutive
-  `grep` or `read_file` calls without using any Serena tools in between.
+  `grep` calls without using any Serena tools in between.
 - **`activate`**: Prompt the agent to activate the project and read Serena's instructions at session start.
 - **`cleanup`**: Clean up hook session data when the session ends.
 - **`auto-approve`**: Auto-approve Serena tool calls whenever Claude Code is in `acceptEdits` mode,
-  so blanket edit approvals cover Serena's destructive tools (e.g. `replace_symbol_body`,
-  `rename_symbol`) instead of prompting on every call.
+  so blanket edit approvals cover Serena's destructive tools (e.g. `cursor_replace_body`,
+  `cursor_rename`) instead of prompting on every call.
 
 For more details on Claude Code's hook system, see the
 [Claude Code hooks documentation](https://code.claude.com/docs/en/hooks).
@@ -232,7 +232,7 @@ up the hooks as below (or a variation thereof) for optimal performance of Serena
 The hooks will:
 
 - **`remind`**: Nudge the agent to use Serena's symbolic tools when it makes too many consecutive
-  `grep` or `read_file` calls without using any Serena tools in between.
+  `grep` calls without using any Serena tools in between.
 - **`activate`**: Prompt the agent to activate the project and read Serena's instructions at session start.
 - **`cleanup`**: Clean up hook session data when the session ends.
 
