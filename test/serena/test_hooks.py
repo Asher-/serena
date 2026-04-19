@@ -77,34 +77,6 @@ class TestPreToolUseRemindAboutSerenaHook:
                 hook = PreToolUseRemindAboutSerenaHook(HookClient.VSCODE)
             assert hook.is_grep_tool() == expected, f"is_grep_tool() wrong for {name} (vscode)"
 
-    def test_read_file_tool_detection_claude_code(self, tmp_path: Path):
-        """Claude Code uses the exact tool name ``Read`` (lowercased to ``read``)."""
-        for name, expected in [("read", True), ("read_file", False), ("readFile", False), ("grep", False)]:
-            with patch("sys.stdin", _make_stdin(_base_input(tool_name=name))), patch("serena.hooks.serena_home_dir", str(tmp_path)):
-                hook = PreToolUseRemindAboutSerenaHook(HookClient.CLAUDE_CODE)
-            assert hook.is_read_file_tool() == expected, f"is_read_file_tool() wrong for {name} (claude-code)"
-
-    def test_read_file_tool_detection_non_claude_code(self, tmp_path: Path):
-        """Non-Claude-Code clients accept any read-style verb (``read``/``view``/``open``/``show``) combined with ``file``."""
-        cases = [
-            # canonical names
-            ("read_file", True),
-            ("readFile", True),
-            # alternative read verbs used by other agents/editors
-            ("view_file", True),
-            ("open_file", True),
-            ("show_file", True),
-            # negatives: no "file", or "file" without a read verb, or modifying verbs
-            ("grep_search", False),
-            ("file_writer", False),
-            ("write_file", False),
-            ("edit_file", False),
-        ]
-        for name, expected in cases:
-            with patch("sys.stdin", _make_stdin(_base_input(tool_name=name))), patch("serena.hooks.serena_home_dir", str(tmp_path)):
-                hook = PreToolUseRemindAboutSerenaHook(HookClient.VSCODE)
-            assert hook.is_read_file_tool() == expected, f"is_read_file_tool() wrong for {name} (vscode)"
-
     def test_serena_tool_detection(self, tmp_path: Path):
         for name, expected in [("mcp_serena_find_symbol", True), ("serena_overview", True), ("grep_search", False)]:
             with patch("sys.stdin", _make_stdin(_base_input(tool_name=name))), patch("serena.hooks.serena_home_dir", str(tmp_path)):
@@ -141,18 +113,6 @@ class TestPreToolUseRemindAboutSerenaHook:
         hook_output = result["hookSpecificOutput"]
         assert hook_output["permissionDecision"] == "deny"
         assert "grep" in hook_output["additionalContext"].lower()
-
-    def test_deny_output_after_threshold_reads(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]):
-        """After reaching the read file threshold, the hook should output a deny."""
-        for _ in range(ToolUseCounter._READ_FILE_USES_THRESHOLD):
-            with patch("sys.stdin", _make_stdin(_base_input("read"))), patch("serena.hooks.serena_home_dir", str(tmp_path)):
-                PreToolUseRemindAboutSerenaHook(HookClient.CLAUDE_CODE).execute()
-
-        output = capsys.readouterr().out.strip()
-        result = json.loads(output)
-        hook_output = result["hookSpecificOutput"]
-        assert hook_output["permissionDecision"] == "deny"
-        assert "read file" in hook_output["additionalContext"].lower()
 
     def test_serena_tool_resets_counters(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]):
         """Using a Serena tool should reset counters, so the threshold is not reached."""
@@ -233,37 +193,6 @@ class TestPreToolUseRemindAboutSerenaHook:
         result = json.loads(second_output)
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    def test_non_symbolic_deny_emitted_when_combined_threshold_tripped(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]):
-        """Pre-populated state trips only the combined non-symbolic counter (not per-tool ones)
-        so execute() must fall through to the _build_non_symbolic_deny branch.
-        """
-        # pre-populate the pickle so only the combined counter is over threshold
-        session_dir = tmp_path / "hook_data" / _base_input()["session_id"]
-        session_dir.mkdir(parents=True)
-        counter = ToolUseCounter(
-            n_recent_grep_uses=ToolUseCounter._GREP_USES_THRESHOLD - 1,
-            n_recent_read_file_uses=ToolUseCounter._READ_FILE_USES_THRESHOLD - 1,
-            n_recent_non_symbolic_uses=ToolUseCounter._NON_SYMBOLIC_USES_THRESHOLD,
-            last_grep_use_timestamp=datetime.now(),
-            last_read_file_use_timestamp=datetime.now(),
-            last_non_symbolic_use_timestamp=datetime.now(),
-        )
-        stub_for_path = object.__new__(PreToolUseRemindAboutSerenaHook)
-        stub_for_path.session_persistence_dir = str(session_dir)
-        counter.save(stub_for_path)
-
-        # invoke execute with a neutral (non-grep, non-read, non-serena) tool so that
-        # update() leaves the counters untouched and the fall-through branch is taken
-        with patch("sys.stdin", _make_stdin(_base_input("Edit"))), patch("serena.hooks.serena_home_dir", str(tmp_path)):
-            PreToolUseRemindAboutSerenaHook(HookClient.CLAUDE_CODE).execute()
-
-        output = capsys.readouterr().out.strip()
-        assert output, "expected a non-symbolic deny to be emitted"
-        result = json.loads(output)
-        hook_output = result["hookSpecificOutput"]
-        assert hook_output["permissionDecision"] == "deny"
-        assert "symbolic" in hook_output["additionalContext"].lower()
-
 
 class TestToolUseCounter:
     """Tests for the time-windowed tool-use counter logic."""
@@ -292,60 +221,32 @@ class TestToolUseCounter:
         assert counter.n_recent_grep_uses == 1
         assert counter.last_grep_use_timestamp == now
 
-    def test_update_increments_read_file_within_period(self):
-        counter = ToolUseCounter()
-        now = datetime.now()
-        counter.last_read_file_use_timestamp = now - timedelta(seconds=1)
-        counter.n_recent_read_file_uses = 1
-
-        hook = self._make_hook_stub("read_file", now)
-        counter.update(hook)
-
-        assert counter.n_recent_read_file_uses == 2
-
-    def test_update_resets_read_file_outside_period(self):
-        counter = ToolUseCounter()
-        now = datetime.now()
-        counter.last_read_file_use_timestamp = now - timedelta(seconds=ToolUseCounter._READ_FILE_RESET_PERIOD_SECONDS + 1)
-        counter.n_recent_read_file_uses = 2
-
-        hook = self._make_hook_stub("read_file", now)
-        counter.update(hook)
-
-        assert counter.n_recent_read_file_uses == 1
-
     def test_serena_tool_resets_all_counters(self):
         counter = ToolUseCounter(
             n_recent_grep_uses=2,
-            n_recent_read_file_uses=2,
             last_grep_use_timestamp=datetime.now(),
-            last_read_file_use_timestamp=datetime.now(),
         )
         hook = self._make_hook_stub("mcp_serena_overview", datetime.now())
         counter.update(hook)
 
         assert counter.n_recent_grep_uses == 0
-        assert counter.n_recent_read_file_uses == 0
         assert counter.last_grep_use_timestamp is None
-        assert counter.last_read_file_use_timestamp is None
 
     def test_non_matching_tool_leaves_counters_unchanged(self):
-        counter = ToolUseCounter(n_recent_grep_uses=1, n_recent_read_file_uses=1)
+        counter = ToolUseCounter(n_recent_grep_uses=1)
         hook = self._make_hook_stub("write_file", datetime.now())
         counter.update(hook)
 
         assert counter.n_recent_grep_uses == 1
-        assert counter.n_recent_read_file_uses == 1
 
     def test_persistence_round_trip(self, tmp_path: Path):
-        counter = ToolUseCounter(n_recent_grep_uses=2, n_recent_read_file_uses=1)
+        counter = ToolUseCounter(n_recent_grep_uses=2)
 
         hook_stub = type("HookStub", (), {"session_persistence_dir": str(tmp_path)})()
         counter.save(hook_stub)  # type: ignore[arg-type]
         loaded = ToolUseCounter.load(hook_stub)  # type: ignore[arg-type]
 
         assert loaded.n_recent_grep_uses == 2
-        assert loaded.n_recent_read_file_uses == 1
 
     def test_load_returns_fresh_counter_on_missing_file(self, tmp_path: Path):
         hook_stub = type("HookStub", (), {"session_persistence_dir": str(tmp_path / "nonexistent")})()
@@ -383,24 +284,20 @@ class TestToolUseCounter:
         base = datetime.now()
         counter.last_deny_timestamp = base
         counter.n_recent_grep_uses = 5
-        counter.n_recent_read_file_uses = 4
-        counter.n_recent_non_symbolic_uses = 7
 
         counter.reset()
 
         assert counter.n_recent_grep_uses == 0
-        assert counter.n_recent_read_file_uses == 0
-        assert counter.n_recent_non_symbolic_uses == 0
         assert counter.last_deny_timestamp == base
 
     @staticmethod
     def _make_hook_stub(tool_name: str, timestamp: datetime) -> PreToolUseRemindAboutSerenaHook:
         """Create a minimal stub that satisfies ToolUseCounter.update without reading stdin.
 
-        Uses ``HookClient.VSCODE`` so that ``is_grep_tool`` / ``is_read_file_tool`` apply the
-        substring-matching branch — the counter tests below feed verbose tool names like
-        ``grep_search`` / ``read_file`` which are only recognized under the non-Claude-Code
-        branch (Claude Code uses exact names ``grep`` / ``read``).
+        Uses ``HookClient.VSCODE`` so that ``is_grep_tool`` applies the substring-matching
+        branch — the counter tests below feed verbose tool names like ``grep_search`` which
+        are only recognized under the non-Claude-Code branch (Claude Code uses the exact
+        name ``grep``).
         """
         stub = object.__new__(PreToolUseRemindAboutSerenaHook)
         stub._tool_name = tool_name.lower()
