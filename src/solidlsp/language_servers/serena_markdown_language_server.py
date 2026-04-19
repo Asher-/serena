@@ -80,6 +80,8 @@ class SerenaMarkdownLanguageServer(SolidLanguageServer):
                         "hierarchicalDocumentSymbolSupport": True,
                         "symbolKind": {"valueSet": list(range(1, 27))},
                     },
+                    "definition": {"dynamicRegistration": True, "linkSupport": False},
+                    "references": {"dynamicRegistration": True},
                 },
                 "workspace": {
                     "workspaceFolders": True,
