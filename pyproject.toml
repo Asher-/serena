@@ -44,6 +44,7 @@ dependencies = [
   "pygls==2.1.1", # used to implement an msl language server
   "lsprotocol==2025.0.0",
   "libcst==1.7.0", # Python structural backend: byte-identical round-trip parse/serialize
+  "libclang==18.1.1", # C++ structural backend: AST-anchored source-range rewriter via clang.cindex
 
   # Transitive deps pinned for security (dependabot alerts).
   # Exact pins because uvx installs from git, ignoring the lock file.
