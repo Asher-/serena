@@ -764,8 +764,8 @@ class SolidLanguageServer(ABC):
         self.stop()
 
     def _start_server_process(self) -> None:
-        self.server_started = True
         self._start_server()
+        self.server_started = True
 
     @abstractmethod
     def _start_server(self) -> None:
