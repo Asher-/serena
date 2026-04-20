@@ -5,7 +5,6 @@ import logging
 import os
 import pathlib
 import shutil
-import subprocess
 import threading
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -700,62 +699,45 @@ class SolidLanguageServer(ABC):
 
     def _shutdown(self, timeout: float = 5.0) -> None:
         """
-        A robust shutdown process designed to terminate cleanly on all platforms, including Windows,
-        by explicitly closing all I/O pipes.
+        Cleanly shut the language server down.
+
+        LSP-protocol shutdown is requested with a bounded thread timer because
+        ``self.server.shutdown`` can block indefinitely on an unresponsive server.
+        After that, process and pipe teardown is delegated to ``LanguageServerProcess.stop``,
+        which owns its own pipe-cleanup / terminate / kill sequencing. Manipulating
+        ``Popen`` directly from here used to leave reader threads running and pipes
+        open on Windows; delegating fixes that.
+
+        :param timeout: upper bound for the LSP-protocol shutdown request; process teardown
+            after that is governed by ``LanguageServerProcess``'s own escalation logic.
         """
         if not self.server.is_running():
             log.debug("Server process not running, skipping shutdown.")
             return
 
         log.info(f"Initiating final robust shutdown with a {timeout}s timeout...")
-        process = self.server.process
-        if process is None:
-            log.debug("Server process is None, cannot shutdown.")
-            return
 
-        # --- Main Shutdown Logic ---
-        # Stage 1: Graceful Termination Request
-        # Send LSP shutdown and close stdin to signal no more input.
+        # request LSP-protocol shutdown on a bounded timer so an unresponsive server cannot block us
         try:
             log.debug("Sending LSP shutdown request...")
-            # Use a thread to timeout the LSP shutdown call since it can hang
-            shutdown_thread = threading.Thread(target=self.server.shutdown)
-            shutdown_thread.daemon = True
+            shutdown_thread = threading.Thread(target=self.server.shutdown, daemon=True)
             shutdown_thread.start()
-            shutdown_thread.join(timeout=2.0)  # 2 second timeout for LSP shutdown
+            shutdown_thread.join(timeout=min(2.0, timeout))
 
             if shutdown_thread.is_alive():
                 log.debug("LSP shutdown request timed out, proceeding to terminate...")
             else:
                 log.debug("LSP shutdown request completed.")
-
-            if process.stdin and not process.stdin.closed:
-                process.stdin.close()
-            log.debug("Stage 1 shutdown complete.")
         except Exception as e:
-            log.debug(f"Exception during graceful shutdown: {e}")
-            # Ignore errors here, we are proceeding to terminate anyway.
+            log.debug(f"Exception during LSP-protocol shutdown: {e}")
+            # fall through — LanguageServerProcess.stop() still tears the process down
 
-        # Stage 2: Terminate and Wait for Process to Exit
-        log.debug(f"Terminating process {process.pid}, current status: {process.poll()}")
-        process.terminate()
-
-        # Stage 3: Wait for process termination with timeout
+        # delegate process + pipe teardown to LanguageServerProcess.stop so we don't
+        # bypass its reader-thread cleanup and pipe-close ordering
         try:
-            log.debug(f"Waiting for process {process.pid} to terminate...")
-            exit_code = process.wait(timeout=timeout)
-            log.info(f"Language server process terminated successfully with exit code {exit_code}.")
-        except subprocess.TimeoutExpired:
-            # If termination failed, forcefully kill the process
-            log.warning(f"Process {process.pid} termination timed out, killing process forcefully...")
-            process.kill()
-            try:
-                exit_code = process.wait(timeout=2.0)
-                log.info(f"Language server process killed successfully with exit code {exit_code}.")
-            except subprocess.TimeoutExpired:
-                log.error(f"Process {process.pid} could not be killed within timeout.")
+            self.server.stop()
         except Exception as e:
-            log.error(f"Error during process shutdown: {e}")
+            log.error(f"Error during LanguageServerProcess.stop(): {e}")
 
     @contextmanager
     def start_server(self) -> Iterator["SolidLanguageServer"]:
