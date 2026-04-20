@@ -2679,22 +2679,90 @@ class SolidLanguageServer(ABC):
 
     def apply_text_edits_to_file(self, relative_path: str, edits: list[ls_types.TextEdit]) -> None:
         """
-        Apply a list of text edits to a file.
+        Apply a list of text edits to a file in a single in-memory pass.
+
+        The previous implementation ran ``delete_text_between_positions`` and
+        ``insert_text_at_position`` per edit. Each call re-scanned the buffer via
+        ``get_index_from_line_col`` (O(N)), so E edits cost O(E*N). For large
+        files with many edits (common during refactors) this dominated runtime.
+
+        Now: precompute line-start offsets once (O(N)), sort edits ascending by
+        start position, verify they don't overlap, and rebuild the new buffer in
+        a single forward pass (O(N + total_new_text)). LSP is notified once with
+        all content changes in reverse order, which keeps each change's range
+        coordinates valid against the incrementally-updated document.
 
         :param relative_path: The relative path of the file to edit
-        :param edits: List of TextEdit dictionaries to apply
+        :param edits: List of TextEdit dictionaries to apply; must not overlap
         """
+        if not edits:
+            return
+
         with self.open_file(relative_path):
-            # Sort edits by position (latest first) to avoid position shifts
-            sorted_edits = sorted(edits, key=lambda e: (e["range"]["start"]["line"], e["range"]["start"]["character"]), reverse=True)
+            if not self.server_started:
+                log.error("apply_text_edits_to_file called before Language Server started")
+                raise SolidLSPException("Language Server not started")
 
+            absolute_file_path = str(PurePath(self.repository_root_path, relative_path))
+            uri = pathlib.Path(absolute_file_path).as_uri()
+            assert uri in self.open_file_buffers, f"File buffer missing for {relative_path}"
+            file_buffer = self.open_file_buffers[uri]
+            original_contents = file_buffer.contents
+
+            # sort ascending so we can walk the buffer forward in one pass
+            sorted_edits = sorted(
+                edits,
+                key=lambda e: (e["range"]["start"]["line"], e["range"]["start"]["character"]),
+            )
+
+            # precompute line-start offsets on the original buffer once (O(N))
+            line_starts = TextUtils.compute_line_starts(original_contents)
+
+            def _to_index(pos: ls_types.Position) -> int:
+                line = pos["line"]
+                if line < 0 or line >= len(line_starts):
+                    raise SolidLSPException(
+                        f"Text edit references line {line} which is outside {relative_path} (has {len(line_starts)} lines)"
+                    )
+                return line_starts[line] + pos["character"]
+
+            # rebuild the new contents in a single forward pass (O(N + total_new_text))
+            parts: list[str] = []
+            cursor_idx = 0
             for edit in sorted_edits:
-                start_pos = ls_types.Position(line=edit["range"]["start"]["line"], character=edit["range"]["start"]["character"])
-                end_pos = ls_types.Position(line=edit["range"]["end"]["line"], character=edit["range"]["end"]["character"])
+                start_idx = _to_index(edit["range"]["start"])
+                end_idx = _to_index(edit["range"]["end"])
+                if start_idx < cursor_idx:
+                    raise SolidLSPException(
+                        f"Overlapping text edits in {relative_path} at line {edit['range']['start']['line']}"
+                    )
+                if end_idx < start_idx:
+                    raise SolidLSPException(
+                        f"Text edit end precedes its start in {relative_path}"
+                    )
+                parts.append(original_contents[cursor_idx:start_idx])
+                parts.append(edit["newText"])
+                cursor_idx = end_idx
+            parts.append(original_contents[cursor_idx:])
+            new_contents = "".join(parts)
 
-                # Delete the old text and insert the new text
-                self.delete_text_between_positions(relative_path, start_pos, end_pos)
-                self.insert_text_at_position(relative_path, start_pos["line"], start_pos["character"], edit["newText"])
+            # commit buffer state and send a single LSP notification; changes must be
+            # listed in reverse order so each range stays valid against the doc as
+            # prior changes are applied by the server
+            file_buffer.version += 1
+            file_buffer.contents = new_contents
+            self.server.notify.did_change_text_document(
+                {
+                    LSPConstants.TEXT_DOCUMENT: {  # type: ignore
+                        LSPConstants.VERSION: file_buffer.version,
+                        LSPConstants.URI: file_buffer.uri,
+                    },
+                    LSPConstants.CONTENT_CHANGES: [
+                        {LSPConstants.RANGE: edit["range"], "text": edit["newText"]}
+                        for edit in reversed(sorted_edits)
+                    ],
+                }
+            )
 
     def start(self) -> "SolidLanguageServer":
         """

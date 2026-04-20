@@ -69,6 +69,27 @@ class TextUtils:
         return idx
 
     @staticmethod
+    def compute_line_starts(text: str) -> list[int]:
+        """
+        Precompute byte offsets at which each line of ``text`` begins.
+
+        Callers that need to convert many (line, col) positions against the same
+        buffer can resolve each position in O(1) via ``line_starts[line] + col``
+        instead of re-scanning the whole text with ``get_index_from_line_col``
+        every time (which is O(len(text)) per call and quadratic when batched).
+
+        :param text: the source text to index.
+        :return: a list where index ``i`` holds the offset of the first character
+            of line ``i``; length equals the number of lines (a final entry for
+            the trailing empty line is included when ``text`` ends with a newline).
+        """
+        line_starts = [0]
+        for i, c in enumerate(text):
+            if c == "\n":
+                line_starts.append(i + 1)
+        return line_starts
+
+    @staticmethod
     def _get_updated_position_from_line_and_column_and_edit(l: int, c: int, text_to_be_inserted: str) -> tuple[int, int]:
         """
         Utility function to get the position of the cursor after inserting text at a given line and column.
