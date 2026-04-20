@@ -67,7 +67,7 @@ _EDGE_CASES: tuple[tuple[str, str], ...] = (
     ),
     (
         "nested-fstrings",
-        'x = f"outer {f\'inner {1 + 2!r}\'}"\n',
+        "x = f\"outer {f'inner {1 + 2!r}'}\"\n",
     ),
     (
         "decorators-stack",
@@ -242,7 +242,6 @@ class TestWalkSymbols:
         assert backend.root_kind(tree) == "module"
 
 
-
 # -----------------------------------------------------------------------------
 # walk_nodes — full-AST addressability
 # -----------------------------------------------------------------------------
@@ -387,11 +386,7 @@ class TestPatternMatching:
         pattern = backend.compile_pattern("foo($arg)")
         matches = list(backend.find_matches(tree, pattern))
         assert len(matches) == 2
-        bound_values = sorted(
-            m.bindings["arg"].value
-            for m in matches
-            if isinstance(m.bindings["arg"], cst.Integer)
-        )
+        bound_values = sorted(m.bindings["arg"].value for m in matches if isinstance(m.bindings["arg"], cst.Integer))
         assert bound_values == ["1", "2"]
 
     def test_wildcard_does_not_bind(self, backend: PythonStructuralLanguage) -> None:

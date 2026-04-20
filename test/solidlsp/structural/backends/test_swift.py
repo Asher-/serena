@@ -67,7 +67,7 @@ _EDGE_CASES: tuple[tuple[str, str], ...] = (
     ),
     (
         "protocol-and-extension",
-        "protocol Greeter {\n    func greet() -> String\n}\n\nextension Greeter {\n    func greet() -> String { \"hi\" }\n}\n",
+        'protocol Greeter {\n    func greet() -> String\n}\n\nextension Greeter {\n    func greet() -> String { "hi" }\n}\n',
     ),
     (
         "actor-decl",
@@ -75,15 +75,15 @@ _EDGE_CASES: tuple[tuple[str, str], ...] = (
     ),
     (
         "string-with-escapes",
-        "let s = \"hello\\n\\t\\\"world\\\"\"\n",
+        'let s = "hello\\n\\t\\"world\\""\n',
     ),
     (
         "multiline-string",
-        "let s = \"\"\"\n  line1\n  line2\n  \"\"\"\n",
+        'let s = """\n  line1\n  line2\n  """\n',
     ),
     (
         "raw-string",
-        "let r = #\"C:\\path\\to\\file\"#\n",
+        'let r = #"C:\\path\\to\\file"#\n',
     ),
     (
         "async-throws",
@@ -138,18 +138,28 @@ class TestKindSchema:
     def test_expected_kinds_present(self, backend: SwiftStructuralLanguage) -> None:
         schema = backend.kind_schema
         expected = {
-            "source_file", "import", "class", "struct", "enum", "protocol",
-            "extension", "actor", "function", "method", "initializer",
-            "variable", "property", "type_alias", "enum_case",
+            "source_file",
+            "import",
+            "class",
+            "struct",
+            "enum",
+            "protocol",
+            "extension",
+            "actor",
+            "function",
+            "method",
+            "initializer",
+            "variable",
+            "property",
+            "type_alias",
+            "enum_case",
         }
         assert expected <= set(schema.kinds)
 
     def test_methods_restricted_to_type_bodies(self) -> None:
         schema = swift_kind_schema()
         method = schema.get("method")
-        assert method.allowed_parent_kinds == frozenset(
-            {"class", "struct", "enum", "protocol", "extension", "actor"}
-        )
+        assert method.allowed_parent_kinds == frozenset({"class", "struct", "enum", "protocol", "extension", "actor"})
 
     def test_import_restricted_to_source_file(self) -> None:
         schema = swift_kind_schema()
@@ -176,13 +186,7 @@ class TestKindSchema:
 
 class TestWalkSymbols:
     def test_walks_top_level_symbols(self, backend: SwiftStructuralLanguage) -> None:
-        source = (
-            "import Foundation\n"
-            "class Foo {\n"
-            "    var x: Int = 1\n"
-            "    func bar() {}\n"
-            "}\n"
-        )
+        source = "import Foundation\nclass Foo {\n    var x: Int = 1\n    func bar() {}\n}\n"
         tree = backend.parse(source)
         symbols = list(backend.walk_symbols(tree))
         kinds = {name_path: kind for name_path, kind, _ref in symbols}
@@ -197,27 +201,16 @@ class TestWalkSymbols:
     ) -> None:
         source = "class Foo {\n    var x: Int = 1\n}\n"
         tree = backend.parse(source)
-        refs = {
-            name_path: ref
-            for name_path, _kind, ref in backend.walk_symbols(tree)
-        }
+        refs = {name_path: ref for name_path, _kind, ref in backend.walk_symbols(tree)}
         foo = refs["Foo"]
         assert foo.body_range is not None
         start, end = foo.body_range
         assert source[start:end].strip().startswith("var x")
 
     def test_walk_detects_method_vs_function(self, backend: SwiftStructuralLanguage) -> None:
-        source = (
-            "func topLevel() {}\n"
-            "struct S {\n"
-            "    func member() {}\n"
-            "}\n"
-        )
+        source = "func topLevel() {}\nstruct S {\n    func member() {}\n}\n"
         tree = backend.parse(source)
-        kinds = {
-            name_path: kind
-            for name_path, kind, _ref in backend.walk_symbols(tree)
-        }
+        kinds = {name_path: kind for name_path, kind, _ref in backend.walk_symbols(tree)}
         assert kinds["topLevel"] == "function"
         assert kinds["S/member"] == "method"
 
@@ -264,7 +257,7 @@ class TestDeclarationAndMutation:
     def test_build_class_with_method_child(self, backend: SwiftStructuralLanguage) -> None:
         method = backend.build_declaration(
             "method",
-            {"name": "hello", "parameters": "", "body": "    print(\"hi\")\n"},
+            {"name": "hello", "parameters": "", "body": '    print("hi")\n'},
             [],
         )
         cls = backend.build_declaration(

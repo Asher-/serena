@@ -68,11 +68,11 @@ _EDGE_CASES: tuple[tuple[str, str], ...] = (
     ),
     (
         "raw-string-literal",
-        "const char* s = R\"(line1\nline2)\";\n",
+        'const char* s = R"(line1\nline2)";\n',
     ),
     (
         "string-with-escapes",
-        "const char* s = \"hello\\n\\t\\\"world\\\"\";\n",
+        'const char* s = "hello\\n\\t\\"world\\"";\n',
     ),
     (
         "operator-overload",
@@ -326,9 +326,7 @@ class TestDeclarationAndMutation:
         tree = backend.parse("namespace foo {\nint x = 1;\n}\n")
         symbols = {path: ref for path, _kind, ref in backend.walk_symbols(tree)}
         foo_ref = symbols["foo"]
-        decl = backend.build_declaration(
-            "variable", {"name": "y", "type": "int", "initializer": "2"}, ()
-        )
+        decl = backend.build_declaration("variable", {"name": "y", "type": "int", "initializer": "2"}, ())
         new_tree = backend.insert_child(tree, decl, anchor=foo_ref, position="end")
         serialized = backend.serialize(new_tree)
         assert "int y = 2;" in serialized

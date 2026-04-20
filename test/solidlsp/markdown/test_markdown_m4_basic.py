@@ -62,9 +62,7 @@ class TestMarkdownM4StructuralParity:
 
     @pytest.mark.parametrize("language_server", [Language.MARKDOWN], indirect=True)
     @pytest.mark.parametrize("relative_path", ["README.md", "guide.md", "api.md"])
-    def test_lsp_matches_structural_backend(
-        self, language_server: SolidLanguageServer, relative_path: str
-    ) -> None:
+    def test_lsp_matches_structural_backend(self, language_server: SolidLanguageServer, relative_path: str) -> None:
         """Headings from the LSP match those from :class:`MarkdownStructuralLanguage` one-to-one."""
         # read the source through the LSP's workspace-rooted path so both surfaces see identical bytes
         repo_root = Path(language_server.repository_root_path)
@@ -72,18 +70,14 @@ class TestMarkdownM4StructuralParity:
 
         # gather the LSP view
         all_symbols, _roots = language_server.request_document_symbols(relative_path).get_all_symbols_and_roots()
-        lsp_view = [
-            (sym["name"], sym["location"]["range"]["start"]["line"]) for sym in all_symbols
-        ]
+        lsp_view = [(sym["name"], sym["location"]["range"]["start"]["line"]) for sym in all_symbols]
 
         # gather the structural backend view
         structural_view = _flatten_structural_headings(source)
 
         # parity: same count, same names, same starting lines, same order
         assert lsp_view == structural_view, (
-            f"LSP/structural disagreement on {relative_path}:\n"
-            f"  LSP:        {lsp_view}\n"
-            f"  Structural: {structural_view}"
+            f"LSP/structural disagreement on {relative_path}:\n  LSP:        {lsp_view}\n  Structural: {structural_view}"
         )
 
 

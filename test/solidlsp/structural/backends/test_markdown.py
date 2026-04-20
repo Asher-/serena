@@ -60,7 +60,7 @@ _EDGE_CASES: tuple[tuple[str, str], ...] = (
     ),
     ("blockquote", "> quoted text\n> continues here\n"),
     ("hr-dashes", "---\n"),
-    ("link-reference", "[label]: https://example.com \"Title\"\n"),
+    ("link-reference", '[label]: https://example.com "Title"\n'),
     (
         "gfm-table",
         "| h1 | h2 |\n| -- | -- |\n| a  | b  |\n",
@@ -216,16 +216,7 @@ class TestLogicalNameResolver:
 
 class TestWalkSymbols:
     def test_walks_headings_as_named_symbols(self, backend: MarkdownStructuralLanguage) -> None:
-        source = (
-            "# Intro\n\n"
-            "body of intro\n\n"
-            "## Motivation\n\n"
-            "why\n\n"
-            "## Details\n\n"
-            "what\n\n"
-            "# Part Two\n\n"
-            "end\n"
-        )
+        source = "# Intro\n\nbody of intro\n\n## Motivation\n\nwhy\n\n## Details\n\nwhat\n\n# Part Two\n\nend\n"
         tree = backend.parse(source)
         symbols = [(path, kind) for path, kind, _ in backend.walk_symbols(tree)]
         assert ("Intro", "heading") in symbols
@@ -357,9 +348,7 @@ class TestDeclarationAndMutation:
         with pytest.raises(DeclarationError):
             backend.build_declaration("heading", {"text": "x", "level": "2"}, ())  # level must be int
         with pytest.raises(DeclarationError):
-            backend.build_declaration("list", {"ordered": "yes"}, (
-                backend.build_declaration("list_item", {"body": "x"}, ()),
-            ))
+            backend.build_declaration("list", {"ordered": "yes"}, (backend.build_declaration("list_item", {"body": "x"}, ()),))
 
     def test_insert_child_at_end(self, backend: MarkdownStructuralLanguage) -> None:
         tree = backend.parse("# A\n\nbody\n")

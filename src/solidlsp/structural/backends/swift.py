@@ -134,10 +134,20 @@ def swift_kind_schema() -> KindSchema:
         description="A Swift source file; the root of any parsed tree.",
         attributes=(),
         allowed_parent_kinds=frozenset(),
-        allowed_child_kinds=frozenset({
-            "import", "class", "struct", "enum", "protocol", "extension",
-            "actor", "function", "variable", "type_alias",
-        }),
+        allowed_child_kinds=frozenset(
+            {
+                "import",
+                "class",
+                "struct",
+                "enum",
+                "protocol",
+                "extension",
+                "actor",
+                "function",
+                "variable",
+                "type_alias",
+            }
+        ),
     )
     imp = KindSpec(
         name="import",
@@ -148,14 +158,34 @@ def swift_kind_schema() -> KindSchema:
     )
 
     # type-like containers
-    type_children = frozenset({
-        "function", "method", "initializer", "property", "variable",
-        "type_alias", "class", "struct", "enum", "protocol",
-        "extension", "actor", "enum_case",
-    })
-    type_parents = frozenset({
-        "source_file", "class", "struct", "enum", "protocol", "extension", "actor",
-    })
+    type_children = frozenset(
+        {
+            "function",
+            "method",
+            "initializer",
+            "property",
+            "variable",
+            "type_alias",
+            "class",
+            "struct",
+            "enum",
+            "protocol",
+            "extension",
+            "actor",
+            "enum_case",
+        }
+    )
+    type_parents = frozenset(
+        {
+            "source_file",
+            "class",
+            "struct",
+            "enum",
+            "protocol",
+            "extension",
+            "actor",
+        }
+    )
 
     cls = KindSpec(
         name="class",
@@ -255,8 +285,23 @@ def swift_kind_schema() -> KindSchema:
         allowed_child_kinds=frozenset(),
     )
 
-    specs = (source_file, imp, cls, struct, enum, protocol, extension, actor,
-             function, method, initializer, variable, prop, alias, enum_case)
+    specs = (
+        source_file,
+        imp,
+        cls,
+        struct,
+        enum,
+        protocol,
+        extension,
+        actor,
+        function,
+        method,
+        initializer,
+        variable,
+        prop,
+        alias,
+        enum_case,
+    )
     return KindSchema(
         language_key="swift",
         source_kinds=frozenset({"source_file"}),
@@ -394,6 +439,7 @@ def _build_bridge_if_needed() -> Path:
         try:
             # posix advisory lock; no-op on systems without fcntl
             import fcntl
+
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         except (ImportError, OSError):
             pass
@@ -401,7 +447,8 @@ def _build_bridge_if_needed() -> Path:
             return binary
         result = subprocess.run(
             ["swift", "build", "-c", "release"],
-            check=False, cwd=str(_BRIDGE_PACKAGE_DIR),
+            check=False,
+            cwd=str(_BRIDGE_PACKAGE_DIR),
             capture_output=True,
             text=True,
         )
@@ -601,6 +648,7 @@ def _render_replacement_template(replacement_source: str, bindings: Mapping[str,
     Bindings may be raw strings (pre-rendered snippets) or
     :class:`_SwiftDeclaration` handles.
     """
+
     def _sub(match: re.Match[str]) -> str:
         name = match.group(1)
         if name not in bindings:
@@ -751,8 +799,7 @@ class SwiftStructuralLanguage(StructuralLanguage):
             generic = _optional_str_or_none(attributes, "generic_parameters", kind)
             inner = _join_bodies(body, _concat_children_source(children_list))
             rendered = (
-                f"{_modifier_prefix(modifiers)}{kind} {name}{_generic_clause(generic)}"
-                f"{_inheritance_clause(inheritance)} {{\n{inner}}}\n"
+                f"{_modifier_prefix(modifiers)}{kind} {name}{_generic_clause(generic)}{_inheritance_clause(inheritance)} {{\n{inner}}}\n"
             )
             return _SwiftDeclaration(kind=kind, source=rendered)
 
@@ -762,10 +809,7 @@ class SwiftStructuralLanguage(StructuralLanguage):
             inheritance = _optional_str_list(attributes, "inheritance", kind)
             modifiers = _optional_str(attributes, "modifiers", kind)
             inner = _join_bodies(body, _concat_children_source(children_list))
-            rendered = (
-                f"{_modifier_prefix(modifiers)}protocol {name}"
-                f"{_inheritance_clause(inheritance)} {{\n{inner}}}\n"
-            )
+            rendered = f"{_modifier_prefix(modifiers)}protocol {name}{_inheritance_clause(inheritance)} {{\n{inner}}}\n"
             return _SwiftDeclaration(kind=kind, source=rendered)
 
         if kind == "extension":
@@ -774,10 +818,7 @@ class SwiftStructuralLanguage(StructuralLanguage):
             inheritance = _optional_str_list(attributes, "inheritance", kind)
             modifiers = _optional_str(attributes, "modifiers", kind)
             inner = _join_bodies(body, _concat_children_source(children_list))
-            rendered = (
-                f"{_modifier_prefix(modifiers)}extension {extended}"
-                f"{_inheritance_clause(inheritance)} {{\n{inner}}}\n"
-            )
+            rendered = f"{_modifier_prefix(modifiers)}extension {extended}{_inheritance_clause(inheritance)} {{\n{inner}}}\n"
             return _SwiftDeclaration(kind=kind, source=rendered)
 
         if kind in {"function", "method"}:
@@ -811,22 +852,12 @@ class SwiftStructuralLanguage(StructuralLanguage):
             init = _optional_str_or_none(attributes, "initializer", kind)
             is_let = _optional_bool(attributes, "is_let", kind)
             modifiers = _optional_str(attributes, "modifiers", kind)
-            body_opt: str | None = (
-                _optional_str_or_none(attributes, "body", kind)
-                if kind == "property"
-                else None
-            )
+            body_opt: str | None = _optional_str_or_none(attributes, "body", kind) if kind == "property" else None
             keyword = "let" if is_let else "var"
             type_clause = f": {ty}" if ty else ""
             init_clause = f" = {init}" if init is not None else ""
-            body_clause = (
-                f" {{\n{body_opt}{'' if body_opt.endswith(chr(10)) else chr(10)}}}"
-                if body_opt
-                else ""
-            )
-            rendered = (
-                f"{_modifier_prefix(modifiers)}{keyword} {name}{type_clause}{init_clause}{body_clause}\n"
-            )
+            body_clause = f" {{\n{body_opt}{'' if body_opt.endswith(chr(10)) else chr(10)}}}" if body_opt else ""
+            rendered = f"{_modifier_prefix(modifiers)}{keyword} {name}{type_clause}{init_clause}{body_clause}\n"
             return _SwiftDeclaration(kind=kind, source=rendered)
 
         if kind == "type_alias":
@@ -897,8 +928,7 @@ class SwiftStructuralLanguage(StructuralLanguage):
         if isinstance(parent, _SwiftTree):
             return parent, None
         raise TypeError(
-            f"parent must be a _SwiftTree; got {type(parent).__name__}. "
-            "Pass the tree and use anchor / position to target a nested symbol."
+            f"parent must be a _SwiftTree; got {type(parent).__name__}. Pass the tree and use anchor / position to target a nested symbol."
         )
 
     # ---- pattern matching --------------------------------------------------
@@ -929,10 +959,7 @@ class SwiftStructuralLanguage(StructuralLanguage):
         )
         _raise_for_error(response)
         for match in response.get("matches", []):
-            bindings = {
-                name: info["source"]
-                for name, info in match.get("bindings", {}).items()
-            }
+            bindings = {name: info["source"] for name, info in match.get("bindings", {}).items()}
             node_ref = _SwiftSymbolRef(
                 kind="match",
                 name_path="",
@@ -961,13 +988,9 @@ class SwiftStructuralLanguage(StructuralLanguage):
         if not isinstance(tree, _SwiftTree):
             raise TypeError(f"apply_replacement expects a _SwiftTree; got {type(tree).__name__}")
         if not isinstance(replacement, _SwiftDeclaration):
-            raise TypeError(
-                f"replacement must be a _SwiftDeclaration; got {type(replacement).__name__}"
-            )
+            raise TypeError(f"replacement must be a _SwiftDeclaration; got {type(replacement).__name__}")
         if not isinstance(match.node, _SwiftSymbolRef):
-            raise TypeError(
-                f"match.node must be a _SwiftSymbolRef; got {type(match.node).__name__}"
-            )
+            raise TypeError(f"match.node must be a _SwiftSymbolRef; got {type(match.node).__name__}")
         response = self._get_bridge().call(
             "apply_replacement",
             source=tree.source,

@@ -363,9 +363,7 @@ class SymbolRangeIndex:
         candidates.sort(key=lambda c: (c[0], c[4], c[1]))
         self._candidates = candidates
 
-    def find_innermost_container(
-        self, line: int, column: int | None, strict: bool
-    ) -> "ls_types.UnifiedSymbolInformation | None":
+    def find_innermost_container(self, line: int, column: int | None, strict: bool) -> "ls_types.UnifiedSymbolInformation | None":
         """
         Return the innermost candidate whose range contains ``(line, column)``.
 
@@ -2823,13 +2821,9 @@ class SolidLanguageServer(ABC):
                 start_idx = _to_index(edit["range"]["start"])
                 end_idx = _to_index(edit["range"]["end"])
                 if start_idx < cursor_idx:
-                    raise SolidLSPException(
-                        f"Overlapping text edits in {relative_path} at line {edit['range']['start']['line']}"
-                    )
+                    raise SolidLSPException(f"Overlapping text edits in {relative_path} at line {edit['range']['start']['line']}")
                 if end_idx < start_idx:
-                    raise SolidLSPException(
-                        f"Text edit end precedes its start in {relative_path}"
-                    )
+                    raise SolidLSPException(f"Text edit end precedes its start in {relative_path}")
                 parts.append(original_contents[cursor_idx:start_idx])
                 parts.append(edit["newText"])
                 cursor_idx = end_idx
@@ -2848,8 +2842,7 @@ class SolidLanguageServer(ABC):
                         LSPConstants.URI: file_buffer.uri,
                     },
                     LSPConstants.CONTENT_CHANGES: [
-                        {LSPConstants.RANGE: edit["range"], "text": edit["newText"]}
-                        for edit in reversed(sorted_edits)
+                        {LSPConstants.RANGE: edit["range"], "text": edit["newText"]} for edit in reversed(sorted_edits)
                     ],
                 }
             )

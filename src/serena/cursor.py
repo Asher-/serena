@@ -165,9 +165,7 @@ class CursorManager:
         self._cursors: dict[str, CursorState] = {}
         self._next_cursor_id = 1
         # lazy default so test overrides and production both go through one path
-        self._structural_registry = (
-            structural_registry if structural_registry is not None else default_structural_backend_registry()
-        )
+        self._structural_registry = structural_registry if structural_registry is not None else default_structural_backend_registry()
         # per-file cache of structural walk_nodes output; keyed by relative path
         self._structural_nodes_cache: dict[str, _StructuralNodeCacheEntry] = {}
 

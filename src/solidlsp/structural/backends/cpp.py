@@ -180,9 +180,7 @@ def cpp_kind_schema() -> KindSchema:
             "enum",
         }
     )
-    record_allowed_parents = frozenset(
-        {"translation_unit", "namespace", "class", "struct", "union"}
-    )
+    record_allowed_parents = frozenset({"translation_unit", "namespace", "class", "struct", "union"})
     record_attributes = (
         _ATTR_NAME,
         _ATTR_BASES,
@@ -262,18 +260,14 @@ def cpp_kind_schema() -> KindSchema:
         name="type_alias",
         description="A 'using X = ...;' or 'typedef ... X;' declaration.",
         attributes=(_ATTR_STATEMENT,),
-        allowed_parent_kinds=frozenset(
-            {"translation_unit", "namespace", "class", "struct", "union"}
-        ),
+        allowed_parent_kinds=frozenset({"translation_unit", "namespace", "class", "struct", "union"}),
         allowed_child_kinds=frozenset(),
     )
     enum = KindSpec(
         name="enum",
         description="An enum or enum-class definition.",
         attributes=(_ATTR_NAME, _ATTR_BODY),
-        allowed_parent_kinds=frozenset(
-            {"translation_unit", "namespace", "class", "struct", "union"}
-        ),
+        allowed_parent_kinds=frozenset({"translation_unit", "namespace", "class", "struct", "union"}),
         allowed_child_kinds=frozenset({"enum_constant"}),
     )
     enum_constant = KindSpec(
@@ -606,9 +600,7 @@ def _in_main_file(cursor: cx.Cursor, main_file_name: str) -> bool:
     return loc.file is not None and loc.file.name == main_file_name
 
 
-def _body_range_for_compound(
-    cursor: cx.Cursor, source: str
-) -> tuple[int, int] | None:
+def _body_range_for_compound(cursor: cx.Cursor, source: str) -> tuple[int, int] | None:
     """Return the byte range inside a compound declaration's braces.
 
     :param cursor: a cursor whose declaration ends in ``{...}``.
@@ -715,6 +707,7 @@ def _walk_named_symbols(
     tree: _CppTree,
 ) -> Iterator[tuple[str, KindName, _CppSymbolRef]]:
     """Yield all named-symbol triples in the main file of ``tree``."""
+
     # a depth-first walk tagged with the structural parent path
     def _recurse(cursor: cx.Cursor, prefix: str) -> Iterator[tuple[str, KindName, _CppSymbolRef]]:
         for child in cursor.get_children():
@@ -750,9 +743,7 @@ def _walk_named_symbols(
     yield from _recurse(tree.tu.cursor, prefix="")
 
 
-_COMPOUND_KINDS: frozenset[KindName] = frozenset(
-    {"namespace", "class", "struct", "union", "enum"}
-)
+_COMPOUND_KINDS: frozenset[KindName] = frozenset({"namespace", "class", "struct", "union", "enum"})
 
 
 # =============================================================================
@@ -944,11 +935,7 @@ class CppStructuralLanguage(StructuralLanguage):
             template_params = _optional_str_or_none(attributes, "template_parameters", kind)
             template_prefix = f"template <{template_params}>\n" if template_params else ""
             qual_suffix = f" {qualifiers}" if qualifiers else ""
-            rendered = (
-                f"{template_prefix}{return_type} {name}({params}){qual_suffix} {{\n"
-                f"{_indent_body(body)}"
-                f"}}\n"
-            )
+            rendered = f"{template_prefix}{return_type} {name}({params}){qual_suffix} {{\n{_indent_body(body)}}}\n"
             return _CppDeclaration(kind=kind, source=rendered)
 
         if kind == "field":
@@ -970,7 +957,7 @@ class CppStructuralLanguage(StructuralLanguage):
         if kind == "type_alias":
             statement = _require_str(attributes, "statement", kind)
             stripped = statement.lstrip()
-            if not (stripped.startswith("using ") or stripped.startswith("typedef ")):
+            if not (stripped.startswith(("using ", "typedef "))):
                 raise DeclarationError(kind, "type_alias statement must start with 'using' or 'typedef'")
             return _CppDeclaration(kind=kind, source=_ensure_trailing_newline(statement))
 
@@ -993,9 +980,7 @@ class CppStructuralLanguage(StructuralLanguage):
 
     # ---- insert / remove ---------------------------------------------------
 
-    def insert_child(
-        self, parent: Any, child: Any, anchor: Any | None = None, position: str = "end"
-    ) -> _CppTree:
+    def insert_child(self, parent: Any, child: Any, anchor: Any | None = None, position: str = "end") -> _CppTree:
         if position not in {"before", "after", "start", "end"}:
             raise ValueError(f"invalid position: {position!r}")
         if position in {"before", "after"} and anchor is None:
@@ -1014,9 +999,7 @@ class CppStructuralLanguage(StructuralLanguage):
     def remove_child(self, parent: Any, child: Any) -> _CppTree:
         tree, _parent_ref = self._resolve_insertion_parent(parent)
         if not isinstance(child, _CppSymbolRef):
-            raise TypeError(
-                f"child to remove must be a _CppSymbolRef from walk_symbols; got {type(child).__name__}"
-            )
+            raise TypeError(f"child to remove must be a _CppSymbolRef from walk_symbols; got {type(child).__name__}")
         edit = _Edit(offset=child.extent_offset, length=child.extent_length, replacement="")
         new_source = _apply_edits(tree.source, [edit])
         return self._reparse(new_source, tree)
@@ -1124,9 +1107,7 @@ class CppStructuralLanguage(StructuralLanguage):
             )
         raise PatternError("parse", f"no wrapping parsed pattern cleanly: {last_error}")
 
-    def find_matches(
-        self, tree: Any, pattern: AstPattern, scope: Any | None = None
-    ) -> Iterable[PatternMatch]:
+    def find_matches(self, tree: Any, pattern: AstPattern, scope: Any | None = None) -> Iterable[PatternMatch]:
         if not isinstance(tree, _CppTree):
             raise TypeError(f"tree must be a _CppTree; got {type(tree).__name__}")
         if not isinstance(pattern, _CppPattern):
@@ -1134,9 +1115,7 @@ class CppStructuralLanguage(StructuralLanguage):
         scope_ref = scope if isinstance(scope, _CppSymbolRef) else None
         return list(self._iter_matches(tree, scope_ref, pattern))
 
-    def _iter_matches(
-        self, tree: _CppTree, scope: _CppSymbolRef | None, pattern: _CppPattern
-    ) -> Iterator[PatternMatch]:
+    def _iter_matches(self, tree: _CppTree, scope: _CppSymbolRef | None, pattern: _CppPattern) -> Iterator[PatternMatch]:
         # locate the pattern's representative cursor (the cursor whose extent best matches the
         # reserved pattern range inside the encoded source)
         pattern_cursors = list(_cursors_within_range(pattern.pattern_tu, pattern.pattern_cursor_extent))
@@ -1194,9 +1173,7 @@ class CppStructuralLanguage(StructuralLanguage):
             mapping[key] = path
         return mapping
 
-    def render_replacement(
-        self, replacement_source: str, bindings: Mapping[str, Any]
-    ) -> _CppDeclaration:
+    def render_replacement(self, replacement_source: str, bindings: Mapping[str, Any]) -> _CppDeclaration:
         # substitute $name tokens with the captured source strings; the result is a
         # rendered text fragment the caller can feed to apply_replacement
         encoded, placeholders = _encode_sigils(replacement_source)
@@ -1222,9 +1199,7 @@ class CppStructuralLanguage(StructuralLanguage):
             rendered = rendered.replace(encoded_name, replacement_text)
         return _CppDeclaration(kind="replacement", source=rendered)
 
-    def apply_replacement(
-        self, tree: Any, match: PatternMatch, replacement: Any
-    ) -> _CppTree:
+    def apply_replacement(self, tree: Any, match: PatternMatch, replacement: Any) -> _CppTree:
         if not isinstance(tree, _CppTree):
             raise TypeError(f"tree must be a _CppTree; got {type(tree).__name__}")
         if not isinstance(match.node, _CppSymbolRef):
@@ -1289,7 +1264,7 @@ def _optional_str_list(attrs: Mapping[str, Any], name: str, kind: KindName) -> t
         return ()
     if isinstance(value, str):
         raise DeclarationError(kind, f"attribute {name!r} must be list[str], not a single str")
-    if not isinstance(value, (list, tuple)):
+    if not isinstance(value, list | tuple):
         raise DeclarationError(kind, f"attribute {name!r} must be list[str], got {type(value).__name__}")
     out: list[str] = []
     for i, item in enumerate(value):
@@ -1329,7 +1304,7 @@ def _indent_body(raw_body: str) -> str:
     # leave hand-crafted indentation alone; otherwise indent each line one level
     if not raw_body:
         return ""
-    if raw_body.startswith(" ") or raw_body.startswith("\t"):
+    if raw_body.startswith((" ", "\t")):
         return raw_body if raw_body.endswith("\n") else raw_body + "\n"
     indented = "\n".join("    " + line if line.strip() else line for line in raw_body.splitlines())
     return indented + "\n"
@@ -1350,9 +1325,7 @@ def _has_fatal_diagnostics(tu: cx.TranslationUnit) -> bool:
     return any(d.severity >= cx.Diagnostic.Fatal for d in tu.diagnostics)
 
 
-def _cursors_within_range(
-    tu: cx.TranslationUnit, extent: tuple[int, int]
-) -> Iterator[cx.Cursor]:
+def _cursors_within_range(tu: cx.TranslationUnit, extent: tuple[int, int]) -> Iterator[cx.Cursor]:
     # yield every cursor whose extent overlaps the given byte range
     start, end = extent
     target_file: str | None = None
@@ -1375,9 +1348,7 @@ def _cursors_within_range(
     yield from _recurse(tu.cursor)
 
 
-def _smallest_enclosing(
-    cursors: Sequence[cx.Cursor], start: int, end: int
-) -> cx.Cursor | None:
+def _smallest_enclosing(cursors: Sequence[cx.Cursor], start: int, end: int) -> cx.Cursor | None:
     # smallest cursor whose extent encloses [start, end)
     best: cx.Cursor | None = None
     best_size: int | None = None

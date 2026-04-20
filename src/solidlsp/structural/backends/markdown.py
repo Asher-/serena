@@ -605,9 +605,7 @@ class MarkdownStructuralLanguage(StructuralLanguage):
 
     # ---- insert / remove ---------------------------------------------------
 
-    def insert_child(
-        self, parent: Any, child: Any, anchor: Any | None = None, position: str = "end"
-    ) -> _MdTree:
+    def insert_child(self, parent: Any, child: Any, anchor: Any | None = None, position: str = "end") -> _MdTree:
         if position not in {"before", "after", "start", "end"}:
             raise ValueError(f"invalid position: {position!r}")
         if position in {"before", "after"} and anchor is None:
@@ -688,9 +686,7 @@ class MarkdownStructuralLanguage(StructuralLanguage):
             raise PatternError("parse", "pattern source produced no block-level nodes")
         return _MdPattern(source=pattern_source, pattern_tree=children[0], placeholders=placeholders)
 
-    def find_matches(
-        self, tree: Any, pattern: AstPattern, scope: Any | None = None
-    ) -> Iterable[PatternMatch]:
+    def find_matches(self, tree: Any, pattern: AstPattern, scope: Any | None = None) -> Iterable[PatternMatch]:
         if not isinstance(tree, _MdTree):
             raise TypeError(f"tree must be a _MdTree; got {type(tree).__name__}")
         if not isinstance(pattern, _MdPattern):
@@ -698,9 +694,7 @@ class MarkdownStructuralLanguage(StructuralLanguage):
         scope_ref = scope if isinstance(scope, _MdSymbolRef) else None
         return list(self._iter_matches(tree, scope_ref, pattern))
 
-    def _iter_matches(
-        self, tree: _MdTree, scope: _MdSymbolRef | None, pattern: _MdPattern
-    ) -> Iterator[PatternMatch]:
+    def _iter_matches(self, tree: _MdTree, scope: _MdSymbolRef | None, pattern: _MdPattern) -> Iterator[PatternMatch]:
         # build a syntax tree for the target so structural comparison is easy
         target_root = SyntaxTreeNode(list(tree.tokens))
         scope_range: tuple[int, int] | None = None
@@ -731,9 +725,7 @@ class MarkdownStructuralLanguage(StructuralLanguage):
                     symbol_path=_nearest_heading_path(heading_paths, start),
                 )
 
-    def render_replacement(
-        self, replacement_source: str, bindings: Mapping[str, Any]
-    ) -> _MdDeclaration:
+    def render_replacement(self, replacement_source: str, bindings: Mapping[str, Any]) -> _MdDeclaration:
         # substitute $name tokens with the captured source strings
         encoded, placeholders = _encode_sigils(replacement_source)
         for placeholder in placeholders.values():
@@ -758,9 +750,7 @@ class MarkdownStructuralLanguage(StructuralLanguage):
             rendered = rendered.replace(encoded_name, replacement_text)
         return _MdDeclaration(kind="replacement", source=rendered)
 
-    def apply_replacement(
-        self, tree: Any, match: PatternMatch, replacement: Any
-    ) -> _MdTree:
+    def apply_replacement(self, tree: Any, match: PatternMatch, replacement: Any) -> _MdTree:
         if not isinstance(tree, _MdTree):
             raise TypeError(f"tree must be a _MdTree; got {type(tree).__name__}")
         if not isinstance(match.node, _MdSymbolRef):
@@ -980,15 +970,13 @@ def _node_byte_range(node: SyntaxTreeNode, line_starts: tuple[int, ...]) -> tupl
     return start, end
 
 
-def _freeze_binding(
-    value: Any, source: str, line_starts: tuple[int, ...]
-) -> str:
+def _freeze_binding(value: Any, source: str, line_starts: tuple[int, ...]) -> str:
     """Convert a captured SyntaxTreeNode into its source text."""
     if isinstance(value, SyntaxTreeNode):
         rng = _node_byte_range(value, line_starts)
         if rng is not None:
             return source[rng[0] : rng[1]]
-        return (value.content or "")
+        return value.content or ""
     if isinstance(value, str):
         return value
     return str(value)
@@ -1005,9 +993,7 @@ def _heading_path_index(tree: _MdTree) -> Sequence[tuple[int, int, str]]:
     return entries
 
 
-def _nearest_heading_path(
-    heading_paths: Sequence[tuple[int, int, str]], offset: int
-) -> str | None:
+def _nearest_heading_path(heading_paths: Sequence[tuple[int, int, str]], offset: int) -> str | None:
     """Return the name_path of the smallest enclosing heading scope for ``offset``."""
     best: tuple[int, str] | None = None  # (scope_size, path)
     for start, end, path in heading_paths:
@@ -1063,7 +1049,7 @@ def _ensure_single_trailing_newline(text: str) -> str:
 
 
 def _block_separators(source: str, offset: int) -> tuple[str, str]:
-    """Return the ``(prefix, suffix)`` padding that puts an insertion at a block boundary.
+    r"""Return the ``(prefix, suffix)`` padding that puts an insertion at a block boundary.
 
     Each side of the insertion point must sit next to a blank-line boundary:
     the prefix injects whatever newlines are needed so ``source[:offset] +

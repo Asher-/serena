@@ -330,8 +330,7 @@ def _build_document_symbols(source: str) -> list[lsp.DocumentSymbol]:
     levels = [int(tok.tag[1]) for tok in tree.tokens if tok.type == "heading_open"]
     if len(levels) != len(refs):
         raise RuntimeError(
-            f"heading count mismatch: walk_symbols yielded {len(refs)} refs, "
-            f"tokens yielded {len(levels)} heading_open entries"
+            f"heading count mismatch: walk_symbols yielded {len(refs)} refs, tokens yielded {len(levels)} heading_open entries"
         )
 
     # build a flat (level, DocumentSymbol) list; range covers the scope, selection_range covers the heading line only

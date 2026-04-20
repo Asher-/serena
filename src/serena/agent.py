@@ -682,9 +682,7 @@ class SerenaAgent:
             startup_error = self._startup_activation_error
             if startup_error is not None:
                 target = self._startup_activation_target or "the project specified at startup"
-                raise ValueError(
-                    f"Project '{target}' specified at startup failed to activate: {startup_error}"
-                ) from startup_error
+                raise ValueError(f"Project '{target}' specified at startup failed to activate: {startup_error}") from startup_error
             raise ValueError("No active project. Please activate a project first.")
         return project
 

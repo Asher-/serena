@@ -391,8 +391,8 @@ def _match_node(target: Any, pattern: Any, placeholders: Mapping[str, _Placehold
     for field_name in _compare_fields(pattern):
         pv = getattr(pattern, field_name)
         tv = getattr(target, field_name)
-        if isinstance(pv, (list, tuple)):
-            if not isinstance(tv, (list, tuple)) or not _match_sequence(tv, pv, placeholders, bindings):
+        if isinstance(pv, list | tuple):
+            if not isinstance(tv, list | tuple) or not _match_sequence(tv, pv, placeholders, bindings):
                 return False
         elif isinstance(pv, cst.CSTNode):
             if not isinstance(tv, cst.CSTNode) or not _match_node(tv, pv, placeholders, bindings):
@@ -466,7 +466,7 @@ def _sequence_placeholder_name(pattern_item: Any, placeholders: Mapping[str, _Pl
         inner = getattr(pattern_item, wrapper_field, None)
         if inner is None:
             continue
-        if isinstance(inner, (list, tuple)):
+        if isinstance(inner, list | tuple):
             if len(inner) == 1:
                 nested = _sequence_placeholder_name(inner[0], placeholders)
                 if nested is not None:
@@ -507,7 +507,7 @@ _UNNAMED_NODE_KIND: dict[type, KindName] = {
 
 def _symbol_name(node: cst.CSTNode) -> str | None:
     """Return the agent-visible name for a symbol node, or ``None`` if the node is unnamed."""
-    if isinstance(node, (cst.ClassDef, cst.FunctionDef)):
+    if isinstance(node, cst.ClassDef | cst.FunctionDef):
         return node.name.value
     if isinstance(node, cst.Import):
         # report the first alias as the name (Serena surfaces imports as flat statements)
@@ -517,7 +517,7 @@ def _symbol_name(node: cst.CSTNode) -> str | None:
         if isinstance(node.names, cst.ImportStar):
             return "*"
         return node.names[0].evaluated_name if node.names else None
-    if isinstance(node, (cst.Assign, cst.AnnAssign)):
+    if isinstance(node, cst.Assign | cst.AnnAssign):
         target = node.target if isinstance(node, cst.AnnAssign) else (node.targets[0].target if node.targets else None)
         if isinstance(target, cst.Name):
             return target.value
@@ -530,7 +530,7 @@ def _iter_body_statements(node: cst.CSTNode) -> Iterator[cst.CSTNode]:
     # Module stores statements directly; ClassDef/FunctionDef wrap them in IndentedBlock
     if isinstance(node, cst.Module):
         yield from node.body
-    elif isinstance(node, (cst.ClassDef, cst.FunctionDef)):
+    elif isinstance(node, cst.ClassDef | cst.FunctionDef):
         body = node.body
         if isinstance(body, cst.IndentedBlock):
             yield from body.body
@@ -543,9 +543,7 @@ def _unwrap_statement(stmt: cst.CSTNode) -> cst.CSTNode:
     return stmt
 
 
-def _walk_named_symbols(
-    parent: cst.CSTNode, prefix: str, inside_class: bool
-) -> Iterator[tuple[str, KindName, cst.CSTNode]]:
+def _walk_named_symbols(parent: cst.CSTNode, prefix: str, inside_class: bool) -> Iterator[tuple[str, KindName, cst.CSTNode]]:
     """Recursively yield named-symbol triples under ``parent``."""
     for raw in _iter_body_statements(parent):
         stmt = _unwrap_statement(raw)
@@ -585,9 +583,7 @@ def _iter_all_body_statements(node: cst.CSTNode) -> Iterator[cst.CSTNode]:
         yield from body.body
 
 
-def _walk_all_nodes(
-    parent: cst.CSTNode, prefix: str, inside_class: bool
-) -> Iterator[tuple[str, KindName, cst.CSTNode]]:
+def _walk_all_nodes(parent: cst.CSTNode, prefix: str, inside_class: bool) -> Iterator[tuple[str, KindName, cst.CSTNode]]:
     """Recursively yield ``(name_path, kind, node)`` for every addressable node under ``parent``.
 
     Named symbols use the same ``parent/name`` convention as
@@ -665,9 +661,7 @@ def _render_class_source(name: str, bases: Sequence[str], body: str) -> str:
     return header + "\n" + body_text + ("\n" if not body_text.endswith("\n") else "")
 
 
-def _render_function_source(
-    name: str, parameters: str, return_annotation: str | None, body: str, is_async: bool
-) -> str:
+def _render_function_source(name: str, parameters: str, return_annotation: str | None, body: str, is_async: bool) -> str:
     prefix = "async def " if is_async else "def "
     header = f"{prefix}{name}({parameters})"
     if return_annotation:
@@ -719,7 +713,7 @@ def _coerce_str_list(value: Any, attribute: str, kind: str) -> tuple[str, ...]:
         return ()
     if isinstance(value, str):
         raise DeclarationError(kind, f"attribute {attribute!r} must be a list of str, not a single str")
-    if not isinstance(value, (list, tuple)):
+    if not isinstance(value, list | tuple):
         raise DeclarationError(kind, f"attribute {attribute!r} must be list[str], got {type(value).__name__}")
     out: list[str] = []
     for i, item in enumerate(value):
@@ -775,7 +769,7 @@ class PythonStructuralLanguage(StructuralLanguage):
             return tree.code
         # for non-module nodes (pattern fragments, rendered replacements), wrap in a module
         # to access the shared code-generation machinery
-        if isinstance(tree, cst.BaseStatement) or isinstance(tree, cst.BaseSmallStatement):
+        if isinstance(tree, cst.BaseStatement | cst.BaseSmallStatement):
             return cst.Module(body=(tree if isinstance(tree, cst.BaseStatement) else cst.SimpleStatementLine(body=[tree]),)).code  # type: ignore[arg-type]
         if isinstance(tree, cst.CSTNode):
             # fall back to the metadata-agnostic printer
@@ -801,9 +795,7 @@ class PythonStructuralLanguage(StructuralLanguage):
 
     # ---- declaration -------------------------------------------------------
 
-    def build_declaration(
-        self, kind: KindName, attributes: Mapping[str, Any], children: Iterable[Any]
-    ) -> cst.CSTNode:
+    def build_declaration(self, kind: KindName, attributes: Mapping[str, Any], children: Iterable[Any]) -> cst.CSTNode:
         # dispatch per kind; children is consumed for decorator attachment below
         self.kind_schema.get(kind)  # raises if unknown
         child_list = list(children)
@@ -815,7 +807,9 @@ class PythonStructuralLanguage(StructuralLanguage):
         if kind == "import":
             statement = _coerce_str(attributes.get("statement"), "statement", kind)
             parsed = _parse_single_statement(statement, diagnostic=kind)
-            if not (isinstance(parsed, cst.SimpleStatementLine) and parsed.body and isinstance(parsed.body[0], (cst.Import, cst.ImportFrom))):
+            if not (
+                isinstance(parsed, cst.SimpleStatementLine) and parsed.body and isinstance(parsed.body[0], cst.Import | cst.ImportFrom)
+            ):
                 raise DeclarationError(kind, "statement must be a single 'import' or 'from ... import ...' line")
             return parsed
 
@@ -852,9 +846,7 @@ class PythonStructuralLanguage(StructuralLanguage):
                 return node
             # function / method share the same rendering
             name = _coerce_str(attributes.get("name"), "name", kind)
-            params = _coerce_str(attributes.get("parameters"), "parameters", kind, required=False) or (
-                "self" if kind == "method" else ""
-            )
+            params = _coerce_str(attributes.get("parameters"), "parameters", kind, required=False) or ("self" if kind == "method" else "")
             return_annotation = attributes.get("return_annotation")
             if return_annotation is not None and not isinstance(return_annotation, str):
                 raise DeclarationError(kind, "attribute 'return_annotation' must be str or None")
@@ -872,9 +864,7 @@ class PythonStructuralLanguage(StructuralLanguage):
 
     # ---- insert / remove ---------------------------------------------------
 
-    def insert_child(
-        self, parent: Any, child: Any, anchor: Any | None = None, position: str = "end"
-    ) -> Any:
+    def insert_child(self, parent: Any, child: Any, anchor: Any | None = None, position: str = "end") -> Any:
         if position not in {"before", "after", "start", "end"}:
             raise ValueError(f"invalid position: {position!r}")
         if position in {"before", "after"} and anchor is None:
@@ -896,7 +886,7 @@ class PythonStructuralLanguage(StructuralLanguage):
     def _extract_body(self, parent: cst.CSTNode) -> list[cst.CSTNode]:
         if isinstance(parent, cst.Module):
             return list(parent.body)
-        if isinstance(parent, (cst.ClassDef, cst.FunctionDef)):
+        if isinstance(parent, cst.ClassDef | cst.FunctionDef):
             inner = parent.body
             if not isinstance(inner, cst.IndentedBlock):
                 raise TypeError(f"cannot insert into {type(parent).__name__} with non-IndentedBlock body")
@@ -906,7 +896,7 @@ class PythonStructuralLanguage(StructuralLanguage):
     def _replace_body(self, parent: cst.CSTNode, new_body: Sequence[cst.CSTNode]) -> cst.CSTNode:
         if isinstance(parent, cst.Module):
             return parent.with_changes(body=tuple(new_body))
-        if isinstance(parent, (cst.ClassDef, cst.FunctionDef)):
+        if isinstance(parent, cst.ClassDef | cst.FunctionDef):
             inner = parent.body
             assert isinstance(inner, cst.IndentedBlock)
             return parent.with_changes(body=inner.with_changes(body=tuple(new_body)))
@@ -941,9 +931,7 @@ class PythonStructuralLanguage(StructuralLanguage):
         root = _parse_pattern_fragment(encoded)
         return _PythonPattern(source=pattern_source, root=root, placeholders=placeholders)
 
-    def find_matches(
-        self, tree: Any, pattern: AstPattern, scope: Any | None = None
-    ) -> Iterable[PatternMatch]:
+    def find_matches(self, tree: Any, pattern: AstPattern, scope: Any | None = None) -> Iterable[PatternMatch]:
         if not isinstance(pattern, _PythonPattern):
             raise TypeError(f"pattern must come from this backend's compile_pattern; got {type(pattern).__name__}")
         search_root = scope if scope is not None else tree
@@ -951,9 +939,7 @@ class PythonStructuralLanguage(StructuralLanguage):
             raise TypeError(f"find_matches requires a CST node; got {type(search_root).__name__}")
         return list(self._iter_matches(tree, search_root, pattern))
 
-    def _iter_matches(
-        self, whole_tree: cst.CSTNode, search_root: cst.CSTNode, pattern: _PythonPattern
-    ) -> Iterator[PatternMatch]:
+    def _iter_matches(self, whole_tree: cst.CSTNode, search_root: cst.CSTNode, pattern: _PythonPattern) -> Iterator[PatternMatch]:
         # visit every descendant of search_root in a single pass, recording matches
         symbol_path_map = self._symbol_path_map(whole_tree)
         collector: list[PatternMatch] = []
@@ -993,9 +979,7 @@ class PythonStructuralLanguage(StructuralLanguage):
 
         node.visit(_Tagger())
 
-    def render_replacement(
-        self, replacement_source: str, bindings: Mapping[str, Any]
-    ) -> cst.CSTNode:
+    def render_replacement(self, replacement_source: str, bindings: Mapping[str, Any]) -> cst.CSTNode:
         encoded, placeholders = _encode_sigils(replacement_source)
         # ensure every placeholder actually has a binding (or is a wildcard)
         for placeholder in placeholders.values():
@@ -1017,9 +1001,7 @@ class PythonStructuralLanguage(StructuralLanguage):
             raise PatternError("parse", "binding substitution removed the replacement root")
         return rendered
 
-    def apply_replacement(
-        self, tree: Any, match: PatternMatch, replacement: Any
-    ) -> cst.CSTNode:
+    def apply_replacement(self, tree: Any, match: PatternMatch, replacement: Any) -> cst.CSTNode:
         if not isinstance(tree, cst.CSTNode):
             raise TypeError(f"tree must be a CST node; got {type(tree).__name__}")
         if not isinstance(match.node, cst.CSTNode) or not isinstance(replacement, cst.CSTNode):

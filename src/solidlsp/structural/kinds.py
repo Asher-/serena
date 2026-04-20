@@ -108,7 +108,9 @@ class KindSchema:
             if child_kind not in self.source_kinds:
                 from solidlsp.structural.errors import DeclarationError
 
-                raise DeclarationError(child_kind, f"cannot appear at source root in {self.language_key}; source kinds are {sorted(self.source_kinds)}")
+                raise DeclarationError(
+                    child_kind, f"cannot appear at source root in {self.language_key}; source kinds are {sorted(self.source_kinds)}"
+                )
             return
 
         # nested placement check
@@ -116,8 +118,14 @@ class KindSchema:
         if child_kind not in parent.allowed_child_kinds:
             from solidlsp.structural.errors import DeclarationError
 
-            raise DeclarationError(child_kind, f"not permitted under kind {parent_kind!r} in {self.language_key}; allowed children: {sorted(parent.allowed_child_kinds)}")
+            raise DeclarationError(
+                child_kind,
+                f"not permitted under kind {parent_kind!r} in {self.language_key}; allowed children: {sorted(parent.allowed_child_kinds)}",
+            )
         if parent_kind not in child.allowed_parent_kinds:
             from solidlsp.structural.errors import DeclarationError
 
-            raise DeclarationError(child_kind, f"does not permit parent {parent_kind!r} in {self.language_key}; allowed parents: {sorted(child.allowed_parent_kinds)}")
+            raise DeclarationError(
+                child_kind,
+                f"does not permit parent {parent_kind!r} in {self.language_key}; allowed parents: {sorted(child.allowed_parent_kinds)}",
+            )

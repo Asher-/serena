@@ -57,9 +57,7 @@ class TestSlugNormalization:
 class TestMarkdownM4References:
     """``request_references`` returns inline-link locations targeting a heading."""
 
-    def test_references_to_heading_in_other_file(
-        self, language_server: SolidLanguageServer
-    ) -> None:
+    def test_references_to_heading_in_other_file(self, language_server: SolidLanguageServer) -> None:
         """A cursor on ``# Foo`` in v2_doc_a.md returns the link in v2_doc_b.md."""
         # the heading "## Foo" lives at line 4 (0-based) in v2_doc_a.md;
         # request_references positions the cursor anywhere on that line
@@ -71,9 +69,7 @@ class TestMarkdownM4References:
 
         # verify the matching range covers the [foo anchor](v2_doc_a.md#foo) link text on line 6
         b_locs = [loc for loc in results if loc["relativePath"] == "v2_doc_b.md"]
-        assert any(
-            loc["range"]["start"]["line"] == 6 for loc in b_locs
-        ), f"expected a link on line 6 of v2_doc_b.md; got {b_locs}"
+        assert any(loc["range"]["start"]["line"] == 6 for loc in b_locs), f"expected a link on line 6 of v2_doc_b.md; got {b_locs}"
 
     def test_references_to_second_heading(self, language_server: SolidLanguageServer) -> None:
         """A second-position heading is reachable via its slug from another file."""
@@ -84,9 +80,7 @@ class TestMarkdownM4References:
         rel_paths = sorted({loc["relativePath"] for loc in results})
         assert "v2_doc_b.md" in rel_paths, f"expected v2_doc_b.md in references; got {rel_paths}"
 
-    def test_references_off_heading_returns_empty(
-        self, language_server: SolidLanguageServer
-    ) -> None:
+    def test_references_off_heading_returns_empty(self, language_server: SolidLanguageServer) -> None:
         """A cursor on a body line (not a heading line) returns no references."""
         # line 6 of v2_doc_a.md is body text "Body of the foo section."
         results = language_server.request_references("v2_doc_a.md", line=6, column=2)
@@ -110,9 +104,7 @@ class TestMarkdownM4Definition:
         assert loc["relativePath"] == "v2_doc_a.md"
         assert loc["range"]["start"]["line"] == 4
 
-    def test_definition_of_bare_fragment_link(
-        self, language_server: SolidLanguageServer
-    ) -> None:
+    def test_definition_of_bare_fragment_link(self, language_server: SolidLanguageServer) -> None:
         """Cursor inside ``[self-link](#bare-fragment-link)`` resolves to the same-file heading."""
         # the bare-fragment self-link lives at line 10 (0-based) of v2_doc_b.md
         results = language_server.request_definition("v2_doc_b.md", line=10, column=4)

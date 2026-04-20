@@ -232,15 +232,7 @@ class TestResolveStructuralNamePath:
         assert first is not None
         assert project.read_file.call_count == 1
 
-        new_source = (
-            "class Thing:\n"
-            "    def method(self) -> None:\n"
-            "        pass\n"
-            "\n"
-            "\n"
-            "def added() -> None:\n"
-            "    pass\n"
-        )
+        new_source = "class Thing:\n    def method(self) -> None:\n        pass\n\n\ndef added() -> None:\n    pass\n"
         Path(abs_path).write_text(new_source, encoding="utf-8")
         stat = os.stat(abs_path)
         os.utime(abs_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
