@@ -1,9 +1,14 @@
 import logging
 from typing import Any, Optional
 
-from sensai.util.pickle import dump_pickle, load_pickle
+from sensai.util.pickle import load_pickle
 
 log = logging.getLogger(__name__)
+
+
+import contextlib
+import os
+import pickle
 
 
 def load_cache(path: str, version: Any) -> Optional[Any]:
@@ -19,5 +24,23 @@ def load_cache(path: str, version: Any) -> Optional[Any]:
 
 
 def save_cache(path: str, version: Any, obj: Any) -> None:
+    """
+    Atomically persist ``obj`` to ``path`` under ``version``.
+
+    A partially-written pickle previously produced a corrupt cache after a mid-write
+    crash because the destination was written in place. We now write to a sibling
+    ``<path>.tmp``, fsync it, and replace the destination in a single atomic rename.
+    The temporary file is removed on failure so orphans do not accumulate.
+    """
     data = {"__cache_version": version, "obj": obj}
-    dump_pickle(data, path)
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "wb") as f:
+            pickle.dump(data, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp_path)
+        raise
