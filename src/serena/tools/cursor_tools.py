@@ -9,6 +9,7 @@ editing (``cursor_replace_body``, ``cursor_insert_before``, ``cursor_insert_afte
 LSP-addressable (symbol-level) activity.
 """
 
+import difflib
 from collections import defaultdict
 from collections.abc import Sequence
 
@@ -300,10 +301,61 @@ class CursorReplaceBodyTool(Tool, ToolMarkerSymbolicEdit):
         relative_path = state.current_location.relative_path
         if relative_path is None:
             raise ValueError(f"Cursor {cursor_id} has no relative path; cannot perform edit.")
+
+        # snapshot extent and file content before the edit so we can report a diff summary
+        # and detect gross over-deletion (e.g. a ballooned symbol extent absorbing siblings)
+        pre_start = state.current_symbol.get_body_start_position_or_raise()
+        pre_end = state.current_symbol.get_body_end_position_or_raise()
+        pre_content = self.project.read_file(relative_path)
+
+        # execute the edit
         code_editor = self.create_code_editor()
         code_editor.replace_body(name_path, relative_file_path=relative_path, body=body)
+
+        # post-edit sibling-loss safety net: if the number of lines removed is much larger than
+        # the symbol's extent could account for, the extent was likely corrupted and absorbed
+        # sibling material. Raise rather than silently report success — the file is in a
+        # surprising state and the caller should inspect before continuing.
+        post_content = self.project.read_file(relative_path)
+        removed, added = self._count_diff_lines(pre_content, post_content)
+        extent_lines = max(pre_end.line - pre_start.line + 1, 1)
+        body_lines = len(body.splitlines()) + 1
+        tolerated_removal = extent_lines + 5
+        if removed > tolerated_removal and removed > extent_lines * 2:
+            raise ValueError(
+                f"cursor_replace_body on {name_path!r} in {relative_path!r} produced a "
+                f"suspicious diff (-{removed}/+{added} lines) for a symbol whose extent "
+                f"spans {extent_lines} lines with a replacement body of {body_lines} lines. "
+                f"This typically indicates that the symbol's extent had silently expanded to "
+                f"absorb sibling material, which is then deleted by the replacement. The edit "
+                f"has already been applied — inspect the file and run `git checkout` to recover."
+            )
+
         manager.reanchor_cursor(cursor_id)
-        return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
+        diff_summary = f"Diff: -{removed} / +{added} lines"
+        return f"{SUCCESS_RESULT}\n{diff_summary}\n\n" + manager.format_cursor_view(cursor_id)
+
+    @staticmethod
+    def _count_diff_lines(before: str, after: str) -> tuple[int, int]:
+        """
+        Counts the number of removed and added lines in a unified diff between ``before``
+        and ``after``.
+
+        :param before: the original text
+        :param after: the updated text
+        :return: ``(removed_line_count, added_line_count)``
+        """
+        diff = list(
+            difflib.unified_diff(
+                before.splitlines(keepends=True),
+                after.splitlines(keepends=True),
+                n=0,
+                lineterm="",
+            )
+        )
+        removed = sum(1 for line in diff if line.startswith("-") and not line.startswith("---"))
+        added = sum(1 for line in diff if line.startswith("+") and not line.startswith("+++"))
+        return removed, added
 
 
 class CursorInsertBeforeTool(Tool, ToolMarkerSymbolicEdit):

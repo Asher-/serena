@@ -132,6 +132,50 @@ class LSPFileBuffer:
         """Ensure that the file is opened in the language server."""
         self._open_in_ls()
 
+    def reload_from_disk(self) -> bool:
+        """
+        Reloads the buffer from disk and notifies the language server of the full
+        new contents (via didChange) when the file on disk has been modified since
+        the last read. This is needed because external mutations (e.g. git
+        operations during a project re-activation) invalidate both the in-memory
+        cache and the language server's document copy — the contents getter's
+        cache-invalidation alone is not enough, because it refreshes the buffer
+        but leaves the language server serving stale document symbols until the
+        next explicit LSP edit.
+
+        :return: True if a reload was performed, False if the buffer was already
+            in sync with disk
+        """
+        # no prior read → nothing to reload; the first read through the contents
+        # property will populate the cache naturally
+        if self._read_file_modified_date is None:
+            return False
+
+        file_modified_date = self.abs_path.stat().st_mtime
+        if file_modified_date <= self._read_file_modified_date:
+            return False
+
+        # refresh the in-memory buffer from disk
+        self._read_file_modified_date = file_modified_date
+        self._contents = FileUtils.read_file(str(self.abs_path), self.encoding)
+        self._content_hash = None
+
+        # resync the language server's copy via a full-document didChange; an
+        # incremental delta would be meaningless because the whole file was
+        # rewritten externally
+        if self._is_open_in_ls:
+            self.version += 1
+            self.language_server.server.notify.did_change_text_document(
+                {
+                    LSPConstants.TEXT_DOCUMENT: {  # type: ignore
+                        LSPConstants.URI: self.uri,
+                        LSPConstants.VERSION: self.version,
+                    },
+                    LSPConstants.CONTENT_CHANGES: [{"text": self._contents}],
+                }
+            )
+        return True
+
     @property
     def contents(self) -> str:
         file_modified_date = self.abs_path.stat().st_mtime
@@ -760,6 +804,10 @@ class SolidLanguageServer(ABC):
             fb.ref_count += 1
             if open_in_ls:
                 fb.ensure_open_in_ls()
+            # resync the language server with disk before yielding: an external
+            # mutation (e.g. git checkout during a project re-activation) could
+            # have made both the cached buffer and the LSP copy stale
+            fb.reload_from_disk()
             yield fb
             fb.ref_count -= 1
         else:

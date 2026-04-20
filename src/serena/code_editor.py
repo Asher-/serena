@@ -50,6 +50,21 @@ class CodeEditor(Generic[TSymbol], ABC):
         def insert_text_at_position(self, pos: PositionInFile, text: str) -> None:
             pass
 
+        def text_between_positions(self, start_pos: PositionInFile, end_pos: PositionInFile) -> str:
+            """
+            Returns the text of the file between ``start_pos`` (inclusive) and
+            ``end_pos`` (exclusive), computed against the current in-memory contents
+            of the edited file.
+
+            :param start_pos: the inclusive start position
+            :param end_pos: the exclusive end position
+            :return: the text between the two positions
+            """
+            contents = self.get_contents()
+            start_idx = TextUtils.get_index_from_line_col(contents, start_pos.line, start_pos.col)
+            end_idx = TextUtils.get_index_from_line_col(contents, end_pos.line, end_pos.col)
+            return contents[start_idx:end_idx]
+
     @contextmanager
     def _open_file_context(self, relative_path: str) -> Iterator["CodeEditor.EditedFile"]:
         """
@@ -107,12 +122,19 @@ class CodeEditor(Generic[TSymbol], ABC):
         end_pos = symbol.get_body_end_position_or_raise()
 
         with self.edited_file_context(relative_file_path) as edited_file:
-            # make sure the replacement adds no additional newlines (before or after) - all newlines
-            # and whitespace before/after should remain the same, so we strip it entirely
-            body = body.strip()
+            # preserve the whitespace envelope of the original extent so that languages whose
+            # symbol extent includes a trailing newline (e.g. markdown headings, where the extent
+            # ends at line N+1 col 0) do not get that newline destroyed by body.strip(). For
+            # Python/Swift/C++ where extents are tight, leading/trailing are empty and the strip
+            # dominates, preserving the historical behaviour.
+            original = edited_file.text_between_positions(start_pos, end_pos)
+            leading = original[: len(original) - len(original.lstrip())]
+            trailing = original[len(original.rstrip()) :]
+            stripped_body = body.strip()
+            framed_body = leading + stripped_body + trailing
 
             edited_file.delete_text_between_positions(start_pos, end_pos)
-            edited_file.insert_text_at_position(start_pos, body)
+            edited_file.insert_text_at_position(start_pos, framed_body)
 
     @staticmethod
     def _count_leading_newlines(text: Iterable) -> int:
