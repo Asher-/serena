@@ -287,3 +287,8 @@ zz-misc/
 vue-implementation/
 
 news/news.json
+
+# Rust bridge build artefacts
+/src/solidlsp/structural/backends/rust_bridge/target
+/src/solidlsp/structural/backends/rust_bridge/Cargo.lock
+/src/solidlsp/structural/backends/rust_bridge/.build.lock

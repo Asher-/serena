@@ -1,0 +1,21 @@
+[package]
+name = "serena-rust-bridge"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "serena-rust-bridge"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = false
+codegen-units = 16
+
+[dependencies]
+syn = { version = "2", features = ["full", "extra-traits", "visit", "parsing", "printing"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
