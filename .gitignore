@@ -292,3 +292,7 @@ news/news.json
 /src/solidlsp/structural/backends/rust_bridge/target
 /src/solidlsp/structural/backends/rust_bridge/Cargo.lock
 /src/solidlsp/structural/backends/rust_bridge/.build.lock
+
+# Java bridge build artefacts
+/src/solidlsp/structural/backends/java_bridge/target
+/src/solidlsp/structural/backends/java_bridge/.build.lock

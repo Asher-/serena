@@ -197,12 +197,19 @@ def _rust_backend_factory() -> "StructuralLanguage":
     return RustStructuralLanguage()
 
 
+def _java_backend_factory() -> "StructuralLanguage":
+    # lazy import: the java bridge subprocess is only spun up when requested
+    from solidlsp.structural.backends.java import JavaStructuralLanguage
+
+    return JavaStructuralLanguage()
+
+
 def default_structural_backend_registry() -> StructuralBackendRegistry:
-    """Build the default registry pre-populated with Serena's ten structural backends.
+    """Build the default registry pre-populated with Serena's eleven structural backends.
 
     The default registry covers the languages that currently have a
     :class:`StructuralLanguage` implementation: Python, C++, Markdown, Swift,
-    JSON, YAML, TOML, TypeScript, Go and Rust. Backends are registered with lazy
+    JSON, YAML, TOML, TypeScript, Go, Rust and Java. Backends are registered with lazy
     factories so simply constructing the registry imposes no import cost
     beyond this module itself.
 
@@ -244,6 +251,10 @@ def default_structural_backend_registry() -> StructuralBackendRegistry:
     # Rust: syn via subprocess bridge; lazy because it spawns a process on first use
     # and cargo builds on demand on the first request.
     registry.register("rust", [".rs"], _rust_backend_factory)
+
+    # Java: javaparser-core via subprocess bridge; lazy because it spawns a
+    # process on first use and mvn package builds on demand on the first request.
+    registry.register("java", [".java"], _java_backend_factory)
 
     return registry
 
