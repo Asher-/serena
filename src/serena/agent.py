@@ -268,6 +268,10 @@ class SerenaAgent:
             if necessary.
         """
         self._active_project: Project | None = None
+        # startup activation error preserved here so the first tool call that requires
+        # the project can surface the real cause instead of a generic "No active project".
+        self._startup_activation_error: Exception | None = None
+        self._startup_activation_target: str | None = None
         self._gui_log_viewer: Optional["GuiLogViewer"] = None
         self._dashboard_viewer_process: multiprocessing.Process | None = None
 
@@ -376,6 +380,9 @@ class SerenaAgent:
                 self.activate_project_from_path_or_name(project, update_active_modes=False, update_active_tools=False)
             except Exception as e:
                 log.error(f"Error activating project '{project}' at startup: {e}", exc_info=e)
+                # preserve the failure so get_active_project_or_raise can surface it to the first tool call
+                self._startup_activation_error = e
+                self._startup_activation_target = project
         self._update_active_modes()
 
         # determine the base toolset defining the set of exposed tools (which e.g. the MCP shall see),
@@ -665,10 +672,19 @@ class SerenaAgent:
 
     def get_active_project_or_raise(self) -> Project:
         """
-        :return: the active project or raises an exception if no project is active
+        :return: the active project or raises an exception if no project is active.
+            If the startup project activation failed, the original error is chained as the cause
+            so the first tool call that requires the project reveals the real failure instead of
+            a generic "No active project" message.
         """
         project = self.get_active_project()
         if project is None:
+            startup_error = self._startup_activation_error
+            if startup_error is not None:
+                target = self._startup_activation_target or "the project specified at startup"
+                raise ValueError(
+                    f"Project '{target}' specified at startup failed to activate: {startup_error}"
+                ) from startup_error
             raise ValueError("No active project. Please activate a project first.")
         return project
 
@@ -844,6 +860,9 @@ class SerenaAgent:
             self._active_project.shutdown()
 
         self._active_project = project
+        # a successful activation invalidates any preserved startup-activation failure
+        self._startup_activation_error = None
+        self._startup_activation_target = None
         self._cursor_manager = None  # type: ignore[assignment]  # reset cursor manager on project switch
         project.set_agent(self)
 
