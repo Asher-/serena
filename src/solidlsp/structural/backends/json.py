@@ -21,10 +21,16 @@ in subsequent commits.
 
 from __future__ import annotations
 
+import json as _stdlib_json
+import re
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
-from solidlsp.structural.errors import ParseError
+from solidlsp.structural.errors import NameResolutionError, ParseError
+from solidlsp.structural.kinds import AttributeSpec, KindName, KindSchema, KindSpec
+from solidlsp.structural.names import LogicalName, LogicalNameResolver, NameResolution
 
 # --------------------------------------------------------------------------- #
 # Tokens and CST nodes
@@ -494,3 +500,280 @@ def serialize_json(tree: Any) -> str:
     parts: list[str] = []
     _emit(tree, parts)
     return "".join(parts)
+
+
+# --------------------------------------------------------------------------- #
+# Kind schema (stage 2)
+# --------------------------------------------------------------------------- #
+
+
+_ATTR_KEY = AttributeSpec(
+    name="key",
+    type_hint="str",
+    required=True,
+    description="object member key, already unescaped; the backend quotes and escapes it on serialization",
+)
+_ATTR_RAW_TEXT = AttributeSpec(
+    name="raw_text",
+    type_hint="str",
+    required=True,
+    description="verbatim source text of the literal (string with surrounding quotes and escapes, or number text as written)",
+)
+_ATTR_BOOL_VALUE = AttributeSpec(
+    name="value",
+    type_hint="bool",
+    required=True,
+    description="True for ``true``, False for ``false``",
+)
+
+
+def json_kind_schema() -> KindSchema:
+    """Return the JSON structural kind vocabulary.
+
+    :return: the kind schema exposed by :class:`JsonStructuralLanguage`.
+    """
+    # scalar-value kinds (every value that may appear directly under a document, array, or member)
+    _VALUE_KINDS = frozenset({"object", "array", "string", "number", "boolean", "null"})
+    _VALUE_PARENT_KINDS = frozenset({"document", "array", "member"})
+
+    # root: the document wraps exactly one value
+    document = KindSpec(
+        name="document",
+        description="A JSON document's top level; wraps exactly one root value.",
+        attributes=(),
+        allowed_parent_kinds=frozenset(),
+        allowed_child_kinds=_VALUE_KINDS,
+    )
+
+    # container: object (composed of members)
+    obj = KindSpec(
+        name="object",
+        description="A JSON object ``{`` ..members.. ``}``.",
+        attributes=(),
+        allowed_parent_kinds=_VALUE_PARENT_KINDS,
+        allowed_child_kinds=frozenset({"member"}),
+    )
+
+    # container: array (composed of values)
+    array = KindSpec(
+        name="array",
+        description="A JSON array ``[`` ..values.. ``]``.",
+        attributes=(),
+        allowed_parent_kinds=_VALUE_PARENT_KINDS,
+        allowed_child_kinds=_VALUE_KINDS,
+    )
+
+    # member: key-value pair within an object
+    member = KindSpec(
+        name="member",
+        description="A ``key: value`` pair within a JSON object.",
+        attributes=(_ATTR_KEY,),
+        allowed_parent_kinds=frozenset({"object"}),
+        allowed_child_kinds=_VALUE_KINDS,
+    )
+
+    # leaf: string literal
+    string = KindSpec(
+        name="string",
+        description="A JSON string literal.",
+        attributes=(_ATTR_RAW_TEXT,),
+        allowed_parent_kinds=_VALUE_PARENT_KINDS,
+        allowed_child_kinds=frozenset(),
+    )
+
+    # leaf: number literal
+    number = KindSpec(
+        name="number",
+        description="A JSON number literal.",
+        attributes=(_ATTR_RAW_TEXT,),
+        allowed_parent_kinds=_VALUE_PARENT_KINDS,
+        allowed_child_kinds=frozenset(),
+    )
+
+    # leaf: boolean literal
+    boolean = KindSpec(
+        name="boolean",
+        description="A JSON ``true`` or ``false`` literal.",
+        attributes=(_ATTR_BOOL_VALUE,),
+        allowed_parent_kinds=_VALUE_PARENT_KINDS,
+        allowed_child_kinds=frozenset(),
+    )
+
+    # leaf: null literal
+    null = KindSpec(
+        name="null",
+        description="A JSON ``null`` literal.",
+        attributes=(),
+        allowed_parent_kinds=_VALUE_PARENT_KINDS,
+        allowed_child_kinds=frozenset(),
+    )
+
+    return KindSchema(
+        language_key="json",
+        source_kinds=frozenset({"document"}),
+        kinds={
+            "document": document,
+            "object": obj,
+            "array": array,
+            "member": member,
+            "string": string,
+            "number": number,
+            "boolean": boolean,
+            "null": null,
+        },
+    )
+
+
+_JSON_KIND_SCHEMA = json_kind_schema()
+
+
+# --------------------------------------------------------------------------- #
+# Logical name resolution (stage 2)
+# --------------------------------------------------------------------------- #
+
+
+_JSON_NAME_PART = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_\-]*")
+
+
+class JsonLogicalNameResolver(LogicalNameResolver):
+    """Maps a slashed or dotted logical name to a ``.json`` file under a root.
+
+    The resolver is file-level: it identifies which ``.json`` file a logical
+    name points at. Inside-file navigation (into nested members or array
+    elements) is handled by :func:`walk_symbols`, not by this resolver.
+
+    :ivar _project_root: project root; resolutions report paths relative to it.
+    :ivar _source_roots: ordered content directories to probe.
+    :ivar _extensions: file extensions to try, in order.
+    """
+
+    _DEFAULT_EXTENSIONS: tuple[str, ...] = (".json",)
+
+    def __init__(
+        self,
+        project_root: Path,
+        source_roots: Sequence[Path] = (),
+        extensions: Sequence[str] = (),
+    ):
+        """:param project_root: directory at whose root paths are reported.
+        :param source_roots: directories under which ``.json`` files live;
+            defaults to ``(project_root,)``.
+        :param extensions: file extensions probed in order (first match wins);
+            defaults to :attr:`_DEFAULT_EXTENSIONS`.
+        """
+        # canonicalize inputs so resolution does not depend on caller CWD
+        self._project_root = project_root.resolve()
+        resolved_roots = tuple(r.resolve() for r in source_roots)
+        self._source_roots: tuple[Path, ...] = resolved_roots if resolved_roots else (self._project_root,)
+        self._extensions: tuple[str, ...] = tuple(extensions) if extensions else self._DEFAULT_EXTENSIONS
+
+    def parse(self, raw: str) -> LogicalName:
+        # grammar: slash- or dot-separated path; each part is a filename token
+        if not raw:
+            raise NameResolutionError(raw, "empty logical name")
+        parts = tuple(re.split(r"[./]", raw))
+        for part in parts:
+            if not part or not _JSON_NAME_PART.fullmatch(part):
+                raise NameResolutionError(raw, f"invalid json name part: {part!r}")
+        return LogicalName(parts=parts, raw=raw)
+
+    def resolve(self, name: LogicalName) -> NameResolution:
+        # probe each source root for an existing file under each extension
+        rel = Path(*name.parts)
+        for root in self._source_roots:
+            for ext in self._extensions:
+                candidate = root / rel.with_suffix(ext)
+                if candidate.is_file():
+                    return self._resolution_for(candidate, exists=True)
+        # synthesize a creation path under the first root with the first extension
+        synthetic = self._source_roots[0] / rel.with_suffix(self._extensions[0])
+        return self._resolution_for(synthetic, exists=False)
+
+    def _resolution_for(self, absolute: Path, exists: bool) -> NameResolution:
+        # enforce that the target sits inside the project root so callers get usable relative paths
+        try:
+            relative = absolute.relative_to(self._project_root)
+        except ValueError as err:
+            raise NameResolutionError(
+                str(absolute),
+                f"resolved path {absolute} escapes project root {self._project_root}",
+            ) from err
+        return NameResolution(relative_path=str(relative), source_kind="document", exists=exists)
+
+
+# --------------------------------------------------------------------------- #
+# Symbol walking (stage 2)
+# --------------------------------------------------------------------------- #
+
+
+def _value_kind(node: _JsonNode) -> KindName:
+    """Return the schema kind name for a JSON value node."""
+    if isinstance(node, _JsonObject):
+        return "object"
+    if isinstance(node, _JsonArray):
+        return "array"
+    if isinstance(node, _JsonString):
+        return "string"
+    if isinstance(node, _JsonNumber):
+        return "number"
+    if isinstance(node, _JsonBool):
+        return "boolean"
+    if isinstance(node, _JsonNull):
+        return "null"
+    raise TypeError(f"unexpected JSON value node type: {type(node).__name__}")
+
+
+def _decode_key(member: _JsonMember) -> str:
+    """Decode a member's key string literal to its unescaped text.
+
+    The key is stored as a :class:`_JsonString` preserving its quotes and
+    escapes. This helper returns the semantic key a path segment should use.
+    """
+    return _stdlib_json.loads(member.key.tok.text)
+
+
+def _walk(node: _JsonNode, prefix: str) -> Iterable[tuple[str, KindName, _JsonNode]]:
+    """Yield addressable symbols under ``node`` with name paths built on ``prefix``.
+
+    The walk yields every object member and every array element. Members
+    whose values are compound (objects, arrays) are walked recursively so
+    nested members and elements are also addressable. Scalar values directly
+    under a member are not yielded separately \u2014 the member itself is the
+    addressable symbol.
+    """
+    # dispatch: object members / array elements / leaves
+    if isinstance(node, _JsonObject):
+        for member in node.members:
+            # slash-join the member key with the current prefix
+            key = _decode_key(member)
+            member_path = f"{prefix}/{key}" if prefix else key
+            yield member_path, "member", member
+            yield from _walk(member.value, member_path)
+        return
+
+    if isinstance(node, _JsonArray):
+        for index, item in enumerate(node.items):
+            # array indices take the bracketed form and extend the path verbatim
+            segment = f"[{index}]"
+            item_path = f"{prefix}/{segment}" if prefix else segment
+            yield item_path, _value_kind(item), item
+            yield from _walk(item, item_path)
+        return
+
+    # scalars contribute no addressable symbols of their own
+    return
+
+
+def walk_symbols(tree: _JsonDocument) -> Iterable[tuple[str, KindName, _JsonNode]]:
+    """Yield ``(name_path, kind, node)`` for every addressable JSON symbol in ``tree``.
+
+    Object members and array elements are addressable. Name paths are
+    slash-separated; array elements use ``[N]`` segments. The root document
+    and its root value carry no name path and are not yielded; only members
+    and elements below them are.
+
+    :raises TypeError: if ``tree`` is not a :class:`_JsonDocument`.
+    """
+    if not isinstance(tree, _JsonDocument):
+        raise TypeError(f"walk_symbols expects a _JsonDocument, got {type(tree).__name__}")
+    return list(_walk(tree.root, ""))
