@@ -204,14 +204,23 @@ def _java_backend_factory() -> "StructuralLanguage":
     return JavaStructuralLanguage()
 
 
+def _ruby_backend_factory() -> "StructuralLanguage":
+    # lazy import: the ruby bridge subprocess is only spun up when requested.
+    # Prism ships as a Ruby stdlib module since Ruby 3.3, so no gem install
+    # step is needed -- only a recent enough ruby binary on PATH.
+    from solidlsp.structural.backends.ruby import RubyStructuralLanguage
+
+    return RubyStructuralLanguage()
+
+
 def default_structural_backend_registry() -> StructuralBackendRegistry:
-    """Build the default registry pre-populated with Serena's eleven structural backends.
+    """Build the default registry pre-populated with Serena's twelve structural backends.
 
     The default registry covers the languages that currently have a
     :class:`StructuralLanguage` implementation: Python, C++, Markdown, Swift,
-    JSON, YAML, TOML, TypeScript, Go, Rust and Java. Backends are registered with lazy
-    factories so simply constructing the registry imposes no import cost
-    beyond this module itself.
+    JSON, YAML, TOML, TypeScript, Go, Rust, Java and Ruby. Backends are
+    registered with lazy factories so simply constructing the registry imposes
+    no import cost beyond this module itself.
 
     :return: a fresh :class:`StructuralBackendRegistry` with defaults registered.
     """
@@ -255,6 +264,10 @@ def default_structural_backend_registry() -> StructuralBackendRegistry:
     # Java: javaparser-core via subprocess bridge; lazy because it spawns a
     # process on first use and mvn package builds on demand on the first request.
     registry.register("java", [".java"], _java_backend_factory)
+
+    # Ruby: Prism via subprocess bridge; lazy because it spawns a process on
+    # first use. Prism is stdlib since Ruby 3.3, so no gem install is needed.
+    registry.register("ruby", [".rb"], _ruby_backend_factory)
 
     return registry
 
