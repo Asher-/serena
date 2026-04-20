@@ -125,9 +125,9 @@ class TestStructuralBackendRegistry:
         with pytest.raises(ValueError, match="non-empty"):
             registry.register("", [".py"], PythonStructuralLanguage)
 
-    def test_default_registry_exposes_six_backends(self) -> None:
+    def test_default_registry_exposes_seven_backends(self) -> None:
         registry = default_structural_backend_registry()
-        assert registry.registered_languages() == frozenset({"python", "cpp", "markdown", "swift", "json", "yaml"})
+        assert registry.registered_languages() == frozenset({"python", "cpp", "markdown", "swift", "json", "yaml", "toml"})
 
 
 class TestResolveStructuralNamePath:

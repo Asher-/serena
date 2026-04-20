@@ -47,6 +47,7 @@ dependencies = [
   "libclang==18.1.1", # C++ structural backend: AST-anchored source-range rewriter via clang.cindex
   "markdown-it-py==3.0.0", # Markdown structural backend: source-mapped CommonMark tokenizer
   "mdit-py-plugins==0.5.0", # Markdown structural backend: tables, front-matter, footnote extensions
+  "tomlkit==0.14.0", # TOML structural backend: round-trip capable with comment preservation
 
   # Transitive deps pinned for security (dependabot alerts).
   # Exact pins because uvx installs from git, ignoring the lock file.
