@@ -145,6 +145,7 @@ def search_text(
     context_lines_before: int = 0,
     context_lines_after: int = 0,
     is_glob: bool = False,
+    encoding: str = DEFAULT_SOURCE_FILE_ENCODING,
 ) -> list[MatchedConsecutiveLines]:
     """
     Search for a pattern in text content. Supports both regex and glob-like patterns.
@@ -159,6 +160,8 @@ def search_text(
     :param context_lines_after: Number of context lines to include after matches
     :param is_glob: If True, pattern is treated as a glob-like pattern (e.g., "*.py", "test_??.py")
              and will be converted to regex internally
+    :param encoding: Text encoding to use when ``source_file_path`` is read because ``content`` is None.
+        Defaults to UTF-8; callers with a known project encoding should pass it explicitly.
 
     :return: List of `TextSearchMatch` objects
 
@@ -166,7 +169,7 @@ def search_text(
 
     """
     if source_file_path and content is None:
-        with open(source_file_path) as f:
+        with open(source_file_path, encoding=encoding) as f:
             content = f.read()
 
     if content is None:
@@ -239,9 +242,9 @@ def search_text(
     return matches
 
 
-def default_file_reader(file_path: str) -> str:
-    """Reads using the default encoding."""
-    with open(file_path, encoding=DEFAULT_SOURCE_FILE_ENCODING) as f:
+def default_file_reader(file_path: str, encoding: str = DEFAULT_SOURCE_FILE_ENCODING) -> str:
+    """Reads using the given encoding (UTF-8 by default)."""
+    with open(file_path, encoding=encoding) as f:
         return f.read()
 
 
