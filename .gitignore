@@ -248,6 +248,11 @@ tmp/
 /src/solidlsp/structural/backends/swift_bridge/Package.resolved
 /src/solidlsp/structural/backends/swift_bridge/.build.lock
 
+# TypeScript bridge build artefacts
+/src/solidlsp/structural/backends/typescript_bridge/node_modules
+/src/solidlsp/structural/backends/typescript_bridge/package-lock.json
+/src/solidlsp/structural/backends/typescript_bridge/.install.lock
+
 # OCaml
 /test/resources/repos/ocaml/test_repo/_build
 

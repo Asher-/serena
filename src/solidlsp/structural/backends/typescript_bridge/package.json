@@ -1,0 +1,11 @@
+{
+  "name": "serena-typescript-bridge",
+  "version": "0.1.0",
+  "description": "TypeScript structural-language bridge: length-prefixed JSON over stdio driving the TypeScript compiler API for Serena's Python backend.",
+  "private": true,
+  "type": "module",
+  "main": "bridge.mjs",
+  "dependencies": {
+    "typescript": "^5.6.0"
+  }
+}

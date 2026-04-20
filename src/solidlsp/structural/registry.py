@@ -176,14 +176,21 @@ def _swift_backend_factory() -> "StructuralLanguage":
     return SwiftStructuralLanguage()
 
 
+def _typescript_backend_factory() -> "StructuralLanguage":
+    # lazy import: the typescript bridge subprocess is only spun up when requested
+    from solidlsp.structural.backends.typescript import TypeScriptStructuralLanguage
+
+    return TypeScriptStructuralLanguage()
+
+
 def default_structural_backend_registry() -> StructuralBackendRegistry:
-    """Build the default registry pre-populated with Serena's seven structural backends.
+    """Build the default registry pre-populated with Serena's eight structural backends.
 
     The default registry covers the languages that currently have a
     :class:`StructuralLanguage` implementation: Python, C++, Markdown, Swift,
-    JSON, YAML and TOML. Backends are registered with lazy factories so
-    simply constructing the registry imposes no import cost beyond this
-    module itself.
+    JSON, YAML, TOML and TypeScript. Backends are registered with lazy
+    factories so simply constructing the registry imposes no import cost
+    beyond this module itself.
 
     :return: a fresh :class:`StructuralBackendRegistry` with defaults registered.
     """
@@ -213,6 +220,9 @@ def default_structural_backend_registry() -> StructuralBackendRegistry:
 
     # TOML: tomlkit round-trip backend; no LSP component, structural-only.
     registry.register("toml", [".toml"], _toml_backend_factory)
+
+    # TypeScript: TS compiler via Node.js subprocess bridge; lazy because it spawns a process on first use.
+    registry.register("typescript", [".ts", ".mts", ".cts"], _typescript_backend_factory)
 
     return registry
 
