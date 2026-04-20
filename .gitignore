@@ -253,6 +253,10 @@ tmp/
 /src/solidlsp/structural/backends/typescript_bridge/package-lock.json
 /src/solidlsp/structural/backends/typescript_bridge/.install.lock
 
+# Go bridge build artefacts
+/src/solidlsp/structural/backends/go_bridge/serena-go-bridge
+/src/solidlsp/structural/backends/go_bridge/.build.lock
+
 # OCaml
 /test/resources/repos/ocaml/test_repo/_build
 

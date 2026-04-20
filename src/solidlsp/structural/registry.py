@@ -183,12 +183,19 @@ def _typescript_backend_factory() -> "StructuralLanguage":
     return TypeScriptStructuralLanguage()
 
 
+def _go_backend_factory() -> "StructuralLanguage":
+    # lazy import: the go bridge subprocess is only spun up when requested
+    from solidlsp.structural.backends.go import GoStructuralLanguage
+
+    return GoStructuralLanguage()
+
+
 def default_structural_backend_registry() -> StructuralBackendRegistry:
-    """Build the default registry pre-populated with Serena's eight structural backends.
+    """Build the default registry pre-populated with Serena's nine structural backends.
 
     The default registry covers the languages that currently have a
     :class:`StructuralLanguage` implementation: Python, C++, Markdown, Swift,
-    JSON, YAML, TOML and TypeScript. Backends are registered with lazy
+    JSON, YAML, TOML, TypeScript and Go. Backends are registered with lazy
     factories so simply constructing the registry imposes no import cost
     beyond this module itself.
 
@@ -223,6 +230,9 @@ def default_structural_backend_registry() -> StructuralBackendRegistry:
 
     # TypeScript: TS compiler via Node.js subprocess bridge; lazy because it spawns a process on first use.
     registry.register("typescript", [".ts", ".mts", ".cts"], _typescript_backend_factory)
+
+    # Go: go/ast via subprocess bridge; lazy because it spawns a process on first use.
+    registry.register("go", [".go"], _go_backend_factory)
 
     return registry
 
