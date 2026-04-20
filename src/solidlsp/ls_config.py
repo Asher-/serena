@@ -581,6 +581,8 @@ class Language(str, Enum):
                 from solidlsp.language_servers.msl_language_server import MslLanguageServer
 
                 return MslLanguageServer
+            case self.JSON:
+                raise NotImplementedError("Language.JSON has no language server; use the JSON structural backend instead.")
             case _:
                 raise ValueError(f"Unhandled language: {self}")
 
@@ -594,7 +596,11 @@ class Language(str, Enum):
         :raises ValueError: If the language server class is not supported
         """
         for enum_instance in cls:
-            if enum_instance.get_ls_class() == ls_class:
+            try:
+                candidate = enum_instance.get_ls_class()
+            except (NotImplementedError, ValueError):
+                continue
+            if candidate == ls_class:
                 return enum_instance
         raise ValueError(f"Unhandled language server class: {ls_class}")
 
