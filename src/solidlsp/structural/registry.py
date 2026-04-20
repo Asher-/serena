@@ -155,6 +155,13 @@ def _json_backend_factory() -> "StructuralLanguage":
     return JsonStructuralLanguage()
 
 
+def _yaml_backend_factory() -> "StructuralLanguage":
+    # lazy import: ruamel.yaml is only loaded when the yaml backend is requested
+    from solidlsp.structural.backends.yaml import YamlStructuralLanguage
+
+    return YamlStructuralLanguage()
+
+
 def _swift_backend_factory() -> "StructuralLanguage":
     # lazy import: the swift bridge subprocess is only spun up when requested
     from solidlsp.structural.backends.swift import SwiftStructuralLanguage
@@ -163,11 +170,11 @@ def _swift_backend_factory() -> "StructuralLanguage":
 
 
 def default_structural_backend_registry() -> StructuralBackendRegistry:
-    """Build the default registry pre-populated with Serena's five structural backends.
+    """Build the default registry pre-populated with Serena's six structural backends.
 
     The default registry covers the languages that currently have a
-    :class:`StructuralLanguage` implementation: Python, C++, Markdown, Swift
-    and JSON. Backends are registered with lazy factories so simply
+    :class:`StructuralLanguage` implementation: Python, C++, Markdown, Swift,
+    JSON and YAML. Backends are registered with lazy factories so simply
     constructing the registry imposes no import cost beyond this module
     itself.
 
@@ -193,6 +200,9 @@ def default_structural_backend_registry() -> StructuralBackendRegistry:
 
     # JSON: in-house round-trip CST backend; no LSP component, structural-only.
     registry.register("json", [".json"], _json_backend_factory)
+
+    # YAML: ruamel.yaml round-trip backend; no LSP component, structural-only.
+    registry.register("yaml", [".yaml", ".yml"], _yaml_backend_factory)
 
     return registry
 
