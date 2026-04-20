@@ -242,6 +242,80 @@ class TestWalkSymbols:
         assert backend.root_kind(tree) == "module"
 
 
+
+# -----------------------------------------------------------------------------
+# walk_nodes — full-AST addressability
+# -----------------------------------------------------------------------------
+
+
+class TestWalkNodes:
+    def test_walk_nodes_superset_includes_named_symbols(self, backend: PythonStructuralLanguage) -> None:
+        source = "import os\n\nx = 1\n\ndef f():\n    pass\n\nclass C:\n    def m(self):\n        pass\n"
+        tree = backend.parse(source)
+        nodes = [(path, kind) for path, kind, _ in backend.walk_nodes(tree)]
+        # every triple from walk_symbols is also yielded by walk_nodes
+        assert ("os", "import") in nodes
+        assert ("x", "assignment") in nodes
+        assert ("f", "function") in nodes
+        assert ("C", "class") in nodes
+        assert ("C/m", "method") in nodes
+
+    def test_walk_nodes_addresses_unnamed_compounds(self, backend: PythonStructuralLanguage) -> None:
+        source = "def f():\n    if cond:\n        pass\n    for i in data:\n        pass\n    while go:\n        pass\n    with ctx:\n        pass\n    try:\n        pass\n    except Exception:\n        pass\n"
+        tree = backend.parse(source)
+        nodes = [(path, kind) for path, kind, _ in backend.walk_nodes(tree)]
+        assert ("f/if_stmt#0", "if_stmt") in nodes
+        assert ("f/for_stmt#0", "for_stmt") in nodes
+        assert ("f/while_stmt#0", "while_stmt") in nodes
+        assert ("f/with_stmt#0", "with_stmt") in nodes
+        assert ("f/try_stmt#0", "try_stmt") in nodes
+
+    def test_walk_nodes_indexes_unnamed_siblings_per_kind(self, backend: PythonStructuralLanguage) -> None:
+        source = "def f():\n    if a:\n        pass\n    for x in y:\n        pass\n    if b:\n        pass\n    if c:\n        pass\n"
+        tree = backend.parse(source)
+        nodes = [(path, kind) for path, kind, _ in backend.walk_nodes(tree)]
+        # indices count siblings of the SAME kind, not global position
+        assert ("f/if_stmt#0", "if_stmt") in nodes
+        assert ("f/for_stmt#0", "for_stmt") in nodes
+        assert ("f/if_stmt#1", "if_stmt") in nodes
+        assert ("f/if_stmt#2", "if_stmt") in nodes
+
+    def test_walk_nodes_emits_decorators_with_synthetic_paths(self, backend: PythonStructuralLanguage) -> None:
+        source = "@dec_a\n@dec_b\nclass C:\n    @staticmethod\n    def m():\n        pass\n"
+        tree = backend.parse(source)
+        nodes = [(path, kind) for path, kind, _ in backend.walk_nodes(tree)]
+        assert ("C/decorator#0", "decorator") in nodes
+        assert ("C/decorator#1", "decorator") in nodes
+        assert ("C/m/decorator#0", "decorator") in nodes
+
+    def test_walk_nodes_recurses_into_compound_bodies(self, backend: PythonStructuralLanguage) -> None:
+        source = "def outer():\n    for i in data:\n        def inner():\n            pass\n"
+        tree = backend.parse(source)
+        nodes = [(path, kind) for path, kind, _ in backend.walk_nodes(tree)]
+        # nested named function under an unnamed compound stays addressable
+        assert ("outer/for_stmt#0", "for_stmt") in nodes
+        assert ("outer/for_stmt#0/inner", "function") in nodes
+
+    def test_walk_nodes_addresses_module_level_expression_statements(self, backend: PythonStructuralLanguage) -> None:
+        source = '"""docstring"""\nx = 1\nprint(x)\n'
+        tree = backend.parse(source)
+        nodes = [(path, kind) for path, kind, _ in backend.walk_nodes(tree)]
+        # the module docstring and the bare print() call both become expression statements
+        assert ("expression_stmt#0", "expression_stmt") in nodes
+        assert ("x", "assignment") in nodes
+        assert ("expression_stmt#1", "expression_stmt") in nodes
+
+    def test_walk_nodes_empty_module_returns_empty(self, backend: PythonStructuralLanguage) -> None:
+        tree = backend.parse("")
+        assert list(backend.walk_nodes(tree)) == []
+
+    def test_walk_nodes_rejects_non_module_input(self, backend: PythonStructuralLanguage) -> None:
+        import libcst as cst
+
+        with pytest.raises(TypeError, match="walk_nodes expects a Module"):
+            list(backend.walk_nodes(cst.Name("x")))
+
+
 # -----------------------------------------------------------------------------
 # Declaration + mutation
 # -----------------------------------------------------------------------------

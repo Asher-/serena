@@ -492,6 +492,19 @@ _SYMBOL_KINDS = {
 }
 
 
+# libcst node types that are addressable by walk_nodes but yield no natural name;
+# walk_nodes gives them synthetic ``parent/<kind>#<sibling-index>`` paths.
+_UNNAMED_NODE_KIND: dict[type, KindName] = {
+    cst.If: "if_stmt",
+    cst.For: "for_stmt",
+    cst.While: "while_stmt",
+    cst.Try: "try_stmt",
+    cst.With: "with_stmt",
+    cst.Match: "match_stmt",
+    cst.Expr: "expression_stmt",
+}
+
+
 def _symbol_name(node: cst.CSTNode) -> str | None:
     """Return the agent-visible name for a symbol node, or ``None`` if the node is unnamed."""
     if isinstance(node, (cst.ClassDef, cst.FunctionDef)):
@@ -553,6 +566,71 @@ def _walk_named_symbols(
             yield from _walk_named_symbols(stmt, path, inside_class=True)
         elif isinstance(stmt, cst.FunctionDef):
             yield from _walk_named_symbols(stmt, path, inside_class=False)
+
+
+def _iter_all_body_statements(node: cst.CSTNode) -> Iterator[cst.CSTNode]:
+    """Yield direct body statements of ``node`` for AST-level traversal.
+
+    Handles modules, class / function definitions, and compound statements whose
+    primary ``.body`` is an :class:`IndentedBlock` or :class:`SimpleStatementSuite`.
+    Alternative bodies such as ``orelse``, ``handlers``, ``finalbody`` and match
+    ``cases`` are not yielded here; a subsequent commit will widen the walk to
+    address them.
+    """
+    if isinstance(node, cst.Module):
+        yield from node.body
+        return
+    body = getattr(node, "body", None)
+    if isinstance(body, cst.IndentedBlock | cst.SimpleStatementSuite):
+        yield from body.body
+
+
+def _walk_all_nodes(
+    parent: cst.CSTNode, prefix: str, inside_class: bool
+) -> Iterator[tuple[str, KindName, cst.CSTNode]]:
+    """Recursively yield ``(name_path, kind, node)`` for every addressable node under ``parent``.
+
+    Named symbols use the same ``parent/name`` convention as
+    :func:`_walk_named_symbols`; unnamed compound / expression statements and
+    decorators get synthetic paths of the form ``parent/<kind>#<index>`` where
+    ``index`` counts siblings of the *same kind* within the same parent scope.
+    """
+    # decorators attached directly to the parent class / function / method
+    if isinstance(parent, cst.ClassDef | cst.FunctionDef):
+        for deco_idx, deco in enumerate(parent.decorators):
+            deco_path = f"{prefix}/decorator#{deco_idx}" if prefix else f"decorator#{deco_idx}"
+            yield deco_path, "decorator", deco
+
+    # walk the direct body, keeping per-kind sibling counts for synthetic paths
+    kind_counts: dict[str, int] = {}
+    for raw in _iter_all_body_statements(parent):
+        stmt = _unwrap_statement(raw)
+        stmt_type = type(stmt)
+
+        # named symbols share the walk_symbols path convention
+        if stmt_type in _SYMBOL_KINDS:
+            base_kind = _SYMBOL_KINDS[stmt_type]
+            kind: KindName = "method" if base_kind == "function" and inside_class else base_kind
+            name = _symbol_name(stmt)
+            if name is not None:
+                path = f"{prefix}/{name}" if prefix else name
+                yield path, kind, raw
+                if isinstance(stmt, cst.ClassDef):
+                    yield from _walk_all_nodes(stmt, path, inside_class=True)
+                elif isinstance(stmt, cst.FunctionDef):
+                    yield from _walk_all_nodes(stmt, path, inside_class=False)
+                continue
+
+        # unnamed compound / expression statements get synthetic sibling-indexed paths
+        node_kind = _UNNAMED_NODE_KIND.get(stmt_type)
+        if node_kind is None:
+            continue
+        idx = kind_counts.get(node_kind, 0)
+        kind_counts[node_kind] = idx + 1
+        node_path = f"{prefix}/{node_kind}#{idx}" if prefix else f"{node_kind}#{idx}"
+        yield node_path, node_kind, raw
+        # recurse into the primary body so nested named / unnamed nodes stay addressable
+        yield from _walk_all_nodes(stmt, node_path, inside_class)
 
 
 # =============================================================================
@@ -715,6 +793,11 @@ class PythonStructuralLanguage(StructuralLanguage):
         if not isinstance(tree, cst.Module):
             raise TypeError(f"walk_symbols expects a Module, got {type(tree).__name__}")
         return list(_walk_named_symbols(tree, prefix="", inside_class=False))
+
+    def walk_nodes(self, tree: Any) -> Iterable[tuple[str, KindName, Any]]:
+        if not isinstance(tree, cst.Module):
+            raise TypeError(f"walk_nodes expects a Module, got {type(tree).__name__}")
+        return list(_walk_all_nodes(tree, prefix="", inside_class=False))
 
     # ---- declaration -------------------------------------------------------
 
