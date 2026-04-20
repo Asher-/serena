@@ -10,6 +10,7 @@ import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 from serena.project import Project
 from serena.symbol import LanguageServerSymbol, LanguageServerSymbolLocation, LanguageServerSymbolRetriever
@@ -20,6 +21,9 @@ from solidlsp.lsp_protocol_handler.lsp_types import (
     SymbolKind,
     TypeHierarchyItem,
 )
+from solidlsp.structural.base import StructuralLanguage
+from solidlsp.structural.kinds import KindName
+from solidlsp.structural.registry import StructuralBackendRegistry, default_structural_backend_registry
 
 log = logging.getLogger(__name__)
 
@@ -100,6 +104,41 @@ class CursorState:
         self.current_location = new_location
 
 
+@dataclass(frozen=True)
+class StructuralResolution:
+    """Result of a structural name-path resolution against a file.
+
+    Returned by :meth:`CursorManager.resolve_structural_name_path` when a name
+    path (including synthetic ``parent/<kind>#<index>`` paths) matches an
+    addressable node in the file's structural backend.
+
+    :ivar name_path: canonical name path as emitted by the backend's
+        :meth:`~solidlsp.structural.base.StructuralLanguage.walk_nodes`.
+    :ivar kind: the :type:`~solidlsp.structural.kinds.KindName` of the
+        resolved node.
+    :ivar node: opaque backend-owned AST handle for the node. Treat this as a
+        value: do not inspect backend-internal attributes.
+    """
+
+    name_path: str
+    kind: KindName
+    node: Any
+
+
+@dataclass
+class _StructuralNodeCacheEntry:
+    """Per-file cache of a structural walk result.
+
+    :ivar mtime_ns: modification time of the source file when the cache was
+        populated; used as the invalidation key.
+    :ivar nodes_by_path: map from ``name_path`` to ``(kind, node)`` covering
+        every node yielded by the backend's ``walk_nodes`` for the file.
+    """
+
+    mtime_ns: int
+    nodes_by_path: dict[str, tuple[KindName, Any]]
+
+
 class CursorManager:
     """
     Manages cursor state and resolves LSP graph edges for navigation.
@@ -108,10 +147,29 @@ class CursorManager:
     trail of visited symbols, and configured edge types.
     """
 
-    def __init__(self, project: Project) -> None:
+    def __init__(
+        self,
+        project: Project,
+        structural_registry: StructuralBackendRegistry | None = None,
+    ) -> None:
+        """Construct the manager with an optional structural backend registry.
+
+        :param project: the project whose files the manager navigates.
+        :param structural_registry: registry used by
+            :meth:`resolve_structural_name_path` to look up per-file structural
+            backends. Defaults to :func:`default_structural_backend_registry`
+            so production callers do not need to configure routing. Tests may
+            pass a custom registry to isolate from backend imports.
+        """
         self._project = project
         self._cursors: dict[str, CursorState] = {}
         self._next_cursor_id = 1
+        # lazy default so test overrides and production both go through one path
+        self._structural_registry = (
+            structural_registry if structural_registry is not None else default_structural_backend_registry()
+        )
+        # per-file cache of structural walk_nodes output; keyed by relative path
+        self._structural_nodes_cache: dict[str, _StructuralNodeCacheEntry] = {}
 
     @property
     def _retriever(self) -> LanguageServerSymbolRetriever:
@@ -506,6 +564,90 @@ class CursorManager:
         )
         self._cursors[cursor_id] = state
         return cursor_id, state
+
+    def resolve_structural_name_path(
+        self,
+        relative_path: str,
+        name_path: str,
+    ) -> StructuralResolution | None:
+        """Resolve ``name_path`` against the structural backend for ``relative_path``.
+
+        Routes through the structural backend registry: if a backend is registered
+        for the file's extension, the file is parsed (with per-file caching keyed
+        on mtime) and ``walk_nodes`` is indexed by name path. Synthetic paths like
+        ``Class/method/if_stmt#0`` resolve to the same dict — the structural
+        backend decides what is addressable.
+
+        Returns ``None`` rather than raising when the file is outside a registered
+        language, missing from disk, or when ``name_path`` has no match: callers
+        are expected to fall back to LSP-based resolution on ``None``.
+
+        :param relative_path: POSIX-style path relative to the project root.
+        :param name_path: full name path of the target node as emitted by
+            :meth:`~solidlsp.structural.base.StructuralLanguage.walk_nodes`.
+        :return: a :class:`StructuralResolution` on match, or ``None``.
+        """
+        # route by the file's extension; no registered backend -> caller falls back
+        backend = self._structural_registry.for_relative_path(relative_path)
+        if backend is None:
+            return None
+
+        # look up against the per-file cache, re-parsing on cache miss or mtime change
+        cache_entry = self._structural_cache_entry(backend, relative_path)
+        if cache_entry is None:
+            return None
+
+        # O(1) dict lookup — walk_nodes already produced canonical name paths
+        match = cache_entry.nodes_by_path.get(name_path)
+        if match is None:
+            return None
+        kind, node = match
+        return StructuralResolution(name_path=name_path, kind=kind, node=node)
+
+    def _structural_cache_entry(
+        self,
+        backend: StructuralLanguage,
+        relative_path: str,
+    ) -> _StructuralNodeCacheEntry | None:
+        """Return a per-file structural walk cache entry, populating or refreshing as needed.
+
+        The cache is keyed on the relative path with the file's mtime as the
+        invalidation signal. A missing file yields ``None`` so the public
+        resolver can fall through to LSP-based handling.
+
+        :param backend: backend to use for parsing and walking the file.
+        :param relative_path: project-relative path of the file.
+        :return: a fresh or reused :class:`_StructuralNodeCacheEntry`, or
+            ``None`` when the file cannot be read.
+        """
+        # resolve to an absolute path so we can stat and read independently of cwd
+        abs_path = os.path.join(self._project.project_root, relative_path)
+        try:
+            mtime_ns = os.stat(abs_path).st_mtime_ns
+        except (FileNotFoundError, NotADirectoryError):
+            # stale cache entries for deleted files are dropped so re-creation re-parses
+            self._structural_nodes_cache.pop(relative_path, None)
+            return None
+
+        # hit the cache when the file has not changed since the last walk
+        cached = self._structural_nodes_cache.get(relative_path)
+        if cached is not None and cached.mtime_ns == mtime_ns:
+            return cached
+
+        # miss or stale: re-read, re-parse, and re-index by canonical name path
+        try:
+            source = self._project.read_file(relative_path)
+        except (FileNotFoundError, NotADirectoryError):
+            self._structural_nodes_cache.pop(relative_path, None)
+            return None
+        tree = backend.parse(source)
+        nodes_by_path: dict[str, tuple[KindName, Any]] = {}
+        for node_name_path, kind, node in backend.walk_nodes(tree):
+            nodes_by_path[node_name_path] = (kind, node)
+
+        entry = _StructuralNodeCacheEntry(mtime_ns=mtime_ns, nodes_by_path=nodes_by_path)
+        self._structural_nodes_cache[relative_path] = entry
+        return entry
 
     def reanchor_cursor(
         self,
