@@ -109,6 +109,20 @@ class StructuralLanguage(ABC):
         symbols; the kind must exist in :attr:`kind_schema`.
         """
 
+    def walk_nodes(self, tree: Any) -> Iterable[tuple[str, KindName, Any]]:
+        """Yield ``(name_path, kind, node)`` for every addressable AST node in ``tree``.
+
+        Superset of :meth:`walk_symbols`. Backends may override this method to
+        expose unnamed syntactic constructs — decorators, match / with / try /
+        for / while / if statements, top-level expressions — using synthetic
+        name paths of the form ``parent/<kind>#<index>`` for unnamed nodes.
+
+        The default implementation delegates to :meth:`walk_symbols`, so
+        backends without AST-level addressability yield only named symbols
+        and keep their pre-``walk_nodes`` behavior.
+        """
+        return self.walk_symbols(tree)
+
     # ---- declaration -------------------------------------------------------
 
     @abstractmethod
