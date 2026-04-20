@@ -148,6 +148,13 @@ def _markdown_backend_factory() -> "StructuralLanguage":
     return MarkdownStructuralLanguage()
 
 
+def _json_backend_factory() -> "StructuralLanguage":
+    # lazy import: the hand-rolled JSON CST parser only loads when the backend is requested
+    from solidlsp.structural.backends.json import JsonStructuralLanguage
+
+    return JsonStructuralLanguage()
+
+
 def _swift_backend_factory() -> "StructuralLanguage":
     # lazy import: the swift bridge subprocess is only spun up when requested
     from solidlsp.structural.backends.swift import SwiftStructuralLanguage
@@ -156,12 +163,13 @@ def _swift_backend_factory() -> "StructuralLanguage":
 
 
 def default_structural_backend_registry() -> StructuralBackendRegistry:
-    """Build the default registry pre-populated with Serena's four structural backends.
+    """Build the default registry pre-populated with Serena's five structural backends.
 
     The default registry covers the languages that currently have a
-    :class:`StructuralLanguage` implementation: Python, C++, Markdown and Swift.
-    Backends are registered with lazy factories so simply constructing the
-    registry imposes no import cost beyond this module itself.
+    :class:`StructuralLanguage` implementation: Python, C++, Markdown, Swift
+    and JSON. Backends are registered with lazy factories so simply
+    constructing the registry imposes no import cost beyond this module
+    itself.
 
     :return: a fresh :class:`StructuralBackendRegistry` with defaults registered.
     """
@@ -182,6 +190,9 @@ def default_structural_backend_registry() -> StructuralBackendRegistry:
 
     # Swift: SwiftSyntax via subprocess bridge; kept lazy because it spawns a process on first use.
     registry.register("swift", [".swift"], _swift_backend_factory)
+
+    # JSON: in-house round-trip CST backend; no LSP component, structural-only.
+    registry.register("json", [".json"], _json_backend_factory)
 
     return registry
 

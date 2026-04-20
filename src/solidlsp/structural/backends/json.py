@@ -13,24 +13,27 @@ the token along with the token's own text. Serialization is a straight
 concatenation of ``tok.pre_ws + tok.text`` in source order, plus the
 document's trailing whitespace.
 
-This file implements the first stage of the JSON backend: parse + serialize +
-round-trip invariant. Higher-level :class:`StructuralLanguage` surface
-(kind schema, name resolution, walk, mutation, patterns) will be layered on
-in subsequent commits.
+The CST underpins the full :class:`StructuralLanguage` surface declared at
+the bottom of this module: parse / serialize, kind schema, logical-name
+resolution, symbol walk, declaration construction, insert / remove, pattern
+matching, and rewriting.
 """
 
 from __future__ import annotations
 
+import copy
 import json as _stdlib_json
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from solidlsp.structural.errors import NameResolutionError, ParseError
+from solidlsp.structural.base import StructuralLanguage
+from solidlsp.structural.errors import DeclarationError, NameResolutionError, ParseError, PatternError
 from solidlsp.structural.kinds import AttributeSpec, KindName, KindSchema, KindSpec
 from solidlsp.structural.names import LogicalName, LogicalNameResolver, NameResolution
+from solidlsp.structural.patterns import AstPattern, PatternMatch
 
 # --------------------------------------------------------------------------- #
 # Tokens and CST nodes
@@ -777,3 +780,639 @@ def walk_symbols(tree: _JsonDocument) -> Iterable[tuple[str, KindName, _JsonNode
     if not isinstance(tree, _JsonDocument):
         raise TypeError(f"walk_symbols expects a _JsonDocument, got {type(tree).__name__}")
     return list(_walk(tree.root, ""))
+
+
+# --------------------------------------------------------------------------- #
+# Patterns (stage 3)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class _JsonPattern:
+    """Compiled JSON pattern.
+
+    The pattern source is parsed as JSON. Two sigils are recognised inside
+    string literals:
+
+    * ``"$_"`` \u2014 anonymous wildcard that matches any value at that position.
+    * ``"$name"`` \u2014 named capture (``name`` is a simple identifier) that
+      matches any value and binds it to ``name``.
+
+    Any other string literal matches literally. Numbers, booleans and nulls
+    match literally on their source text; objects and arrays match
+    structurally (same members in source order; recursive value match).
+    """
+
+    source: str
+    tree: _JsonDocument
+
+
+@dataclass(frozen=True)
+class _JsonReplacement:
+    """Rendered replacement subtree ready for :meth:`JsonStructuralLanguage.apply_replacement`."""
+
+    node: _JsonNode
+
+
+_CAPTURE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _decoded_string(node: _JsonString) -> str:
+    """Return the unescaped Python string carried by a ``_JsonString`` literal."""
+    return _stdlib_json.loads(node.tok.text)
+
+
+def _capture_kind(literal: str) -> tuple[str, str] | None:
+    """Classify a decoded string literal as a capture sigil.
+
+    :return: ``("wildcard", "")`` for ``$_``, ``("named", name)`` for ``$name``
+        when ``name`` is a simple identifier, or ``None`` otherwise.
+    """
+    if literal == "$_":
+        return ("wildcard", "")
+    if literal.startswith("$") and _CAPTURE_NAME.fullmatch(literal[1:]):
+        return ("named", literal[1:])
+    return None
+
+
+def _iter_value_nodes(node: _JsonNode) -> Iterator[_JsonNode]:
+    """Yield ``node`` and every value node nested inside it in source order."""
+    yield node
+    if isinstance(node, _JsonObject):
+        for member in node.members:
+            yield from _iter_value_nodes(member.value)
+    elif isinstance(node, _JsonArray):
+        for item in node.items:
+            yield from _iter_value_nodes(item)
+
+
+def _match_value(pattern: _JsonNode, target: _JsonNode, bindings: dict[str, _JsonNode]) -> bool:
+    """Structurally match ``pattern`` against ``target``.
+
+    Mutates ``bindings`` when a named capture succeeds. Capture sigils in the
+    pattern match any target value regardless of kind.
+    """
+    # capture sigils take priority over literal matching
+    if isinstance(pattern, _JsonString):
+        capture = _capture_kind(_decoded_string(pattern))
+        if capture is not None:
+            kind, name = capture
+            if kind == "named":
+                bindings[name] = target
+            return True
+
+    # non-capture pattern must share the target's value kind
+    if type(pattern) is not type(target):
+        return False
+
+    if isinstance(pattern, _JsonString):
+        assert isinstance(target, _JsonString)
+        return _decoded_string(pattern) == _decoded_string(target)
+
+    if isinstance(pattern, _JsonNumber):
+        assert isinstance(target, _JsonNumber)
+        return pattern.tok.text == target.tok.text
+
+    if isinstance(pattern, _JsonBool):
+        assert isinstance(target, _JsonBool)
+        return pattern.tok.text == target.tok.text
+
+    if isinstance(pattern, _JsonNull):
+        return True
+
+    if isinstance(pattern, _JsonObject):
+        assert isinstance(target, _JsonObject)
+        if len(pattern.members) != len(target.members):
+            return False
+        for p_member, t_member in zip(pattern.members, target.members, strict=True):
+            if _decoded_string(p_member.key) != _decoded_string(t_member.key):
+                return False
+            if not _match_value(p_member.value, t_member.value, bindings):
+                return False
+        return True
+
+    if isinstance(pattern, _JsonArray):
+        assert isinstance(target, _JsonArray)
+        if len(pattern.items) != len(target.items):
+            return False
+        for p_item, t_item in zip(pattern.items, target.items, strict=True):
+            if not _match_value(p_item, t_item, bindings):
+                return False
+        return True
+
+    return False
+
+
+def _render_capture_resolution(node: _JsonNode, bindings: Mapping[str, _JsonNode]) -> _JsonNode:
+    """Return ``node`` with capture sigils substituted from ``bindings``.
+
+    :raises PatternError: when a ``$_`` wildcard or unbound ``$name`` appears
+        in the replacement source.
+    """
+    # string capture sigils become the matching captured subtree
+    if isinstance(node, _JsonString):
+        capture = _capture_kind(_decoded_string(node))
+        if capture is None:
+            return node
+        kind, name = capture
+        if kind == "wildcard":
+            raise PatternError("parse", "replacement source contains $_ which has no binding")
+        if name not in bindings:
+            raise PatternError("parse", f"replacement references capture {name!r} with no binding")
+        # clear the captured node's pre_ws so the surrounding template controls placement
+        substituted = copy.deepcopy(bindings[name])
+        _clear_leading_ws(substituted)
+        return substituted
+
+    # compound nodes re-thread capture-resolved children into fresh wrappers
+    if isinstance(node, _JsonObject):
+        new_members = [
+            _JsonMember(
+                key=m.key,
+                colon=m.colon,
+                value=_render_capture_resolution(m.value, bindings),
+            )
+            for m in node.members
+        ]
+        return _JsonObject(open=node.open, members=new_members, commas=list(node.commas), close=node.close)
+
+    if isinstance(node, _JsonArray):
+        new_items = [_render_capture_resolution(item, bindings) for item in node.items]
+        return _JsonArray(open=node.open, items=new_items, commas=list(node.commas), close=node.close)
+
+    return node
+
+
+def _replace_in_tree(node: _JsonNode, target: _JsonNode, replacement: _JsonNode) -> tuple[_JsonNode, bool]:
+    """Return a copy of ``node`` with ``target`` (matched by identity) replaced.
+
+    :return: ``(new_node, found)`` where ``found`` is ``True`` iff ``target``
+        was located and replaced in the subtree rooted at ``node``.
+    """
+    # identity match: splice in a fresh replacement copy
+    if node is target:
+        return copy.deepcopy(replacement), True
+
+    if isinstance(node, _JsonDocument):
+        new_root, found = _replace_in_tree(node.root, target, replacement)
+        if found:
+            return _JsonDocument(root=new_root, trailing_ws=node.trailing_ws), True
+        return node, False
+
+    if isinstance(node, _JsonMember):
+        new_value, found = _replace_in_tree(node.value, target, replacement)
+        if found:
+            return _JsonMember(key=node.key, colon=node.colon, value=new_value), True
+        return node, False
+
+    if isinstance(node, _JsonObject):
+        for i, member in enumerate(node.members):
+            new_member, found = _replace_in_tree(member, target, replacement)
+            if found:
+                assert isinstance(new_member, _JsonMember)
+                new_members = list(node.members)
+                new_members[i] = new_member
+                return _JsonObject(open=node.open, members=new_members, commas=list(node.commas), close=node.close), True
+        return node, False
+
+    if isinstance(node, _JsonArray):
+        for i, item in enumerate(node.items):
+            new_item, found = _replace_in_tree(item, target, replacement)
+            if found:
+                new_items = list(node.items)
+                new_items[i] = new_item
+                return _JsonArray(open=node.open, items=new_items, commas=list(node.commas), close=node.close), True
+        return node, False
+
+    return node, False
+
+
+# --------------------------------------------------------------------------- #
+# Attribute helpers (stage 3)
+# --------------------------------------------------------------------------- #
+
+
+def _require_str(attributes: Mapping[str, Any], name: str, kind: str) -> str:
+    """Read a required string attribute from a declaration."""
+    if name not in attributes:
+        raise DeclarationError(kind, f"missing required attribute {name!r}")
+    value = attributes[name]
+    if not isinstance(value, str):
+        raise DeclarationError(kind, f"attribute {name!r} must be str, got {type(value).__name__}")
+    return value
+
+
+def _require_bool(attributes: Mapping[str, Any], name: str, kind: str) -> bool:
+    """Read a required boolean attribute from a declaration."""
+    if name not in attributes:
+        raise DeclarationError(kind, f"missing required attribute {name!r}")
+    value = attributes[name]
+    if not isinstance(value, bool):
+        raise DeclarationError(kind, f"attribute {name!r} must be bool, got {type(value).__name__}")
+    return value
+
+
+def _validate_string_literal(raw_text: str, kind: str) -> None:
+    """Confirm a raw JSON string literal parses and unescapes cleanly."""
+    if not (raw_text.startswith('"') and raw_text.endswith('"') and len(raw_text) >= 2):
+        raise DeclarationError(kind, "string raw_text must be enclosed in double quotes")
+    try:
+        decoded = _stdlib_json.loads(raw_text)
+    except _stdlib_json.JSONDecodeError as err:
+        raise DeclarationError(kind, f"string raw_text is not a valid JSON string literal: {err.msg}") from err
+    if not isinstance(decoded, str):
+        raise DeclarationError(kind, f"string raw_text did not decode to a string; got {type(decoded).__name__}")
+
+
+def _validate_number_literal(raw_text: str, kind: str) -> None:
+    """Confirm a raw JSON number literal matches the RFC 8259 grammar."""
+    try:
+        decoded = _stdlib_json.loads(raw_text)
+    except _stdlib_json.JSONDecodeError as err:
+        raise DeclarationError(kind, f"number raw_text is not a valid JSON number literal: {err.msg}") from err
+    if not isinstance(decoded, int | float) or isinstance(decoded, bool):
+        raise DeclarationError(kind, f"number raw_text did not decode to a number; got {type(decoded).__name__}")
+
+
+# --------------------------------------------------------------------------- #
+# Mutation helpers (stage 3)
+# --------------------------------------------------------------------------- #
+
+
+def _clear_leading_ws(node: _JsonNode) -> None:
+    """Clear the leading whitespace of ``node``'s first emitted token."""
+    tok = _leading_token(node)
+    if tok is not None:
+        tok.pre_ws = ""
+
+
+def _leading_token(node: _JsonNode) -> _Tok | None:
+    """Return the first emitted token of ``node``, or ``None`` for a document."""
+    if isinstance(node, _JsonString | _JsonNumber | _JsonBool | _JsonNull):
+        return node.tok
+    if isinstance(node, _JsonObject):
+        return node.open
+    if isinstance(node, _JsonArray):
+        return node.open
+    if isinstance(node, _JsonMember):
+        return node.key.tok
+    return None
+
+
+def _find_member_index(obj: _JsonObject, anchor: Any) -> int:
+    """Return the index of ``anchor`` in ``obj.members`` matched by identity."""
+    if not isinstance(anchor, _JsonMember):
+        raise TypeError(f"object anchor must be a _JsonMember, got {type(anchor).__name__}")
+    for i, m in enumerate(obj.members):
+        if m is anchor:
+            return i
+    raise ValueError("anchor not found under parent object")
+
+
+def _find_item_index(arr: _JsonArray, anchor: Any) -> int:
+    """Return the index of ``anchor`` in ``arr.items`` matched by identity."""
+    if not isinstance(anchor, _JsonNode):
+        raise TypeError(f"array anchor must be a _JsonNode, got {type(anchor).__name__}")
+    for i, item in enumerate(arr.items):
+        if item is anchor:
+            return i
+    raise ValueError("anchor not found under parent array")
+
+
+def _object_with_inserted(
+    obj: _JsonObject,
+    child: _JsonMember,
+    anchor: Any,
+    position: str,
+) -> _JsonObject:
+    """Return a copy of ``obj`` with ``child`` inserted at ``anchor`` / ``position``."""
+    # child has already been deep-copied by the caller; clear its pre_ws so we control placement
+    _clear_leading_ws(child)
+    members = list(obj.members)  # shallow copy: existing member nodes stay shared and untouched
+    if anchor is None:
+        index = 0 if position == "start" else len(members)
+    else:
+        anchor_index = _find_member_index(obj, anchor)
+        index = anchor_index if position in {"before", "start"} else anchor_index + 1
+    members.insert(index, child)
+    commas = [_Tok(pre_ws="", text=",") for _ in range(max(0, len(members) - 1))]
+    return _JsonObject(open=obj.open, members=members, commas=commas, close=obj.close)
+
+
+def _array_with_inserted(
+    arr: _JsonArray,
+    child: _JsonNode,
+    anchor: Any,
+    position: str,
+) -> _JsonArray:
+    """Return a copy of ``arr`` with ``child`` inserted at ``anchor`` / ``position``."""
+    _clear_leading_ws(child)
+    items = list(arr.items)
+    if anchor is None:
+        index = 0 if position == "start" else len(items)
+    else:
+        anchor_index = _find_item_index(arr, anchor)
+        index = anchor_index if position in {"before", "start"} else anchor_index + 1
+    items.insert(index, child)
+    commas = [_Tok(pre_ws="", text=",") for _ in range(max(0, len(items) - 1))]
+    return _JsonArray(open=arr.open, items=items, commas=commas, close=arr.close)
+
+
+def _object_without(obj: _JsonObject, child: Any) -> _JsonObject:
+    """Return a copy of ``obj`` without ``child`` (matched by identity)."""
+    if not isinstance(child, _JsonMember):
+        raise TypeError(f"object child to remove must be a _JsonMember, got {type(child).__name__}")
+    for i, m in enumerate(obj.members):
+        if m is child:
+            members = [x for j, x in enumerate(obj.members) if j != i]
+            commas = [_Tok(pre_ws="", text=",") for _ in range(max(0, len(members) - 1))]
+            return _JsonObject(open=obj.open, members=members, commas=commas, close=obj.close)
+    raise ValueError("child not found under parent object")
+
+
+def _array_without(arr: _JsonArray, child: Any) -> _JsonArray:
+    """Return a copy of ``arr`` without ``child`` (matched by identity)."""
+    if not isinstance(child, _JsonNode):
+        raise TypeError(f"array child to remove must be a _JsonNode, got {type(child).__name__}")
+    for i, item in enumerate(arr.items):
+        if item is child:
+            items = [x for j, x in enumerate(arr.items) if j != i]
+            commas = [_Tok(pre_ws="", text=",") for _ in range(max(0, len(items) - 1))]
+            return _JsonArray(open=arr.open, items=items, commas=commas, close=arr.close)
+    raise ValueError("child not found under parent array")
+
+
+# --------------------------------------------------------------------------- #
+# StructuralLanguage implementation (stage 3)
+# --------------------------------------------------------------------------- #
+
+
+_JSON_VALUE_TYPES: tuple[type, ...] = (_JsonObject, _JsonArray, _JsonString, _JsonNumber, _JsonBool, _JsonNull)
+
+
+class JsonStructuralLanguage(StructuralLanguage):
+    """Structural backend for JSON documents.
+
+    Parses with the hand-rolled round-trip CST from this module. Mutations
+    build a fresh CST (sharing unchanged subtrees) and then re-parse the
+    serialized source, so every returned handle is a freshly validated
+    :class:`_JsonDocument` with the same round-trip guarantees as direct
+    :func:`parse_json` output.
+    """
+
+    def __init__(self, name_resolver: LogicalNameResolver | None = None):
+        """:param name_resolver: the resolver exposed via :attr:`name_resolver`.
+        Defaults to a :class:`JsonLogicalNameResolver` rooted at the current
+        working directory, mirroring the markdown backend's default.
+        """
+        # one resolver per backend instance; callers may inject their own to change root / extensions
+        self._name_resolver = name_resolver or JsonLogicalNameResolver(Path.cwd())
+
+    # ---- identity ----------------------------------------------------------
+
+    @property
+    def language_key(self) -> str:
+        return "json"
+
+    @property
+    def kind_schema(self) -> KindSchema:
+        return _JSON_KIND_SCHEMA
+
+    @property
+    def name_resolver(self) -> LogicalNameResolver:
+        return self._name_resolver
+
+    # ---- parse / serialize -------------------------------------------------
+
+    def parse(self, source: str) -> _JsonDocument:
+        # parse_json already raises ParseError with a source preview; nothing to add
+        return parse_json(source)
+
+    def serialize(self, tree: Any) -> str:
+        if not isinstance(tree, _JsonNode):
+            raise TypeError(f"cannot serialize handle of type {type(tree).__name__}")
+        return serialize_json(tree)
+
+    # ---- symbol-tree introspection ----------------------------------------
+
+    def root_kind(self, tree: Any) -> KindName:
+        if not isinstance(tree, _JsonDocument):
+            raise TypeError(f"root_kind expects a _JsonDocument, got {type(tree).__name__}")
+        return "document"
+
+    def walk_symbols(self, tree: Any) -> Iterable[tuple[str, KindName, _JsonNode]]:
+        # delegate to the module-level walk_symbols so stage-2 behaviour is shared with the class
+        return walk_symbols(tree)
+
+    # ---- declaration -------------------------------------------------------
+
+    def build_declaration(
+        self,
+        kind: KindName,
+        attributes: Mapping[str, Any],
+        children: Iterable[Any],
+    ) -> _JsonNode:
+        self.kind_schema.get(kind)  # validates the kind name exists
+        children_list = list(children)
+
+        if kind == "document":
+            raise DeclarationError(kind, "construct document via empty_source() plus insert_child()")
+
+        if kind == "string":
+            if children_list:
+                raise DeclarationError(kind, "string takes no children")
+            raw_text = _require_str(attributes, "raw_text", kind)
+            _validate_string_literal(raw_text, kind)
+            return _JsonString(tok=_Tok(pre_ws="", text=raw_text))
+
+        if kind == "number":
+            if children_list:
+                raise DeclarationError(kind, "number takes no children")
+            raw_text = _require_str(attributes, "raw_text", kind)
+            _validate_number_literal(raw_text, kind)
+            return _JsonNumber(tok=_Tok(pre_ws="", text=raw_text))
+
+        if kind == "boolean":
+            if children_list:
+                raise DeclarationError(kind, "boolean takes no children")
+            value = _require_bool(attributes, "value", kind)
+            return _JsonBool(tok=_Tok(pre_ws="", text="true" if value else "false"))
+
+        if kind == "null":
+            if children_list:
+                raise DeclarationError(kind, "null takes no children")
+            return _JsonNull(tok=_Tok(pre_ws="", text="null"))
+
+        if kind == "member":
+            key = _require_str(attributes, "key", kind)
+            if len(children_list) != 1:
+                raise DeclarationError(kind, f"member requires exactly one value child, got {len(children_list)}")
+            value_child = children_list[0]
+            if not isinstance(value_child, _JSON_VALUE_TYPES):
+                raise DeclarationError(kind, f"member child must be a JSON value, got {type(value_child).__name__}")
+            # copy so downstream mutation cannot disturb the caller's handle
+            value_copy: _JsonNode = copy.deepcopy(value_child)  # type: ignore[assignment]
+            _clear_leading_ws(value_copy)
+            key_node = _JsonString(tok=_Tok(pre_ws="", text=_stdlib_json.dumps(key)))
+            return _JsonMember(key=key_node, colon=_Tok(pre_ws="", text=":"), value=value_copy)
+
+        if kind == "object":
+            for idx, child in enumerate(children_list):
+                if not isinstance(child, _JsonMember):
+                    raise DeclarationError(kind, f"object child {idx} must be a member, got {type(child).__name__}")
+            members = [copy.deepcopy(c) for c in children_list]
+            for m in members:
+                _clear_leading_ws(m)
+            commas = [_Tok(pre_ws="", text=",") for _ in range(max(0, len(members) - 1))]
+            return _JsonObject(
+                open=_Tok(pre_ws="", text="{"),
+                members=members,
+                commas=commas,
+                close=_Tok(pre_ws="", text="}"),
+            )
+
+        if kind == "array":
+            for idx, child in enumerate(children_list):
+                if not isinstance(child, _JSON_VALUE_TYPES):
+                    raise DeclarationError(kind, f"array child {idx} must be a JSON value, got {type(child).__name__}")
+            items = [copy.deepcopy(c) for c in children_list]
+            for item in items:
+                _clear_leading_ws(item)
+            commas = [_Tok(pre_ws="", text=",") for _ in range(max(0, len(items) - 1))]
+            return _JsonArray(
+                open=_Tok(pre_ws="", text="["),
+                items=items,
+                commas=commas,
+                close=_Tok(pre_ws="", text="]"),
+            )
+
+        raise DeclarationError(kind, f"build_declaration not supported for kind {kind!r}")
+
+    # ---- insert / remove ---------------------------------------------------
+
+    def insert_child(
+        self,
+        parent: Any,
+        child: Any,
+        anchor: Any | None = None,
+        position: str = "end",
+    ) -> _JsonDocument:
+        if not isinstance(parent, _JsonDocument):
+            raise TypeError(f"parent must be _JsonDocument, got {type(parent).__name__}")
+        if position not in {"before", "after", "start", "end"}:
+            raise ValueError(f"invalid position: {position!r}")
+        if position in {"before", "after"} and anchor is None:
+            raise ValueError(f"position {position!r} requires an anchor")
+
+        root = parent.root
+        new_root: _JsonNode
+
+        if isinstance(root, _JsonObject):
+            if not isinstance(child, _JsonMember):
+                raise TypeError(f"inserting into object requires a _JsonMember, got {type(child).__name__}")
+            member_copy: _JsonMember = copy.deepcopy(child)
+            new_root = _object_with_inserted(root, member_copy, anchor, position)
+            return self.parse(serialize_json(_JsonDocument(root=new_root, trailing_ws=parent.trailing_ws)))
+
+        if isinstance(root, _JsonArray):
+            if not isinstance(child, _JSON_VALUE_TYPES):
+                raise TypeError(f"inserting into array requires a JSON value, got {type(child).__name__}")
+            value_copy: _JsonNode = copy.deepcopy(child)  # type: ignore[assignment]
+            new_root = _array_with_inserted(root, value_copy, anchor, position)
+            return self.parse(serialize_json(_JsonDocument(root=new_root, trailing_ws=parent.trailing_ws)))
+
+        raise ValueError(f"cannot insert into scalar root of kind {_value_kind(root)!r}")
+
+    def remove_child(self, parent: Any, child: Any) -> _JsonDocument:
+        if not isinstance(parent, _JsonDocument):
+            raise TypeError(f"parent must be _JsonDocument, got {type(parent).__name__}")
+        root = parent.root
+        new_root: _JsonNode
+        if isinstance(root, _JsonObject):
+            new_root = _object_without(root, child)
+            return self.parse(serialize_json(_JsonDocument(root=new_root, trailing_ws=parent.trailing_ws)))
+        if isinstance(root, _JsonArray):
+            new_root = _array_without(root, child)
+            return self.parse(serialize_json(_JsonDocument(root=new_root, trailing_ws=parent.trailing_ws)))
+        raise ValueError(f"cannot remove from scalar root of kind {_value_kind(root)!r}")
+
+    # ---- pattern matching & rewriting --------------------------------------
+
+    def compile_pattern(self, pattern_source: str) -> AstPattern:
+        if not pattern_source.strip():
+            raise PatternError("parse", "pattern source is empty")
+        try:
+            tree = parse_json(pattern_source)
+        except ParseError as err:
+            raise PatternError("parse", f"pattern source is not valid JSON: {err.detail}") from err
+        return _JsonPattern(source=pattern_source, tree=tree)
+
+    def find_matches(
+        self,
+        tree: Any,
+        pattern: AstPattern,
+        scope: Any | None = None,
+    ) -> Iterable[PatternMatch]:
+        if not isinstance(tree, _JsonDocument):
+            raise TypeError(f"tree must be a _JsonDocument, got {type(tree).__name__}")
+        if not isinstance(pattern, _JsonPattern):
+            raise TypeError(f"pattern must come from this backend's compile_pattern, got {type(pattern).__name__}")
+        # scope narrows the search to a subtree; None means the whole document root
+        root: _JsonNode = tree.root
+        if scope is not None:
+            if not isinstance(scope, _JsonNode):
+                raise TypeError(f"scope must be a _JsonNode, got {type(scope).__name__}")
+            root = scope
+        matches: list[PatternMatch] = []
+        pattern_root = pattern.tree.root
+        for candidate in _iter_value_nodes(root):
+            bindings: dict[str, _JsonNode] = {}
+            if _match_value(pattern_root, candidate, bindings):
+                matches.append(PatternMatch(node=candidate, bindings=dict(bindings), symbol_path=None))
+        return matches
+
+    def render_replacement(
+        self,
+        replacement_source: str,
+        bindings: Mapping[str, Any],
+    ) -> _JsonReplacement:
+        if not replacement_source.strip():
+            raise PatternError("parse", "replacement source is empty")
+        try:
+            tree = parse_json(replacement_source)
+        except ParseError as err:
+            raise PatternError("parse", f"replacement source is not valid JSON: {err.detail}") from err
+        typed_bindings: dict[str, _JsonNode] = {}
+        for name, value in bindings.items():
+            if not isinstance(value, _JsonNode):
+                raise PatternError("parse", f"binding {name!r} is not a JSON node; got {type(value).__name__}")
+            typed_bindings[name] = value
+        resolved = _render_capture_resolution(tree.root, typed_bindings)
+        return _JsonReplacement(node=resolved)
+
+    def apply_replacement(
+        self,
+        tree: Any,
+        match: PatternMatch,
+        replacement: Any,
+    ) -> _JsonDocument:
+        if not isinstance(tree, _JsonDocument):
+            raise TypeError(f"tree must be a _JsonDocument, got {type(tree).__name__}")
+        if not isinstance(replacement, _JsonReplacement):
+            raise TypeError(f"replacement must come from this backend's render_replacement, got {type(replacement).__name__}")
+        if not isinstance(match.node, _JsonNode):
+            raise TypeError(f"match.node must be a _JsonNode, got {type(match.node).__name__}")
+        new_tree, found = _replace_in_tree(tree, match.node, replacement.node)
+        if not found:
+            raise ValueError("match.node was not found in tree")
+        assert isinstance(new_tree, _JsonDocument)
+        # re-parse so the returned handle is a clean CST with valid invariants
+        return self.parse(serialize_json(new_tree))
+
+    # ---- new-source construction ------------------------------------------
+
+    def empty_source(self, source_kind: KindName) -> _JsonDocument:
+        if source_kind != "document":
+            raise DeclarationError(source_kind, f"json has no source kind {source_kind!r}")
+        # seed with an empty object so insert_child can append members immediately
+        return self.parse("{}")

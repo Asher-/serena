@@ -128,6 +128,13 @@ class Language(str, Enum):
     definitions, completion). Must be explicitly specified as the main
     language, not auto-detected.
     """
+    JSON = "json"
+    """Serena's in-house JSON structural backend (experimental).
+    Backed by :class:`JsonStructuralLanguage` (a hand-rolled round-trip CST),
+    so every parse / serialize cycle is byte-exact. There is no language
+    server yet — the backend provides structural editing only. Must be
+    explicitly specified as the main language, not auto-detected.
+    """
     YAML = "yaml"
     """YAML language server (experimental).
     Must be explicitly specified as the main language, not auto-detected.
@@ -184,6 +191,7 @@ class Language(str, Enum):
             self.PHP_PHPACTOR,
             self.MARKDOWN,
             self.MARKSMAN,
+            self.JSON,
             self.YAML,
             self.TOML,
             self.GROOVY,
@@ -285,6 +293,8 @@ class Language(str, Enum):
                 return FilenameMatcher("*.rego")
             case self.MARKDOWN | self.MARKSMAN:
                 return FilenameMatcher("*.md", "*.markdown")
+            case self.JSON:
+                return FilenameMatcher("*.json")
             case self.SCALA:
                 return FilenameMatcher("*.scala", "*.sbt")
             case self.JULIA:

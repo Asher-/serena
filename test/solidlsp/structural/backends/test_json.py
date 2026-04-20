@@ -408,3 +408,490 @@ class TestWalkSymbols:
         tree = parse_json(r'{"a\nb": 1}')
         path, _, _ = next(iter(walk_symbols(tree)))
         assert path == "a\nb"
+
+
+# --------------------------------------------------------------------------- #
+# StructuralLanguage surface (stage 3)
+# --------------------------------------------------------------------------- #
+
+
+from solidlsp.structural.backends.json import (
+    JsonStructuralLanguage,
+    _JsonPattern,
+    _JsonReplacement,
+)
+from solidlsp.structural.errors import PatternError
+from solidlsp.structural.patterns import PatternMatch
+
+
+@pytest.fixture()
+def backend(tmp_path: Path) -> JsonStructuralLanguage:
+    # one resolver per backend rooted at tmp_path so file lookups stay hermetic
+    return JsonStructuralLanguage(JsonLogicalNameResolver(tmp_path))
+
+
+class TestStructuralLanguageIdentity:
+    """Identity surface: language_key, kind_schema, name_resolver."""
+
+    def test_language_key_returns_json(self, backend: JsonStructuralLanguage) -> None:
+        assert backend.language_key == "json"
+
+    def test_kind_schema_returns_json_schema(self, backend: JsonStructuralLanguage) -> None:
+        schema = backend.kind_schema
+        assert schema.language_key == "json"
+        assert schema.source_kinds == frozenset({"document"})
+
+    def test_name_resolver_is_json_resolver(self, backend: JsonStructuralLanguage) -> None:
+        assert isinstance(backend.name_resolver, JsonLogicalNameResolver)
+
+
+class TestStructuralParseSerialize:
+    """parse/serialize surface on the class delegate to the module helpers."""
+
+    def test_parse_and_serialize_round_trip(self, backend: JsonStructuralLanguage) -> None:
+        source = '{"a": 1, "b": [true, null]}\n'
+        tree = backend.parse(source)
+        assert backend.serialize(tree) == source
+
+    def test_parse_malformed_raises_parse_error(self, backend: JsonStructuralLanguage) -> None:
+        with pytest.raises(ParseError):
+            backend.parse("{not json}")
+
+    def test_serialize_rejects_non_cst_handle(self, backend: JsonStructuralLanguage) -> None:
+        with pytest.raises(TypeError):
+            backend.serialize("not a cst node")
+
+
+class TestStructuralRootKind:
+    """root_kind returns ``document`` for JSON documents; anything else errors."""
+
+    def test_root_kind_is_document(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse("[]")
+        assert backend.root_kind(tree) == "document"
+
+    def test_root_kind_rejects_non_document(self, backend: JsonStructuralLanguage) -> None:
+        with pytest.raises(TypeError):
+            backend.root_kind("not a tree")
+
+
+class TestStructuralWalkSymbols:
+    """walk_symbols on the class delegates to the module-level function."""
+
+    def test_walks_object_members(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse('{"a": 1, "b": 2}')
+        paths = [p for p, _, _ in backend.walk_symbols(tree)]
+        assert paths == ["a", "b"]
+
+    def test_walks_nested_compound_paths(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse('{"outer": {"inner": [1, 2]}}')
+        paths = {p for p, _, _ in backend.walk_symbols(tree)}
+        assert "outer" in paths
+        assert "outer/inner" in paths
+        assert "outer/inner/[0]" in paths
+        assert "outer/inner/[1]" in paths
+
+    def test_walks_empty_object_yields_nothing(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse("{}")
+        assert list(backend.walk_symbols(tree)) == []
+
+
+class TestBuildDeclaration:
+    """build_declaration produces opaque CST nodes ready for insert/replace."""
+
+    def test_string_declaration(self, backend: JsonStructuralLanguage) -> None:
+        node = backend.build_declaration("string", {"raw_text": '"hello"'}, [])
+        assert backend.serialize(node) == '"hello"'
+
+    def test_string_with_escapes_preserved_verbatim(self, backend: JsonStructuralLanguage) -> None:
+        node = backend.build_declaration("string", {"raw_text": r'"a\nb"'}, [])
+        assert backend.serialize(node) == r'"a\nb"'
+
+    def test_string_raw_text_without_quotes_rejected(self, backend: JsonStructuralLanguage) -> None:
+        with pytest.raises(DeclarationError):
+            backend.build_declaration("string", {"raw_text": "hello"}, [])
+
+    def test_string_missing_raw_text_rejected(self, backend: JsonStructuralLanguage) -> None:
+        with pytest.raises(DeclarationError):
+            backend.build_declaration("string", {}, [])
+
+    def test_number_declaration(self, backend: JsonStructuralLanguage) -> None:
+        node = backend.build_declaration("number", {"raw_text": "3.14"}, [])
+        assert backend.serialize(node) == "3.14"
+
+    def test_number_malformed_rejected(self, backend: JsonStructuralLanguage) -> None:
+        with pytest.raises(DeclarationError):
+            backend.build_declaration("number", {"raw_text": "3.14.15"}, [])
+
+    def test_boolean_true_declaration(self, backend: JsonStructuralLanguage) -> None:
+        node = backend.build_declaration("boolean", {"value": True}, [])
+        assert backend.serialize(node) == "true"
+
+    def test_boolean_false_declaration(self, backend: JsonStructuralLanguage) -> None:
+        node = backend.build_declaration("boolean", {"value": False}, [])
+        assert backend.serialize(node) == "false"
+
+    def test_boolean_missing_value_rejected(self, backend: JsonStructuralLanguage) -> None:
+        with pytest.raises(DeclarationError):
+            backend.build_declaration("boolean", {}, [])
+
+    def test_null_declaration(self, backend: JsonStructuralLanguage) -> None:
+        node = backend.build_declaration("null", {}, [])
+        assert backend.serialize(node) == "null"
+
+    def test_member_wraps_value_child(self, backend: JsonStructuralLanguage) -> None:
+        value = backend.build_declaration("number", {"raw_text": "1"}, [])
+        member = backend.build_declaration("member", {"key": "foo"}, [value])
+        assert backend.serialize(member) == '"foo":1'
+
+    def test_member_key_with_special_chars_is_quoted(self, backend: JsonStructuralLanguage) -> None:
+        # the member key is escaped on render, not taken verbatim
+        value = backend.build_declaration("null", {}, [])
+        member = backend.build_declaration("member", {"key": 'a "b"'}, [value])
+        assert backend.serialize(member) == '"a \\"b\\"":null'
+
+    def test_member_requires_single_child(self, backend: JsonStructuralLanguage) -> None:
+        with pytest.raises(DeclarationError):
+            backend.build_declaration("member", {"key": "k"}, [])
+
+    def test_object_from_members(self, backend: JsonStructuralLanguage) -> None:
+        v1 = backend.build_declaration("number", {"raw_text": "1"}, [])
+        v2 = backend.build_declaration("number", {"raw_text": "2"}, [])
+        m1 = backend.build_declaration("member", {"key": "a"}, [v1])
+        m2 = backend.build_declaration("member", {"key": "b"}, [v2])
+        obj = backend.build_declaration("object", {}, [m1, m2])
+        assert backend.serialize(obj) == '{"a":1,"b":2}'
+
+    def test_object_empty(self, backend: JsonStructuralLanguage) -> None:
+        obj = backend.build_declaration("object", {}, [])
+        assert backend.serialize(obj) == "{}"
+
+    def test_object_rejects_non_member_children(self, backend: JsonStructuralLanguage) -> None:
+        v = backend.build_declaration("number", {"raw_text": "1"}, [])
+        with pytest.raises(DeclarationError):
+            backend.build_declaration("object", {}, [v])
+
+    def test_array_from_items(self, backend: JsonStructuralLanguage) -> None:
+        items = [backend.build_declaration("number", {"raw_text": str(i)}, []) for i in range(3)]
+        arr = backend.build_declaration("array", {}, items)
+        assert backend.serialize(arr) == "[0,1,2]"
+
+    def test_array_empty(self, backend: JsonStructuralLanguage) -> None:
+        arr = backend.build_declaration("array", {}, [])
+        assert backend.serialize(arr) == "[]"
+
+    def test_array_rejects_member_children(self, backend: JsonStructuralLanguage) -> None:
+        m = backend.build_declaration("member", {"key": "k"}, [backend.build_declaration("null", {}, [])])
+        with pytest.raises(DeclarationError):
+            backend.build_declaration("array", {}, [m])
+
+    def test_document_kind_rejected(self, backend: JsonStructuralLanguage) -> None:
+        with pytest.raises(DeclarationError):
+            backend.build_declaration("document", {}, [])
+
+    def test_unknown_kind_rejected(self, backend: JsonStructuralLanguage) -> None:
+        with pytest.raises(KeyError):
+            backend.build_declaration("mystery", {}, [])
+
+
+class TestInsertChild:
+    """insert_child appends/prepends/positions members in object or array roots."""
+
+    def test_insert_member_into_empty_object(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.empty_source("document")
+        value = backend.build_declaration("number", {"raw_text": "1"}, [])
+        member = backend.build_declaration("member", {"key": "a"}, [value])
+        new_tree = backend.insert_child(tree, member)
+        assert backend.serialize(new_tree) == '{"a":1}'
+
+    def test_insert_member_at_end_of_populated_object(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse('{"a":1}')
+        value = backend.build_declaration("number", {"raw_text": "2"}, [])
+        member = backend.build_declaration("member", {"key": "b"}, [value])
+        new_tree = backend.insert_child(tree, member)
+        assert backend.serialize(new_tree) == '{"a":1,"b":2}'
+
+    def test_insert_member_at_start_of_populated_object(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse('{"a":1}')
+        value = backend.build_declaration("number", {"raw_text": "0"}, [])
+        member = backend.build_declaration("member", {"key": "z"}, [value])
+        new_tree = backend.insert_child(tree, member, position="start")
+        assert backend.serialize(new_tree) == '{"z":0,"a":1}'
+
+    def test_insert_member_before_anchor(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse('{"a":1,"c":3}')
+        assert isinstance(tree.root, _JsonObject)
+        anchor = tree.root.members[1]  # the "c" member
+        value = backend.build_declaration("number", {"raw_text": "2"}, [])
+        member = backend.build_declaration("member", {"key": "b"}, [value])
+        new_tree = backend.insert_child(tree, member, anchor=anchor, position="before")
+        assert backend.serialize(new_tree) == '{"a":1,"b":2,"c":3}'
+
+    def test_insert_member_after_anchor(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse('{"a":1,"c":3}')
+        assert isinstance(tree.root, _JsonObject)
+        anchor = tree.root.members[0]  # the "a" member
+        value = backend.build_declaration("number", {"raw_text": "2"}, [])
+        member = backend.build_declaration("member", {"key": "b"}, [value])
+        new_tree = backend.insert_child(tree, member, anchor=anchor, position="after")
+        assert backend.serialize(new_tree) == '{"a":1,"b":2,"c":3}'
+
+    def test_insert_value_into_array(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse("[1,2]")
+        value = backend.build_declaration("number", {"raw_text": "3"}, [])
+        new_tree = backend.insert_child(tree, value)
+        assert backend.serialize(new_tree) == "[1,2,3]"
+
+    def test_insert_rejects_value_into_object(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse("{}")
+        value = backend.build_declaration("number", {"raw_text": "1"}, [])
+        with pytest.raises(TypeError):
+            backend.insert_child(tree, value)
+
+    def test_insert_rejects_member_into_array(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse("[]")
+        value = backend.build_declaration("number", {"raw_text": "1"}, [])
+        member = backend.build_declaration("member", {"key": "a"}, [value])
+        with pytest.raises(TypeError):
+            backend.insert_child(tree, member)
+
+    def test_insert_rejects_scalar_root(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse("42")
+        value = backend.build_declaration("number", {"raw_text": "1"}, [])
+        with pytest.raises(ValueError):
+            backend.insert_child(tree, value)
+
+    def test_insert_before_without_anchor_rejected(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse('{"a":1}')
+        value = backend.build_declaration("number", {"raw_text": "2"}, [])
+        member = backend.build_declaration("member", {"key": "b"}, [value])
+        with pytest.raises(ValueError):
+            backend.insert_child(tree, member, position="before")
+
+    def test_insert_invalid_position_rejected(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse("{}")
+        value = backend.build_declaration("number", {"raw_text": "1"}, [])
+        member = backend.build_declaration("member", {"key": "a"}, [value])
+        with pytest.raises(ValueError):
+            backend.insert_child(tree, member, position="middle")
+
+    def test_old_tree_unchanged_after_insert(self, backend: JsonStructuralLanguage) -> None:
+        # handles are values: inserting produces a new tree and leaves the old one intact
+        tree = backend.parse('{"a":1}')
+        value = backend.build_declaration("number", {"raw_text": "2"}, [])
+        member = backend.build_declaration("member", {"key": "b"}, [value])
+        backend.insert_child(tree, member)
+        assert backend.serialize(tree) == '{"a":1}'
+
+
+class TestRemoveChild:
+    """remove_child removes a member or array item by identity."""
+
+    def test_remove_member_from_object(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse('{"a":1,"b":2}')
+        assert isinstance(tree.root, _JsonObject)
+        victim = tree.root.members[0]
+        new_tree = backend.remove_child(tree, victim)
+        assert backend.serialize(new_tree) == '{"b":2}'
+
+    def test_remove_member_middle(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse('{"a":1,"b":2,"c":3}')
+        assert isinstance(tree.root, _JsonObject)
+        victim = tree.root.members[1]
+        new_tree = backend.remove_child(tree, victim)
+        assert backend.serialize(new_tree) == '{"a":1,"c":3}'
+
+    def test_remove_leaves_empty_object(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse('{"a":1}')
+        assert isinstance(tree.root, _JsonObject)
+        victim = tree.root.members[0]
+        new_tree = backend.remove_child(tree, victim)
+        assert backend.serialize(new_tree) == "{}"
+
+    def test_remove_item_from_array(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse("[1,2,3]")
+        assert isinstance(tree.root, _JsonArray)
+        victim = tree.root.items[1]
+        new_tree = backend.remove_child(tree, victim)
+        assert backend.serialize(new_tree) == "[1,3]"
+
+    def test_remove_unknown_child_raises(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse('{"a":1}')
+        other_tree = backend.parse('{"x":0}')
+        assert isinstance(other_tree.root, _JsonObject)
+        stranger = other_tree.root.members[0]
+        with pytest.raises(ValueError):
+            backend.remove_child(tree, stranger)
+
+    def test_remove_from_scalar_root_rejected(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse("42")
+        with pytest.raises(ValueError):
+            backend.remove_child(tree, object())
+
+    def test_old_tree_unchanged_after_remove(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse('{"a":1,"b":2}')
+        assert isinstance(tree.root, _JsonObject)
+        victim = tree.root.members[0]
+        backend.remove_child(tree, victim)
+        assert backend.serialize(tree) == '{"a":1,"b":2}'
+
+
+class TestEmptySource:
+    """empty_source yields a parsable, round-trip-valid seed document."""
+
+    def test_document_empty_source(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.empty_source("document")
+        assert isinstance(tree, _JsonDocument)
+        assert backend.serialize(tree) == "{}"
+
+    def test_unknown_source_kind_rejected(self, backend: JsonStructuralLanguage) -> None:
+        with pytest.raises(DeclarationError):
+            backend.empty_source("module")
+
+
+class TestCompilePattern:
+    """compile_pattern accepts valid JSON patterns and rejects empty input."""
+
+    def test_empty_pattern_rejected(self, backend: JsonStructuralLanguage) -> None:
+        with pytest.raises(PatternError):
+            backend.compile_pattern("   ")
+
+    def test_malformed_pattern_rejected(self, backend: JsonStructuralLanguage) -> None:
+        with pytest.raises(PatternError):
+            backend.compile_pattern("{not json")
+
+    def test_valid_pattern_returns_astpattern(self, backend: JsonStructuralLanguage) -> None:
+        pattern = backend.compile_pattern("42")
+        assert isinstance(pattern, _JsonPattern)
+
+
+class TestFindMatches:
+    """find_matches walks the tree and returns matches with identity-preserved nodes."""
+
+    def test_exact_literal_match(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse("[1, 2, 3]")
+        pattern = backend.compile_pattern("2")
+        matches = list(backend.find_matches(tree, pattern))
+        assert len(matches) == 1
+
+    def test_no_match_yields_empty(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse("[1, 2, 3]")
+        pattern = backend.compile_pattern("99")
+        assert list(backend.find_matches(tree, pattern)) == []
+
+    def test_wildcard_matches_every_value(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse('{"a":1}')
+        pattern = backend.compile_pattern('"$_"')
+        matches = list(backend.find_matches(tree, pattern))
+        # matches the whole document root object, its member's value, plus the matched string key appears? No; keys are not values.
+        # expect: root object + inner number 1 => 2 matches
+        assert len(matches) == 2
+
+    def test_named_capture_binds(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse('{"user":{"name":"alice"}}')
+        pattern = backend.compile_pattern('{"name":"$n"}')
+        matches = list(backend.find_matches(tree, pattern))
+        assert len(matches) == 1
+        match = matches[0]
+        assert "n" in match.bindings
+        bound = match.bindings["n"]
+        assert isinstance(bound, _JsonString)
+        assert backend.serialize(bound).strip() == '"alice"'
+
+    def test_object_member_count_mismatch_no_match(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse('{"a":1,"b":2}')
+        pattern = backend.compile_pattern('{"a":1}')
+        assert list(backend.find_matches(tree, pattern)) == []
+
+    def test_array_length_mismatch_no_match(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse("[[1, 2, 3]]")
+        pattern = backend.compile_pattern("[1, 2]")
+        assert list(backend.find_matches(tree, pattern)) == []
+
+    def test_scope_restricts_search(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse('{"a":42,"b":{"c":42}}')
+        pattern = backend.compile_pattern("42")
+        # full search hits both 42s
+        assert len(list(backend.find_matches(tree, pattern))) == 2
+        # scoped to the nested object hits only one
+        assert isinstance(tree.root, _JsonObject)
+        scope = tree.root.members[1].value  # the {"c":42} object
+        assert len(list(backend.find_matches(tree, pattern, scope=scope))) == 1
+
+    def test_find_rejects_foreign_pattern(self, backend: JsonStructuralLanguage) -> None:
+        class _Alien:
+            pass
+
+        tree = backend.parse("{}")
+        with pytest.raises(TypeError):
+            backend.find_matches(tree, _Alien())  # type: ignore[arg-type]
+
+
+class TestRenderReplacement:
+    """render_replacement substitutes captures into a replacement template."""
+
+    def test_substitutes_captured_node(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse('{"v":1}')
+        pattern = backend.compile_pattern('{"v":"$x"}')
+        match = next(iter(backend.find_matches(tree, pattern)))
+        replacement = backend.render_replacement('{"v":"$x","copy":"$x"}', match.bindings)
+        assert isinstance(replacement, _JsonReplacement)
+        assert backend.serialize(replacement.node) == '{"v":1,"copy":1}'
+
+    def test_missing_binding_raises(self, backend: JsonStructuralLanguage) -> None:
+        with pytest.raises(PatternError):
+            backend.render_replacement('{"v":"$x"}', {})
+
+    def test_wildcard_in_replacement_rejected(self, backend: JsonStructuralLanguage) -> None:
+        with pytest.raises(PatternError):
+            backend.render_replacement('{"v":"$_"}', {})
+
+    def test_empty_replacement_rejected(self, backend: JsonStructuralLanguage) -> None:
+        with pytest.raises(PatternError):
+            backend.render_replacement("   ", {})
+
+    def test_malformed_replacement_rejected(self, backend: JsonStructuralLanguage) -> None:
+        with pytest.raises(PatternError):
+            backend.render_replacement("{not json", {})
+
+
+class TestApplyReplacement:
+    """apply_replacement splices a rendered subtree back into the tree."""
+
+    def test_replaces_matched_node(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse('{"items":[1,2,3]}')
+        pattern = backend.compile_pattern("2")
+        match = next(iter(backend.find_matches(tree, pattern)))
+        replacement = backend.render_replacement("99", {})
+        new_tree = backend.apply_replacement(tree, match, replacement)
+        assert backend.serialize(new_tree) == '{"items":[1,99,3]}'
+
+    def test_replaces_object_subtree(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse('{"outer":{"inner":1}}')
+        pattern = backend.compile_pattern('{"inner":"$x"}')
+        match = next(iter(backend.find_matches(tree, pattern)))
+        replacement = backend.render_replacement('{"new":"$x"}', match.bindings)
+        new_tree = backend.apply_replacement(tree, match, replacement)
+        assert backend.serialize(new_tree) == '{"outer":{"new":1}}'
+
+    def test_replace_root_returns_fresh_document(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse("42")
+        pattern = backend.compile_pattern("42")
+        match = next(iter(backend.find_matches(tree, pattern)))
+        replacement = backend.render_replacement("99", {})
+        new_tree = backend.apply_replacement(tree, match, replacement)
+        assert backend.serialize(new_tree) == "99"
+
+    def test_apply_rejects_foreign_replacement(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse("42")
+        pattern = backend.compile_pattern("42")
+        match = next(iter(backend.find_matches(tree, pattern)))
+        with pytest.raises(TypeError):
+            backend.apply_replacement(tree, match, "raw string")  # type: ignore[arg-type]
+
+    def test_apply_rejects_unknown_match_node(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse('{"a":1}')
+        other = backend.parse('{"x":0}')
+        replacement = backend.render_replacement("99", {})
+        fake_match = PatternMatch(node=other.root, bindings={}, symbol_path=None)
+        with pytest.raises(ValueError):
+            backend.apply_replacement(tree, fake_match, replacement)
