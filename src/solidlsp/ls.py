@@ -957,7 +957,7 @@ class SolidLanguageServer(ABC):
         def execute(self) -> list[ls_types.Location]:
             self._ensure_server_started()
 
-            t0 = perf_counter() if _debug_enabled else None
+            t0 = perf_counter() if log.isEnabledFor(logging.DEBUG) else None
             with self.language_server.open_file(self.relative_file_path):
                 self.language_server._wait_for_cross_file_references_if_needed()
                 try:
