@@ -408,7 +408,12 @@ class LanguageServerProcess:
 
     def _receive_payload(self, payload: StringDict) -> None:
         """
-        Determine if the payload received from server is for a request, response, or notification and invoke the appropriate handler
+        Determine if the payload received from server is for a request, response, or notification and invoke the appropriate handler.
+
+        If dispatch raises while processing a response payload, the waiting request
+        would previously have been abandoned (its future never completed), forcing
+        the caller to wait out the full request timeout. Route the error to the
+        owning request so ``send_request`` fails fast with the real cause.
         """
         self._trace("ls", "solidlsp", payload)
         try:
@@ -422,7 +427,21 @@ class LanguageServerProcess:
             else:
                 log.error(f"Unknown payload type: {payload}")
         except Exception as err:
-            log.error(f"Error handling server payload: {err}")
+            log.error(f"Error handling server payload: {err}", exc_info=err)
+            # if this was a response, notify the waiting request so its caller doesn't hang
+            if "method" not in payload and "id" in payload:
+                raw_id = payload.get("id")
+                # the wire id can be int or numeric string; _pending_requests keys are int
+                response_id: int | None = None
+                if isinstance(raw_id, int):
+                    response_id = raw_id
+                elif isinstance(raw_id, str) and raw_id.isdigit():
+                    response_id = int(raw_id)
+                if response_id is not None:
+                    with self._response_handlers_lock:
+                        request = self._pending_requests.pop(response_id, None)
+                    if request is not None:
+                        request.on_error(err)
 
     def send_notification(self, method: str, params: dict | None = None) -> None:
         """
@@ -481,7 +500,14 @@ class LanguageServerProcess:
 
     def _send_payload(self, payload: StringDict) -> None:
         """
-        Send the payload to the server by writing to its stdin asynchronously.
+        Send the payload to the server by writing to its stdin.
+
+        A write failure means the server is gone: silently returning previously
+        left ``send_request`` callers blocked on ``Request.get_result`` until the
+        full LSP request timeout elapsed (many seconds, sometimes the full
+        configured timeout). We now cancel every pending request with the write
+        error so concurrent waiters unblock immediately, then re-raise so the
+        caller that triggered this send fails fast with the real cause.
         """
         if not self.process or not self.process.stdin:
             return
@@ -494,9 +520,10 @@ class LanguageServerProcess:
                 self.process.stdin.writelines(msg)
                 self.process.stdin.flush()
             except (BrokenPipeError, ConnectionResetError, OSError) as e:
-                # Log the error but don't raise to prevent cascading failures
                 log.error(f"Failed to write to stdin: {e}")
-                return
+                # free every in-flight request so their callers don't block on a dead server
+                self._cancel_pending_requests(e)
+                raise
 
     def on_request(self, method: str, cb: Callable[[Any], Any]) -> None:
         """
