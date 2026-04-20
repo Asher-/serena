@@ -95,25 +95,41 @@ class MemoriesManager:
             # Strip "global/" prefix and resolve against global dir
             sub_name = name[len(self.GLOBAL_TOPIC) + 1 :]
             parts = sub_name.split("/")
-            filename = f"{parts[-1]}.md"
-            if len(parts) > 1:
-                subdir = self._global_memory_dir / "/".join(parts[:-1])
-                subdir.mkdir(parents=True, exist_ok=True)
-                return subdir / filename
-            return self._global_memory_dir / filename
+            root = self._global_memory_dir
+        else:
+            # Project-local memory
+            assert self._project_memory_dir is not None, "Project dir was not passed at initialization"
+            parts = name.split("/")
+            root = self._project_memory_dir
 
-        # Project-local memory
-        assert self._project_memory_dir is not None, "Project dir was not passed at initialization"
-        parts = name.split("/")
+        # Reject traversal attempts before creating any directories. Splitting
+        # on "/" means individual parts cannot themselves contain a slash, but
+        # they can be "..", ".", or empty -- all of which would walk out of
+        # the memories root.
+        for part in parts:
+            if not part or part in (".", ".."):
+                raise ValueError(f"Memory name {name!r} contains a forbidden path segment {part!r}.")
+
         filename = f"{parts[-1]}.md"
-
         if len(parts) > 1:
-            # Create subdirectory path
-            subdir = self._project_memory_dir / "/".join(parts[:-1])
+            subdir = root / "/".join(parts[:-1])
             subdir.mkdir(parents=True, exist_ok=True)
-            return subdir / filename
+            candidate = subdir / filename
+        else:
+            candidate = root / filename
 
-        return self._project_memory_dir / filename
+        # Defence in depth: verify the resolved path stays inside the root.
+        # .resolve() normalises ".." and follows symlinks so a layout-based
+        # escape (e.g. a symlink inside memories pointing out) is also caught.
+        resolved_root = root.resolve()
+        resolved_candidate = candidate.resolve()
+        try:
+            resolved_candidate.relative_to(resolved_root)
+        except ValueError as exc:
+            raise ValueError(
+                f"Memory name {name!r} resolves to {resolved_candidate!s}, outside the memories root {resolved_root!s}."
+            ) from exc
+        return candidate
 
     def _check_write_access(self, name: str, is_tool_context: bool) -> None:
         # in tool context, memories can be read-only

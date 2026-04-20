@@ -526,3 +526,19 @@ class TestMemoriesManagerCustomPath:
         manager.save_memory("topic_b", "content b", is_tool_context=False)
         memories = manager.list_project_memories()
         assert sorted(memories.get_full_list()) == ["topic_a", "topic_b"]
+
+    def test_path_traversal_is_rejected(self):
+        manager = MemoriesManager(str(self.data_folder))
+        # Parent-directory segments must be rejected before any filesystem touch.
+        for bad in ("../escape", "nested/../../../escape", "a/../../b"):
+            with pytest.raises(ValueError, match="forbidden path segment"):
+                manager.get_memory_file_path(bad)
+        # Empty segments (double slash) are also rejected.
+        with pytest.raises(ValueError, match="forbidden path segment"):
+            manager.get_memory_file_path("a//b")
+        # Current-directory segments are rejected.
+        with pytest.raises(ValueError, match="forbidden path segment"):
+            manager.get_memory_file_path("./a")
+        # Legitimate nested names continue to resolve inside the memories root.
+        good_path = manager.get_memory_file_path("nested/name")
+        assert good_path.parent.name == "nested"
