@@ -12,22 +12,22 @@ Organized as four suites:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import libcst as cst
 import pytest
 
+from solidlsp.structural.backends.python import (
+    PythonLogicalNameResolver,
+    PythonStructuralLanguage,
+    python_kind_schema,
+)
 from solidlsp.structural.errors import (
     DeclarationError,
     NameResolutionError,
     ParseError,
     PatternError,
-)
-from solidlsp.structural.backends.python import (
-    PythonLogicalNameResolver,
-    PythonStructuralLanguage,
-    python_kind_schema,
 )
 from test.solidlsp.structural.harness import assert_round_trip, iter_corpus
 

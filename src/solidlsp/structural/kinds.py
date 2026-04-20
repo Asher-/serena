@@ -14,8 +14,8 @@ vocabulary would be lossy, so each language names its own.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Mapping
 
 # a string identifying one kind within one language's vocabulary; the grammar
 # is ``<lower-snake-case>``. Uniqueness is only required within one language.

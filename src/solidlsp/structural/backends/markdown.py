@@ -16,9 +16,10 @@ Public entry points:
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any
 
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
@@ -446,8 +447,8 @@ class MarkdownStructuralLanguage(StructuralLanguage):
 
     def __init__(self, name_resolver: LogicalNameResolver | None = None):
         """:param name_resolver: the resolver exposed via :attr:`name_resolver`.
-            Defaults to a :class:`MarkdownLogicalNameResolver` rooted at the
-            current working directory.
+        Defaults to a :class:`MarkdownLogicalNameResolver` rooted at the
+        current working directory.
         """
         # markdown-it-py instances are cheap; one per backend is fine
         self._md = self._build_parser()
@@ -947,7 +948,7 @@ def _node_match(
     pattern_children = list(pattern.children)
     if len(target_children) != len(pattern_children):
         return False
-    for tc, pc in zip(target_children, pattern_children):
+    for tc, pc in zip(target_children, pattern_children, strict=False):
         if not _node_match(tc, pc, placeholders, bindings, source, line_starts):
             return False
     return True

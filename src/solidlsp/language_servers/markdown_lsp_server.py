@@ -337,7 +337,7 @@ def _build_document_symbols(source: str) -> list[lsp.DocumentSymbol]:
     # build a flat (level, DocumentSymbol) list; range covers the scope, selection_range covers the heading line only
     line_starts = tree.line_starts
     flat: list[tuple[int, lsp.DocumentSymbol]] = []
-    for level, ref in zip(levels, refs):
+    for level, ref in zip(levels, refs, strict=False):
         extent_start = ref.extent_offset
         extent_end = ref.extent_offset + ref.extent_length
         full_end = ref.body_range[1] if ref.body_range is not None else extent_end

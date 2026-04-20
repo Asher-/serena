@@ -19,17 +19,14 @@ import pytest
 from solidlsp.structural.backends.cpp import (
     CppLogicalNameResolver,
     CppStructuralLanguage,
-    _CppSymbolRef,
     cpp_kind_schema,
 )
 from solidlsp.structural.errors import (
     DeclarationError,
     NameResolutionError,
-    ParseError,
     PatternError,
 )
 from test.solidlsp.structural.harness import assert_round_trip
-
 
 # -----------------------------------------------------------------------------
 # Fixtures and helpers

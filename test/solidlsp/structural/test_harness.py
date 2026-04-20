@@ -9,8 +9,9 @@ C++ / Swift are wired.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 import pytest
 
@@ -20,7 +21,6 @@ from solidlsp.structural.kinds import KindName, KindSchema, KindSpec
 from solidlsp.structural.names import LogicalName, LogicalNameResolver, NameResolution
 from solidlsp.structural.patterns import AstPattern, PatternMatch
 from test.solidlsp.structural.harness import assert_round_trip, iter_corpus
-
 
 # ---- fake backend used only for harness self-tests ------------------------
 

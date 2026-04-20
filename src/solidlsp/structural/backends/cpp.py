@@ -25,11 +25,11 @@ Public entry points:
 
 from __future__ import annotations
 
-import dataclasses
 import re
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any
 
 import clang.cindex as cx
 
@@ -1428,7 +1428,7 @@ def _cursor_match(
     pattern_children = list(pattern.get_children())
     if len(target_children) != len(pattern_children):
         return False
-    for tgt_child, pat_child in zip(target_children, pattern_children):
+    for tgt_child, pat_child in zip(target_children, pattern_children, strict=False):
         if not _cursor_match(tgt_child, pat_child, placeholders, bindings):
             return False
     return True

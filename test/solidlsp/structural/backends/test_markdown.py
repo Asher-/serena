@@ -20,7 +20,6 @@ import pytest
 from solidlsp.structural.backends.markdown import (
     MarkdownLogicalNameResolver,
     MarkdownStructuralLanguage,
-    _MdSymbolRef,
     markdown_kind_schema,
 )
 from solidlsp.structural.errors import (
@@ -29,7 +28,6 @@ from solidlsp.structural.errors import (
     PatternError,
 )
 from test.solidlsp.structural.harness import assert_round_trip
-
 
 # -----------------------------------------------------------------------------
 # Fixtures and helpers

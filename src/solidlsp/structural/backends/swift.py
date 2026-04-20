@@ -12,13 +12,12 @@ re-parses.
 from __future__ import annotations
 
 import json
-import os
 import re
 import struct
 import subprocess
 import threading
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -402,7 +401,7 @@ def _build_bridge_if_needed() -> Path:
             return binary
         result = subprocess.run(
             ["swift", "build", "-c", "release"],
-            cwd=str(_BRIDGE_PACKAGE_DIR),
+            check=False, cwd=str(_BRIDGE_PACKAGE_DIR),
             capture_output=True,
             text=True,
         )
@@ -431,7 +430,8 @@ class _SwiftBridge:
 
     def __init__(self, binary_path: Path):
         """:param binary_path: absolute path to the serena-swift-bridge
-            executable."""
+        executable.
+        """
         self._binary_path = binary_path
         self._process: subprocess.Popen[bytes] | None = None
         self._lock = threading.Lock()

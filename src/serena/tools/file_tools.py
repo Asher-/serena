@@ -86,7 +86,6 @@ class SearchForPatternTool(Tool):
             configured default. Tighten the query rather than raising this.
         :return: a plain-text cursor-style listing — never JSON.
         """
-
         # locate and validate the search root
         abs_path = os.path.join(self.get_project_root(), relative_path)
         if not os.path.exists(abs_path):

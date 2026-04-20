@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import dataclasses
 import re
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any
 
 import libcst as cst
 
@@ -428,7 +429,7 @@ def _match_sequence(
     if seq_placeholder_index is None:
         if len(target_seq) != len(pattern_seq):
             return False
-        for pv, tv in zip(pattern_seq, target_seq):
+        for pv, tv in zip(pattern_seq, target_seq, strict=False):
             if not _match_node(tv, pv, placeholders, bindings):
                 return False
         return True
@@ -441,10 +442,10 @@ def _match_sequence(
     prefix_target = target_seq[: len(prefix)]
     suffix_target = target_seq[len(target_seq) - len(suffix) :] if suffix else []
     middle_target = target_seq[len(prefix) : len(target_seq) - len(suffix)]
-    for pv, tv in zip(prefix, prefix_target):
+    for pv, tv in zip(prefix, prefix_target, strict=False):
         if not _match_node(tv, pv, placeholders, bindings):
             return False
-    for pv, tv in zip(suffix, suffix_target):
+    for pv, tv in zip(suffix, suffix_target, strict=False):
         if not _match_node(tv, pv, placeholders, bindings):
             return False
     # seq_placeholder_name is non-None here because seq_placeholder_index is non-None
@@ -660,9 +661,9 @@ class PythonStructuralLanguage(StructuralLanguage):
 
     def __init__(self, name_resolver: LogicalNameResolver | None = None):
         """:param name_resolver: the resolver to expose via :attr:`name_resolver`.
-            When omitted, a resolver rooted at the current working directory is
-            used. Callers with a :class:`Project` in hand should pass one
-            constructed from ``project.project_root``.
+        When omitted, a resolver rooted at the current working directory is
+        used. Callers with a :class:`Project` in hand should pass one
+        constructed from ``project.project_root``.
         """
         self._name_resolver = name_resolver or PythonLogicalNameResolver(Path.cwd())
 
@@ -875,7 +876,7 @@ class PythonStructuralLanguage(StructuralLanguage):
         collector: list[PatternMatch] = []
 
         class _Collector(cst.CSTVisitor):
-            def on_visit(inner, node: cst.CSTNode) -> bool:  # noqa: N805
+            def on_visit(inner, node: cst.CSTNode) -> bool:
                 bindings: dict[str, Any] = {}
                 if _match_node(node, pattern.root, pattern.placeholders, bindings):
                     collector.append(
@@ -903,7 +904,7 @@ class PythonStructuralLanguage(StructuralLanguage):
 
     def _tag_subtree(self, node: cst.CSTNode, path: str, mapping: dict[int, str]) -> None:
         class _Tagger(cst.CSTVisitor):
-            def on_visit(inner, descendant: cst.CSTNode) -> bool:  # noqa: N805
+            def on_visit(inner, descendant: cst.CSTNode) -> bool:
                 mapping.setdefault(id(descendant), path)
                 return True
 

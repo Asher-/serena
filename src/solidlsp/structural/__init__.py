@@ -15,29 +15,29 @@ meet that contract are not admitted to this layer.
 
 from solidlsp.structural.base import StructuralLanguage
 from solidlsp.structural.errors import (
-    ParseError,
-    RoundTripViolation,
-    PatternError,
     DeclarationError,
     NameResolutionError,
+    ParseError,
+    PatternError,
+    RoundTripViolation,
 )
-from solidlsp.structural.kinds import KindName, KindSpec, KindSchema
-from solidlsp.structural.names import LogicalName, NameResolution, LogicalNameResolver
+from solidlsp.structural.kinds import KindName, KindSchema, KindSpec
+from solidlsp.structural.names import LogicalName, LogicalNameResolver, NameResolution
 from solidlsp.structural.patterns import AstPattern, PatternMatch
 
 __all__ = [
-    "StructuralLanguage",
-    "ParseError",
-    "RoundTripViolation",
-    "PatternError",
-    "DeclarationError",
-    "NameResolutionError",
-    "KindName",
-    "KindSpec",
-    "KindSchema",
-    "LogicalName",
-    "NameResolution",
-    "LogicalNameResolver",
     "AstPattern",
+    "DeclarationError",
+    "KindName",
+    "KindSchema",
+    "KindSpec",
+    "LogicalName",
+    "LogicalNameResolver",
+    "NameResolution",
+    "NameResolutionError",
+    "ParseError",
+    "PatternError",
     "PatternMatch",
+    "RoundTripViolation",
+    "StructuralLanguage",
 ]

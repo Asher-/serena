@@ -34,7 +34,8 @@ Design premises encoded in the ABC
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Iterable, Mapping
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 from solidlsp.structural.kinds import KindName, KindSchema
 from solidlsp.structural.names import LogicalNameResolver
@@ -96,7 +97,8 @@ class StructuralLanguage(ABC):
     @abstractmethod
     def root_kind(self, tree: Any) -> KindName:
         """Return the kind of the root of ``tree`` (e.g. ``"module"`` for
-        Python sources)."""
+        Python sources).
+        """
 
     @abstractmethod
     def walk_symbols(self, tree: Any) -> Iterable[tuple[str, KindName, Any]]:

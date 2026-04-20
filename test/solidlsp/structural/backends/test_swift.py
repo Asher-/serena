@@ -15,14 +15,11 @@ import pytest
 
 from solidlsp.structural.backends.swift import (
     SwiftStructuralLanguage,
-    _SwiftDeclaration,
-    _SwiftSymbolRef,
     _SwiftTree,
     swift_kind_schema,
 )
 from solidlsp.structural.errors import DeclarationError, PatternError
 from test.solidlsp.structural.harness import assert_round_trip
-
 
 # -----------------------------------------------------------------------------
 # Shared fixture
@@ -311,7 +308,7 @@ class TestDeclarationAndMutation:
         )
         new_tree = backend.insert_child(tree, decl, anchor=symbols["c"], position="before")
         serialized = backend.serialize(new_tree)
-        assert "let a = 1\nlet b = 2\nlet c = 3\n" == serialized
+        assert serialized == "let a = 1\nlet b = 2\nlet c = 3\n"
 
     def test_remove_child(self, backend: SwiftStructuralLanguage) -> None:
         source = "let a = 1\nlet b = 2\nlet c = 3\n"

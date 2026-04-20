@@ -29,7 +29,6 @@ def iter_corpus(corpus_dir: Path, glob: str) -> Iterator[tuple[str, str]]:
     :return: iterator of ``(relative_label, file_text)`` pairs. Labels are
         stable, human-facing identifiers used in assertion messages.
     """
-
     # iterate matches deterministically so test ordering is stable
     for path in sorted(corpus_dir.glob(glob)):
         if not path.is_file():
@@ -52,7 +51,6 @@ def assert_round_trip(backend: StructuralLanguage, label: str, source: str) -> N
         in error output.
     :param source: the text to round-trip.
     """
-
     # parse and re-serialize
     tree = backend.parse(source)
     rendered = backend.serialize(tree)
