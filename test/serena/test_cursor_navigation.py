@@ -680,6 +680,66 @@ class TestCursorEditTools:
             except Exception:
                 pass
 
+    def test_cursor_configure_include_body_widens_python_variable_multiline_literal(
+        self, python_serena_agent: SerenaAgent
+    ) -> None:
+        """Regression: cursor_configure include_body=True must display the full multi-line
+        literal for a Python Variable whose LSP extent is name-only.
+
+        Reproduces the body-extraction limitation complementary to the insertion-anchor
+        widening: Python language servers report Variable symbols with identifier-only
+        ranges, so without statement-widening at format time the displayed body is just
+        the identifier instead of the enclosing assignment.
+        """
+        from pathlib import Path
+
+        start_tool = python_serena_agent.get_tool(CursorStartTool)
+        configure_tool = python_serena_agent.get_tool(CursorConfigureTool)
+
+        project_root = Path(python_serena_agent.get_active_project_or_raise().project_root)
+        rel_path = os.path.join("test_repo", "_cursor_variable_body_widening_sandbox.py")
+        abs_path = project_root / rel_path
+        abs_path.write_text(
+            "FOO = [\n"
+            "    1,\n"
+            "    2,\n"
+            "    3,\n"
+            "]\n"
+        )
+
+        try:
+            python_serena_agent.reset_language_server_manager()
+            start_tool.apply(
+                name_path="FOO",
+                relative_path=rel_path,
+                cursor_id="var-body",
+            )
+            view = configure_tool.apply(
+                cursor_id="var-body",
+                include_body=True,
+            )
+
+            # body block must be emitted and span the full multi-line assignment
+            assert "--- body ---" in view, f"Body delimiter missing from view:\n{view}"
+            assert "FOO = [" in view, f"Assignment start missing from body:\n{view}"
+            assert "    1," in view, f"First literal element missing from body:\n{view}"
+            assert "    2," in view, f"Second literal element missing from body:\n{view}"
+            assert "    3," in view, f"Third literal element missing from body:\n{view}"
+
+            # extract the body block and verify the closing bracket is present — the
+            # previous narrow-range behavior would have elided everything after "FOO"
+            body_start = view.index("--- body ---")
+            body_end = view.index("--- end body ---")
+            body_block = view[body_start:body_end]
+            assert "]" in body_block, f"Closing bracket missing from body block:\n{body_block}"
+        finally:
+            if abs_path.exists():
+                abs_path.unlink()
+            try:
+                python_serena_agent.reset_language_server_manager()
+            except Exception:
+                pass
+
     def test_cursor_rename(self, python_serena_agent: SerenaAgent, throwaway_python_file: str) -> None:
         """cursor_rename renames the symbol and re-anchors the cursor."""
         from pathlib import Path

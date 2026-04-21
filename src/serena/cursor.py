@@ -489,12 +489,18 @@ class CursorManager:
         lines.append(f"@ {symbol.get_name_path()} ({symbol.symbol_kind_name}){loc_str}")
         lines.append(f"  cursor: {state.cursor_id} | trail: {len(state.trail)} steps")
 
-        # Body (if configured)
-        if state.include_body and symbol.body:
-            lines.append("")
-            lines.append("--- body ---")
-            lines.append(symbol.body)
-            lines.append("--- end body ---")
+        # Body (if configured): prefer the statement-widened slice so Python variable
+        # symbols whose LSP extent is name-only display the full assignment (e.g. a
+        # multi-line list literal); fall back to the LSP-reported body otherwise.
+        if state.include_body:
+            body_text = self._format_widened_body(symbol)
+            if body_text is None:
+                body_text = symbol.body
+            if body_text:
+                lines.append("")
+                lines.append("--- body ---")
+                lines.append(body_text)
+                lines.append("--- end body ---")
 
         # Neighbors grouped by edge type
         neighbors = self.resolve_neighbors(cursor_id)
@@ -518,6 +524,67 @@ class CursorManager:
         lines.append("Use cursor_move to navigate to a neighbor, cursor_look to re-examine.")
 
         return "\n".join(lines)
+
+    def _format_widened_body(self, symbol: LanguageServerSymbol) -> str | None:
+        """
+        Extract the statement-widened body text for the given symbol.
+
+        Consults the per-language :class:`SymbolExtentStrategy` (via
+        :func:`get_symbol_extent_strategy`) to widen the LSP-reported range to the
+        enclosing statement. The common case is a Python ``Variable``/``Constant``/
+        ``Field``/``Property`` whose language server reports only the identifier
+        extent; widening recovers the full assignment including multi-line literal
+        values.
+
+        :param symbol: the symbol whose body to widen.
+        :return: widened body text sliced from the file; ``None`` when widening does
+            not apply (caller should fall back to ``symbol.body``).
+        """
+        # imported lazily to avoid coupling the module graph at import time,
+        # mirroring the LanguageServerCodeEditor pattern in code_editor.py
+        from serena.symbol_extent import get_symbol_extent_strategy
+
+        # precondition — widening needs an addressable path and LSP body bounds
+        relative_path = symbol.relative_path
+        if relative_path is None:
+            return None
+        lsp_start = symbol.get_body_start_position()
+        lsp_end = symbol.get_body_end_position()
+        if lsp_start is None or lsp_end is None:
+            return None
+
+        # read current file text; widening without file text is impossible
+        try:
+            file_text = self._project.read_file(relative_path)
+        except OSError as e:
+            log.debug("Could not read %s for body widening: %s", relative_path, e)
+            return None
+
+        # consult the strategy — identity for non-Python, ast-based for Python
+        strategy = get_symbol_extent_strategy(relative_path)
+        wide_start = strategy.get_statement_start_position(symbol, file_text, lsp_start)
+        wide_end = strategy.get_statement_end_position(symbol, file_text, lsp_end)
+
+        # identity-reference shortcut — the strategy returns the same object when
+        # no widening applies, which covers both the IdentitySymbolExtentStrategy
+        # and the Python strategy's fail-safe early returns
+        if wide_start is lsp_start and wide_end is lsp_end:
+            return None
+
+        # slice the widened range out of the file text using line/col bounds;
+        # splitlines(keepends=True) preserves line terminators so multi-line
+        # slicing reconstructs the original text without manual newline handling
+        file_lines = file_text.splitlines(keepends=True)
+        if wide_start.line >= len(file_lines):
+            return ""
+        if wide_start.line == wide_end.line:
+            return file_lines[wide_start.line][wide_start.col:wide_end.col]
+        pieces: list[str] = [file_lines[wide_start.line][wide_start.col:]]
+        for i in range(wide_start.line + 1, min(wide_end.line, len(file_lines))):
+            pieces.append(file_lines[i])
+        if wide_end.line < len(file_lines):
+            pieces.append(file_lines[wide_end.line][:wide_end.col])
+        return "".join(pieces)
 
     def find_symbols(
         self,
