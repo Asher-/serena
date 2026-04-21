@@ -627,6 +627,59 @@ class TestCursorEditTools:
         content = abs_path.read_text()
         assert "inserted-after-marker" in content
 
+    def test_cursor_insert_after_python_variable_multiline_literal(
+        self, python_serena_agent: SerenaAgent
+    ) -> None:
+        """Regression: cursor_insert_after on a Python module-level variable whose value is a
+        multi-line list literal must insert after the closing bracket, not inside the list.
+
+        Reproduces the LSP-extent issue where Python language servers report Variable symbols
+        with name-only extents; without statement-widening, the inserted content lands between
+        the list items rather than after the assignment.
+        """
+        from pathlib import Path
+
+        start_tool = python_serena_agent.get_tool(CursorStartTool)
+        insert_tool = python_serena_agent.get_tool(CursorInsertAfterTool)
+
+        project_root = Path(python_serena_agent.get_active_project_or_raise().project_root)
+        rel_path = os.path.join("test_repo", "_cursor_variable_extent_sandbox.py")
+        abs_path = project_root / rel_path
+        abs_path.write_text("FOO = [\n    1,\n    2,\n    3,\n]\n")
+
+        try:
+            python_serena_agent.reset_language_server_manager()
+            start_tool.apply(
+                name_path="FOO",
+                relative_path=rel_path,
+                cursor_id="var-after",
+            )
+            result = insert_tool.apply(
+                cursor_id="var-after",
+                body="BAR = 42\n",
+            )
+            assert "OK" in result
+
+            content = abs_path.read_text()
+
+            # BAR must appear after the closing bracket of the FOO list, not inside
+            foo_close_idx = content.index("]")
+            bar_idx = content.index("BAR = 42")
+            assert bar_idx > foo_close_idx, (
+                f"BAR was inserted at char {bar_idx}, before the FOO closing bracket at {foo_close_idx}. "
+                f"Full content:\n{content}"
+            )
+
+            # the original FOO structure must still be intact
+            assert "FOO = [\n    1,\n    2,\n    3,\n]" in content
+        finally:
+            if abs_path.exists():
+                abs_path.unlink()
+            try:
+                python_serena_agent.reset_language_server_manager()
+            except Exception:
+                pass
+
     def test_cursor_rename(self, python_serena_agent: SerenaAgent, throwaway_python_file: str) -> None:
         """cursor_rename renames the symbol and re-anchors the cursor."""
         from pathlib import Path

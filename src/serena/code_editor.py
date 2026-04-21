@@ -109,6 +109,37 @@ class CodeEditor(Generic[TSymbol], ABC):
         :return: the unique symbol
         """
 
+    def _get_statement_end_position(
+        self, symbol: TSymbol, edited_file: "CodeEditor.EditedFile"
+    ) -> PositionInFile:
+        """
+        Get the end position for statement-level edit operations on the given symbol.
+
+        Default implementation returns the LSP-reported body end position unchanged.
+        Subclasses targeting language servers that report narrower-than-statement extents
+        (e.g. Python variable symbols) should override to widen to the enclosing statement.
+
+        :param symbol: the symbol the caller is about to edit.
+        :param edited_file: the edited file context, providing access to current file text.
+        :return: the 0-based end position.
+        """
+        return symbol.get_body_end_position_or_raise()
+
+    def _get_statement_start_position(
+        self, symbol: TSymbol, edited_file: "CodeEditor.EditedFile"
+    ) -> PositionInFile:
+        """
+        Get the start position for statement-level edit operations on the given symbol.
+
+        Symmetric to :meth:`_get_statement_end_position`; default returns the LSP-reported
+        body start position unchanged.
+
+        :param symbol: the symbol the caller is about to edit.
+        :param edited_file: the edited file context, providing access to current file text.
+        :return: the 0-based start position.
+        """
+        return symbol.get_body_start_position_or_raise()
+
     def replace_body(self, name_path: str, relative_file_path: str, body: str) -> None:
         """
         Replaces the body of the symbol with the given name_path in the given file.
@@ -118,10 +149,14 @@ class CodeEditor(Generic[TSymbol], ABC):
         :param body: the new body
         """
         symbol = self._find_unique_symbol(name_path, relative_file_path)
-        start_pos = symbol.get_body_start_position_or_raise()
-        end_pos = symbol.get_body_end_position_or_raise()
 
         with self.edited_file_context(relative_file_path) as edited_file:
+            # widen the LSP-reported extent to the enclosing statement boundaries when the
+            # language server reports narrower extents (e.g. Python Variable symbols where
+            # the extent ends at the identifier rather than the full assignment)
+            start_pos = self._get_statement_start_position(symbol, edited_file)
+            end_pos = self._get_statement_end_position(symbol, edited_file)
+
             # preserve the whitespace envelope of the original extent so that languages whose
             # symbol extent includes a trailing newline (e.g. markdown headings, where the extent
             # ends at line N+1 col 0) do not get that newline destroyed by body.strip(). For
@@ -162,12 +197,6 @@ class CodeEditor(Generic[TSymbol], ABC):
         if not body.endswith("\n"):
             body += "\n"
 
-        pos = symbol.get_body_end_position_or_raise()
-
-        # start at the beginning of the next line
-        col = 0
-        line = pos.line + 1
-
         # make sure a suitable number of leading empty lines is used (at least 0/1 depending on the symbol type,
         # otherwise as many as the caller wanted to insert)
         original_leading_newlines = self._count_leading_newlines(body)
@@ -184,6 +213,15 @@ class CodeEditor(Generic[TSymbol], ABC):
         body = body.rstrip("\r\n") + "\n"
 
         with self.edited_file_context(relative_file_path) as edited_file:
+            # widen the LSP-reported extent to the enclosing statement end when the language server
+            # reports narrower extents (e.g. Python Variable symbols) — prevents insertion inside
+            # the RHS of multi-line assignments
+            pos = self._get_statement_end_position(symbol, edited_file)
+
+            # start at the beginning of the next line
+            col = 0
+            line = pos.line + 1
+
             edited_file.insert_text_at_position(PositionInFile(line, col), body)
 
     def insert_before_symbol(self, name_path: str, relative_file_path: str, body: str) -> None:
@@ -191,11 +229,6 @@ class CodeEditor(Generic[TSymbol], ABC):
         Inserts content before the symbol with the given name in the given file.
         """
         symbol = self._find_unique_symbol(name_path, relative_file_path)
-        symbol_start_pos = symbol.get_body_start_position_or_raise()
-
-        # insert position is the start of line where the symbol is defined
-        line = symbol_start_pos.line
-        col = 0
 
         original_trailing_empty_lines = self._count_trailing_newlines(body) - 1
 
@@ -212,6 +245,15 @@ class CodeEditor(Generic[TSymbol], ABC):
 
         # apply edit
         with self.edited_file_context(relative_file_path) as edited_file:
+            # widen the LSP-reported extent to the enclosing statement start when the language
+            # server reports narrower extents (e.g. Python Variable symbols where the start may
+            # fall on a continuation line of a multi-line assignment)
+            symbol_start_pos = self._get_statement_start_position(symbol, edited_file)
+
+            # insert position is the start of line where the symbol is defined
+            line = symbol_start_pos.line
+            col = 0
+
             edited_file.insert_text_at_position(PositionInFile(line=line, col=col), body)
 
     def insert_at_line(self, relative_path: str, line: int, content: str) -> None:
@@ -298,6 +340,29 @@ class LanguageServerCodeEditor(CodeEditor[LanguageServerSymbol]):
 
     def _find_unique_symbol(self, name_path: str, relative_file_path: str) -> LanguageServerSymbol:
         return self._symbol_retriever.find_unique(name_path, within_relative_path=relative_file_path)
+
+    def _get_statement_end_position(
+        self, symbol: LanguageServerSymbol, edited_file: "CodeEditor.EditedFile"
+    ) -> PositionInFile:
+        # route through the per-language :class:`SymbolExtentStrategy` so Python variable
+        # extents (reported as name-only by pyright/jedi) get widened to the enclosing
+        # assignment statement's end. Other languages fall through to the identity strategy.
+        # imported lazily to avoid coupling the module graph at import time.
+        from serena.symbol_extent import get_symbol_extent_strategy
+
+        lsp_end = symbol.get_body_end_position_or_raise()
+        strategy = get_symbol_extent_strategy(edited_file.relative_path)
+        return strategy.get_statement_end_position(symbol, edited_file.get_contents(), lsp_end)
+
+    def _get_statement_start_position(
+        self, symbol: LanguageServerSymbol, edited_file: "CodeEditor.EditedFile"
+    ) -> PositionInFile:
+        # imported lazily to avoid coupling the module graph at import time.
+        from serena.symbol_extent import get_symbol_extent_strategy
+
+        lsp_start = symbol.get_body_start_position_or_raise()
+        strategy = get_symbol_extent_strategy(edited_file.relative_path)
+        return strategy.get_statement_start_position(symbol, edited_file.get_contents(), lsp_start)
 
     def _relative_path_from_uri(self, uri: str) -> str:
         return os.path.relpath(PathUtils.uri_to_path(uri), self.project_root)
