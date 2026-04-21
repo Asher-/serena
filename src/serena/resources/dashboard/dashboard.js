@@ -599,6 +599,10 @@ class Dashboard {
                 } else {
                     console.log('Config unchanged, skipping display update');
                 }
+                // language-server status is orthogonal to config.yml state — a language listed in
+                // config.languages may still be unavailable if its LSP crashed at startup, and a
+                // restart can flip an unavailable language back to active without any config edit
+                self.loadLanguageServerStatus();
             }, error: function (xhr, status, error) {
                 console.error('Error loading config overview:', error);
                 self.$configDisplay.html('<div class="error-message">Error loading configuration</div>');
@@ -609,6 +613,43 @@ class Dashboard {
                 self.$availableContextsDisplay.html('<div class="error-message">Error loading contexts</div>');
             }, complete: function () {
                 self.waitingForConfigPollingResult = false;
+            }
+        });
+    }
+
+    loadLanguageServerStatus() {
+        // fetches per-language LSP state (active + unavailable with exception text) and applies it
+        // as visual decoration (green/red accent, tooltip with error) onto the language badges the
+        // config section already rendered. Safe to call on every poll — the decoration is idempotent
+        const self = this;
+        $.ajax({
+            url: '/get_language_server_status',
+            type: 'GET',
+            success: function (response) {
+                self.applyLanguageServerStatus(response);
+            },
+            error: function (xhr, status, error) {
+                console.error('Error loading language server status:', error);
+            }
+        });
+    }
+
+    applyLanguageServerStatus(status) {
+        // strip prior decoration so a language that recovered (unavailable → active) loses its error state
+        const $badges = $('.language-badge');
+        $badges.removeClass('active unavailable').removeAttr('title');
+        const active = new Set(status.active || []);
+        const unavailable = status.unavailable || {};
+        $badges.each(function () {
+            const $badge = $(this);
+            // language text is the badge's first text node; the remove-× is a child span, not text
+            const language = $badge.contents().filter(function () { return this.nodeType === 3; }).first().text().trim();
+            if (Object.prototype.hasOwnProperty.call(unavailable, language)) {
+                $badge.addClass('unavailable');
+                $badge.attr('title', 'Language server unavailable: ' + unavailable[language]);
+            } else if (active.has(language)) {
+                $badge.addClass('active');
+                $badge.attr('title', 'Language server running');
             }
         });
     }

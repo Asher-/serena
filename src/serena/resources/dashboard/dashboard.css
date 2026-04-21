@@ -1144,6 +1144,38 @@ body {
     padding-right: 28px;
 }
 
+.language-badge.active {
+    border-color: #2e8b57;
+    box-shadow: inset 3px 0 0 #2e8b57;
+}
+
+.language-badge.unavailable {
+    border-color: #d73a49;
+    background: rgba(215, 58, 73, 0.08);
+    box-shadow: inset 3px 0 0 #d73a49;
+    cursor: help;
+}
+
+.language-badge.unavailable::after {
+    content: "!";
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: 6px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #d73a49;
+    color: #fff;
+    font-size: 10px;
+    font-weight: bold;
+    line-height: 1;
+}
+
+.language-badge.removable.unavailable {
+    padding-right: 28px;
+}
+
 .language-remove {
     position: absolute;
     top: 2px;
