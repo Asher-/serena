@@ -889,14 +889,36 @@ class SerenaAgent:
     ) -> bool:
         """
         Activate a project from a path or a name.
-        If the project was already registered, it will just be activated.
+        If the project was already registered, it will just be activated. Any change to its ``project.yml``
+        on disk since the MCP process started (or since the project was last activated) is picked up here:
+        the on-disk configuration is re-read and, if it differs from the cached one, any memoized project
+        instance is dropped and rebuilt. If the project with the changed configuration happens to be the
+        currently active one, it is shut down first so that the activation fully re-initialises the language
+        server manager with the updated language list.
         If the argument is a path at which no Serena project previously existed, the project will be created beforehand.
         Raises ProjectNotFoundError if the project could neither be found nor created.
 
         :return: True if the project was newly activated, False if it was already active
         """
-        project_instance: Project | None = self.serena_config.get_project(project_root_or_name)
-        if project_instance is not None:
+        # locate the registered project (if any) so we can refresh its configuration from disk
+        registered_project = self.serena_config.get_registered_project(project_root_or_name)
+
+        project_instance: Project | None = None
+        if registered_project is not None:
+            # pick up any edits to project.yml made since the process started or the project was last activated
+            config_changed = registered_project.reload_if_changed(self.serena_config)
+            if (
+                config_changed
+                and self._active_project is not None
+                and self._active_project.project_root == str(registered_project.project_root)
+            ):
+                log.info(
+                    "Configuration changed for currently active project '%s'; shutting it down to re-initialise.",
+                    registered_project.project_name,
+                )
+                self._active_project.shutdown()
+                self._active_project = None
+            project_instance = registered_project.get_project_instance(serena_config=self.serena_config)
             log.info(f"Found registered project '{project_instance.project_name}' at path {project_instance.project_root}")
         elif os.path.isdir(project_root_or_name):
             project_instance = self.serena_config.add_project_from_path(project_root_or_name)

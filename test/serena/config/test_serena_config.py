@@ -542,3 +542,83 @@ class TestMemoriesManagerCustomPath:
         # Legitimate nested names continue to resolve inside the memories root.
         good_path = manager.get_memory_file_path("nested/name")
         assert good_path.parent.name == "nested"
+
+
+class TestRegisteredProjectReloadIfChanged:
+    """Tests for :meth:`RegisteredProject.reload_if_changed` — the hot-reload path that picks up
+    user edits to ``project.yml`` between project activations without requiring an MCP restart.
+    """
+
+    def setup_method(self):
+        # scratch project directory with a complete, template-aligned project.yml (via autogenerate)
+        # so that subsequent loads are stable (no "incomplete yml" re-save path on the first load,
+        # which would otherwise introduce a tuple-vs-list equality artefact on the sequence defaults)
+        self.test_dir = tempfile.mkdtemp()
+        self.project_path = Path(self.test_dir)
+        self.serena_config = create_default_serena_config()
+        ProjectConfig.autogenerate(
+            self.project_path,
+            self.serena_config,
+            project_name="reload_test_project",
+            languages=[Language.PYTHON],
+            save_to_disk=True,
+        )
+        self.yml_path = self.project_path / SERENA_MANAGED_DIR_NAME / ProjectConfig.SERENA_PROJECT_FILE
+        self.registered = RegisteredProject.from_project_root(str(self.project_path), serena_config=self.serena_config)
+
+    def teardown_method(self):
+        shutil.rmtree(self.test_dir)
+
+    def test_returns_false_when_yml_unchanged(self):
+        """freshly-loaded config already reflects disk; a no-op reload reports False and preserves state."""
+        assert self.registered.project_config.languages == [Language.PYTHON]
+        assert self.registered.reload_if_changed(self.serena_config) is False
+        assert self.registered.project_config.languages == [Language.PYTHON]
+
+    def test_picks_up_added_language(self):
+        """editing project.yml to append a language is reflected on the next reload_if_changed call."""
+        cfg = ProjectConfig.load(self.project_path, serena_config=self.serena_config)
+        cfg.languages.append(Language.TYPESCRIPT)
+        cfg.save(str(self.yml_path), save_project_local_yml=False)
+        assert self.registered.reload_if_changed(self.serena_config) is True
+        assert self.registered.project_config.languages == [Language.PYTHON, Language.TYPESCRIPT]
+
+    def test_picks_up_removed_language(self):
+        """editing project.yml to drop and replace a language is reflected on the next reload_if_changed call."""
+        cfg = ProjectConfig.load(self.project_path, serena_config=self.serena_config)
+        cfg.languages = [Language.TYPESCRIPT]
+        cfg.save(str(self.yml_path), save_project_local_yml=False)
+        assert self.registered.reload_if_changed(self.serena_config) is True
+        assert self.registered.project_config.languages == [Language.TYPESCRIPT]
+
+    def test_drops_cached_project_instance_on_change(self):
+        """on a detected change, the next get_project_instance must build a fresh Project, not return the memoized one."""
+        # force instantiation so we have a cached Project to invalidate
+        project_first = self.registered.get_project_instance(serena_config=self.serena_config)
+        # edit project.yml to change languages through the proper round-trip
+        cfg = ProjectConfig.load(self.project_path, serena_config=self.serena_config)
+        cfg.languages.append(Language.TYPESCRIPT)
+        cfg.save(str(self.yml_path), save_project_local_yml=False)
+        assert self.registered.reload_if_changed(self.serena_config) is True
+        project_second = self.registered.get_project_instance(serena_config=self.serena_config)
+        assert project_second is not project_first
+        assert project_second.project_config.languages == [Language.PYTHON, Language.TYPESCRIPT]
+
+    def test_keeps_cached_instance_when_unchanged(self):
+        """when the on-disk config is unchanged, the memoized Project instance is preserved."""
+        project_first = self.registered.get_project_instance(serena_config=self.serena_config)
+        assert self.registered.reload_if_changed(self.serena_config) is False
+        project_second = self.registered.get_project_instance(serena_config=self.serena_config)
+        assert project_second is project_first
+
+    def test_keeps_cache_when_yml_deleted(self):
+        """if project.yml has been removed, reload_if_changed reports False and preserves the cached config defensively."""
+        self.yml_path.unlink()
+        assert self.registered.reload_if_changed(self.serena_config) is False
+        assert self.registered.project_config.languages == [Language.PYTHON]
+
+    def test_keeps_cache_when_yml_malformed(self):
+        """if project.yml is malformed, reload_if_changed reports False and preserves the cached config defensively."""
+        self.yml_path.write_text("this: is: not: valid: yaml: :\n", encoding="utf-8")
+        assert self.registered.reload_if_changed(self.serena_config) is False
+        assert self.registered.project_config.languages == [Language.PYTHON]

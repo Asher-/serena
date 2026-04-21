@@ -661,6 +661,37 @@ class RegisteredProject(ToStringMixin):
                 )
         return self._project_instance
 
+    def reload_if_changed(self, serena_config: "SerenaConfig") -> bool:
+        """
+        Reloads the project configuration from disk (``project.yml``, including the ``project.local.yml`` override)
+        and, if it differs from the cached configuration, replaces the cached configuration and drops any
+        memoized project instance so that the next :meth:`get_project_instance` call builds a fresh
+        :class:`Project` reflecting the on-disk state.
+
+        :param serena_config: the global Serena configuration (used to resolve the project.yml path)
+        :return: True if the on-disk configuration differed from the cached one and the cache was updated;
+            False if the configuration was unchanged or could not be loaded (e.g., the project.yml file no
+            longer exists or is malformed). In the latter case the cached configuration is preserved.
+        """
+        try:
+            new_config = ProjectConfig.load(self.project_root, serena_config=serena_config)
+        except Exception as e:
+            log.warning(
+                "Could not reload project configuration for %s from disk: %s. Keeping cached configuration.",
+                self.project_root,
+                e,
+            )
+            return False
+        if new_config == self.project_config:
+            return False
+        log.info(
+            "Detected on-disk change to project configuration for %s; dropping cached project instance.",
+            self.project_root,
+        )
+        self.project_config = new_config
+        self._project_instance = None
+        return True
+
 
 @dataclass(kw_only=True)
 class SerenaConfig(SharedConfig):
