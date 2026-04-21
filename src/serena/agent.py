@@ -41,6 +41,7 @@ from serena.task_executor import TaskExecutor
 from serena.tools import (
     ActivateProjectTool,
     GetCurrentConfigTool,
+    GetLanguageServerStatusTool,
     OpenDashboardTool,
     ReadMemoryTool,
     Tool,
@@ -466,6 +467,15 @@ class SerenaAgent:
             tool_inclusion_definitions.append(
                 NamedToolInclusionDefinition(name="OpenDashboard", included_optional_tools=[OpenDashboardTool.get_name_from_cls()])
             )
+
+        # expose GetLanguageServerStatusTool by default so agents can query per-language LSP state
+        # without reactivating the project; contexts that want to hide it can still exclude it by name
+        tool_inclusion_definitions.append(
+            NamedToolInclusionDefinition(
+                name="OptionalLspStatus",
+                included_optional_tools=[GetLanguageServerStatusTool.get_name_from_cls()],
+            )
+        )
 
         # consider Serena configuration and the active context
         tool_inclusion_definitions.append(serena_config)
