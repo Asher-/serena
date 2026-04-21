@@ -417,6 +417,71 @@ class CursorInsertAfterTool(Tool, ToolMarkerSymbolicEdit):
         manager.reanchor_cursor(cursor_id)
         return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
 
+class CursorReplaceRangeTool(Tool, ToolMarkerSymbolicEdit):
+    """
+    Replace a non-symbolic line range in a file. Unlike ``cursor_replace_body`` and the
+    ``cursor_insert_before`` / ``cursor_insert_after`` pair, this primitive does not
+    address an LSP symbol — it operates directly on a ``[start_line, end_line]``
+    (inclusive, 0-based) range of file lines. It is the escape hatch for editing
+    regions that the language server does not surface as symbols: free-floating
+    comment blocks, blank-line gaps between imports, imports themselves (on LSPs that
+    do not expose them as symbols), license headers, and any content before the first
+    declaration or after the last.
+
+    The replacement ``body`` is inserted verbatim at the start of ``start_line``
+    after the range has been deleted. If the caller intends the replacement to remain
+    line-oriented, ``body`` should end with a newline.
+
+    Note on the marker: this tool does not perform a *symbolic* edit — it mutates a
+    raw line range. It is marked with ``ToolMarkerSymbolicEdit`` only because that is
+    the existing edit marker already imported by this module and because the current
+    project-server-required check only gates read-only tools; the distinction has no
+    runtime effect for edit tools. A future cleanup pass may introduce a dedicated
+    ``ToolMarkerFileLineEdit`` marker.
+    """
+
+    def apply(self, relative_path: str, start_line: int, end_line: int, body: str) -> str:
+        """
+        Replace the file's lines ``[start_line, end_line]`` (inclusive) with ``body``.
+
+        Typical uses: delete a top-of-file comment block that sits above the first
+        declaration (``body=""``); reorder a sequence of import statements; rewrite a
+        ``///`` doc comment whose lines are not themselves an LSP symbol; rewrite any
+        other non-symbolic region that ``cursor_replace_body`` cannot reach.
+
+        :param relative_path: relative path to the file to edit.
+        :param start_line: the 0-based index of the first line to replace (inclusive).
+        :param end_line: the 0-based index of the last line to replace (inclusive).
+            Must satisfy ``start_line <= end_line``. To replace a single line, pass
+            ``start_line == end_line``.
+        :param body: the replacement text. Inserted verbatim; the caller should supply
+            a trailing newline to keep the file line-oriented. Pass an empty string to
+            delete the range with no replacement.
+        :return: a success confirmation and the diff summary.
+        """
+        # validate input before any filesystem work so callers see a clean error message
+        if start_line < 0 or end_line < start_line:
+            raise ValueError(
+                f"cursor_replace_range: invalid range [{start_line}, {end_line}] "
+                f"in {relative_path!r}; require 0 <= start_line <= end_line."
+            )
+
+        # snapshot content so we can report a line-diff summary after the edit
+        pre_content = self.project.read_file(relative_path)
+
+        # execute the edit via the filesystem-level code editor layer; the operation
+        # bypasses the LSP's workspace-edit interface intentionally — workspace edits
+        # are rejected for regions the server does not recognize as symbols
+        code_editor = self.create_code_editor()
+        code_editor.replace_lines(relative_path, start_line, end_line, body)
+
+        # compute a diff summary for the return value so the caller can verify the edit
+        # size against their intent (mirrors cursor_replace_body's diff-summary style)
+        post_content = self.project.read_file(relative_path)
+        removed, added = CursorReplaceBodyTool._count_diff_lines(pre_content, post_content)
+        diff_summary = f"Diff: -{removed} / +{added} lines"
+        return f"{SUCCESS_RESULT}\n{diff_summary}"
+
 
 class CursorRenameTool(Tool, ToolMarkerSymbolicEdit):
     """

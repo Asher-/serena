@@ -283,6 +283,42 @@ class CodeEditor(Generic[TSymbol], ABC):
             end_pos = PositionInFile(line=end_line_for_delete, col=end_col)
             edited_file.delete_text_between_positions(start_pos, end_pos)
 
+    def replace_lines(self, relative_path: str, start_line: int, end_line: int, content: str) -> None:
+        """
+        Replaces a range of lines in the given file with the given content.
+
+        The operation deletes lines ``[start_line, end_line]`` (inclusive, 0-based) and
+        inserts ``content`` at the position where those lines began. This is the file-level
+        counterpart to :py:meth:`replace_body` — it does not consult the language server
+        and can therefore mutate regions outside any LSP symbol extent (e.g. free-floating
+        comment blocks, blank-line gaps between imports, or regions before the first
+        declaration in a file).
+
+        The body is inserted verbatim. If the caller intends the replacement to remain
+        line-oriented, ``content`` should end with a newline; otherwise the line that
+        previously followed ``end_line`` will be joined onto the final line of ``content``.
+
+        :param relative_path: the relative path of the file to edit
+        :param start_line: the 0-based index of the first line to replace (inclusive)
+        :param end_line: the 0-based index of the last line to replace (inclusive)
+        :param content: the text to insert in place of the deleted range
+        """
+        # validate the range; start > end is a programmer error
+        if start_line < 0 or end_line < start_line:
+            raise ValueError(
+                f"Invalid replace_lines range [{start_line}, {end_line}] for {relative_path!r}"
+            )
+
+        # perform the delete-then-insert pair inside a single edited_file_context so the
+        # file is saved exactly once; the delete spans [start_line, end_line+1) line-starts
+        # and the insert happens at the freed position (start_line, 0)
+        with self.edited_file_context(relative_path) as edited_file:
+            delete_start = PositionInFile(line=start_line, col=0)
+            delete_end = PositionInFile(line=end_line + 1, col=0)
+            edited_file.delete_text_between_positions(delete_start, delete_end)
+            if content:
+                edited_file.insert_text_at_position(PositionInFile(line=start_line, col=0), content)
+
     def delete_symbol(self, name_path: str, relative_file_path: str) -> None:
         """
         Deletes the symbol with the given name in the given file.
