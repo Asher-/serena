@@ -745,6 +745,26 @@ class SerenaAgent:
         if self._language_backend == LanguageBackend.LSP:
             languages_str = ", ".join([lang.value for lang in proj.project_config.languages])
             msg += f"\nProgramming languages: {languages_str}."
+
+            # report per-language LSP health at activation time: the language server manager is initialized
+            # asynchronously, so if we arrive here before startup has completed, note that explicitly; otherwise
+            # surface any languages that failed to start so the user learns of the degradation here rather than
+            # only from logs or the next tool call
+            ls_manager = self.get_language_server_manager()
+            if ls_manager is None:
+                msg += "\nLanguage servers are still initializing; check logs or query get_current_config for the latest status."
+            else:
+                active_languages = ls_manager.get_active_languages()
+                unavailable = ls_manager.get_unavailable_languages()
+                if active_languages:
+                    msg += f"\nActive language servers: {', '.join(lang.value for lang in active_languages)}."
+                if unavailable:
+                    failures = "; ".join(f"{lang.value}: {exc}" for lang, exc in unavailable.items())
+                    msg += (
+                        f"\nLanguage servers that failed to start: {failures}."
+                        f" Tools that target these languages will raise a LanguageUnavailableError until the servers are"
+                        f" restarted (use restart_language_server)."
+                    )
         msg += f"File encoding: {proj.project_config.encoding}."
 
         include_memories = self._active_tools.contains_tool_class(ReadMemoryTool)
@@ -1071,6 +1091,17 @@ class SerenaAgent:
         if ls_manager is None:
             return []
         return ls_manager.get_active_languages()
+
+    def get_unavailable_lsp_languages(self) -> dict[Language, Exception]:
+        """
+        :return: a mapping from language to the captured startup exception for each language whose
+            server failed to start (or failed a subsequent restart). Empty if no active project, no
+            manager yet, or all requested languages are running.
+        """
+        ls_manager = self.get_language_server_manager()
+        if ls_manager is None:
+            return {}
+        return ls_manager.get_unavailable_languages()
 
     @contextmanager
     def active_project_context(self, project: Project) -> Iterator[None]:
