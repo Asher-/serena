@@ -213,12 +213,20 @@ def _ruby_backend_factory() -> "StructuralLanguage":
     return RubyStructuralLanguage()
 
 
+def _csharp_backend_factory() -> "StructuralLanguage":
+    # lazy import: the csharp bridge subprocess is only spun up when requested
+    # and `dotnet build` runs on demand on the first request.
+    from solidlsp.structural.backends.csharp import CSharpStructuralLanguage
+
+    return CSharpStructuralLanguage()
+
+
 def default_structural_backend_registry() -> StructuralBackendRegistry:
-    """Build the default registry pre-populated with Serena's twelve structural backends.
+    """Build the default registry pre-populated with Serena's thirteen structural backends.
 
     The default registry covers the languages that currently have a
     :class:`StructuralLanguage` implementation: Python, C++, Markdown, Swift,
-    JSON, YAML, TOML, TypeScript, Go, Rust, Java and Ruby. Backends are
+    JSON, YAML, TOML, TypeScript, Go, Rust, Java, Ruby and C#. Backends are
     registered with lazy factories so simply constructing the registry imposes
     no import cost beyond this module itself.
 
@@ -268,6 +276,10 @@ def default_structural_backend_registry() -> StructuralBackendRegistry:
     # Ruby: Prism via subprocess bridge; lazy because it spawns a process on
     # first use. Prism is stdlib since Ruby 3.3, so no gem install is needed.
     registry.register("ruby", [".rb"], _ruby_backend_factory)
+
+    # C#: Roslyn via subprocess bridge; lazy because it spawns a process on
+    # first use and `dotnet build` runs on demand on the first request.
+    registry.register("csharp", [".cs"], _csharp_backend_factory)
 
     return registry
 

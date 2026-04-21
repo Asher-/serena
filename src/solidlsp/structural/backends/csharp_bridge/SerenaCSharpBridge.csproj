@@ -1,0 +1,30 @@
+<!--
+  MSBuild project file for the serena-csharp-bridge executable.
+
+  The bridge speaks length-prefixed JSON over stdio so the Python
+  CSharpStructuralLanguage backend can drive Roslyn parse, walk, and
+  mutation operations without a Python-side .NET FFI.
+
+  Microsoft.CodeAnalysis.CSharp 4.14.x tracks recent C# language levels
+  (C# 13 features: collection expressions, primary constructors on
+  non-record types, ref struct improvements, extension properties).
+  The bridge is developed against Roslyn 4.14.0.
+
+  `dotnet build -c Release` produces bin/Release/net10.0/SerenaCSharpBridge.dll
+  which is invoked via `dotnet exec <dll-path>` at runtime.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Serena</RootNamespace>
+    <AssemblyName>SerenaCSharpBridge</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" />
+  </ItemGroup>
+</Project>
