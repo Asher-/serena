@@ -57,6 +57,13 @@ if TYPE_CHECKING:
     from serena.gui_log_viewer import GuiLogViewer
 
 log = logging.getLogger(__name__)
+
+# maximum number of seconds get_project_activation_message waits for the backgrounded
+# language-server-manager init task to complete before reporting 'still initializing';
+# larger than a typical LSP startup (a few seconds for Pyright, longer for Metals), but
+# bounded so a hung init cannot stall the activation response indefinitely
+LS_MANAGER_INIT_WAIT_SECONDS = 10.0
+
 TTool = TypeVar("TTool", bound="Tool")
 T = TypeVar("T")
 SUCCESS_RESULT = "OK"
@@ -272,6 +279,10 @@ class SerenaAgent:
         # the project can surface the real cause instead of a generic "No active project".
         self._startup_activation_error: Exception | None = None
         self._startup_activation_target: str | None = None
+        # task handle for the backgrounded language-server-manager initialization of the
+        # currently-activating project; the activation message path waits on this handle so
+        # per-language LSP startup failures can be surfaced synchronously to the caller
+        self._ls_manager_init_task: TaskExecutor.Task[None] | None = None
         self._gui_log_viewer: Optional["GuiLogViewer"] = None
         self._dashboard_viewer_process: multiprocessing.Process | None = None
 
@@ -747,10 +758,15 @@ class SerenaAgent:
             msg += f"\nProgramming languages: {languages_str}."
 
             # report per-language LSP health at activation time: the language server manager is initialized
-            # asynchronously, so if we arrive here before startup has completed, note that explicitly; otherwise
-            # surface any languages that failed to start so the user learns of the degradation here rather than
-            # only from logs or the next tool call
+            # asynchronously, so if we arrive here before startup has completed, wait on the init task with
+            # a bounded timeout and then re-check; this closes the race between activate_project returning
+            # and the backgrounded init task completing, so per-language failures (e.g. Metals crashing for
+            # Scala) are surfaced in the activation message itself rather than only from logs or the next
+            # tool call
             ls_manager = self.get_language_server_manager()
+            if ls_manager is None and self._ls_manager_init_task is not None:
+                self._ls_manager_init_task.wait_until_done(timeout=LS_MANAGER_INIT_WAIT_SECONDS)
+                ls_manager = self.get_language_server_manager()
             if ls_manager is None:
                 msg += "\nLanguage servers are still initializing; check logs or query get_current_config for the latest status."
             else:
@@ -895,9 +911,12 @@ class SerenaAgent:
             with LogTime("Language server initialization", logger=log):
                 self.reset_language_server_manager()
 
-        # initialize the language server in the background (if in language server mode)
+        # initialize the language server in the background (if in language server mode);
+        # the task handle is captured so the activation-message path can wait on it with
+        # a bounded timeout before reporting on per-language LSP health
+        self._ls_manager_init_task = None
         if self.get_language_backend().is_lsp():
-            self.issue_task(init_language_server_manager)
+            self._ls_manager_init_task = self.issue_task(init_language_server_manager)
 
         if self._project_activation_callback is not None:
             self._project_activation_callback()

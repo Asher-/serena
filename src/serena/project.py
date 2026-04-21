@@ -689,8 +689,17 @@ class Project(ToStringMixin):
             raise
 
     def get_language_server_manager_or_raise(self) -> LanguageServerManager:
+        # this error path fires only when the entire manager could not be constructed, which is distinct from
+        # the (now expected) case where the manager came up with partial coverage. Per-language startup failures
+        # no longer surface here: the manager is still constructed with the healthy languages, and calls into
+        # the manager for an unavailable language raise a :class:`LanguageUnavailableError` at the call site.
+        # Reaching this branch means construction itself raised, typically a project-wide configuration problem.
         if self.language_server_manager is None:
-            msg = TextBuilder("The language server manager is not initialized, indicating a problem during project initialisation.")
+            msg = TextBuilder(
+                "The language server manager could not be constructed at all, indicating a project-wide "
+                "initialisation problem (as opposed to a single language failing to start, which is handled "
+                "by the manager itself)."
+            )
             if self._language_server_manager_init_error is not None:
                 msg.with_text(str(self._language_server_manager_init_error))
             if self._agent is not None:

@@ -6,19 +6,35 @@ instead, the manager is constructed with the successfully-started servers, and c
 an unavailable language receive a typed :class:`LanguageUnavailableError`.
 """
 
+
 from __future__ import annotations
 
+import logging
+import threading
+import time
+import types
+from collections.abc import Callable
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
+from serena import agent as agent_module
+from serena.agent import SerenaAgent
+from serena.config.serena_config import (
+    LanguageBackend,
+    ProjectConfig,
+    RegisteredProject,
+    SerenaConfig,
+)
 from serena.ls_manager import LanguageServerFactory, LanguageServerManager, LanguageUnavailableError
+from serena.project import Project
 from solidlsp import SolidLanguageServer
+from solidlsp.ls_config import Language
 from solidlsp.ls_config import Language
 
 
 class _ScriptedLanguageServerFactory(LanguageServerFactory):
-    """factory that can be told, per language, to either return a running mock or raise on creation."""
 
     def __init__(self, failures: dict[Language, Exception] | None = None) -> None:
         # stored as instance state only; the base constructor is deliberately not invoked because
@@ -144,3 +160,110 @@ class TestRestartRecoversUnavailableLanguage:
 
         with pytest.raises(ValueError, match="cannot restart"):
             manager.restart_language_server(Language.SCALA)
+
+
+
+class TestActivationMessageWaitsForLsInit:
+    """
+    Covers the race between `SerenaAgent.activate_project_from_path_or_name` returning and
+    the backgrounded language-server-manager init task completing. The activation message
+    must wait on the init task with a bounded timeout so per-language LSP startup failures
+    are surfaced in the message itself, not deferred to the next tool call.
+    """
+
+    _PYTHON_REPO = str(Path(__file__).parent.parent / "resources" / "repos" / "python" / "test_repo")
+
+    def _build_agent(
+        self,
+        create_manager: Callable[[Project], LanguageServerManager],
+    ) -> tuple[SerenaAgent, Project]:
+        # construct a project whose LS manager creation we can script from the test
+        config = SerenaConfig(
+            gui_log_window=False,
+            web_dashboard=False,
+            log_level=logging.ERROR,
+            language_backend=LanguageBackend.LSP,
+        )
+        project = Project(
+            project_root=self._PYTHON_REPO,
+            project_config=ProjectConfig(
+                project_name="race_test",
+                languages=[Language.PYTHON, Language.SCALA],
+                language_backend=LanguageBackend.LSP,
+            ),
+            serena_config=config,
+        )
+        # patch the project's LS manager factory before activation so the backgrounded
+        # init task runs our scripted body instead of spawning real language servers
+        project.create_language_server_manager = types.MethodType(  # type: ignore[method-assign]
+            create_manager, project
+        )
+        config.projects = [RegisteredProject.from_project_instance(project)]
+
+        # constructing with project=None keeps the agent inactive so the test can drive
+        # activation explicitly and observe the message produced by that specific call
+        agent = SerenaAgent(project=None, serena_config=config)
+        return agent, project
+
+    def test_activation_message_surfaces_per_language_failure_after_init_completes(self) -> None:
+        # scripted LS manager creation: sleep briefly so the init task is demonstrably
+        # still running when get_project_activation_message is called, then install a
+        # fake manager whose get_unavailable_languages mimics the Metals-crash case
+        def create_manager(project: Project) -> LanguageServerManager:
+            time.sleep(0.3)
+            fake_manager = MagicMock(spec=LanguageServerManager)
+            fake_manager.get_active_languages.return_value = [Language.PYTHON]
+            fake_manager.get_unavailable_languages.return_value = {
+                Language.SCALA: RuntimeError("metals crashed"),
+            }
+            fake_manager.stop_all.return_value = None
+            project.language_server_manager = fake_manager
+            return fake_manager
+
+        # _activate_project is called directly rather than going through
+        # activate_project_from_path_or_name so that reload_if_changed does not
+        # replace our custom project instance (whose create_language_server_manager
+        # is monkey-patched) with a fresh one rebuilt from the on-disk project.yml
+        agent, project = self._build_agent(create_manager)
+        try:
+            agent._activate_project(project)
+            msg = agent.get_project_activation_message()
+
+            assert "Active language servers: python" in msg
+            assert "Language servers that failed to start" in msg
+            assert "scala: metals crashed" in msg
+        finally:
+            agent.on_shutdown(timeout=5)
+
+    def test_activation_message_falls_back_to_still_initializing_on_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # shrink the bounded wait so the test does not have to sleep 10 seconds to
+        # observe the fallback path; the scripted factory blocks on a gate that is never
+        # released within the patched timeout, guaranteeing wait_until_done times out
+        # and the activation message falls through to the 'still initializing' branch
+        monkeypatch.setattr(agent_module, "LS_MANAGER_INIT_WAIT_SECONDS", 0.1)
+
+        init_gate = threading.Event()
+
+        def create_manager(project: Project) -> LanguageServerManager:
+            init_gate.wait(timeout=5.0)
+            fake_manager = MagicMock(spec=LanguageServerManager)
+            fake_manager.get_active_languages.return_value = []
+            fake_manager.get_unavailable_languages.return_value = {}
+            fake_manager.stop_all.return_value = None
+            project.language_server_manager = fake_manager
+            return fake_manager
+
+        # _activate_project is called directly for the same reason as the companion
+        # test: to keep our custom project instance (with the gated create_language_server_manager)
+        agent, project = self._build_agent(create_manager)
+        try:
+            agent._activate_project(project)
+            msg = agent.get_project_activation_message()
+
+            assert "Language servers are still initializing" in msg
+        finally:
+            # release the gate so the executor thread can finish before on_shutdown
+            init_gate.set()
+            agent.on_shutdown(timeout=5)
