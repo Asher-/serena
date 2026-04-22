@@ -169,6 +169,8 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional):
             If you have some knowledge about the codebase, you should use this parameter, as it will significantly
             speed up the search as well as reduce the number of results.
         :param include_body: whether to include the symbol's source code. Use judiciously.
+            For languages with narrow LSP-reported extents (notably Python variables/constants/fields/properties),
+            the body is widened to the enclosing statement, matching the ``cursor_configure`` body formatting.
         :param include_info: whether to include additional info (hover-like, typically including docstring and signature),
             about the symbol (ignored if include_body is True). Info is never included for child symbols.
             Note: Depending on the language, this can be slow (e.g., C/C++).
@@ -222,6 +224,19 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional):
             )
             for s in symbols
         ]
+
+        # widen body text to the enclosing statement when include_body is set, matching the
+        # statement-level extent that cursor_configure's body formatter exposes; this keeps
+        # FindSymbolTool consumers from receiving narrow LSP-reported identifier-only ranges
+        # for Python variable-like symbols (Variable/Constant/Field/Property).
+        if include_body:
+            from serena.symbol_extent import compute_widened_body_text
+
+            for s, s_dict in zip(symbols, symbol_dicts, strict=True):
+                widened = compute_widened_body_text(s, self.project)
+                if widened is not None:
+                    s_dict["body"] = widened
+
         if not include_body and include_info:
             info_by_symbol = symbol_retriever.request_info_for_symbol_batch(symbols)
             for s, s_dict in zip(symbols, symbol_dicts, strict=True):

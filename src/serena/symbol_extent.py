@@ -16,6 +16,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 
+from serena.project import Project
 from serena.symbol import LanguageServerSymbol, PositionInFile
 from solidlsp.lsp_protocol_handler.lsp_types import SymbolKind
 
@@ -207,3 +208,61 @@ def get_symbol_extent_strategy(relative_path: str) -> SymbolExtentStrategy:
     if ext.lower() in (".py", ".pyi"):
         return PythonSymbolExtentStrategy()
     return IdentitySymbolExtentStrategy()
+
+
+def compute_widened_body_text(symbol: LanguageServerSymbol, project: Project) -> str | None:
+    """
+    Extract the statement-widened body text for ``symbol`` using the active project's file contents.
+
+    Consults the per-language :class:`SymbolExtentStrategy` (via
+    :func:`get_symbol_extent_strategy`) to widen the LSP-reported range to the enclosing
+    statement. The common case is a Python ``Variable``/``Constant``/``Field``/``Property``
+    whose language server reports only the identifier extent; widening recovers the full
+    assignment including multi-line literal values.
+
+    :param symbol: the symbol whose body to widen.
+    :param project: the active project, used to read the current file text.
+    :return: widened body text sliced from the file; ``None`` when widening does not apply
+        (callers should fall back to ``symbol.body``).
+    """
+    # precondition — widening needs an addressable path and LSP body bounds
+    relative_path = symbol.relative_path
+    if relative_path is None:
+        return None
+    lsp_start = symbol.get_body_start_position()
+    lsp_end = symbol.get_body_end_position()
+    if lsp_start is None or lsp_end is None:
+        return None
+
+    # read current file text; widening without file text is impossible
+    try:
+        file_text = project.read_file(relative_path)
+    except OSError as e:
+        log.debug("Could not read %s for body widening: %s", relative_path, e)
+        return None
+
+    # consult the strategy — identity for non-Python, ast-based for Python
+    strategy = get_symbol_extent_strategy(relative_path)
+    wide_start = strategy.get_statement_start_position(symbol, file_text, lsp_start)
+    wide_end = strategy.get_statement_end_position(symbol, file_text, lsp_end)
+
+    # identity-reference shortcut — the strategy returns the same object when no widening
+    # applies, which covers both the IdentitySymbolExtentStrategy and the Python strategy's
+    # fail-safe early returns
+    if wide_start is lsp_start and wide_end is lsp_end:
+        return None
+
+    # slice the widened range out of the file text using line/col bounds;
+    # splitlines(keepends=True) preserves line terminators so multi-line slicing
+    # reconstructs the original text without manual newline handling
+    file_lines = file_text.splitlines(keepends=True)
+    if wide_start.line >= len(file_lines):
+        return ""
+    if wide_start.line == wide_end.line:
+        return file_lines[wide_start.line][wide_start.col:wide_end.col]
+    pieces: list[str] = [file_lines[wide_start.line][wide_start.col:]]
+    for i in range(wide_start.line + 1, min(wide_end.line, len(file_lines))):
+        pieces.append(file_lines[i])
+    if wide_end.line < len(file_lines):
+        pieces.append(file_lines[wide_end.line][:wide_end.col])
+    return "".join(pieces)
