@@ -461,9 +461,12 @@ class ProjectConfig(SharedConfig):
             project_name=data["project_name"],
             languages=languages,
             ignored_paths=data["ignored_paths"],
-            excluded_tools=data["excluded_tools"],
-            fixed_tools=data["fixed_tools"],
-            included_optional_tools=data["included_optional_tools"],
+            # normalise the three tuple-defaulted sequence fields to tuple so that an in-memory
+            # ProjectConfig built from an incomplete yml (where the default () was injected) compares
+            # equal to one reloaded from disk (where ruamel has re-serialised the tuple as a list).
+            excluded_tools=tuple(data["excluded_tools"]),
+            fixed_tools=tuple(data["fixed_tools"]),
+            included_optional_tools=tuple(data["included_optional_tools"]),
             read_only=data["read_only"],
             read_only_memory_patterns=data.get("read_only_memory_patterns", []),
             ignored_memory_patterns=data.get("ignored_memory_patterns", []),

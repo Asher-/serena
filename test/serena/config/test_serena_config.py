@@ -145,6 +145,43 @@ class TestProjectConfig:
         assert is_complete, "Project template YAML is incomplete; all fields must be present (with descriptions)."
 
 
+class TestProjectConfigRoundtripEquality:
+    """Tests that a ProjectConfig loaded from an incomplete yml compares equal to one reloaded
+    after the incomplete-yml re-save has rewritten the file with defaults. Guards against silent
+    divergence between in-memory tuple defaults on sequence fields and their ruamel-serialised
+    list counterparts on disk.
+    """
+
+    def setup_method(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.project_path = Path(self.test_dir)
+        self.serena_config = create_default_serena_config()
+        serena_dir = self.project_path / SERENA_MANAGED_DIR_NAME
+        serena_dir.mkdir(parents=True, exist_ok=True)
+        self.yml_path = serena_dir / ProjectConfig.SERENA_PROJECT_FILE
+
+    def teardown_method(self):
+        shutil.rmtree(self.test_dir)
+
+    def test_minimal_yml_reload_equals_first_load(self):
+        """A minimal hand-written project.yml (only project_name and languages) must produce a
+        ProjectConfig that dataclass-compares equal to one loaded from the now-complete yml
+        that the first load re-wrote to disk.
+        """
+        # minimal yml: only the two FIELDS_WITHOUT_DEFAULTS; every other field will be default-injected
+        self.yml_path.write_text(
+            "project_name: roundtrip_equality\nlanguages:\n  - python\n",
+            encoding="utf-8",
+        )
+
+        # first load triggers the incomplete-yml path and re-saves the yml with all defaults materialised
+        first = ProjectConfig.load(self.project_path, serena_config=self.serena_config)
+        # second load reads the now-complete yml (where ruamel has serialised sequence defaults as YAML lists)
+        second = ProjectConfig.load(self.project_path, serena_config=self.serena_config)
+
+        assert first == second
+
+
 class TestProjectConfigLanguageBackend:
     """Tests for the per-project language_backend field."""
 
@@ -550,20 +587,21 @@ class TestRegisteredProjectReloadIfChanged:
     """
 
     def setup_method(self):
-        # scratch project directory with a complete, template-aligned project.yml (via autogenerate)
-        # so that subsequent loads are stable (no "incomplete yml" re-save path on the first load,
-        # which would otherwise introduce a tuple-vs-list equality artefact on the sequence defaults)
+        # scratch project directory seeded with a minimal hand-written project.yml (only the two
+        # FIELDS_WITHOUT_DEFAULTS) so the very first load goes through the incomplete-yml path:
+        # _load_yaml_dict injects defaults and ProjectConfig.load re-saves a complete yml to disk.
+        # A subsequent reload must then still report "unchanged" — catching regressions of the
+        # tuple-vs-list divergence on Sequence[str] fields whose defaults are ().
         self.test_dir = tempfile.mkdtemp()
         self.project_path = Path(self.test_dir)
         self.serena_config = create_default_serena_config()
-        ProjectConfig.autogenerate(
-            self.project_path,
-            self.serena_config,
-            project_name="reload_test_project",
-            languages=[Language.PYTHON],
-            save_to_disk=True,
+        serena_dir = self.project_path / SERENA_MANAGED_DIR_NAME
+        serena_dir.mkdir(parents=True, exist_ok=True)
+        self.yml_path = serena_dir / ProjectConfig.SERENA_PROJECT_FILE
+        self.yml_path.write_text(
+            "project_name: reload_test_project\nlanguages:\n  - python\n",
+            encoding="utf-8",
         )
-        self.yml_path = self.project_path / SERENA_MANAGED_DIR_NAME / ProjectConfig.SERENA_PROJECT_FILE
         self.registered = RegisteredProject.from_project_root(str(self.project_path), serena_config=self.serena_config)
 
     def teardown_method(self):
