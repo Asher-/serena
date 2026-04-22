@@ -18,6 +18,7 @@ Public entry points:
 
 from __future__ import annotations
 
+import copy
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -821,6 +822,91 @@ class YamlStructuralLanguage(StructuralLanguage):
         # an empty yaml source parses to None under ruamel; use that as the seed
         return _YamlTree(source="", data=None)
 
+    def container_insert_member(
+        self,
+        tree: Any,
+        anchor_or_container_path: str,
+        source: str,
+        position: str = "end",
+    ) -> _YamlTree:
+        # ABC-level shape and arg validation
+        if not isinstance(tree, _YamlTree):
+            raise TypeError(f"tree must be _YamlTree, got {type(tree).__name__}")
+        if position not in {"before", "after", "start", "end"}:
+            raise ValueError(f"invalid position: {position!r}")
+
+        # start/end target the container directly; before/after target a sibling
+        if position in {"start", "end"}:
+            container_path = anchor_or_container_path
+            anchor_segment: str | None = None
+        else:
+            container_path, anchor_segment = _split_member_path_yaml(anchor_or_container_path)
+
+        # deepcopy once, then walk + mutate the live clone so surrounding commentary stays anchored
+        cloned_root = copy.deepcopy(tree.data)
+        container = _resolve_container_yaml(cloned_root, container_path)
+
+        # dispatch on container kind
+        if isinstance(container, CommentedMap | dict):
+            key_str, value = _parse_yaml_member(source)
+            existing_keys = [_stringify_key(k) for k in container]
+            if key_str in existing_keys:
+                raise DeclarationError("pair", f"duplicate key {key_str!r} in mapping")
+            _mapping_insert_yaml_in_place(container, key_str, value, anchor_segment, position)
+        elif isinstance(container, CommentedSeq | list):
+            anchor_index: int | None = None
+            if anchor_segment is not None:
+                anchor_index = _parse_sequence_index_segment_yaml(anchor_segment)
+            value = _parse_yaml_value(source)
+            _sequence_insert_yaml_in_place(container, value, anchor_index, position)
+        else:
+            raise ValueError(
+                f"container at {container_path!r} is not a mapping or sequence",
+            )
+
+        return self.parse(_dump(cloned_root))
+
+    def container_remove_member(self, tree: Any, member_path: str) -> _YamlTree:
+        if not isinstance(tree, _YamlTree):
+            raise TypeError(f"tree must be _YamlTree, got {type(tree).__name__}")
+
+        parent_path, last_segment = _split_member_path_yaml(member_path)
+        cloned_root = copy.deepcopy(tree.data)
+        container = _resolve_container_yaml(cloned_root, parent_path)
+
+        if isinstance(container, CommentedMap | dict):
+            _mapping_remove_yaml_in_place(container, last_segment)
+        elif isinstance(container, CommentedSeq | list):
+            idx = _parse_sequence_index_segment_yaml(last_segment)
+            _sequence_remove_yaml_in_place(container, idx)
+        else:
+            raise ValueError(
+                f"container at {parent_path!r} is not a mapping or sequence",
+            )
+
+        return self.parse(_dump(cloned_root))
+
+    def container_replace_member(self, tree: Any, member_path: str, source: str) -> _YamlTree:
+        if not isinstance(tree, _YamlTree):
+            raise TypeError(f"tree must be _YamlTree, got {type(tree).__name__}")
+
+        parent_path, last_segment = _split_member_path_yaml(member_path)
+        cloned_root = copy.deepcopy(tree.data)
+        container = _resolve_container_yaml(cloned_root, parent_path)
+        new_value = _parse_yaml_value(source)
+
+        if isinstance(container, CommentedMap | dict):
+            _mapping_replace_yaml_in_place(container, last_segment, new_value)
+        elif isinstance(container, CommentedSeq | list):
+            idx = _parse_sequence_index_segment_yaml(last_segment)
+            _sequence_replace_yaml_in_place(container, idx, new_value)
+        else:
+            raise ValueError(
+                f"container at {parent_path!r} is not a mapping or sequence",
+            )
+
+        return self.parse(_dump(cloned_root))
+
 
 # --------------------------------------------------------------------------- #
 # Mutation helpers
@@ -970,6 +1056,243 @@ def _locate_by_path(original: Any, cloned: Any, target: Any) -> Any:
                 return found
         return None
     return None
+
+
+# -----------------------------------------------------------------------------
+# Path-based container-member helpers
+#
+# these power the L3 container_insert_member / container_remove_member /
+# container_replace_member ABC methods on YamlStructuralLanguage. strategy
+# is the same as the TOML backend: deepcopy the root once, walk the
+# slash-separated name-path to the target container inside the clone, then
+# mutate that container in place. ruamel.yaml CommentedMap / CommentedSeq
+# preserve comments and layout across edits as long as we manipulate the
+# live nodes rather than rebuilding.
+# -----------------------------------------------------------------------------
+
+
+def _split_member_path_yaml(member_path: str) -> tuple[str, str]:
+    """Split a member path on its last ``/``.
+
+    ``"foo/bar/baz"`` -> ``("foo/bar", "baz")``. A path with no ``/`` is
+    returned as ``("", member_path)`` -- the member is a direct child of
+    the document root.
+    """
+    slash_idx = member_path.rfind("/")
+    if slash_idx < 0:
+        return "", member_path
+    return member_path[:slash_idx], member_path[slash_idx + 1 :]
+
+
+def _parse_sequence_index_segment_yaml(segment: str) -> int:
+    """Parse a ``[N]`` bracket segment into its integer index.
+
+    :raises ValueError: if ``segment`` is not of the form ``[N]`` or ``N``
+        is not a valid integer.
+    """
+    if not (segment.startswith("[") and segment.endswith("]")):
+        raise ValueError(f"sequence segment must be [N], got {segment!r}")
+    try:
+        return int(segment[1:-1])
+    except ValueError as err:
+        raise ValueError(f"invalid sequence index in segment {segment!r}") from err
+
+
+def _resolve_node_by_path_yaml(root: Any, path: str) -> Any:
+    """Walk ``root`` along ``path`` and return the terminal node.
+
+    Mapping-key segments descend into the mapping's VALUE for that key
+    (matching :func:`walk_symbols`). Bracketed segments are sequence
+    indices.
+
+    :raises ValueError: on empty path, type mismatches, or unresolvable
+        segments.
+    """
+    if not path:
+        raise ValueError("empty path does not resolve to a node")
+    node: Any = root
+    for segment in path.split("/"):
+        if segment.startswith("[") and segment.endswith("]"):
+            # sequence-index descent
+            if not isinstance(node, CommentedSeq | list):
+                raise ValueError(
+                    f"segment {segment!r} expects a sequence, got {type(node).__name__}",
+                )
+            idx = _parse_sequence_index_segment_yaml(segment)
+            if idx < 0 or idx >= len(node):
+                raise ValueError(
+                    f"sequence index {idx} out of range for segment {segment!r}",
+                )
+            node = node[idx]
+        else:
+            # mapping-key descent
+            if not isinstance(node, CommentedMap | dict):
+                raise ValueError(
+                    f"segment {segment!r} expects a mapping, got {type(node).__name__}",
+                )
+            match_key = None
+            for k in node:
+                if _stringify_key(k) == segment:
+                    match_key = k
+                    break
+            if match_key is None:
+                raise ValueError(f"mapping has no key {segment!r}")
+            node = node[match_key]
+    return node
+
+
+def _resolve_container_yaml(root: Any, container_path: str) -> Any:
+    """Resolve ``container_path`` against ``root``, requiring a container node.
+
+    Empty path returns ``root`` itself. Any non-empty path must land on a
+    :class:`CommentedMap` / :class:`dict` or on a :class:`CommentedSeq` /
+    :class:`list`.
+    """
+    if not container_path:
+        return root
+    node = _resolve_node_by_path_yaml(root, container_path)
+    if isinstance(node, CommentedMap | dict | CommentedSeq | list):
+        return node
+    raise ValueError(
+        f"path {container_path!r} does not resolve to a YAML container",
+    )
+
+
+def _parse_yaml_member(source: str) -> tuple[str, Any]:
+    """Parse a single ``key: value`` pair and return ``(key_str, value)``.
+
+    YAML parses a pair fragment into a one-entry mapping; this helper
+    insists on exactly one entry and returns its key/value.
+    """
+    data = _load(source)
+    if not isinstance(data, CommentedMap | dict):
+        raise ParseError(
+            language_key="yaml",
+            source_preview=source[:240],
+            detail="member source must be a key: value pair",
+        )
+    if len(data) != 1:
+        raise ParseError(
+            language_key="yaml",
+            source_preview=source[:240],
+            detail=f"member source must contain exactly one pair, got {len(data)}",
+        )
+    for k, v in data.items():
+        return _stringify_key(k), v
+    # unreachable given the len check above
+    raise ParseError(
+        language_key="yaml",
+        source_preview=source[:240],
+        detail="empty member source",
+    )
+
+
+def _parse_yaml_value(source: str) -> Any:
+    """Parse a bare YAML value expression (for sequence items or replacement RHS)."""
+    return _load(source)
+
+
+def _mapping_insert_yaml_in_place(
+    mapping: Any,
+    key_str: str,
+    value: Any,
+    anchor_key: str | None,
+    position: str,
+) -> None:
+    """Splice a ``(key, value)`` pair into ``mapping`` at ``position`` in place.
+
+    :class:`CommentedMap` exposes an ``insert(pos, key, value)`` method
+    that preserves surrounding commentary; we use it for all four
+    positions. Plain ``dict`` (YAML-safe fallback) also supports
+    positional insertion via a rebuild, but in the round-trip engine the
+    root is always :class:`CommentedMap`.
+    """
+    if position == "start":
+        mapping.insert(0, key_str, value)
+        return
+    if position == "end":
+        # len() on CommentedMap returns the member count; inserting at the
+        # end places the new pair after every existing pair
+        mapping.insert(len(mapping), key_str, value)
+        return
+    if anchor_key is None:
+        raise ValueError(f"position {position!r} requires an anchor")
+    idx = _find_mapping_key_index(mapping, anchor_key)
+    if idx is None:
+        raise ValueError(f"anchor key {anchor_key!r} not found in mapping")
+    if position == "before":
+        mapping.insert(idx, key_str, value)
+    else:  # after
+        mapping.insert(idx + 1, key_str, value)
+
+
+def _find_mapping_key_index(mapping: Any, key_str: str) -> int | None:
+    """Return the positional index of ``key_str`` in ``mapping``'s iteration order, or ``None``."""
+    for i, k in enumerate(mapping):
+        if _stringify_key(k) == key_str:
+            return i
+    return None
+
+
+def _mapping_remove_yaml_in_place(mapping: Any, key_str: str) -> None:
+    """Delete the entry keyed by ``key_str`` from ``mapping``."""
+    target_key = None
+    for k in mapping:
+        if _stringify_key(k) == key_str:
+            target_key = k
+            break
+    if target_key is None:
+        raise ValueError(f"key {key_str!r} not found in mapping")
+    del mapping[target_key]
+
+
+def _mapping_replace_yaml_in_place(mapping: Any, key_str: str, new_value: Any) -> None:
+    """Replace the value of the entry keyed by ``key_str``, preserving key identity and position."""
+    target_key = None
+    for k in mapping:
+        if _stringify_key(k) == key_str:
+            target_key = k
+            break
+    if target_key is None:
+        raise ValueError(f"key {key_str!r} not found in mapping")
+    mapping[target_key] = new_value
+
+
+def _sequence_insert_yaml_in_place(
+    sequence: Any,
+    value: Any,
+    anchor_index: int | None,
+    position: str,
+) -> None:
+    """Insert ``value`` into a :class:`CommentedSeq` / :class:`list` at ``position`` in place."""
+    if position == "start":
+        sequence.insert(0, value)
+        return
+    if position == "end":
+        sequence.append(value)
+        return
+    if anchor_index is None:
+        raise ValueError(f"position {position!r} requires an anchor")
+    if anchor_index < 0 or anchor_index >= len(sequence):
+        raise ValueError(f"anchor index {anchor_index} out of range")
+    if position == "before":
+        sequence.insert(anchor_index, value)
+    else:  # after
+        sequence.insert(anchor_index + 1, value)
+
+
+def _sequence_remove_yaml_in_place(sequence: Any, index: int) -> None:
+    """Remove the item at ``index`` from ``sequence``."""
+    if index < 0 or index >= len(sequence):
+        raise ValueError(f"sequence index {index} out of range")
+    del sequence[index]
+
+
+def _sequence_replace_yaml_in_place(sequence: Any, index: int, new_value: Any) -> None:
+    """Replace the item at ``index`` in ``sequence`` with ``new_value``."""
+    if index < 0 or index >= len(sequence):
+        raise ValueError(f"sequence index {index} out of range")
+    sequence[index] = new_value
 
 
 __all__ = [

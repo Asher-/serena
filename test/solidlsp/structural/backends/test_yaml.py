@@ -418,6 +418,161 @@ class TestRemoveChild:
             backend.remove_child(tree, (object(), "not-a-key"))
 
 
+
+class TestContainerInsertMember:
+    """L3 path-based insertion into YAML mappings and sequences.
+
+    Exercises :meth:`YamlStructuralLanguage.container_insert_member`. Paths
+    are slash-separated; mapping segments are bare keys, sequence segments
+    are ``[N]``. ``position="start"/"end"`` targets the container at
+    ``anchor_or_container_path``; ``"before"/"after"`` targets the named
+    sibling member instead.
+    """
+
+    def test_insert_end_root_mapping(self) -> None:
+        backend = YamlStructuralLanguage()
+        tree = backend.parse("a: 1\nb: 2\n")
+        out = backend.container_insert_member(tree, "", "c: 3", position="end")
+        assert backend.serialize(out) == "a: 1\nb: 2\nc: 3\n"
+
+    def test_insert_start_root_mapping(self) -> None:
+        backend = YamlStructuralLanguage()
+        tree = backend.parse("a: 1\nb: 2\n")
+        out = backend.container_insert_member(tree, "", "z: 0", position="start")
+        assert backend.serialize(out) == "z: 0\na: 1\nb: 2\n"
+
+    def test_insert_before_anchor(self) -> None:
+        backend = YamlStructuralLanguage()
+        tree = backend.parse("a: 1\nb: 2\n")
+        out = backend.container_insert_member(tree, "b", "mid: 99", position="before")
+        assert backend.serialize(out) == "a: 1\nmid: 99\nb: 2\n"
+
+    def test_insert_after_anchor(self) -> None:
+        backend = YamlStructuralLanguage()
+        tree = backend.parse("a: 1\nb: 2\n")
+        out = backend.container_insert_member(tree, "a", "mid: 99", position="after")
+        assert backend.serialize(out) == "a: 1\nmid: 99\nb: 2\n"
+
+    def test_insert_into_nested_mapping(self) -> None:
+        backend = YamlStructuralLanguage()
+        tree = backend.parse("pkg:\n  name: hi\n  version: \"1\"\n")
+        out = backend.container_insert_member(tree, "pkg", "author: me", position="end")
+        assert (
+            backend.serialize(out)
+            == "pkg:\n  name: hi\n  version: \"1\"\n  author: me\n"
+        )
+
+    def test_insert_into_block_sequence_end(self) -> None:
+        backend = YamlStructuralLanguage()
+        tree = backend.parse("xs:\n  - 1\n  - 2\n  - 3\n")
+        out = backend.container_insert_member(tree, "xs", "4", position="end")
+        assert backend.serialize(out) == "xs:\n  - 1\n  - 2\n  - 3\n  - 4\n"
+
+    def test_insert_into_sequence_before_index(self) -> None:
+        backend = YamlStructuralLanguage()
+        tree = backend.parse("xs:\n  - 1\n  - 2\n  - 3\n")
+        out = backend.container_insert_member(tree, "xs/[1]", "99", position="before")
+        assert backend.serialize(out) == "xs:\n  - 1\n  - 99\n  - 2\n  - 3\n"
+
+    def test_insert_into_flow_sequence(self) -> None:
+        # flow-style sequences round-trip differently from block-style; the
+        # backend supports both as long as ruamel's dump agrees with the
+        # original layout
+        backend = YamlStructuralLanguage()
+        tree = backend.parse("xs: [1, 2, 3]\n")
+        out = backend.container_insert_member(tree, "xs", "4", position="end")
+        assert backend.serialize(out) == "xs: [1, 2, 3, 4]\n"
+
+    def test_insert_rejects_non_tree(self) -> None:
+        backend = YamlStructuralLanguage()
+        with pytest.raises(TypeError):
+            backend.container_insert_member("not a tree", "", "a: 1")  # type: ignore[arg-type]
+
+    def test_insert_rejects_invalid_position(self) -> None:
+        backend = YamlStructuralLanguage()
+        tree = backend.parse("a: 1\n")
+        with pytest.raises(ValueError):
+            backend.container_insert_member(tree, "", "b: 2", position="middle")
+
+    def test_insert_rejects_duplicate_key(self) -> None:
+        backend = YamlStructuralLanguage()
+        tree = backend.parse("a: 1\n")
+        with pytest.raises(DeclarationError):
+            backend.container_insert_member(tree, "", "a: 2", position="end")
+
+    def test_insert_rejects_missing_anchor(self) -> None:
+        backend = YamlStructuralLanguage()
+        tree = backend.parse("a: 1\n")
+        with pytest.raises(ValueError):
+            backend.container_insert_member(tree, "missing", "b: 2", position="before")
+
+
+class TestContainerRemoveMember:
+    """L3 path-based removal from YAML mappings and sequences."""
+
+    def test_remove_from_root_mapping(self) -> None:
+        backend = YamlStructuralLanguage()
+        tree = backend.parse("a: 1\nb: 2\nc: 3\n")
+        out = backend.container_remove_member(tree, "b")
+        assert backend.serialize(out) == "a: 1\nc: 3\n"
+
+    def test_remove_from_nested_mapping(self) -> None:
+        backend = YamlStructuralLanguage()
+        tree = backend.parse("pkg:\n  name: hi\n  version: \"1\"\n")
+        out = backend.container_remove_member(tree, "pkg/version")
+        assert backend.serialize(out) == "pkg:\n  name: hi\n"
+
+    def test_remove_from_block_sequence(self) -> None:
+        backend = YamlStructuralLanguage()
+        tree = backend.parse("xs:\n  - 1\n  - 2\n  - 3\n")
+        out = backend.container_remove_member(tree, "xs/[1]")
+        assert backend.serialize(out) == "xs:\n  - 1\n  - 3\n"
+
+    def test_remove_rejects_non_tree(self) -> None:
+        backend = YamlStructuralLanguage()
+        with pytest.raises(TypeError):
+            backend.container_remove_member("not a tree", "a")  # type: ignore[arg-type]
+
+    def test_remove_rejects_missing_key(self) -> None:
+        backend = YamlStructuralLanguage()
+        tree = backend.parse("a: 1\n")
+        with pytest.raises(ValueError):
+            backend.container_remove_member(tree, "nonexistent")
+
+
+class TestContainerReplaceMember:
+    """L3 path-based value replacement for YAML mapping entries and sequence items."""
+
+    def test_replace_root_mapping_value(self) -> None:
+        backend = YamlStructuralLanguage()
+        tree = backend.parse("a: 1\nb: 2\n")
+        out = backend.container_replace_member(tree, "a", "99")
+        assert backend.serialize(out) == "a: 99\nb: 2\n"
+
+    def test_replace_nested_mapping_value(self) -> None:
+        backend = YamlStructuralLanguage()
+        tree = backend.parse("pkg:\n  name: hi\n  version: \"1\"\n")
+        out = backend.container_replace_member(tree, "pkg/name", "bye")
+        assert backend.serialize(out) == "pkg:\n  name: bye\n  version: \"1\"\n"
+
+    def test_replace_sequence_item(self) -> None:
+        backend = YamlStructuralLanguage()
+        tree = backend.parse("xs:\n  - 1\n  - 2\n  - 3\n")
+        out = backend.container_replace_member(tree, "xs/[1]", "99")
+        assert backend.serialize(out) == "xs:\n  - 1\n  - 99\n  - 3\n"
+
+    def test_replace_rejects_non_tree(self) -> None:
+        backend = YamlStructuralLanguage()
+        with pytest.raises(TypeError):
+            backend.container_replace_member("not a tree", "a", "1")  # type: ignore[arg-type]
+
+    def test_replace_rejects_missing_key(self) -> None:
+        backend = YamlStructuralLanguage()
+        tree = backend.parse("a: 1\n")
+        with pytest.raises(ValueError):
+            backend.container_replace_member(tree, "missing", "99")
+
+
 # =============================================================================
 # Empty source
 # =============================================================================
