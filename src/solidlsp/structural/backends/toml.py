@@ -838,6 +838,91 @@ class TomlStructuralLanguage(StructuralLanguage):
             raise DeclarationError(source_kind, f"toml has no source kind {source_kind!r}")
         return _TomlTree(source="", data=tomlkit.document())
 
+    def container_insert_member(
+        self,
+        tree: Any,
+        anchor_or_container_path: str,
+        source: str,
+        position: str = "end",
+    ) -> _TomlTree:
+        # ABC-level shape and arg validation
+        if not isinstance(tree, _TomlTree):
+            raise TypeError(f"tree must be _TomlTree, got {type(tree).__name__}")
+        if position not in {"before", "after", "start", "end"}:
+            raise ValueError(f"invalid position: {position!r}")
+
+        # start/end target the container directly; before/after target a sibling
+        if position in {"start", "end"}:
+            container_path = anchor_or_container_path
+            anchor_segment: str | None = None
+        else:
+            container_path, anchor_segment = _split_member_path_toml(anchor_or_container_path)
+
+        # deepcopy once, then walk + mutate in place so surrounding comments stay anchored
+        cloned_root = copy.deepcopy(tree.data)
+        container = _resolve_container_toml(cloned_root, container_path)
+
+        # dispatch on container kind
+        if _is_mapping_like(container):
+            key_str, value = _parse_toml_member(source)
+            existing_keys = [_stringify_key(k) for k in container.keys()]
+            if key_str in existing_keys:
+                raise DeclarationError("pair", f"duplicate key {key_str!r} in mapping")
+            _mapping_insert_in_place(container, key_str, value, anchor_segment, position)
+        elif isinstance(container, AoT | Array):
+            anchor_index: int | None = None
+            if anchor_segment is not None:
+                anchor_index = _parse_sequence_index_segment(anchor_segment)
+            value = _parse_toml_value(source)
+            _sequence_insert_in_place(container, value, anchor_index, position)
+        else:
+            raise ValueError(
+                f"container at {container_path!r} is not a mapping or sequence",
+            )
+
+        return self.parse(_dump(cloned_root))
+
+    def container_remove_member(self, tree: Any, member_path: str) -> _TomlTree:
+        if not isinstance(tree, _TomlTree):
+            raise TypeError(f"tree must be _TomlTree, got {type(tree).__name__}")
+
+        parent_path, last_segment = _split_member_path_toml(member_path)
+        cloned_root = copy.deepcopy(tree.data)
+        container = _resolve_container_toml(cloned_root, parent_path)
+
+        if _is_mapping_like(container):
+            _mapping_remove_in_place(container, last_segment)
+        elif isinstance(container, AoT | Array):
+            idx = _parse_sequence_index_segment(last_segment)
+            _sequence_remove_in_place(container, idx)
+        else:
+            raise ValueError(
+                f"container at {parent_path!r} is not a mapping or sequence",
+            )
+
+        return self.parse(_dump(cloned_root))
+
+    def container_replace_member(self, tree: Any, member_path: str, source: str) -> _TomlTree:
+        if not isinstance(tree, _TomlTree):
+            raise TypeError(f"tree must be _TomlTree, got {type(tree).__name__}")
+
+        parent_path, last_segment = _split_member_path_toml(member_path)
+        cloned_root = copy.deepcopy(tree.data)
+        container = _resolve_container_toml(cloned_root, parent_path)
+        new_value = _parse_toml_value(source)
+
+        if _is_mapping_like(container):
+            _mapping_replace_value_in_place(container, last_segment, new_value)
+        elif isinstance(container, AoT | Array):
+            idx = _parse_sequence_index_segment(last_segment)
+            _sequence_replace_in_place(container, idx, new_value)
+        else:
+            raise ValueError(
+                f"container at {parent_path!r} is not a mapping or sequence",
+            )
+
+        return self.parse(_dump(cloned_root))
+
 
 # --------------------------------------------------------------------------- #
 # Mutation helpers
@@ -990,6 +1075,275 @@ def _locate_by_path(original: Any, cloned: Any, target: Any) -> Any:
                 return found
         return None
     return None
+
+
+# -----------------------------------------------------------------------------
+# Path-based container-member helpers
+#
+# these power the L3 container_insert_member / container_remove_member /
+# container_replace_member ABC methods on TomlStructuralLanguage. the edit
+# strategy is: deepcopy the root once, walk the slash-separated name-path to
+# the target container inside the clone, then mutate that container in place
+# (so surrounding trivia / comments stay anchored in place relative to their
+# original neighbors). the re-dumped clone is then re-parsed by the backend,
+# giving a fresh _TomlTree with a round-tripped source.
+# -----------------------------------------------------------------------------
+
+
+def _split_member_path_toml(member_path: str) -> tuple[str, str]:
+    """Split a member path on its last ``/``.
+
+    ``"foo/bar/baz"`` -> ``("foo/bar", "baz")``. A path with no ``/`` is
+    returned as ``("", member_path)`` -- the member is a direct child of
+    the document root.
+    """
+    slash_idx = member_path.rfind("/")
+    if slash_idx < 0:
+        return "", member_path
+    return member_path[:slash_idx], member_path[slash_idx + 1 :]
+
+
+def _parse_sequence_index_segment(segment: str) -> int:
+    """Parse a ``[N]`` bracket segment into its integer index.
+
+    :raises ValueError: if ``segment`` is not of the form ``[N]`` or ``N``
+        is not a valid integer.
+    """
+    if not (segment.startswith("[") and segment.endswith("]")):
+        raise ValueError(f"sequence segment must be [N], got {segment!r}")
+    try:
+        return int(segment[1:-1])
+    except ValueError as err:
+        raise ValueError(f"invalid sequence index in segment {segment!r}") from err
+
+
+def _resolve_node_by_path_toml(root: Any, path: str) -> Any:
+    """Walk ``root`` along ``path`` and return the terminal node.
+
+    Mapping-key segments descend into the mapping's VALUE for that key
+    (matching what :func:`walk_symbols` exposes for a pair entry's
+    name-path). Bracketed segments are array / AoT indices.
+
+    :raises ValueError: on empty path, type mismatches, or unresolvable
+        segments.
+    """
+    if not path:
+        raise ValueError("empty path does not resolve to a node")
+    node: Any = root
+    for segment in path.split("/"):
+        if segment.startswith("[") and segment.endswith("]"):
+            # sequence-index descent
+            if not isinstance(node, AoT | Array):
+                raise ValueError(
+                    f"segment {segment!r} expects AoT/Array, got {type(node).__name__}",
+                )
+            idx = _parse_sequence_index_segment(segment)
+            if idx < 0 or idx >= len(node):
+                raise ValueError(
+                    f"sequence index {idx} out of range for segment {segment!r}",
+                )
+            node = node[idx]
+        else:
+            # mapping-key descent
+            if not _is_mapping_like(node):
+                raise ValueError(
+                    f"segment {segment!r} expects a mapping, got {type(node).__name__}",
+                )
+            match_key = None
+            for k in node.keys():
+                if _stringify_key(k) == segment:
+                    match_key = k
+                    break
+            if match_key is None:
+                raise ValueError(f"mapping has no key {segment!r}")
+            node = node[match_key]
+    return node
+
+
+def _resolve_container_toml(root: Any, container_path: str) -> Any:
+    """Resolve ``container_path`` against ``root``, requiring a container node.
+
+    Empty path returns ``root`` itself. Any non-empty path must land on a
+    mapping-like node (:class:`TOMLDocument` / :class:`Container` /
+    :class:`Table` / :class:`InlineTable`) or on a sequence-like node
+    (:class:`AoT` / :class:`Array`).
+    """
+    if not container_path:
+        return root
+    node = _resolve_node_by_path_toml(root, container_path)
+    if _is_mapping_like(node) or isinstance(node, AoT | Array):
+        return node
+    raise ValueError(
+        f"path {container_path!r} does not resolve to a TOML container",
+    )
+
+
+def _parse_toml_member(source: str) -> tuple[str, Any]:
+    """Parse a mapping-member fragment like ``key = value`` and return ``(key, value)``.
+
+    Extra leading whitespace / comments in ``source`` are tolerated; the
+    first keyed body entry is returned.
+    """
+    try:
+        doc = _load(source)
+    except TOMLKitError as err:
+        raise ParseError(
+            language_key="toml",
+            source_preview=source[:240],
+            detail=str(err),
+        ) from err
+    for key, value in doc.body:
+        if key is not None:
+            return _stringify_key(key), value
+    raise ParseError(
+        language_key="toml",
+        source_preview=source[:240],
+        detail="member source has no key/value pair",
+    )
+
+
+def _parse_toml_value(source: str) -> Any:
+    """Parse a bare value expression into a tomlkit value node.
+
+    tomlkit has no public "parse value" entry point, so ``source`` is
+    wrapped as the RHS of a throwaway assignment and the parsed value is
+    extracted.
+    """
+    wrapped = f"_structural_value = {source}"
+    try:
+        doc = _load(wrapped)
+    except TOMLKitError as err:
+        raise ParseError(
+            language_key="toml",
+            source_preview=source[:240],
+            detail=str(err),
+        ) from err
+    for key, value in doc.body:
+        if key is not None:
+            return value
+    raise ParseError(
+        language_key="toml",
+        source_preview=source[:240],
+        detail="value source did not yield a value",
+    )
+
+
+def _mapping_insert_in_place(
+    mapping: Any,
+    key_str: str,
+    value: Any,
+    anchor_key: str | None,
+    position: str,
+) -> None:
+    """Splice a ``(key, value)`` pair into ``mapping``'s body list in place.
+
+    Direct body-list manipulation keeps surrounding trivia / comments
+    anchored in place rather than being re-emitted by tomlkit at the end
+    of the container. For block-level mapping contexts (the common case
+    for ``[table]`` and root-level documents) the value must carry a
+    trailing ``\\n`` in its trivia; otherwise the re-dumped pair runs
+    into its successor on the same line and becomes malformed.
+    """
+    body = _body_of(mapping)
+    _ensure_block_trailing_newline(value)
+    new_pair = (SingleKey(key_str), value)
+
+    if position == "start":
+        body.insert(0, new_pair)
+        return
+    if position == "end":
+        # insert right after the last non-container keyed entry so the new
+        # pair doesn't get swallowed by a trailing [table] / [[aot]] scope
+        body.insert(_end_insertion_index(body), new_pair)
+        return
+    if anchor_key is None:
+        raise ValueError(f"position {position!r} requires an anchor")
+    idx = _keyed_body_index(body, anchor_key)
+    if idx is None:
+        raise ValueError(f"anchor key {anchor_key!r} not found in mapping")
+    if position == "before":
+        body.insert(idx, new_pair)
+    else:  # after
+        body.insert(idx + 1, new_pair)
+
+
+def _ensure_block_trailing_newline(value: Any) -> None:
+    """Ensure ``value``'s trivia ends with ``\\n`` so a block-level pair dumps cleanly.
+
+    tomlkit items parsed from ``key = 42`` (without a trailing newline)
+    come back with empty trivia. When such an item is spliced into a
+    block-level body list, the dumped output has the next pair running
+    onto the same line. Setting the trailing newline restores the
+    expected line-per-pair layout.
+    """
+    if hasattr(value, "trivia") and not value.trivia.trail.endswith("\n"):
+        value.trivia.trail = value.trivia.trail + "\n"
+
+
+def _mapping_remove_in_place(mapping: Any, key_str: str) -> None:
+    """Delete the entry keyed by ``key_str`` from ``mapping``."""
+    target_key = None
+    for k in mapping.keys():
+        if _stringify_key(k) == key_str:
+            target_key = k
+            break
+    if target_key is None:
+        raise ValueError(f"key {key_str!r} not found in mapping")
+    del mapping[target_key]
+
+
+def _mapping_replace_value_in_place(mapping: Any, key_str: str, new_value: Any) -> None:
+    """Replace the value of the entry keyed by ``key_str``, preserving key identity and position.
+
+    The old value's trailing trivia (typically a ``\\n`` for block-level
+    pairs) is copied onto the new value, so replacing a pair inside a
+    ``[table]`` does not collapse the following pair onto the same line.
+    """
+    body = _body_of(mapping)
+    for i, (k, old_v) in enumerate(body):
+        if k is not None and _stringify_key(k) == key_str:
+            if hasattr(old_v, "trivia") and hasattr(new_value, "trivia"):
+                new_value.trivia.trail = old_v.trivia.trail
+            body[i] = (k, new_value)
+            return
+    raise ValueError(f"key {key_str!r} not found in mapping")
+
+
+def _sequence_insert_in_place(
+    sequence: Any,
+    value: Any,
+    anchor_index: int | None,
+    position: str,
+) -> None:
+    """Insert ``value`` into an :class:`AoT` / :class:`Array` at ``position`` in place."""
+    if position == "start":
+        sequence.insert(0, value)
+        return
+    if position == "end":
+        sequence.append(value)
+        return
+    if anchor_index is None:
+        raise ValueError(f"position {position!r} requires an anchor")
+    if anchor_index < 0 or anchor_index >= len(sequence):
+        raise ValueError(f"anchor index {anchor_index} out of range")
+    if position == "before":
+        sequence.insert(anchor_index, value)
+    else:  # after
+        sequence.insert(anchor_index + 1, value)
+
+
+def _sequence_remove_in_place(sequence: Any, index: int) -> None:
+    """Remove the item at ``index`` from ``sequence``."""
+    if index < 0 or index >= len(sequence):
+        raise ValueError(f"sequence index {index} out of range")
+    del sequence[index]
+
+
+def _sequence_replace_in_place(sequence: Any, index: int, new_value: Any) -> None:
+    """Replace the item at ``index`` in ``sequence`` with ``new_value``."""
+    if index < 0 or index >= len(sequence):
+        raise ValueError(f"sequence index {index} out of range")
+    sequence[index] = new_value
 
 
 __all__ = [

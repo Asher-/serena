@@ -469,6 +469,184 @@ class TestRemoveChild:
             backend.remove_child(tree, (object(), "not-a-key"))
 
 
+
+class TestContainerInsertMember:
+    """L3 path-based insertion into mappings and sequences.
+
+    Exercises :meth:`TomlStructuralLanguage.container_insert_member`. Paths
+    are slash-separated; mapping segments are bare keys, sequence segments
+    are ``[N]``. ``position="start"/"end"`` targets the container at
+    ``anchor_or_container_path``; ``"before"/"after"`` targets the named
+    sibling member instead.
+    """
+
+    def test_insert_end_root_mapping(self) -> None:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("a = 1\nb = 2\n")
+        out = backend.container_insert_member(tree, "", "c = 3", position="end")
+        assert backend.serialize(out) == "a = 1\nb = 2\nc = 3\n"
+
+    def test_insert_start_root_mapping(self) -> None:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("a = 1\nb = 2\n")
+        out = backend.container_insert_member(tree, "", "z = 0", position="start")
+        assert backend.serialize(out) == "z = 0\na = 1\nb = 2\n"
+
+    def test_insert_before_anchor(self) -> None:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("a = 1\nb = 2\n")
+        out = backend.container_insert_member(tree, "b", "mid = 99", position="before")
+        assert backend.serialize(out) == "a = 1\nmid = 99\nb = 2\n"
+
+    def test_insert_after_anchor(self) -> None:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("a = 1\nb = 2\n")
+        out = backend.container_insert_member(tree, "a", "mid = 99", position="after")
+        assert backend.serialize(out) == "a = 1\nmid = 99\nb = 2\n"
+
+    def test_insert_into_nested_table(self) -> None:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("[pkg]\nname = \"hi\"\nversion = \"1\"\n")
+        out = backend.container_insert_member(tree, "pkg", "author = \"me\"", position="end")
+        assert (
+            backend.serialize(out)
+            == "[pkg]\nname = \"hi\"\nversion = \"1\"\nauthor = \"me\"\n"
+        )
+
+    def test_insert_after_anchor_in_deep_table(self) -> None:
+        # canonical-ish repro: deep [tool.x] with a multi-line body, insert
+        # a new pair between two existing ones; surrounding pairs and the
+        # table header must be untouched
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("[tool.x]\nfirst = 1\nsecond = 2\nthird = 3\n")
+        out = backend.container_insert_member(
+            tree, "tool/x/second", "between = 99", position="after",
+        )
+        assert (
+            backend.serialize(out)
+            == "[tool.x]\nfirst = 1\nsecond = 2\nbetween = 99\nthird = 3\n"
+        )
+
+    def test_insert_into_inline_array_end(self) -> None:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("xs = [1, 2, 3]\n")
+        out = backend.container_insert_member(tree, "xs", "4", position="end")
+        assert backend.serialize(out) == "xs = [1, 2, 3, 4]\n"
+
+    def test_insert_into_inline_array_before_index(self) -> None:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("xs = [1, 2, 3]\n")
+        out = backend.container_insert_member(tree, "xs/[1]", "99", position="before")
+        assert backend.serialize(out) == "xs = [1, 99, 2, 3]\n"
+
+    def test_insert_rejects_non_tree(self) -> None:
+        backend = TomlStructuralLanguage()
+        with pytest.raises(TypeError):
+            backend.container_insert_member("not a tree", "", "a = 1")  # type: ignore[arg-type]
+
+    def test_insert_rejects_invalid_position(self) -> None:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("a = 1\n")
+        with pytest.raises(ValueError):
+            backend.container_insert_member(tree, "", "b = 2", position="middle")
+
+    def test_insert_rejects_duplicate_key(self) -> None:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("a = 1\n")
+        with pytest.raises(DeclarationError):
+            backend.container_insert_member(tree, "", "a = 2", position="end")
+
+    def test_insert_rejects_missing_anchor(self) -> None:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("a = 1\n")
+        with pytest.raises(ValueError):
+            backend.container_insert_member(tree, "missing", "b = 2", position="before")
+
+    def test_insert_rejects_malformed_member_source(self) -> None:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("a = 1\n")
+        with pytest.raises(ParseError):
+            backend.container_insert_member(tree, "", "not even a pair!", position="end")
+
+
+class TestContainerRemoveMember:
+    """L3 path-based removal from mappings and sequences."""
+
+    def test_remove_from_root_mapping(self) -> None:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("a = 1\nb = 2\nc = 3\n")
+        out = backend.container_remove_member(tree, "b")
+        assert backend.serialize(out) == "a = 1\nc = 3\n"
+
+    def test_remove_from_nested_table(self) -> None:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("[pkg]\nname = \"hi\"\nversion = \"1\"\n")
+        out = backend.container_remove_member(tree, "pkg/version")
+        assert backend.serialize(out) == "[pkg]\nname = \"hi\"\n"
+
+    def test_remove_from_inline_array(self) -> None:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("xs = [1, 2, 3]\n")
+        out = backend.container_remove_member(tree, "xs/[1]")
+        assert backend.serialize(out) == "xs = [1, 3]\n"
+
+    def test_remove_rejects_non_tree(self) -> None:
+        backend = TomlStructuralLanguage()
+        with pytest.raises(TypeError):
+            backend.container_remove_member("not a tree", "a")  # type: ignore[arg-type]
+
+    def test_remove_rejects_missing_key(self) -> None:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("a = 1\n")
+        with pytest.raises(ValueError):
+            backend.container_remove_member(tree, "nonexistent")
+
+    def test_remove_rejects_out_of_range_index(self) -> None:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("xs = [1, 2]\n")
+        with pytest.raises(ValueError):
+            backend.container_remove_member(tree, "xs/[5]")
+
+
+class TestContainerReplaceMember:
+    """L3 path-based value replacement for mapping entries and sequence items."""
+
+    def test_replace_root_mapping_value(self) -> None:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("a = 1\nb = 2\n")
+        out = backend.container_replace_member(tree, "a", "99")
+        assert backend.serialize(out) == "a = 99\nb = 2\n"
+
+    def test_replace_nested_mapping_value(self) -> None:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("[pkg]\nname = \"hi\"\nversion = \"1\"\n")
+        out = backend.container_replace_member(tree, "pkg/name", "\"bye\"")
+        assert backend.serialize(out) == "[pkg]\nname = \"bye\"\nversion = \"1\"\n"
+
+    def test_replace_inline_array_item(self) -> None:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("xs = [1, 2, 3]\n")
+        out = backend.container_replace_member(tree, "xs/[1]", "99")
+        assert backend.serialize(out) == "xs = [1, 99, 3]\n"
+
+    def test_replace_rejects_non_tree(self) -> None:
+        backend = TomlStructuralLanguage()
+        with pytest.raises(TypeError):
+            backend.container_replace_member("not a tree", "a", "1")  # type: ignore[arg-type]
+
+    def test_replace_rejects_missing_key(self) -> None:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("a = 1\n")
+        with pytest.raises(ValueError):
+            backend.container_replace_member(tree, "missing", "99")
+
+    def test_replace_rejects_malformed_value(self) -> None:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse("a = 1\n")
+        with pytest.raises(ParseError):
+            backend.container_replace_member(tree, "a", "not-a-value!!")
+
+
 # =============================================================================
 # Empty source
 # =============================================================================
