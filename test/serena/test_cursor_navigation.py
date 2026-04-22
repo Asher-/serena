@@ -680,6 +680,122 @@ class TestCursorEditTools:
             except Exception:
                 pass
 
+    def test_cursor_insert_before_python_variable_multiline_literal(
+        self, python_serena_agent: SerenaAgent
+    ) -> None:
+        """Regression (symmetric to insert_after): cursor_insert_before on a Python
+        module-level variable whose value is a multi-line list literal must insert
+        above the assignment line, not on a continuation line.
+
+        Covers the statement-start widening path in :class:`PythonSymbolExtentStrategy`:
+        without widening, the LSP may report the symbol start on the name's identifier
+        line which still coincides with the statement start for module-level names, but
+        this test guards the contract by exercising the widened path end-to-end.
+        """
+        from pathlib import Path
+
+        start_tool = python_serena_agent.get_tool(CursorStartTool)
+        insert_tool = python_serena_agent.get_tool(CursorInsertBeforeTool)
+
+        project_root = Path(python_serena_agent.get_active_project_or_raise().project_root)
+        rel_path = os.path.join("test_repo", "_cursor_variable_before_sandbox.py")
+        abs_path = project_root / rel_path
+        abs_path.write_text("FOO = [\n    1,\n    2,\n    3,\n]\n")
+
+        try:
+            python_serena_agent.reset_language_server_manager()
+            start_tool.apply(
+                name_path="FOO",
+                relative_path=rel_path,
+                cursor_id="var-before",
+            )
+            result = insert_tool.apply(
+                cursor_id="var-before",
+                body="PRECEDING = 0\n",
+            )
+            assert "OK" in result
+
+            content = abs_path.read_text()
+
+            # PRECEDING must appear before the FOO assignment begins
+            preceding_idx = content.index("PRECEDING = 0")
+            foo_idx = content.index("FOO = [")
+            assert preceding_idx < foo_idx, (
+                f"PRECEDING was inserted at char {preceding_idx}, after the FOO "
+                f"assignment at {foo_idx}. Full content:\n{content}"
+            )
+
+            # the original FOO structure must still be intact
+            assert "FOO = [\n    1,\n    2,\n    3,\n]" in content
+        finally:
+            if abs_path.exists():
+                abs_path.unlink()
+            try:
+                python_serena_agent.reset_language_server_manager()
+            except Exception:
+                pass
+
+    def test_cursor_insert_after_python_dataclass_field(
+        self, python_serena_agent: SerenaAgent
+    ) -> None:
+        """Regression: cursor_insert_after on a dataclass field (an ``AnnAssign`` inside
+        a class body) must land at class-body indent level after the field's full
+        annotation statement, not inside the annotation expression.
+
+        Guards the Field kind path through the statement-widening strategy end-to-end.
+        """
+        from pathlib import Path
+
+        start_tool = python_serena_agent.get_tool(CursorStartTool)
+        insert_tool = python_serena_agent.get_tool(CursorInsertAfterTool)
+
+        project_root = Path(python_serena_agent.get_active_project_or_raise().project_root)
+        rel_path = os.path.join("test_repo", "_cursor_dataclass_field_sandbox.py")
+        abs_path = project_root / rel_path
+        abs_path.write_text(
+            "from dataclasses import dataclass\n"
+            "\n"
+            "\n"
+            "@dataclass\n"
+            "class Point:\n"
+            "    x: int = 0\n"
+            "    y: int = 0\n"
+        )
+
+        try:
+            python_serena_agent.reset_language_server_manager()
+            start_tool.apply(
+                name_path="Point/x",
+                relative_path=rel_path,
+                cursor_id="field-after",
+            )
+            result = insert_tool.apply(
+                cursor_id="field-after",
+                body="    z: int = 0\n",
+            )
+            assert "OK" in result
+
+            content = abs_path.read_text()
+
+            # the new z field must sit between x and y, at class-body indent
+            x_idx = content.index("x: int = 0")
+            z_idx = content.index("z: int = 0")
+            y_idx = content.index("y: int = 0")
+            assert x_idx < z_idx < y_idx, (
+                f"z field landed outside the x..y window (x={x_idx}, z={z_idx}, y={y_idx}). "
+                f"Full content:\n{content}"
+            )
+
+            # the x annotation must not have been mangled by an insertion mid-expression
+            assert "    x: int = 0\n" in content, f"x field annotation corrupted:\n{content}"
+        finally:
+            if abs_path.exists():
+                abs_path.unlink()
+            try:
+                python_serena_agent.reset_language_server_manager()
+            except Exception:
+                pass
+
     def test_cursor_configure_include_body_widens_python_variable_multiline_literal(
         self, python_serena_agent: SerenaAgent
     ) -> None:
