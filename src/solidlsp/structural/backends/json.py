@@ -1143,6 +1143,236 @@ def _array_without(arr: _JsonArray, child: Any) -> _JsonArray:
 
 
 # --------------------------------------------------------------------------- #
+# Container-member editing helpers
+# --------------------------------------------------------------------------- #
+
+
+def _split_member_path_json(member_path: str) -> tuple[str, str]:
+    """Split ``foo/bar/[0]`` into ``("foo/bar", "[0]")`` etc.
+
+    Returns ``("", <first>)`` when ``member_path`` has no ``/`` — in that
+    case the member is a direct child of the document root.
+    """
+    slash_idx = member_path.rfind("/")
+    if slash_idx < 0:
+        return "", member_path
+    return member_path[:slash_idx], member_path[slash_idx + 1 :]
+
+
+def _root_as_container(tree: _JsonDocument) -> _JsonObject | _JsonArray:
+    """Return the document root if it is a container; raise otherwise."""
+    root = tree.root
+    if not isinstance(root, _JsonObject | _JsonArray):
+        raise ValueError(f"document root is {_value_kind(root)!r}, not a container")
+    return root
+
+
+def _resolve_container(tree: _JsonDocument, container_path: str) -> _JsonObject | _JsonArray:
+    """Resolve ``container_path`` to a ``_JsonObject``/``_JsonArray`` inside ``tree``.
+
+    Empty path resolves to the document root.
+    """
+    if not container_path:
+        return _root_as_container(tree)
+    node = _resolve_node_by_path(tree, container_path)
+    if isinstance(node, _JsonObject | _JsonArray):
+        return node
+    # members wrap their value; when the path points at a member whose value is a container, descend
+    if isinstance(node, _JsonMember) and isinstance(node.value, _JsonObject | _JsonArray):
+        return node.value
+    raise ValueError(
+        f"path {container_path!r} does not resolve to a JSON object or array",
+    )
+
+
+def _resolve_node_by_path(tree: _JsonDocument, path: str) -> _JsonNode:
+    """Walk ``tree`` along ``path`` and return the matching node.
+
+    For object paths, returns the member's VALUE (not the ``_JsonMember``
+    wrapper) — matching what :func:`walk_symbols` yields for member paths.
+    For array paths returns the item directly.
+    """
+    if not path:
+        # empty path is not a valid member/container target
+        raise ValueError("empty path does not resolve to a node")
+    node: _JsonNode = tree.root
+    for segment in path.split("/"):
+        if segment.startswith("[") and segment[-1:] == "]":
+            # array index segment
+            if not isinstance(node, _JsonArray):
+                raise ValueError(f"segment {segment!r} expects an array, got {_value_kind(node)!r}")
+            try:
+                idx = int(segment[1:-1])
+            except ValueError as err:
+                raise ValueError(f"segment {segment!r} is not a valid array index") from err
+            if idx < 0 or idx >= len(node.items):
+                raise ValueError(f"array index {idx} out of range for segment {segment!r}")
+            node = node.items[idx]
+        else:
+            # object key segment
+            if not isinstance(node, _JsonObject):
+                raise ValueError(f"segment {segment!r} expects an object, got {_value_kind(node)!r}")
+            match = next((m for m in node.members if _decode_key(m) == segment), None)
+            if match is None:
+                raise ValueError(f"object has no member with key {segment!r}")
+            node = match.value
+    return node
+
+
+def _find_member_for_value(obj: _JsonObject, value: _JsonNode) -> _JsonMember:
+    """Locate the member within ``obj`` whose ``.value`` is identity-equal to ``value``."""
+    for member in obj.members:
+        if member.value is value:
+            return member
+    raise ValueError("value is not the value of any member in the given object")
+
+
+def _parse_json_value(source: str) -> _JsonNode:
+    """Parse ``source`` as a JSON value expression (any value type)."""
+    stripped = source.strip()
+    if not stripped:
+        raise ValueError("JSON value source is empty")
+    # wrap the value in an array so parse_json can consume it (parse_json expects a document)
+    try:
+        doc = parse_json(f"[{stripped}]")
+    except ParseError as err:
+        raise ValueError(f"JSON value source did not parse: {err.detail}") from err
+    if not isinstance(doc.root, _JsonArray) or len(doc.root.items) != 1:
+        raise ValueError("JSON value source must be exactly one value")
+    return doc.root.items[0]
+
+
+def _parse_json_member(source: str) -> _JsonMember:
+    """Parse ``source`` as a ``"key": value`` fragment into a ``_JsonMember``."""
+    stripped = source.strip()
+    if not stripped:
+        raise ValueError("JSON member source is empty")
+    try:
+        doc = parse_json("{" + stripped + "}")
+    except ParseError as err:
+        raise ValueError(f"JSON member source did not parse: {err.detail}") from err
+    if not isinstance(doc.root, _JsonObject) or len(doc.root.members) != 1:
+        raise ValueError("JSON member source must be exactly one key/value pair")
+    return doc.root.members[0]
+
+
+def _document_with_replacement(
+    tree: _JsonDocument,
+    old_node: _JsonNode,
+    new_node: _JsonNode,
+) -> _JsonDocument:
+    """Return a new document with ``old_node`` (by identity) replaced by ``new_node``.
+
+    The result is re-serialized and re-parsed so the returned handle is a
+    freshly validated ``_JsonDocument``.
+    """
+    new_tree, found = _replace_in_tree(tree, old_node, new_node)
+    if not found:
+        raise ValueError("old node was not found in the tree by identity")
+    if not isinstance(new_tree, _JsonDocument):
+        raise RuntimeError("tree replacement produced a non-document root")
+    # re-serialize and re-parse so the result matches the parse-then-serialize invariant
+    return parse_json(serialize_json(new_tree))
+
+
+def _first_value_pre_ws(node: _JsonNode) -> str:
+    """Return the leading whitespace of ``node``'s first token."""
+    if isinstance(node, _JsonString | _JsonNumber | _JsonBool | _JsonNull):
+        return node.tok.pre_ws
+    if isinstance(node, _JsonMember):
+        return node.key.tok.pre_ws
+    if isinstance(node, _JsonObject | _JsonArray):
+        return node.open.pre_ws
+    raise TypeError(f"unknown JSON node type: {type(node).__name__}")
+
+
+def _set_first_value_pre_ws(node: _JsonNode, ws: str) -> None:
+    """Mutate ``node`` in place to set its first token's ``pre_ws``."""
+    if isinstance(node, _JsonString | _JsonNumber | _JsonBool | _JsonNull):
+        node.tok.pre_ws = ws
+        return
+    if isinstance(node, _JsonMember):
+        node.key.tok.pre_ws = ws
+        return
+    if isinstance(node, _JsonObject | _JsonArray):
+        node.open.pre_ws = ws
+        return
+    raise TypeError(f"unknown JSON node type: {type(node).__name__}")
+
+
+def _detect_leading_ws(existing_pre_ws: list[str]) -> tuple[str, bool]:
+    """Infer the standard per-member leading whitespace for a container.
+
+    Returns ``(leading, multiline)`` where ``leading`` is the pre-token
+    whitespace to apply uniformly, and ``multiline`` is whether the container
+    spans multiple lines.
+    """
+    best = ""
+    for ws in existing_pre_ws:
+        if len(ws) > len(best):
+            best = ws
+    multiline = "\n" in best
+    return best, multiline
+
+
+def _renormalize_object_whitespace(obj: _JsonObject) -> _JsonObject:
+    """Rewrite ``obj``'s whitespace so every member / comma formats consistently.
+
+    ``close.pre_ws`` and ``open.pre_ws`` are preserved verbatim — only the
+    per-member leading whitespace, commas, and (for empty objects) close
+    whitespace are rewritten.
+    """
+    pre_ws_observed = [m.key.tok.pre_ws for m in obj.members]
+    leading, multiline = _detect_leading_ws(pre_ws_observed)
+
+    if not multiline:
+        leading = leading if leading else " "
+
+    new_members: list[_JsonMember] = []
+    for i, m in enumerate(obj.members):
+        # multiline: every member gets the full leading (newline + indent).
+        # inline with existing members: only non-first members get leading (a space).
+        ws = leading if (multiline or i > 0) else ""
+        new_key = _JsonString(tok=_Tok(pre_ws=ws, text=m.key.tok.text))
+        new_member = _JsonMember(key=new_key, colon=m.colon, value=m.value)
+        new_members.append(new_member)
+
+    commas = [_Tok(pre_ws="", text=",") for _ in range(max(0, len(new_members) - 1))]
+    # preserve close.pre_ws verbatim: it encodes the outer dedent we cannot re-derive
+    # from members alone (we don't know the outer indent step from inside the container)
+    return _JsonObject(
+        open=_Tok(pre_ws=obj.open.pre_ws, text=obj.open.text),
+        members=new_members,
+        commas=commas,
+        close=_Tok(pre_ws=obj.close.pre_ws, text=obj.close.text),
+    )
+
+
+def _renormalize_array_whitespace(arr: _JsonArray) -> _JsonArray:
+    """Mirror of :func:`_renormalize_object_whitespace` for arrays."""
+    pre_ws_observed = [_first_value_pre_ws(item) for item in arr.items]
+    leading, multiline = _detect_leading_ws(pre_ws_observed)
+
+    if not multiline:
+        leading = leading if leading else " "
+
+    new_items: list[_JsonNode] = []
+    for i, item in enumerate(arr.items):
+        ws = leading if (multiline or i > 0) else ""
+        new_item = copy.deepcopy(item)
+        _set_first_value_pre_ws(new_item, ws)
+        new_items.append(new_item)
+
+    commas = [_Tok(pre_ws="", text=",") for _ in range(max(0, len(new_items) - 1))]
+    return _JsonArray(
+        open=_Tok(pre_ws=arr.open.pre_ws, text=arr.open.text),
+        items=new_items,
+        commas=commas,
+        close=_Tok(pre_ws=arr.close.pre_ws, text=arr.close.text),
+    )
+
+
+# --------------------------------------------------------------------------- #
 # StructuralLanguage implementation (stage 3)
 # --------------------------------------------------------------------------- #
 
@@ -1335,6 +1565,91 @@ class JsonStructuralLanguage(StructuralLanguage):
             new_root = _array_without(root, child)
             return self.parse(serialize_json(_JsonDocument(root=new_root, trailing_ws=parent.trailing_ws)))
         raise ValueError(f"cannot remove from scalar root of kind {_value_kind(root)!r}")
+
+    # ---- container-member editing -----------------------------------------
+
+    def container_insert_member(
+        self,
+        tree: Any,
+        anchor_or_container_path: str,
+        source: str,
+        position: str = "end",
+    ) -> _JsonDocument:
+        if not isinstance(tree, _JsonDocument):
+            raise TypeError(f"tree must be _JsonDocument, got {type(tree).__name__}")
+        if position not in {"before", "after", "start", "end"}:
+            raise ValueError(f"invalid position: {position!r}")
+
+        if position in {"start", "end"}:
+            container = _resolve_container(tree, anchor_or_container_path)
+            anchor_node: _JsonNode | None = None
+        else:
+            # the anchor's parent is the container; the anchor itself is the positioning reference
+            parent_path, _last = _split_member_path_json(anchor_or_container_path)
+            container = _resolve_container(tree, parent_path) if parent_path else _root_as_container(tree)
+            # for object anchors, walk_symbols yields the member's value — but identity-based
+            # insertion needs the _JsonMember wrapper, so translate it when the container is an object
+            target_value = _resolve_node_by_path(tree, anchor_or_container_path)
+            if isinstance(container, _JsonObject):
+                anchor_node = _find_member_for_value(container, target_value)
+            else:
+                anchor_node = target_value
+
+        if isinstance(container, _JsonObject):
+            child = _parse_json_member(source)
+            inserted = _object_with_inserted(container, child, anchor_node, position)
+            new_container: _JsonNode = _renormalize_object_whitespace(inserted)
+        else:
+            child_value = _parse_json_value(source)
+            inserted_arr = _array_with_inserted(container, child_value, anchor_node, position)
+            new_container = _renormalize_array_whitespace(inserted_arr)
+        return _document_with_replacement(tree, container, new_container)
+
+    def container_remove_member(self, tree: Any, member_path: str) -> _JsonDocument:
+        if not isinstance(tree, _JsonDocument):
+            raise TypeError(f"tree must be _JsonDocument, got {type(tree).__name__}")
+        parent_path, _last = _split_member_path_json(member_path)
+        container = _resolve_container(tree, parent_path) if parent_path else _root_as_container(tree)
+        target = _resolve_node_by_path(tree, member_path)
+        new_container: _JsonNode
+        if isinstance(container, _JsonObject):
+            member = _find_member_for_value(container, target)
+            removed = _object_without(container, member)
+            new_container = _renormalize_object_whitespace(removed)
+        else:
+            removed_arr = _array_without(container, target)
+            new_container = _renormalize_array_whitespace(removed_arr)
+        return _document_with_replacement(tree, container, new_container)
+
+    def container_replace_member(self, tree: Any, member_path: str, source: str) -> _JsonDocument:
+        if not isinstance(tree, _JsonDocument):
+            raise TypeError(f"tree must be _JsonDocument, got {type(tree).__name__}")
+        parent_path, _last = _split_member_path_json(member_path)
+        container = _resolve_container(tree, parent_path) if parent_path else _root_as_container(tree)
+        target = _resolve_node_by_path(tree, member_path)
+        new_value = _parse_json_value(source)
+        # keep the slot's original leading whitespace so serialization stays stable
+        _set_first_value_pre_ws(new_value, _first_value_pre_ws(target))
+        new_container: _JsonNode
+        if isinstance(container, _JsonObject):
+            member = _find_member_for_value(container, target)
+            new_member = _JsonMember(key=member.key, colon=member.colon, value=new_value)
+            new_members = [new_member if m is member else m for m in container.members]
+            new_container = _JsonObject(
+                open=container.open,
+                members=new_members,
+                commas=list(container.commas),
+                close=container.close,
+            )
+        else:
+            new_items = [new_value if item is target else item for item in container.items]
+            new_container = _JsonArray(
+                open=container.open,
+                items=new_items,
+                commas=list(container.commas),
+                close=container.close,
+            )
+        return _document_with_replacement(tree, container, new_container)
 
     # ---- pattern matching & rewriting --------------------------------------
 

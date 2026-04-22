@@ -895,3 +895,101 @@ class TestApplyReplacement:
         fake_match = PatternMatch(node=other.root, bindings={}, symbol_path=None)
         with pytest.raises(ValueError):
             backend.apply_replacement(tree, fake_match, replacement)
+
+
+# --------------------------------------------------------------------------- #
+# Container-member editing
+# --------------------------------------------------------------------------- #
+
+
+class TestJsonContainerMemberEdits:
+    """container_insert_member / container_remove_member / container_replace_member
+    preserve formatting for multi-line and nested containers.
+    """
+
+    _MULTI = (
+        "{\n"
+        '  "a": 1,\n'
+        '  "nested": {\n'
+        '    "x": 10,\n'
+        '    "y": 20\n'
+        "  },\n"
+        '  "list": [\n'
+        "    1,\n"
+        "    2\n"
+        "  ]\n"
+        "}\n"
+    )
+
+    def test_insert_at_end_of_root_object(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse(self._MULTI)
+        new_tree = backend.container_insert_member(tree, "", '"c": 3', position="end")
+        serialized = backend.serialize(new_tree)
+        assert '"c": 3' in serialized
+        # original shape preserved: newlines and 2-space indent
+        assert "  \"c\": 3\n}" in serialized
+
+    def test_insert_into_nested_object(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse(self._MULTI)
+        new_tree = backend.container_insert_member(tree, "nested", '"z": 30', position="end")
+        serialized = backend.serialize(new_tree)
+        assert "    \"z\": 30\n  }" in serialized
+
+    def test_insert_before_nested_member(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse(self._MULTI)
+        new_tree = backend.container_insert_member(tree, "nested/y", '"m": 100', position="before")
+        serialized = backend.serialize(new_tree)
+        # m comes before y with matching indent
+        m_line = '    "m": 100'
+        y_line = '    "y": 20'
+        assert serialized.index(m_line) < serialized.index(y_line)
+
+    def test_insert_into_nested_array(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse(self._MULTI)
+        new_tree = backend.container_insert_member(tree, "list", "99", position="end")
+        serialized = backend.serialize(new_tree)
+        assert "    99\n  ]" in serialized
+
+    def test_replace_nested_object_value(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse(self._MULTI)
+        new_tree = backend.container_replace_member(tree, "nested/y", "999")
+        serialized = backend.serialize(new_tree)
+        assert '"y": 999' in serialized
+        # the original x is untouched
+        assert '"x": 10' in serialized
+
+    def test_replace_nested_array_item(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse(self._MULTI)
+        new_tree = backend.container_replace_member(tree, "list/[0]", "99")
+        serialized = backend.serialize(new_tree)
+        assert "    99,\n    2" in serialized
+
+    def test_remove_nested_object_member(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse(self._MULTI)
+        new_tree = backend.container_remove_member(tree, "nested/x")
+        serialized = backend.serialize(new_tree)
+        assert '"x"' not in serialized
+        assert '"y": 20' in serialized
+        # the nested close-brace still has 2-space indent
+        assert "    \"y\": 20\n  }" in serialized
+
+    def test_remove_nested_array_item(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse(self._MULTI)
+        new_tree = backend.container_remove_member(tree, "list/[0]")
+        serialized = backend.serialize(new_tree)
+        assert "    2\n  ]" in serialized
+
+    def test_insert_rejects_malformed_member(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse(self._MULTI)
+        with pytest.raises(ValueError):
+            backend.container_insert_member(tree, "", "not a key:value", position="end")
+
+    def test_insert_rejects_missing_anchor(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse(self._MULTI)
+        with pytest.raises(ValueError):
+            backend.container_insert_member(tree, "nested/missing", '"m": 1', position="before")
+
+    def test_remove_rejects_missing_member(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse(self._MULTI)
+        with pytest.raises(ValueError):
+            backend.container_remove_member(tree, "nested/missing")

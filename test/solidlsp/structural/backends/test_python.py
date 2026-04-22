@@ -370,6 +370,162 @@ class TestDeclarationAndMutation:
 
 
 # -----------------------------------------------------------------------------
+# Container-member editing
+# -----------------------------------------------------------------------------
+
+
+class TestContainerMemberWalk:
+    """walk_nodes yields addressable paths for dict / list literal members."""
+
+    _MULTI_DICT = 'FOO = {\n    "a": 1,\n    "b": 2,\n}\n'
+    _NESTED = 'FOO = {\n    "m": {\n        "x": 1,\n    },\n    "n": 2,\n}\n'
+    _LIST = "BAR = [10, 20, 30]\n"
+
+    def test_dict_members_appear_in_walk(self, backend: PythonStructuralLanguage) -> None:
+        tree = backend.parse(self._MULTI_DICT)
+        paths = {p for p, _k, _n in backend.walk_nodes(tree)}
+        assert 'FOO/["a"]' in paths
+        assert 'FOO/["b"]' in paths
+
+    def test_nested_dict_members_appear_in_walk(self, backend: PythonStructuralLanguage) -> None:
+        tree = backend.parse(self._NESTED)
+        paths = {p for p, _k, _n in backend.walk_nodes(tree)}
+        assert 'FOO/["m"]/["x"]' in paths
+        assert 'FOO/["n"]' in paths
+
+    def test_list_items_appear_in_walk(self, backend: PythonStructuralLanguage) -> None:
+        tree = backend.parse(self._LIST)
+        paths = {p for p, _k, _n in backend.walk_nodes(tree)}
+        assert "BAR/[0]" in paths
+        assert "BAR/[1]" in paths
+        assert "BAR/[2]" in paths
+
+    def test_container_kind_at_assignment_path(self, backend: PythonStructuralLanguage) -> None:
+        tree = backend.parse(self._MULTI_DICT)
+        kinds_at_foo = [k for p, k, _n in backend.walk_nodes(tree) if p == "FOO"]
+        assert "assignment" in kinds_at_foo
+        assert "container" in kinds_at_foo
+
+
+class TestContainerMemberInsert:
+    """container_insert_member delivers position-correct, format-correct results."""
+
+    _SRC = 'FOO = {\n    "a": 1,\n    "b": 2,\n}\n'
+
+    def test_insert_at_end_of_multiline_dict(self, backend: PythonStructuralLanguage) -> None:
+        tree = backend.parse(self._SRC)
+        new_tree = backend.container_insert_member(tree, "FOO", '"c": 3', position="end")
+        serialized = backend.serialize(new_tree)
+        assert serialized == 'FOO = {\n    "a": 1,\n    "b": 2,\n    "c": 3,\n}\n'
+
+    def test_insert_at_start_of_multiline_dict(self, backend: PythonStructuralLanguage) -> None:
+        tree = backend.parse(self._SRC)
+        new_tree = backend.container_insert_member(tree, "FOO", '"c": 3', position="start")
+        serialized = backend.serialize(new_tree)
+        assert serialized == 'FOO = {\n    "c": 3,\n    "a": 1,\n    "b": 2,\n}\n'
+
+    def test_insert_before_anchor(self, backend: PythonStructuralLanguage) -> None:
+        tree = backend.parse(self._SRC)
+        new_tree = backend.container_insert_member(tree, 'FOO/["b"]', '"c": 3', position="before")
+        serialized = backend.serialize(new_tree)
+        assert serialized == 'FOO = {\n    "a": 1,\n    "c": 3,\n    "b": 2,\n}\n'
+
+    def test_insert_after_anchor(self, backend: PythonStructuralLanguage) -> None:
+        tree = backend.parse(self._SRC)
+        new_tree = backend.container_insert_member(tree, 'FOO/["a"]', '"c": 3', position="after")
+        serialized = backend.serialize(new_tree)
+        assert serialized == 'FOO = {\n    "a": 1,\n    "c": 3,\n    "b": 2,\n}\n'
+
+    def test_insert_into_nested_dict(self, backend: PythonStructuralLanguage) -> None:
+        src = 'FOO = {\n    "m": {\n        "x": 1,\n    },\n    "n": 2,\n}\n'
+        tree = backend.parse(src)
+        new_tree = backend.container_insert_member(tree, 'FOO/["m"]', '"y": 2', position="end")
+        serialized = backend.serialize(new_tree)
+        assert serialized == 'FOO = {\n    "m": {\n        "x": 1,\n        "y": 2,\n    },\n    "n": 2,\n}\n'
+
+    def test_insert_into_list(self, backend: PythonStructuralLanguage) -> None:
+        tree = backend.parse("BAR = [10, 20, 30]\n")
+        new_tree = backend.container_insert_member(tree, "BAR/[1]", "99", position="after")
+        serialized = backend.serialize(new_tree)
+        assert serialized == "BAR = [10, 20, 99, 30]\n"
+
+    def test_insert_rejects_invalid_member_source(self, backend: PythonStructuralLanguage) -> None:
+        tree = backend.parse(self._SRC)
+        with pytest.raises(ValueError):
+            backend.container_insert_member(tree, "FOO", "not a valid k:v", position="end")
+
+    def test_insert_rejects_unknown_anchor(self, backend: PythonStructuralLanguage) -> None:
+        tree = backend.parse(self._SRC)
+        with pytest.raises(ValueError):
+            backend.container_insert_member(tree, 'FOO/["missing"]', '"c": 3', position="before")
+
+
+class TestContainerMemberReplace:
+    def test_replace_dict_value_preserves_key(self, backend: PythonStructuralLanguage) -> None:
+        tree = backend.parse('FOO = {\n    "a": 1,\n    "b": 2,\n}\n')
+        new_tree = backend.container_replace_member(tree, 'FOO/["b"]', "99")
+        serialized = backend.serialize(new_tree)
+        assert serialized == 'FOO = {\n    "a": 1,\n    "b": 99,\n}\n'
+
+    def test_replace_list_item(self, backend: PythonStructuralLanguage) -> None:
+        tree = backend.parse("BAR = [10, 20, 30]\n")
+        new_tree = backend.container_replace_member(tree, "BAR/[1]", "99")
+        assert backend.serialize(new_tree) == "BAR = [10, 99, 30]\n"
+
+    def test_replace_rejects_non_container_path(self, backend: PythonStructuralLanguage) -> None:
+        tree = backend.parse("FOO = 1\n")
+        with pytest.raises(ValueError):
+            backend.container_replace_member(tree, 'FOO/["missing"]', "2")
+
+
+class TestContainerMemberRemove:
+    def test_remove_dict_member(self, backend: PythonStructuralLanguage) -> None:
+        tree = backend.parse('FOO = {\n    "a": 1,\n    "b": 2,\n}\n')
+        new_tree = backend.container_remove_member(tree, 'FOO/["a"]')
+        assert backend.serialize(new_tree) == 'FOO = {\n    "b": 2,\n}\n'
+
+    def test_remove_list_item(self, backend: PythonStructuralLanguage) -> None:
+        tree = backend.parse("BAR = [10, 20, 30]\n")
+        new_tree = backend.container_remove_member(tree, "BAR/[1]")
+        assert backend.serialize(new_tree) == "BAR = [10, 30]\n"
+
+    def test_remove_rejects_missing_member(self, backend: PythonStructuralLanguage) -> None:
+        tree = backend.parse('FOO = {\n    "a": 1,\n}\n')
+        with pytest.raises(ValueError):
+            backend.container_remove_member(tree, 'FOO/["missing"]')
+
+
+class TestContainerMemberCanonicalRepro:
+    """The canonical Direction-B repro: add one field to a multi-line dict
+    bound to a module-level variable without rewriting the rest.
+    """
+
+    def test_adds_one_field_without_disturbing_others(self, backend: PythonStructuralLanguage) -> None:
+        # mirrors the Instantiation-dict shape from strongai/code-graph/core/schema.py:79-88
+        source = (
+            "INSTANTIATION = {\n"
+            '    "kind": "instantiation",\n'
+            '    "schema_version": 1,\n'
+            '    "provenance": "explicit",\n'
+            "}\n"
+        )
+        tree = backend.parse(source)
+        new_tree = backend.container_insert_member(
+            tree, "INSTANTIATION", '"metadata": None', position="end",
+        )
+        result = backend.serialize(new_tree)
+        expected = (
+            "INSTANTIATION = {\n"
+            '    "kind": "instantiation",\n'
+            '    "schema_version": 1,\n'
+            '    "provenance": "explicit",\n'
+            '    "metadata": None,\n'
+            "}\n"
+        )
+        assert result == expected
+
+
+# -----------------------------------------------------------------------------
 # Pattern matching
 # -----------------------------------------------------------------------------
 

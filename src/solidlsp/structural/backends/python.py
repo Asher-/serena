@@ -505,6 +505,11 @@ _UNNAMED_NODE_KIND: dict[type, KindName] = {
 }
 
 
+# kind names for container-literal members yielded by walk_nodes
+_CONTAINER_MEMBER_KIND: KindName = "container_member"
+_CONTAINER_KIND: KindName = "container"
+
+
 def _symbol_name(node: cst.CSTNode) -> str | None:
     """Return the agent-visible name for a symbol node, or ``None`` if the node is unnamed."""
     if isinstance(node, cst.ClassDef | cst.FunctionDef):
@@ -590,6 +595,13 @@ def _walk_all_nodes(parent: cst.CSTNode, prefix: str, inside_class: bool) -> Ite
     :func:`_walk_named_symbols`; unnamed compound / expression statements and
     decorators get synthetic paths of the form ``parent/<kind>#<index>`` where
     ``index`` counts siblings of the *same kind* within the same parent scope.
+
+    Dict / list literals bound to assignments contribute further addressable
+    nodes: the container itself (kind ``container``) at the assignment's own
+    path, and each of its members (kind ``container_member``) at
+    ``{assignment}/["key"]`` for string-keyed dict members, ``{assignment}/[N]``
+    for int-keyed dict members and list items. Nested dict / list literals
+    recurse under the member path.
     """
     # decorators attached directly to the parent class / function / method
     if isinstance(parent, cst.ClassDef | cst.FunctionDef):
@@ -611,6 +623,12 @@ def _walk_all_nodes(parent: cst.CSTNode, prefix: str, inside_class: bool) -> Ite
             if name is not None:
                 path = f"{prefix}/{name}" if prefix else name
                 yield path, kind, raw
+                # descend into Dict / List RHS of an assignment so container members
+                # become path-addressable; does nothing for non-collection RHS values
+                if isinstance(stmt, cst.Assign | cst.AnnAssign):
+                    rhs = _assignment_rhs(stmt)
+                    if isinstance(rhs, cst.Dict | cst.List):
+                        yield from _walk_container_members(rhs, path)
                 if isinstance(stmt, cst.ClassDef):
                     yield from _walk_all_nodes(stmt, path, inside_class=True)
                 elif isinstance(stmt, cst.FunctionDef):
@@ -627,6 +645,401 @@ def _walk_all_nodes(parent: cst.CSTNode, prefix: str, inside_class: bool) -> Ite
         yield node_path, node_kind, raw
         # recurse into the primary body so nested named / unnamed nodes stay addressable
         yield from _walk_all_nodes(stmt, node_path, inside_class)
+
+
+def _assignment_rhs(stmt: cst.Assign | cst.AnnAssign) -> cst.BaseExpression | None:
+    """Return the right-hand side expression of an assignment, or ``None`` when absent.
+
+    ``Assign`` always carries a value; ``AnnAssign`` may have ``value=None``
+    (bare annotation) — in that case the assignment addresses no RHS and this
+    returns ``None``.
+    """
+    if isinstance(stmt, cst.Assign):
+        return stmt.value
+    # AnnAssign
+    return stmt.value
+
+
+def _walk_container_members(
+    container: cst.Dict | cst.List,
+    container_path: str,
+) -> Iterator[tuple[str, KindName, cst.CSTNode]]:
+    """Recursively yield ``(name_path, kind, node)`` for a Dict/List and its members.
+
+    Emits:
+
+    * the container itself at ``container_path`` with kind ``container``;
+    * each addressable member at ``container_path/[<key>]`` with kind
+      ``container_member``, where ``<key>`` is
+      ``"<decoded-string>"`` for string-keyed dict members, ``<integer>``
+      for int-keyed dict members, and the zero-based index for list items;
+    * for members whose value is itself a ``Dict`` / ``List``, the nested
+      container and its members, extending the member path.
+
+    Members whose key is not representable as a simple addressable path
+    (tuples, computed expressions, ``**`` / ``*`` spread forms, etc.) are
+    silently skipped — they remain legal Python but cannot be addressed by
+    the cursor layer.
+    """
+    # yield the container node itself so callers can look it up by assignment path
+    yield container_path, _CONTAINER_KIND, container
+
+    if isinstance(container, cst.Dict):
+        for element in container.elements:
+            # only non-starred dict elements are addressable; ** expansions have no key
+            if not isinstance(element, cst.DictElement):
+                continue
+            segment = _dict_key_segment(element.key)
+            if segment is None:
+                continue
+            member_path = f"{container_path}/{segment}"
+            yield member_path, _CONTAINER_MEMBER_KIND, element
+            # recurse when the value is itself a collection literal
+            if isinstance(element.value, cst.Dict | cst.List):
+                yield from _walk_container_members(element.value, member_path)
+        return
+
+    if isinstance(container, cst.List):
+        for index, element in enumerate(container.elements):
+            # * spread has no usable index identity; skip it
+            if not isinstance(element, cst.Element):
+                continue
+            member_path = f"{container_path}/[{index}]"
+            yield member_path, _CONTAINER_MEMBER_KIND, element
+            if isinstance(element.value, cst.Dict | cst.List):
+                yield from _walk_container_members(element.value, member_path)
+        return
+
+
+def _dict_key_segment(key: cst.BaseExpression) -> str | None:
+    """Encode a dict key as a ``[...]`` path segment, or ``None`` when unsupported.
+
+    String keys are emitted as ``["<decoded>"]`` (Python-repr-style with
+    double quotes). Int keys are emitted as ``[<int>]``. Any other key
+    (tuples, computed expressions, negative ints, bool, None) returns
+    ``None`` so the member is treated as non-addressable.
+    """
+    # string literal: cst.SimpleString carries the raw source including its quotes
+    if isinstance(key, cst.SimpleString):
+        decoded = key.evaluated_value
+        if not isinstance(decoded, str):
+            return None
+        # always double-quote with Python-escape semantics so the segment is unambiguous
+        # and faithful to the decoded value regardless of the source quoting style
+        return f"[{_encode_string_segment(decoded)}]"
+    # plain non-negative int literal
+    if isinstance(key, cst.Integer):
+        try:
+            as_int = int(key.value)
+        except ValueError:
+            return None
+        if as_int < 0:
+            return None
+        return f"[{as_int}]"
+    return None
+
+
+def _encode_string_segment(decoded: str) -> str:
+    """Render ``decoded`` as a double-quoted Python string literal for a path segment.
+
+    Used to make container-member paths byte-stable — two string keys that
+    Python evaluates to the same value produce identical path segments.
+    """
+    # use the standard Python repr to get escaping; force double quotes for consistency
+    # with _dict_key_segment which embeds them into ``[...]`` forms
+    escaped = decoded.encode("unicode_escape").decode("ascii").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+# =============================================================================
+# Container-member editing helpers
+# =============================================================================
+
+
+def _is_bracketed_segment(segment: str) -> bool:
+    """True when ``segment`` has ``[...]`` shape; used for path parsing."""
+    return len(segment) >= 2 and segment[0] == "[" and segment[-1] == "]"
+
+
+def _split_member_path(member_path: str) -> tuple[str, str]:
+    """Split a member path into ``(container_path, last_segment)``.
+
+    ``last_segment`` includes the enclosing brackets, e.g. ``'["foo"]'`` or
+    ``'[3]'``. Raises ``ValueError`` if ``member_path`` does not end in a
+    bracketed segment.
+    """
+    slash_idx = member_path.rfind("/")
+    last = member_path[slash_idx + 1 :] if slash_idx >= 0 else member_path
+    if not _is_bracketed_segment(last):
+        raise ValueError(
+            f"member path {member_path!r} does not end in a bracketed segment; "
+            f"cannot split into container path + member segment",
+        )
+    if slash_idx < 0:
+        raise ValueError(
+            f"member path {member_path!r} has no container-path prefix",
+        )
+    return member_path[:slash_idx], last
+
+
+def _list_index_from_segment(segment: str) -> int | None:
+    """Return the integer index encoded in a list segment, or ``None`` when malformed."""
+    if not _is_bracketed_segment(segment):
+        return None
+    inner = segment[1:-1]
+    if not inner:
+        return None
+    # quoted string segments are dict keys, not list indices
+    if inner[0] == '"' or inner[0] == "'":
+        return None
+    try:
+        idx = int(inner)
+    except ValueError:
+        return None
+    if idx < 0:
+        return None
+    return idx
+
+
+def _parse_value_expression(source: str) -> cst.BaseExpression:
+    """Parse ``source`` as a single Python expression."""
+    stripped = source.strip()
+    if not stripped:
+        raise ValueError("value source is empty")
+    try:
+        return cst.parse_expression(stripped)
+    except cst.ParserSyntaxError as err:
+        raise ValueError(f"value source is not a valid Python expression: {err.message}") from None
+
+
+def _parse_dict_element(source: str) -> cst.DictElement:
+    """Parse ``source`` as a single dict entry (``"key": value``)."""
+    stripped = source.strip()
+    if not stripped:
+        raise ValueError("dict-member source is empty")
+    try:
+        expr = cst.parse_expression("{" + stripped + "}")
+    except cst.ParserSyntaxError as err:
+        raise ValueError(f"dict-member source is not a valid key/value fragment: {err.message}") from None
+    if not isinstance(expr, cst.Dict):
+        raise ValueError("dict-member source did not parse as a Dict literal")
+    if len(expr.elements) != 1:
+        raise ValueError(f"dict-member source must have exactly one entry, got {len(expr.elements)}")
+    element = expr.elements[0]
+    if not isinstance(element, cst.DictElement):
+        raise ValueError("dict-member source must not use '**' expansion")
+    return element
+
+
+def _parse_list_element(source: str) -> cst.Element:
+    """Parse ``source`` as a single list item (plain value expression)."""
+    value = _parse_value_expression(source)
+    return cst.Element(value=value)
+
+
+def _parse_container_element(container: cst.Dict | cst.List, source: str) -> cst.BaseDictElement | cst.BaseElement:
+    """Parse user-supplied ``source`` into the element kind ``container`` expects."""
+    if isinstance(container, cst.Dict):
+        return _parse_dict_element(source)
+    return _parse_list_element(source)
+
+
+def _find_dict_element_index(container: cst.Dict, segment: str) -> int:
+    """Locate the Dict element whose key encodes to ``segment``; raise on miss."""
+    for idx, element in enumerate(container.elements):
+        if isinstance(element, cst.DictElement) and _dict_key_segment(element.key) == segment:
+            return idx
+    raise ValueError(f"no dict member with segment {segment!r}")
+
+
+def _find_list_element_index(container: cst.List, segment: str) -> int:
+    """Locate the List element whose index matches ``segment``; raise on miss."""
+    idx = _list_index_from_segment(segment)
+    if idx is None:
+        raise ValueError(f"segment {segment!r} is not a list index")
+    addressable_idx = 0
+    for i, element in enumerate(container.elements):
+        if not isinstance(element, cst.Element):
+            continue
+        if addressable_idx == idx:
+            return i
+        addressable_idx += 1
+    raise ValueError(f"list index {idx} is out of range")
+
+
+def _container_with_inserted(
+    container: cst.Dict | cst.List,
+    new_element: cst.BaseDictElement | cst.BaseElement,
+    anchor_segment: str | None,
+    position: str,
+) -> cst.Dict | cst.List:
+    """Return a new container with ``new_element`` inserted.
+
+    The new element is placed according to ``position`` / ``anchor_segment``,
+    then the container's element whitespace is renormalized so every element
+    (old and new) is formatted consistently with the container's existing
+    style — multi-line dicts / lists keep one-element-per-line, inline ones
+    stay compact.
+    """
+    elements = list(container.elements)
+    if position == "start":
+        insert_at = 0
+    elif position == "end":
+        insert_at = len(elements)
+    else:
+        if anchor_segment is None:
+            raise ValueError(f"position {position!r} requires an anchor segment")
+        if isinstance(container, cst.Dict):
+            anchor_idx = _find_dict_element_index(container, anchor_segment)
+        else:
+            anchor_idx = _find_list_element_index(container, anchor_segment)
+        insert_at = anchor_idx if position == "before" else anchor_idx + 1
+    elements.insert(insert_at, new_element)
+    updated = container.with_changes(elements=tuple(elements))
+    return _renormalize_container_whitespace(updated)
+
+
+def _container_without(container: cst.Dict | cst.List, segment: str) -> cst.Dict | cst.List:
+    """Return a new container with the member at ``segment`` removed."""
+    if isinstance(container, cst.Dict):
+        idx = _find_dict_element_index(container, segment)
+    else:
+        idx = _find_list_element_index(container, segment)
+    elements = list(container.elements)
+    del elements[idx]
+    updated = container.with_changes(elements=tuple(elements))
+    return _renormalize_container_whitespace(updated)
+
+
+def _container_with_replaced_value(
+    container: cst.Dict | cst.List,
+    segment: str,
+    new_value: cst.BaseExpression,
+) -> cst.Dict | cst.List:
+    """Return a new container with the VALUE at ``segment`` replaced.
+
+    Whitespace is preserved on the element (key, commas, gaps) — only the
+    value changes — so no renormalization is needed.
+    """
+    if isinstance(container, cst.Dict):
+        idx = _find_dict_element_index(container, segment)
+        element = container.elements[idx]
+        assert isinstance(element, cst.DictElement)
+        new_element: cst.BaseDictElement | cst.BaseElement = element.with_changes(value=new_value)
+    else:
+        idx = _find_list_element_index(container, segment)
+        element = container.elements[idx]
+        assert isinstance(element, cst.Element)
+        new_element = element.with_changes(value=new_value)
+    elements = list(container.elements)
+    elements[idx] = new_element
+    return container.with_changes(elements=tuple(elements))
+
+
+def _detect_inter_element_whitespace(container: cst.Dict | cst.List) -> cst.BaseParenthesizableWhitespace:
+    """Infer the standard between-elements whitespace for ``container``.
+
+    Strategy:
+    * If any existing non-last element carries a ``Comma`` with a
+      ``ParenthesizedWhitespace`` trailer, reuse it verbatim — that is
+      authoritative for the container's style.
+    * Else, if ``lbrace``/``lbracket`` carry a ``ParenthesizedWhitespace``
+      after them, adopt its indent: the leading pattern is always a safe
+      between-elements pattern too (newline + indent).
+    * Else fall back to a simple single space (inline style).
+    """
+    # first, check siblings' trailing comma whitespace
+    for el in container.elements:
+        comma = getattr(el, "comma", None)
+        if comma is None:
+            continue
+        # filter out MaybeSentinel.DEFAULT which appears as an Enum value, not a Comma node
+        if not isinstance(comma, cst.Comma):
+            continue
+        ws_after = comma.whitespace_after
+        if isinstance(ws_after, cst.ParenthesizedWhitespace):
+            return ws_after
+    # fallback: leading whitespace after lbrace/lbracket
+    leading = container.lbrace.whitespace_after if isinstance(container, cst.Dict) else container.lbracket.whitespace_after
+    if isinstance(leading, cst.ParenthesizedWhitespace):
+        return leading
+    # inline style fallback
+    return cst.SimpleWhitespace(" ")
+
+
+def _is_multiline_container(container: cst.Dict | cst.List) -> bool:
+    """True when ``container`` spans multiple source lines (one element per line)."""
+    leading = container.lbrace.whitespace_after if isinstance(container, cst.Dict) else container.lbracket.whitespace_after
+    return isinstance(leading, cst.ParenthesizedWhitespace)
+
+
+def _renormalize_container_whitespace(container: cst.Dict | cst.List) -> cst.Dict | cst.List:
+    """Rewrite every element's ``comma`` so the container formats consistently.
+
+    * Multi-line containers: every non-last element gets a ``Comma`` whose
+      ``whitespace_after`` is the detected inter-element whitespace; the last
+      element also gets a trailing comma but with empty trailing whitespace
+      (Python's idiomatic trailing-comma-per-element style). The close brace
+      supplies the newline before ``}`` / ``]`` via its ``whitespace_before``.
+    * Inline containers: every non-last element gets a ``Comma`` with a
+      single space; the last element has no comma.
+
+    This is called after insertion/removal so the result round-trips
+    through libcst without residual formatting artefacts from the mutation.
+    """
+    elements = list(container.elements)
+    if not elements:
+        return container
+
+    multiline = _is_multiline_container(container)
+    inter_ws = _detect_inter_element_whitespace(container) if multiline else cst.SimpleWhitespace(" ")
+
+    new_elements: list[cst.BaseDictElement | cst.BaseElement] = []
+    for i, el in enumerate(elements):
+        is_last = i == len(elements) - 1
+        if multiline:
+            # keep a trailing comma on the last element but with empty whitespace_after,
+            # since the newline before '}' is owned by rbrace.whitespace_before
+            if is_last:
+                comma = cst.Comma(whitespace_after=cst.SimpleWhitespace(""))
+            else:
+                comma = cst.Comma(whitespace_after=inter_ws)
+        else:
+            if is_last:
+                # inline: no trailing comma
+                comma = cst.MaybeSentinel.DEFAULT  # type: ignore[assignment]
+            else:
+                comma = cst.Comma(whitespace_after=cst.SimpleWhitespace(" "))
+        new_elements.append(el.with_changes(comma=comma))  # type: ignore[arg-type]
+    return container.with_changes(elements=tuple(new_elements))
+
+
+class _SingleNodeReplacer(cst.CSTTransformer):
+    """Replace one specific node (by identity) inside a larger tree."""
+
+    def __init__(self, target: cst.CSTNode, replacement: cst.CSTNode) -> None:
+        self.target = target
+        self.replacement = replacement
+        self.replaced = False
+
+    def on_leave(self, original_node: cst.CSTNode, updated_node: cst.CSTNode) -> cst.CSTNode:
+        # identity check on the ORIGINAL node so we act on the user-supplied handle,
+        # not on any transformer-reshaped copy
+        if original_node is self.target:
+            self.replaced = True
+            return self.replacement
+        return updated_node
+
+
+def _tree_with_replacement(tree: cst.Module, old_node: cst.CSTNode, new_node: cst.CSTNode) -> cst.Module:
+    """Return a new Module with ``old_node`` (located by identity) replaced by ``new_node``."""
+    transformer = _SingleNodeReplacer(old_node, new_node)
+    new_tree = tree.visit(transformer)
+    if not transformer.replaced:
+        raise ValueError("old_node was not found in the tree by identity; cannot replace")
+    if not isinstance(new_tree, cst.Module):
+        raise RuntimeError("tree replacement returned a non-Module root")
+    return new_tree
 
 
 # =============================================================================
@@ -921,6 +1334,88 @@ class PythonStructuralLanguage(StructuralLanguage):
             raise ValueError("anchor is not present in parent's body") from None
         insert_at = idx if position == "before" else idx + 1
         return body[:insert_at] + [child] + body[insert_at:]
+
+    # ---- container-member editing -----------------------------------------
+
+    def container_insert_member(
+        self,
+        tree: Any,
+        anchor_or_container_path: str,
+        source: str,
+        position: str = "end",
+    ) -> Any:
+        if not isinstance(tree, cst.Module):
+            raise TypeError(f"tree must be a Module, got {type(tree).__name__}")
+        if position not in {"before", "after", "start", "end"}:
+            raise ValueError(f"invalid position: {position!r}")
+
+        # start/end target the container directly; before/after target a sibling member
+        if position in {"start", "end"}:
+            container_path = anchor_or_container_path
+            anchor_segment: str | None = None
+        else:
+            container_path, anchor_segment = _split_member_path(anchor_or_container_path)
+
+        container_node = self._find_container(tree, container_path)
+        new_element = _parse_container_element(container_node, source)
+        new_container = _container_with_inserted(container_node, new_element, anchor_segment, position)
+        return _tree_with_replacement(tree, container_node, new_container)
+
+    def container_remove_member(self, tree: Any, member_path: str) -> Any:
+        if not isinstance(tree, cst.Module):
+            raise TypeError(f"tree must be a Module, got {type(tree).__name__}")
+        container_path, segment = _split_member_path(member_path)
+        container_node = self._find_container(tree, container_path)
+        new_container = _container_without(container_node, segment)
+        return _tree_with_replacement(tree, container_node, new_container)
+
+    def container_replace_member(self, tree: Any, member_path: str, source: str) -> Any:
+        if not isinstance(tree, cst.Module):
+            raise TypeError(f"tree must be a Module, got {type(tree).__name__}")
+        container_path, segment = _split_member_path(member_path)
+        container_node = self._find_container(tree, container_path)
+        new_value = _parse_value_expression(source)
+        new_container = _container_with_replaced_value(container_node, segment, new_value)
+        return _tree_with_replacement(tree, container_node, new_container)
+
+    def _find_container(self, tree: cst.Module, container_path: str) -> cst.Dict | cst.List:
+        """Resolve ``container_path`` to a Dict or List node inside ``tree``.
+
+        The path may refer directly to an assignment (whose RHS is the
+        container) or to a nested container-member whose value is itself a
+        container. Raises ``ValueError`` when the path does not resolve to an
+        addressable container.
+        """
+        for candidate_path, kind, node in _walk_all_nodes(tree, prefix="", inside_class=False):
+            if candidate_path != container_path:
+                continue
+            # the named-symbol row yields the assignment statement; descend to its RHS value
+            if kind in {"assignment", "class", "function", "method", "import", "decorator"}:
+                if not isinstance(node, cst.SimpleStatementLine):
+                    raise ValueError(
+                        f"path {container_path!r} resolves to a non-assignment {kind!r} node "
+                        f"which cannot be used as a container",
+                    )
+                inner = node.body[0] if node.body else None
+                if not isinstance(inner, cst.Assign | cst.AnnAssign):
+                    raise ValueError(f"path {container_path!r} is not an assignment")
+                rhs = _assignment_rhs(inner)
+                if not isinstance(rhs, cst.Dict | cst.List):
+                    raise ValueError(
+                        f"path {container_path!r} does not bind a dict or list literal",
+                    )
+                return rhs
+            # container / container_member rows: the node IS the container or a member
+            if kind == _CONTAINER_KIND and isinstance(node, cst.Dict | cst.List):
+                return node
+            if kind == _CONTAINER_MEMBER_KIND and isinstance(node, cst.DictElement | cst.Element):
+                if isinstance(node.value, cst.Dict | cst.List):
+                    return node.value
+                raise ValueError(
+                    f"path {container_path!r} addresses a container member whose value "
+                    f"is not itself a dict or list",
+                )
+        raise ValueError(f"no addressable node at path {container_path!r}")
 
     # ---- pattern matching & rewriting --------------------------------------
 

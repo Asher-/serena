@@ -159,6 +159,79 @@ class StructuralLanguage(ABC):
         ``child`` is not found under ``parent``.
         """
 
+    # ---- container-member editing -----------------------------------------
+    #
+    # These methods operate on *collection-literal members* — dict entries,
+    # list items, object members, array items, mapping pairs, sequence items.
+    # They complement ``insert_child`` / ``remove_child``, which only act on
+    # the body of named block-scoped constructs (modules, classes, functions).
+    #
+    # All three take the full ``tree`` plus a ``name_path`` as emitted by
+    # :meth:`walk_nodes`, and return a fresh tree of the same type as
+    # ``tree``. Implementations should re-parse after mutation so handles to
+    # the old tree stay valid but stale — the caller is expected to discard
+    # them.
+    #
+    # A backend that cannot represent container members as addressable nodes
+    # (e.g. ``markdown``) raises :class:`NotImplementedError` from all three.
+
+    def container_insert_member(
+        self,
+        tree: Any,
+        anchor_or_container_path: str,
+        source: str,
+        position: str = "end",
+    ) -> Any:
+        """Insert a new member into a container inside ``tree``.
+
+        :param anchor_or_container_path: when ``position`` is ``"start"`` or
+            ``"end"``, this is the name-path of the *container* (dict/list/
+            object/array/mapping/sequence). When ``position`` is ``"before"``
+            or ``"after"``, this is the name-path of the *anchor member*
+            within its parent container; the new member becomes the anchor's
+            sibling.
+        :param source: the new member's source text in the target language.
+            For mapping-like containers (dict, object, mapping) this is a
+            full key-and-value fragment, e.g. ``'"foo": 42'``. For
+            sequence-like containers (list, array, sequence) it is just the
+            value expression.
+        :param position: one of ``"before"``, ``"after"``, ``"start"``,
+            ``"end"``.
+        :return: a new ``tree`` of the same type as the input.
+
+        Default implementation raises :class:`NotImplementedError`; backends
+        that support container-member editing override this.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support container-member insertion",
+        )
+
+    def container_remove_member(self, tree: Any, member_path: str) -> Any:
+        """Remove the member at ``member_path`` from its container.
+
+        :param member_path: name-path of the member (not the container).
+        :return: a new ``tree`` of the same type as the input.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support container-member removal",
+        )
+
+    def container_replace_member(self, tree: Any, member_path: str, source: str) -> Any:
+        """Replace the *value* of the member at ``member_path``.
+
+        For mapping-like containers this replaces only the value half of the
+        key/value pair — the key is preserved. For sequence-like containers
+        the entire item is replaced (there is no separate key).
+
+        :param member_path: name-path of the member.
+        :param source: the new value's source text (not a full key/value
+            pair, even for mapping-like containers).
+        :return: a new ``tree`` of the same type as the input.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support container-member replacement",
+        )
+
     # ---- pattern matching & rewriting --------------------------------------
 
     @abstractmethod
