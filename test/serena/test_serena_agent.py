@@ -22,6 +22,20 @@ from solidlsp.ls_types import SymbolKind
 from test.conftest import get_repo_path, is_ci, language_tests_enabled
 from test.solidlsp import clojure as clj
 
+# Kotlin LSP skip coverage: two separate upstream bugs, neither timing.
+# - CI: JVM restart crashes (KLS process terminates with -32800 on second run).
+# - Local: -32803 "RAW_FIR -> STATUS" on hover of class symbols and "Unknown stableId"
+#   on request_references. Permanent state errors; retry does not converge. Reproduces
+#   across KLS 261.13587.0, 262.1668.0, 262.2310.0 on macOS-arm64. Older artifacts
+#   (0.253.x) are 404 on the JetBrains CDN. Remove when upstream ships a fix.
+_KOTLIN_SKIP_MARKS = [
+    pytest.mark.skipif(is_ci, reason="Kotlin LSP JVM crashes on restart in CI"),
+    pytest.mark.skipif(
+        not is_ci,
+        reason="Kotlin LSP -32803 RAW_FIR->STATUS / Unknown stableId bugs (permanent; KLS 261.x and 262.x affected)",
+    ),
+]
+
 
 @pytest.fixture
 def serena_config():
@@ -187,7 +201,7 @@ class TestSerenaAgent:
                 "Model",
                 "Struct",
                 "Model.kt",
-                marks=[pytest.mark.kotlin] + ([pytest.mark.skip(reason="Kotlin LSP JVM crashes on restart in CI")] if is_ci else []),
+                marks=[pytest.mark.kotlin, *_KOTLIN_SKIP_MARKS],
             ),
             pytest.param(Language.TYPESCRIPT, "DemoClass", "Class", "index.ts", marks=pytest.mark.typescript),
             pytest.param(Language.PHP, "helperFunction", "Function", "helper.php", marks=pytest.mark.php),
@@ -284,7 +298,7 @@ class TestSerenaAgent:
                 "Model",
                 os.path.join("src", "main", "kotlin", "test_repo", "Model.kt"),
                 os.path.join("src", "main", "kotlin", "test_repo", "Main.kt"),
-                marks=[pytest.mark.kotlin] + ([pytest.mark.skip(reason="Kotlin LSP JVM crashes on restart in CI")] if is_ci else []),
+                marks=[pytest.mark.kotlin, *_KOTLIN_SKIP_MARKS],
             ),
             pytest.param(Language.RUST, "add", os.path.join("src", "lib.rs"), os.path.join("src", "main.rs"), marks=pytest.mark.rust),
             pytest.param(Language.PHP, "helperFunction", "helper.php", "index.php", marks=pytest.mark.php),
