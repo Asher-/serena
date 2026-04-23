@@ -260,13 +260,14 @@ _LANGUAGE_PYTEST_MARKERS: dict[Language, list[MarkDecorator | Mark]] = {
     Language.KOTLIN: [pytest.mark.kotlin, pytest.mark.skipif(is_ci, reason="Kotlin LSP JVM crashes on restart in CI")],
     Language.LEAN4: [pytest.mark.lean4, pytest.mark.skipif(_sh.which("lean") is None, reason="Lean is not installed")],
     Language.MSL: [pytest.mark.msl],
+    Language.NIX: [pytest.mark.nix, pytest.mark.skipif(_sh.which("nix") is None, reason="nix CLI is not installed")],
     Language.PHP: [pytest.mark.php],
     Language.PHP_PHPACTOR: [pytest.mark.php],
-    Language.POWERSHELL: [pytest.mark.powershell],
+    Language.POWERSHELL: [pytest.mark.powershell, pytest.mark.skipif(_sh.which("pwsh") is None, reason="pwsh is not installed")],
     Language.PYTHON: [pytest.mark.python],
     Language.PYTHON_JEDI: [pytest.mark.python],
     Language.PYTHON_TY: [pytest.mark.python],
-    Language.RUST: [pytest.mark.rust],
+    Language.RUST: [pytest.mark.rust, pytest.mark.skipif(_sh.which("rust-analyzer") is None, reason="rust-analyzer is not installed")],
     Language.TYPESCRIPT: [pytest.mark.typescript],
 }
 
@@ -310,6 +311,22 @@ def _determine_disabled_languages() -> list[Language]:
     php_tests_enabled = _sh.which("php") is not None
     if not php_tests_enabled:
         result.append(Language.PHP_PHPACTOR)
+
+    # Disable PowerShell tests if pwsh is not available
+    if _sh.which("pwsh") is None:
+        result.append(Language.POWERSHELL)
+
+    # Disable Lean4 tests if lean is not available
+    if _sh.which("lean") is None:
+        result.append(Language.LEAN4)
+
+    # Disable Nix tests if nix is not available
+    if _sh.which("nix") is None:
+        result.append(Language.NIX)
+
+    # Disable Rust tests if rust-analyzer is not available
+    if _sh.which("rust-analyzer") is None:
+        result.append(Language.RUST)
 
     al_tests_enabled = True
     if not al_tests_enabled:
