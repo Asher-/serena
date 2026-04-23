@@ -36,9 +36,29 @@ class CursorStartTool(Tool, ToolMarkerSymbolicRead):
         Start a new cursor at the specified symbol. Returns the symbol's neighborhood
         showing all reachable symbols via active edge types.
 
-        :param name_path: name path of the symbol to start at (e.g. "MyClass/my_method").
-            See find_symbol for name path pattern syntax.
+        ``name_path`` accepts two grammars:
+
+        1. **LSP symbol path** (e.g. ``"MyClass/my_method"``) — the
+           language-server-backed form used by ``find_symbol``. This
+           resolves through the language server and supports the full
+           LSP neighborhood.
+        2. **Structural descent path** — addresses a member inside a
+           container literal (dict/list/object/array/mapping/sequence)
+           that the language server does not surface as a symbol. When the
+           LSP lookup misses and ``relative_path`` is provided, the cursor
+           falls through to the file's structural backend.
+
+        Structural path grammar differs slightly per backend:
+
+        - **Python**: dict string keys appear as ``["key"]``; list indices
+          as ``[N]``. Example: ``LAYER1_CLASSES/[7]/["source_file"]``.
+        - **JSON / TOML / YAML**: object/table/mapping keys appear bare;
+          sequence indices as ``[N]``. Example: ``members/existing``.
+
+        :param name_path: name path of the symbol to start at (see grammar above).
         :param relative_path: optional file path to narrow the symbol search.
+            Required for the structural fallback (the backend is chosen by
+            file extension).
         :param cursor_id: optional explicit cursor ID. Auto-generated if empty.
         :return: the cursor view showing the symbol and its neighborhood.
         """
@@ -460,6 +480,125 @@ class CursorInsertAfterTool(Tool, ToolMarkerSymbolicEdit):
         code_editor = self.create_code_editor()
         code_editor.insert_after_symbol(name_path, relative_file_path=relative_path, body=body)
         manager.reanchor_cursor(cursor_id)
+        return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
+
+class CursorInsertAtStartTool(Tool, ToolMarkerSymbolicEdit):
+    """
+    Insert a member at the beginning of a container. Structural cursors only.
+
+    The cursor must be positioned on a container (dict, list, object, array,
+    mapping, sequence). The new member becomes the container's first entry.
+    Calling this on an LSP cursor raises ``TypeError`` — symbol-level
+    "prepend" is already expressible with :class:`CursorInsertBeforeTool`
+    on the first child.
+    """
+
+    def apply(self, cursor_id: str, body: str) -> str:
+        """
+        Insert a member at the start of the container at the cursor's position.
+
+        For mapping-like containers ``body`` is a full ``"key": value`` pair;
+        for sequence-like containers it is a bare value expression. The
+        cursor stays on the container.
+
+        :param cursor_id: the structural cursor positioned on the container.
+        :param body: the new member's source-text fragment.
+        :return: confirmation and the updated cursor view.
+        :raises TypeError: if ``cursor_id`` is an LSP cursor.
+        """
+        manager = self.agent.get_cursor_manager()
+        state = manager.get_cursor(cursor_id)
+        if not isinstance(state, StructuralCursorState):
+            raise TypeError(
+                f"Cursor '{cursor_id}' is an LSP cursor; "
+                "cursor_insert_at_start requires a structural cursor on a container.",
+            )
+        manager.apply_container_edit(cursor_id, "insert_start", body)
+        manager.reanchor_cursor(cursor_id)
+        return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
+
+
+class CursorInsertAtEndTool(Tool, ToolMarkerSymbolicEdit):
+    """
+    Insert a member at the end of a container. Structural cursors only.
+
+    Mirror of :class:`CursorInsertAtStartTool`: the cursor must be on a
+    container and the new member becomes its last entry. LSP cursors are
+    rejected.
+    """
+
+    def apply(self, cursor_id: str, body: str) -> str:
+        """
+        Insert a member at the end of the container at the cursor's position.
+
+        :param cursor_id: the structural cursor positioned on the container.
+        :param body: the new member's source-text fragment.
+        :return: confirmation and the updated cursor view.
+        :raises TypeError: if ``cursor_id`` is an LSP cursor.
+        """
+        manager = self.agent.get_cursor_manager()
+        state = manager.get_cursor(cursor_id)
+        if not isinstance(state, StructuralCursorState):
+            raise TypeError(
+                f"Cursor '{cursor_id}' is an LSP cursor; "
+                "cursor_insert_at_end requires a structural cursor on a container.",
+            )
+        manager.apply_container_edit(cursor_id, "insert_end", body)
+        manager.reanchor_cursor(cursor_id)
+        return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
+
+
+class CursorRemoveMemberTool(Tool, ToolMarkerSymbolicEdit):
+    """
+    Remove the container member at the cursor's position. Structural cursors only.
+
+    This is the container-member complement of :class:`SafeDeleteSymbol`:
+    safe-delete runs an LSP reference check before deleting a symbol, while
+    remove-member deletes a single member from a mapping or sequence
+    literal where no such reference graph exists. Callers that need
+    reference safety for LSP symbols should keep using :class:`SafeDeleteSymbol`.
+    """
+
+    def apply(self, cursor_id: str) -> str:
+        """
+        Remove the structural member the cursor is positioned on.
+
+        After the removal the cursor is re-anchored at the parent container
+        (the member's path is gone from the tree, so re-anchoring at the
+        removed path would fail). Top-level removals close the cursor since
+        no parent remains.
+
+        :param cursor_id: the structural cursor identifying the member to
+            remove.
+        :return: confirmation and the updated cursor view, or a confirmation
+            and close notice when the removed member was top-level.
+        :raises TypeError: if ``cursor_id`` is an LSP cursor (symbol
+            deletion is handled by :class:`SafeDeleteSymbol`).
+        """
+        manager = self.agent.get_cursor_manager()
+        state = manager.get_cursor(cursor_id)
+        if not isinstance(state, StructuralCursorState):
+            raise TypeError(
+                f"Cursor '{cursor_id}' is an LSP cursor; "
+                "cursor_remove_member requires a structural cursor "
+                "(use safe_delete_symbol for LSP symbols).",
+            )
+
+        # compute the parent container path BEFORE dispatching so we can
+        # re-anchor after the removed path disappears from the index
+        from serena.cursor import _split_name_path_segments
+
+        segments = _split_name_path_segments(state.name_path)
+        parent_path = "/".join(segments[:-1]) if len(segments) > 1 else ""
+
+        manager.apply_container_edit(cursor_id, "remove", "")
+
+        if not parent_path:
+            # top-level member removed: there is no parent to re-anchor on;
+            # close the cursor rather than carry a dangling path forward
+            manager.close_cursor(cursor_id)
+            return f"{SUCCESS_RESULT}\n\nCursor {cursor_id} closed: removed top-level member had no parent to re-anchor on."
+        manager.reanchor_cursor(cursor_id, name_path=parent_path)
         return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
 
 class CursorReplaceRangeTool(Tool, ToolMarkerSymbolicEdit):

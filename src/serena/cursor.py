@@ -175,6 +175,35 @@ class _StructuralNodeCacheEntry:
     mtime_ns: int
     nodes_by_path: dict[str, tuple[KindName, Any]]
 
+def _split_name_path_segments(name_path: str) -> list[str]:
+    """Split a structural name path into segments on bracket-depth-0 slashes.
+
+    Canonical name paths may embed ``/`` inside ``[...]`` brackets (e.g. a
+    Python dict key ``"a/b"`` appears as ``["a/b"]``); splitting on the raw
+    ``/`` character would corrupt such keys. This helper walks the path and
+    breaks only at ``/`` characters whose surrounding bracket depth is zero,
+    yielding the canonical atoms used by ``walk_nodes``.
+
+    :param name_path: a structural name path emitted by a backend's
+        ``walk_nodes``. May be empty.
+    :return: list of segment strings in the order they appear. An empty
+        input yields ``[""]`` (the caller usually wants to treat this as
+        the root container; callers filter as needed).
+    """
+    segments: list[str] = []
+    depth = 0
+    start = 0
+    for i, ch in enumerate(name_path):
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+        elif ch == "/" and depth == 0:
+            segments.append(name_path[start:i])
+            start = i + 1
+    segments.append(name_path[start:])
+    return segments
+
 
 class CursorManager:
     """
@@ -386,9 +415,10 @@ class CursorManager:
         :return: list of neighbor symbols with their edge types
         """
         state = self.get_cursor(cursor_id)
-        # structural cursors carry no LSP graph edges; neighbor resolution is a no-op
+        # structural cursors use the structural-cache walk to surface container
+        # membership as the CONTAINS edge; other edge types remain no-ops.
         if isinstance(state, StructuralCursorState):
-            return []
+            return self._resolve_structural_neighbors(state)
         symbol = state.current_symbol
         location = state.current_location
         neighbors: list[NeighborSymbol] = []
@@ -517,6 +547,53 @@ class CursorManager:
 
         return neighbors
 
+    def _resolve_structural_neighbors(self, state: StructuralCursorState) -> list[NeighborSymbol]:
+        """Surface container membership as CONTAINS-edged neighbors.
+
+        Structural cursors do not participate in the LSP graph, so call
+        hierarchy, references, and type hierarchy are all empty. The one
+        useful neighborhood is *what this node contains*: for a container
+        kind, its direct members; for a leaf member, the empty set. The
+        method reads the structural cache so the neighbors reflect whatever
+        is on disk at the time of the call.
+
+        :param state: the structural cursor state to resolve around.
+        :return: a list of neighbor symbols, each tagged with
+            :data:`EdgeType.CONTAINS`. Empty when the cursor is a leaf or
+            the file is no longer backed by a registered backend.
+        """
+        backend = self._structural_registry.for_relative_path(state.relative_path)
+        if backend is None:
+            return []
+
+        # fresh cache entry so neighbors follow on-disk edits since the last call
+        cache_entry = self._structural_cache_entry(backend, state.relative_path)
+        if cache_entry is None:
+            return []
+
+        # filter the indexed paths to direct children of the cursor's node.
+        # a path is a direct child when its segment count is exactly one
+        # greater than the cursor's and it shares the cursor path as prefix.
+        prefix = state.name_path
+        cursor_segment_count = len(_split_name_path_segments(prefix))
+        children: list[NeighborSymbol] = []
+        for candidate_path, (kind, _node) in cache_entry.nodes_by_path.items():
+            if not candidate_path.startswith(prefix + "/"):
+                continue
+            if len(_split_name_path_segments(candidate_path)) != cursor_segment_count + 1:
+                continue
+            children.append(
+                NeighborSymbol(
+                    name=candidate_path,
+                    kind=kind,
+                    relative_path=state.relative_path,
+                    line=None,
+                    column=None,
+                    edge_type=EdgeType.CONTAINS,
+                )
+            )
+        return children
+
     def _symbol_name_at(self, relative_path: str, line: int, col: int) -> str:
         """Try to find the symbol name at a location, falling back to file:line."""
         try:
@@ -641,16 +718,26 @@ class CursorManager:
         """Render a structural cursor's position as text.
 
         Structural cursors have no LSP neighborhood; the view shows the
-        canonical name path, the resolved kind, and — when ``include_body``
+        canonical name path, the resolved kind, the node's direct members
+        (CONTAINS-edged structural neighbors) and — when ``include_body``
         is set — the serialized source text of the addressed node. The
-        serialized slice is obtained by re-parsing the file and looking up
-        ``state.name_path`` in the backend's ``walk_nodes`` index so the view
-        reflects whatever is on disk at render time.
+        neighbor listing and the serialized slice are obtained by
+        re-reading the file so the view reflects on-disk state at render
+        time.
         """
         lines = [
             f"@ {state.name_path} ({state.kind}) [{state.relative_path}]",
             f"  cursor: {state.cursor_id} | trail: {len(state.trail)} steps | structural",
         ]
+
+        # members of the addressed node — present only when the cursor is on
+        # a container; leaf members produce an empty list and no block is shown
+        children = self._resolve_structural_neighbors(state)
+        if children:
+            lines.append("")
+            lines.append("  contains:")
+            for child in children:
+                lines.append(f"    {child.name} ({child.kind})")
 
         if state.include_body:
             body_text = self._format_structural_node_source(state)
@@ -662,9 +749,10 @@ class CursorManager:
 
         lines.append("")
         lines.append(
-            "Structural cursor: no LSP neighbors. Use cursor_start on a different path to move; "
-            "cursor_replace_body / cursor_insert_before / cursor_insert_after dispatch to the "
-            "container-member backend."
+            "Structural cursor: LSP edges are inactive. Use cursor_start on a member "
+            "path to move; cursor_replace_body / cursor_insert_before / "
+            "cursor_insert_after / cursor_insert_at_start / cursor_insert_at_end / "
+            "cursor_remove_member dispatch to the container-member backend."
         )
         return "\n".join(lines)
 
@@ -857,20 +945,25 @@ class CursorManager:
     ) -> tuple[str, str]:
         """Apply a container-member edit at the position of a structural cursor.
 
-        Used by the cursor edit tools to dispatch replace/insert operations to
-        the appropriate structural backend. The method reads the file, parses
-        it, calls the matching backend method, serializes, and writes the
-        result atomically. The structural cache is invalidated after the
-        write so subsequent re-anchors see fresh node handles.
+        Used by the cursor edit tools to dispatch replace/insert/remove
+        operations to the appropriate structural backend. The method reads
+        the file, parses it, calls the matching backend method, serializes,
+        and writes the result atomically. The structural cache is invalidated
+        after the write so subsequent re-anchors see fresh node handles.
 
         :param cursor_id: the structural cursor whose position to edit.
         :param operation: one of ``"replace"``, ``"insert_before"``,
-            ``"insert_after"``. Future work can widen this to
-            ``"insert_start"`` / ``"insert_end"`` once the tool surface grows.
+            ``"insert_after"``, ``"insert_start"``, ``"insert_end"``,
+            ``"remove"``. ``"insert_start"`` / ``"insert_end"`` expect the
+            cursor to be positioned on a *container* and insert at the
+            beginning or end of that container. The member-anchored
+            ``"insert_before"`` / ``"insert_after"`` expect the cursor to be
+            on an existing member. ``"remove"`` deletes the member at the
+            cursor's position.
         :param source: the source-text fragment passed to the backend. For
-            replacements this is the bare value expression; for insertions it
-            is the key/value pair (mapping containers) or a bare value
-            (sequence containers).
+            replacements this is the bare value expression; for insertions
+            it is the key/value pair (mapping containers) or a bare value
+            (sequence containers). Ignored for ``"remove"``.
         :return: a tuple ``(before_contents, after_contents)`` letting the
             caller compute a unified-diff summary without re-reading the file.
         :raises TypeError: if ``cursor_id`` is not a structural cursor.
@@ -882,7 +975,15 @@ class CursorManager:
             raise TypeError(
                 f"Cursor '{cursor_id}' is an LSP cursor; apply_container_edit requires a structural cursor",
             )
-        if operation not in {"replace", "insert_before", "insert_after"}:
+        valid_ops = {
+            "replace",
+            "insert_before",
+            "insert_after",
+            "insert_start",
+            "insert_end",
+            "remove",
+        }
+        if operation not in valid_ops:
             raise ValueError(f"unknown container edit operation: {operation!r}")
 
         # route to a backend by file extension; no backend -> the cursor is stale
@@ -900,19 +1001,18 @@ class CursorManager:
         # dispatch to the matching ABC method; each returns a new tree handle
         if operation == "replace":
             new_tree = backend.container_replace_member(tree, state.name_path, source)
-        elif operation == "insert_before":
+        elif operation == "remove":
+            new_tree = backend.container_remove_member(tree, state.name_path)
+        else:
+            # insert_before | insert_after | insert_start | insert_end share
+            # the container_insert_member signature; the position suffix maps
+            # directly to the backend's position parameter.
+            position = operation[len("insert_"):]
             new_tree = backend.container_insert_member(
                 tree,
                 state.name_path,
                 source,
-                position="before",
-            )
-        else:  # insert_after
-            new_tree = backend.container_insert_member(
-                tree,
-                state.name_path,
-                source,
-                position="after",
+                position=position,
             )
 
         after_contents = backend.serialize(new_tree)

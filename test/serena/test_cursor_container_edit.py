@@ -30,19 +30,20 @@ from unittest.mock import MagicMock
 
 import pytest
 
+
 from serena.cursor import (
     CursorManager,
     StructuralCursorState,
 )
 from serena.tools.cursor_tools import (
     CursorInsertAfterTool,
+    CursorInsertAtEndTool,
+    CursorInsertAtStartTool,
     CursorInsertBeforeTool,
+    CursorRemoveMemberTool,
     CursorReplaceBodyTool,
 )
-
-
-# --- helpers -----------------------------------------------------------------
-
+from solidlsp.structural.registry import default_structural_backend_registry
 
 class _StubRetriever:
     """Minimal ``LanguageServerSymbolRetriever`` stand-in that always misses.
@@ -531,3 +532,404 @@ class TestStrongaiRepro:
         value_line = next(i for i, line in enumerate(after.splitlines()) if '"value"' in line)
         prov_line = next(i for i, line in enumerate(after.splitlines()) if '"provenance"' in line)
         assert prov_line == value_line + 1
+
+class TestContainerRemoveAndAnchored:
+    """Remove, insert_start, insert_end at the ``apply_container_edit`` layer.
+
+    These three operations round-trip through the same backend plumbing as
+    replace / insert_before / insert_after, but until now only the first
+    three were exercised end-to-end from the cursor layer. Each backend
+    gets one test per new operation — the backend unit tests already
+    cover deeper permutations.
+    """
+
+    # reusable sources per backend — each has a two-member container so
+    # insert_start has a neighbor to land before and insert_end has one
+    # to land after
+    _PYTHON = (
+        "FOO = {\n"
+        '    "members": {\n'
+        '        "alpha": 1,\n'
+        '        "beta": 2,\n'
+        "    },\n"
+        "}\n"
+    )
+    _JSON = (
+        "{\n"
+        '    "members": {\n'
+        '        "alpha": 1,\n'
+        '        "beta": 2\n'
+        "    }\n"
+        "}\n"
+    )
+    _TOML = (
+        "[members]\n"
+        "alpha = 1\n"
+        "beta = 2\n"
+    )
+    _YAML = (
+        "members:\n"
+        "  alpha: 1\n"
+        "  beta: 2\n"
+    )
+
+    # --- python ---------------------------------------------------------
+
+    def test_python_remove(self, tmp_path: Path) -> None:
+        (tmp_path / "s.py").write_text(self._PYTHON, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, _ = manager.start_cursor(
+            name_path='FOO/["members"]/["alpha"]',
+            relative_path="s.py",
+        )
+
+        _before, after = manager.apply_container_edit(cid, "remove", "")
+
+        assert '"alpha"' not in after
+        assert '"beta": 2' in after
+        assert (tmp_path / "s.py").read_text(encoding="utf-8") == after
+
+    def test_python_insert_start_on_container(self, tmp_path: Path) -> None:
+        (tmp_path / "s.py").write_text(self._PYTHON, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, _ = manager.start_cursor(
+            name_path='FOO/["members"]',
+            relative_path="s.py",
+        )
+
+        _before, after = manager.apply_container_edit(cid, "insert_start", '"zero": 0')
+
+        lines = after.splitlines()
+        zero = next(i for i, ln in enumerate(lines) if '"zero"' in ln)
+        alpha = next(i for i, ln in enumerate(lines) if '"alpha"' in ln)
+        assert zero < alpha
+
+    def test_python_insert_end_on_container(self, tmp_path: Path) -> None:
+        (tmp_path / "s.py").write_text(self._PYTHON, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, _ = manager.start_cursor(
+            name_path='FOO/["members"]',
+            relative_path="s.py",
+        )
+
+        _before, after = manager.apply_container_edit(cid, "insert_end", '"omega": 99')
+
+        lines = after.splitlines()
+        beta = next(i for i, ln in enumerate(lines) if '"beta"' in ln)
+        omega = next(i for i, ln in enumerate(lines) if '"omega"' in ln)
+        assert beta < omega
+
+    # --- json -----------------------------------------------------------
+
+    def test_json_remove(self, tmp_path: Path) -> None:
+        (tmp_path / "d.json").write_text(self._JSON, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, _ = manager.start_cursor(
+            name_path="members/alpha",
+            relative_path="d.json",
+        )
+
+        _before, after = manager.apply_container_edit(cid, "remove", "")
+
+        assert "alpha" not in after
+        assert '"beta": 2' in after
+
+    def test_json_insert_start_on_container(self, tmp_path: Path) -> None:
+        (tmp_path / "d.json").write_text(self._JSON, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, _ = manager.start_cursor(
+            name_path="members",
+            relative_path="d.json",
+        )
+
+        _before, after = manager.apply_container_edit(cid, "insert_start", '"zero": 0')
+
+        lines = after.splitlines()
+        zero = next(i for i, ln in enumerate(lines) if '"zero"' in ln)
+        alpha = next(i for i, ln in enumerate(lines) if '"alpha"' in ln)
+        assert zero < alpha
+
+    def test_json_insert_end_on_container(self, tmp_path: Path) -> None:
+        (tmp_path / "d.json").write_text(self._JSON, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, _ = manager.start_cursor(
+            name_path="members",
+            relative_path="d.json",
+        )
+
+        _before, after = manager.apply_container_edit(cid, "insert_end", '"omega": 99')
+
+        lines = after.splitlines()
+        beta = next(i for i, ln in enumerate(lines) if '"beta"' in ln)
+        omega = next(i for i, ln in enumerate(lines) if '"omega"' in ln)
+        assert beta < omega
+
+    # --- toml -----------------------------------------------------------
+
+    def test_toml_remove(self, tmp_path: Path) -> None:
+        (tmp_path / "c.toml").write_text(self._TOML, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, _ = manager.start_cursor(
+            name_path="members/alpha",
+            relative_path="c.toml",
+        )
+
+        _before, after = manager.apply_container_edit(cid, "remove", "")
+
+        assert "alpha" not in after
+        assert "beta = 2" in after
+
+    def test_toml_insert_start_on_container(self, tmp_path: Path) -> None:
+        (tmp_path / "c.toml").write_text(self._TOML, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, _ = manager.start_cursor(
+            name_path="members",
+            relative_path="c.toml",
+        )
+
+        _before, after = manager.apply_container_edit(cid, "insert_start", "zero = 0")
+
+        lines = after.splitlines()
+        zero = next(i for i, ln in enumerate(lines) if "zero" in ln)
+        alpha = next(i for i, ln in enumerate(lines) if "alpha" in ln)
+        assert zero < alpha
+
+    def test_toml_insert_end_on_container(self, tmp_path: Path) -> None:
+        (tmp_path / "c.toml").write_text(self._TOML, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, _ = manager.start_cursor(
+            name_path="members",
+            relative_path="c.toml",
+        )
+
+        _before, after = manager.apply_container_edit(cid, "insert_end", "omega = 99")
+
+        lines = after.splitlines()
+        beta = next(i for i, ln in enumerate(lines) if "beta" in ln)
+        omega = next(i for i, ln in enumerate(lines) if "omega" in ln)
+        assert beta < omega
+
+    # --- yaml -----------------------------------------------------------
+
+    def test_yaml_remove(self, tmp_path: Path) -> None:
+        (tmp_path / "d.yaml").write_text(self._YAML, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, _ = manager.start_cursor(
+            name_path="members/alpha",
+            relative_path="d.yaml",
+        )
+
+        _before, after = manager.apply_container_edit(cid, "remove", "")
+
+        assert "alpha" not in after
+        assert "beta: 2" in after
+
+    def test_yaml_insert_start_on_container(self, tmp_path: Path) -> None:
+        (tmp_path / "d.yaml").write_text(self._YAML, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, _ = manager.start_cursor(
+            name_path="members",
+            relative_path="d.yaml",
+        )
+
+        _before, after = manager.apply_container_edit(cid, "insert_start", "zero: 0")
+
+        lines = after.splitlines()
+        zero = next(i for i, ln in enumerate(lines) if "zero" in ln)
+        alpha = next(i for i, ln in enumerate(lines) if "alpha" in ln)
+        assert zero < alpha
+
+    def test_yaml_insert_end_on_container(self, tmp_path: Path) -> None:
+        (tmp_path / "d.yaml").write_text(self._YAML, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, _ = manager.start_cursor(
+            name_path="members",
+            relative_path="d.yaml",
+        )
+
+        _before, after = manager.apply_container_edit(cid, "insert_end", "omega: 99")
+
+        lines = after.splitlines()
+        beta = next(i for i, ln in enumerate(lines) if "beta" in ln)
+        omega = next(i for i, ln in enumerate(lines) if "omega" in ln)
+        assert beta < omega
+
+
+class TestApplyContainerEditValidation:
+    """Dispatcher-level validation of the expanded operation set."""
+
+    _SOURCE = (
+        "FOO = {\n"
+        '    "members": {\n'
+        '        "alpha": 1,\n'
+        "    },\n"
+        "}\n"
+    )
+
+    def test_unknown_operation_raises(self, tmp_path: Path) -> None:
+        (tmp_path / "s.py").write_text(self._SOURCE, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, _ = manager.start_cursor(
+            name_path='FOO/["members"]/["alpha"]',
+            relative_path="s.py",
+        )
+
+        with pytest.raises(ValueError, match="unknown container edit operation"):
+            manager.apply_container_edit(cid, "wipe", "")
+
+
+class TestStructuralNeighbors:
+    """The ``_resolve_structural_neighbors`` helper and its view integration."""
+
+    _SOURCE = (
+        "FOO = {\n"
+        '    "members": {\n'
+        '        "alpha": 1,\n'
+        '        "beta": 2,\n'
+        '        "gamma": 3,\n'
+        "    },\n"
+        "}\n"
+    )
+
+    def test_container_cursor_yields_direct_children(self, tmp_path: Path) -> None:
+        (tmp_path / "s.py").write_text(self._SOURCE, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, state = manager.start_cursor(
+            name_path='FOO/["members"]',
+            relative_path="s.py",
+        )
+
+        assert isinstance(state, StructuralCursorState)
+        neighbors = manager._resolve_structural_neighbors(state)  # type: ignore[attr-defined]
+        names = {n.name for n in neighbors}
+        assert names == {
+            'FOO/["members"]/["alpha"]',
+            'FOO/["members"]/["beta"]',
+            'FOO/["members"]/["gamma"]',
+        }
+        _ = cid  # silence unused warning; cursor lifetime bound by manager
+
+    def test_leaf_cursor_yields_no_neighbors(self, tmp_path: Path) -> None:
+        (tmp_path / "s.py").write_text(self._SOURCE, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        _cid, state = manager.start_cursor(
+            name_path='FOO/["members"]/["alpha"]',
+            relative_path="s.py",
+        )
+
+        assert isinstance(state, StructuralCursorState)
+        neighbors = manager._resolve_structural_neighbors(state)  # type: ignore[attr-defined]
+        assert neighbors == []
+
+    def test_format_cursor_view_lists_members(self, tmp_path: Path) -> None:
+        (tmp_path / "s.py").write_text(self._SOURCE, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, _ = manager.start_cursor(
+            name_path='FOO/["members"]',
+            relative_path="s.py",
+        )
+
+        view = manager.format_cursor_view(cid)
+        assert "contains:" in view
+        assert '["alpha"]' in view
+        assert '["beta"]' in view
+        assert '["gamma"]' in view
+
+
+class TestStructuralNeighborSplitter:
+    """Name-path segmenter respects bracket depth so keys with ``/`` survive."""
+
+    def test_splits_plain_path(self) -> None:
+        from serena.cursor import _split_name_path_segments
+
+        assert _split_name_path_segments("a/b/c") == ["a", "b", "c"]
+
+    def test_keeps_bracketed_slash_together(self) -> None:
+        from serena.cursor import _split_name_path_segments
+
+        # a key literally containing "/" in Python dict form: FOO/["a/b"]
+        assert _split_name_path_segments('FOO/["a/b"]') == ["FOO", '["a/b"]']
+
+    def test_nested_brackets(self) -> None:
+        from serena.cursor import _split_name_path_segments
+
+        assert _split_name_path_segments("FOO/[7]/[\"x\"]") == ["FOO", "[7]", '["x"]']
+
+
+class TestNewToolSurface:
+    """End-to-end tool dispatch for CursorInsertAtStart / AtEnd / RemoveMember."""
+
+    _SOURCE = (
+        "FOO = {\n"
+        '    "members": {\n'
+        '        "alpha": 1,\n'
+        '        "beta": 2,\n'
+        "    },\n"
+        "}\n"
+    )
+
+    @pytest.fixture
+    def py_state(self, tmp_path: Path) -> tuple[CursorManager, Any, Path]:
+        file_path = tmp_path / "s.py"
+        file_path.write_text(self._SOURCE, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        project = manager._project  # type: ignore[attr-defined]
+        return manager, project, file_path
+
+    def test_insert_at_start_tool(
+        self,
+        py_state: tuple[CursorManager, Any, Path],
+    ) -> None:
+        manager, project, file_path = py_state
+        manager.start_cursor(
+            name_path='FOO/["members"]',
+            relative_path="s.py",
+            cursor_id="c1",
+        )
+        tool = _bind_tool(CursorInsertAtStartTool, _ToolHarness(manager, project))
+
+        tool.apply(cursor_id="c1", body='"zero": 0')
+
+        content = file_path.read_text(encoding="utf-8")
+        lines = content.splitlines()
+        zero = next(i for i, ln in enumerate(lines) if '"zero"' in ln)
+        alpha = next(i for i, ln in enumerate(lines) if '"alpha"' in ln)
+        assert zero < alpha
+
+    def test_insert_at_end_tool(
+        self,
+        py_state: tuple[CursorManager, Any, Path],
+    ) -> None:
+        manager, project, file_path = py_state
+        manager.start_cursor(
+            name_path='FOO/["members"]',
+            relative_path="s.py",
+            cursor_id="c1",
+        )
+        tool = _bind_tool(CursorInsertAtEndTool, _ToolHarness(manager, project))
+
+        tool.apply(cursor_id="c1", body='"omega": 99')
+
+        content = file_path.read_text(encoding="utf-8")
+        lines = content.splitlines()
+        beta = next(i for i, ln in enumerate(lines) if '"beta"' in ln)
+        omega = next(i for i, ln in enumerate(lines) if '"omega"' in ln)
+        assert beta < omega
+
+    def test_remove_member_tool(
+        self,
+        py_state: tuple[CursorManager, Any, Path],
+    ) -> None:
+        manager, project, file_path = py_state
+        manager.start_cursor(
+            name_path='FOO/["members"]/["alpha"]',
+            relative_path="s.py",
+            cursor_id="c1",
+        )
+        tool = _bind_tool(CursorRemoveMemberTool, _ToolHarness(manager, project))
+
+        tool.apply(cursor_id="c1")
+
+        content = file_path.read_text(encoding="utf-8")
+        assert "alpha" not in content
+        assert '"beta": 2' in content
