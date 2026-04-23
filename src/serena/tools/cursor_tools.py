@@ -13,7 +13,7 @@ import difflib
 from collections import defaultdict
 from collections.abc import Sequence
 
-from serena.cursor import EdgeType
+from serena.cursor import EdgeType, StructuralCursorState
 from serena.tools import SUCCESS_RESULT
 from serena.tools.tools_base import Tool, ToolMarkerSymbolicEdit, ToolMarkerSymbolicRead
 from solidlsp.ls_types import SymbolKind
@@ -121,6 +121,13 @@ class CursorConfigureTool(Tool, ToolMarkerSymbolicRead):
         """
         manager = self.agent.get_cursor_manager()
         state = manager.get_cursor(cursor_id)
+
+        # structural cursors carry no LSP edges; silently ignore edge_types so the
+        # tool stays uniform across cursor kinds. include_body still toggles whether
+        # the view renders the node's serialized source.
+        if isinstance(state, StructuralCursorState):
+            state.include_body = include_body
+            return manager.format_cursor_view(cursor_id)
 
         if edge_types:
             valid_types: set[EdgeType] = set()
@@ -291,12 +298,26 @@ class CursorReplaceBodyTool(Tool, ToolMarkerSymbolicEdit):
         the signature line for functions. It does NOT include preceding docstrings, comments,
         or imports.
 
+        For structural cursors (container-member positions), ``body`` is the
+        bare value expression that should replace the existing member's
+        value; the member's key is preserved.
+
         :param cursor_id: the cursor whose current symbol to replace.
         :param body: the new body text.
         :return: confirmation and the updated cursor view.
         """
         manager = self.agent.get_cursor_manager()
         state = manager.get_cursor(cursor_id)
+        # structural-cursor branch: dispatch to the container-member backend.
+        # body is a bare value expression — the backend preserves the key half
+        # of mapping-like containers.
+        if isinstance(state, StructuralCursorState):
+            before, after = manager.apply_container_edit(cursor_id, "replace", body)
+            removed, added = self._count_diff_lines(before, after)
+            manager.reanchor_cursor(cursor_id)
+            diff_summary = f"Diff: -{removed} / +{added} lines"
+            return f"{SUCCESS_RESULT}\n{diff_summary}\n\n" + manager.format_cursor_view(cursor_id)
+
         name_path = state.current_symbol.get_name_path()
         relative_path = state.current_location.relative_path
         if relative_path is None:
@@ -371,6 +392,12 @@ class CursorInsertBeforeTool(Tool, ToolMarkerSymbolicEdit):
         Typical uses: insert a new class/function above the current one, or insert a new
         import statement before the first top-level symbol in a file.
 
+        For structural cursors (container-member positions), ``body`` is a
+        full member fragment: a ``"key": value`` pair for mapping-like
+        containers (dict, object, mapping) or a bare value expression for
+        sequence-like containers (list, array, sequence). The new member is
+        inserted immediately before the cursor's anchor.
+
         :param cursor_id: the cursor whose current symbol to insert before.
         :param body: the content to insert; it will be placed immediately before the line
             where the symbol is defined.
@@ -378,6 +405,12 @@ class CursorInsertBeforeTool(Tool, ToolMarkerSymbolicEdit):
         """
         manager = self.agent.get_cursor_manager()
         state = manager.get_cursor(cursor_id)
+        # structural-cursor branch: container-member insertion before the anchor
+        if isinstance(state, StructuralCursorState):
+            manager.apply_container_edit(cursor_id, "insert_before", body)
+            manager.reanchor_cursor(cursor_id)
+            return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
+
         name_path = state.current_symbol.get_name_path()
         relative_path = state.current_location.relative_path
         if relative_path is None:
@@ -401,6 +434,12 @@ class CursorInsertAfterTool(Tool, ToolMarkerSymbolicEdit):
         Typical use: add a new class, function, method, or variable assignment after
         an existing one.
 
+        For structural cursors (container-member positions), ``body`` is a
+        full member fragment: a ``"key": value`` pair for mapping-like
+        containers (dict, object, mapping) or a bare value expression for
+        sequence-like containers (list, array, sequence). The new member is
+        inserted immediately after the cursor's anchor.
+
         :param cursor_id: the cursor whose current symbol to insert after.
         :param body: the content to insert; it will be placed on the line following the
             end of the symbol's definition.
@@ -408,6 +447,12 @@ class CursorInsertAfterTool(Tool, ToolMarkerSymbolicEdit):
         """
         manager = self.agent.get_cursor_manager()
         state = manager.get_cursor(cursor_id)
+        # structural-cursor branch: container-member insertion after the anchor
+        if isinstance(state, StructuralCursorState):
+            manager.apply_container_edit(cursor_id, "insert_after", body)
+            manager.reanchor_cursor(cursor_id)
+            return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
+
         name_path = state.current_symbol.get_name_path()
         relative_path = state.current_location.relative_path
         if relative_path is None:
@@ -501,7 +546,9 @@ class CursorRenameTool(Tool, ToolMarkerSymbolicEdit):
         :return: the rename status message followed by the updated cursor view.
         """
         manager = self.agent.get_cursor_manager()
-        state = manager.get_cursor(cursor_id)
+        # rename is LSP-only; structural cursors cannot use the language server's
+        # rename refactoring, so we fail fast via get_lsp_cursor.
+        state = manager.get_lsp_cursor(cursor_id)
         old_name_path = state.current_symbol.get_name_path()
         relative_path = state.current_location.relative_path
         if relative_path is None:

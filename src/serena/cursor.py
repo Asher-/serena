@@ -104,6 +104,43 @@ class CursorState:
         self.current_location = new_location
 
 
+@dataclass
+class StructuralCursorState:
+    """The state of a cursor positioned on a structural (non-LSP) node.
+
+    Used when a name path resolves to a container-literal member (dict entry,
+    list item, object member, array item, mapping pair, sequence item) that
+    the language server does not surface as a symbol. The cursor carries a
+    canonical name path (as emitted by the backend's ``walk_nodes``) plus the
+    file's relative path; edit tools re-resolve against a fresh parse on each
+    call so handles stay consistent with on-disk content.
+
+    :ivar cursor_id: the cursor's handle.
+    :ivar relative_path: POSIX-style project-relative path of the file whose
+        structural backend owns this cursor. Required because structural
+        lookups route through the backend registry by file extension.
+    :ivar name_path: canonical name path identifying the addressed node. For
+        Python, dict keys appear as ``["key"]`` and list indices as ``[N]``;
+        for JSON/TOML/YAML keys appear bare and indices as ``[N]``.
+    :ivar kind: the :type:`~solidlsp.structural.kinds.KindName` of the resolved
+        node captured at ``cursor_start`` time for display.
+    :ivar trail: prior canonical name paths visited by this cursor.
+    :ivar include_body: preserved for API parity with :class:`CursorState`;
+        structural cursors always render the serialized node source so this
+        flag is effectively a no-op today.
+    """
+
+    cursor_id: str
+    relative_path: str
+    name_path: str
+    kind: KindName
+    trail: list[str] = field(default_factory=list)
+    include_body: bool = False
+
+
+AnyCursorState = CursorState | StructuralCursorState
+
+
 @dataclass(frozen=True)
 class StructuralResolution:
     """Result of a structural name-path resolution against a file.
@@ -162,7 +199,7 @@ class CursorManager:
             pass a custom registry to isolate from backend imports.
         """
         self._project = project
-        self._cursors: dict[str, CursorState] = {}
+        self._cursors: dict[str, AnyCursorState] = {}
         self._next_cursor_id = 1
         # lazy default so test overrides and production both go through one path
         self._structural_registry = structural_registry if structural_registry is not None else default_structural_backend_registry()
@@ -178,10 +215,25 @@ class CursorManager:
         self._next_cursor_id += 1
         return cursor_id
 
-    def get_cursor(self, cursor_id: str) -> CursorState:
+    def get_cursor(self, cursor_id: str) -> AnyCursorState:
         if cursor_id not in self._cursors:
             raise ValueError(f"No cursor with id '{cursor_id}'. Active cursors: {list(self._cursors.keys())}")
         return self._cursors[cursor_id]
+
+    def get_lsp_cursor(self, cursor_id: str) -> CursorState:
+        """Return the cursor strictly as an LSP :class:`CursorState`.
+
+        Raises :class:`TypeError` when the cursor is a
+        :class:`StructuralCursorState` — callers that cannot operate on
+        structural cursors use this accessor to fail fast.
+        """
+        state = self.get_cursor(cursor_id)
+        if not isinstance(state, CursorState):
+            raise TypeError(
+                f"Cursor '{cursor_id}' is a structural cursor at "
+                f"{state.relative_path}:{state.name_path!r}; this operation requires an LSP cursor",
+            )
+        return state
 
     def list_cursors(self) -> list[str]:
         return list(self._cursors.keys())
@@ -191,33 +243,68 @@ class CursorManager:
         name_path: str,
         relative_path: str | None = None,
         cursor_id: str | None = None,
-    ) -> tuple[str, CursorState]:
+    ) -> tuple[str, AnyCursorState]:
         """
         Start a new cursor at a symbol identified by name_path.
 
-        :param name_path: the name path of the symbol (e.g. "MyClass/my_method")
-        :param relative_path: optional file path to narrow the search
-        :param cursor_id: optional explicit cursor ID; auto-generated if None
-        :return: tuple of (cursor_id, cursor_state)
-        """
-        retriever = self._retriever
-        symbol = retriever.find_unique(name_path, within_relative_path=relative_path)
-        location = symbol.location
+        The method first consults the language server: if ``find_unique``
+        resolves ``name_path`` to an LSP symbol, an LSP-backed
+        :class:`CursorState` is returned. When the LSP lookup fails and
+        ``relative_path`` points at a file with a registered structural
+        backend, resolution falls through to
+        :meth:`resolve_structural_name_path`; a successful structural match
+        returns a :class:`StructuralCursorState`. This lets cursors address
+        container members (dict entries, list/array items, YAML/TOML pairs)
+        that the language server does not surface as symbols.
 
-        if cursor_id is None:
-            cursor_id = self._generate_cursor_id()
-        elif cursor_id in self._cursors:
+        :param name_path: the name path of the symbol or structural node.
+            For Python dict descent the agent writes ``FOO/["members"]``;
+            for JSON/TOML/YAML the form is ``foo/bar/[3]``.
+        :param relative_path: optional file path to narrow the search.
+            Required to enable the structural fallback.
+        :param cursor_id: optional explicit cursor ID; auto-generated if None
+        :return: tuple of (cursor_id, cursor_state); the state is either an
+            LSP :class:`CursorState` or a :class:`StructuralCursorState`.
+        """
+        # validate the cursor id up-front so both resolution paths share the check
+        if cursor_id is not None and cursor_id in self._cursors:
             raise ValueError(
                 f"Cursor '{cursor_id}' already exists. Close it first or use a different ID. Active cursors: {list(self._cursors.keys())}"
             )
 
+        retriever = self._retriever
+        try:
+            symbol = retriever.find_unique(name_path, within_relative_path=relative_path)
+        except ValueError as lsp_error:
+            # LSP missed; fall through to the structural backend when a file is known.
+            # Without a relative_path we have no way to pick a backend, so the LSP
+            # error is the agent's honest feedback and we re-raise it.
+            if relative_path is None:
+                raise
+            structural = self.resolve_structural_name_path(relative_path, name_path)
+            if structural is None:
+                raise lsp_error
+            assigned_id = cursor_id if cursor_id is not None else self._generate_cursor_id()
+            struct_state = StructuralCursorState(
+                cursor_id=assigned_id,
+                relative_path=relative_path,
+                name_path=structural.name_path,
+                kind=structural.kind,
+            )
+            self._cursors[assigned_id] = struct_state
+            return assigned_id, struct_state
+
+        location = symbol.location
+
+        assigned_id = cursor_id if cursor_id is not None else self._generate_cursor_id()
+
         state = CursorState(
-            cursor_id=cursor_id,
+            cursor_id=assigned_id,
             current_symbol=symbol,
             current_location=location,
         )
-        self._cursors[cursor_id] = state
-        return cursor_id, state
+        self._cursors[assigned_id] = state
+        return assigned_id, state
 
     def move_cursor(
         self,
@@ -236,7 +323,9 @@ class CursorManager:
         :param target_relative_path: optional file path to disambiguate
         :return: updated cursor state
         """
-        state = self.get_cursor(cursor_id)
+        # cursor_move operates on LSP graph edges; structural cursors have no such
+        # edges, so we raise a targeted error pointing the agent at cursor_start.
+        state = self.get_lsp_cursor(cursor_id)
 
         # First, try to find the target among current neighbors
         neighbors = self.resolve_neighbors(cursor_id)
@@ -297,6 +386,9 @@ class CursorManager:
         :return: list of neighbor symbols with their edge types
         """
         state = self.get_cursor(cursor_id)
+        # structural cursors carry no LSP graph edges; neighbor resolution is a no-op
+        if isinstance(state, StructuralCursorState):
+            return []
         symbol = state.current_symbol
         location = state.current_location
         neighbors: list[NeighborSymbol] = []
@@ -477,6 +569,8 @@ class CursorManager:
         :return: human-readable text representation
         """
         state = self.get_cursor(cursor_id)
+        if isinstance(state, StructuralCursorState):
+            return self._format_structural_cursor_view(state)
         symbol = state.current_symbol
         location = state.current_location
 
@@ -542,6 +636,90 @@ class CursorManager:
         from serena.symbol_extent import compute_widened_body_text
 
         return compute_widened_body_text(symbol, self._project)
+
+    def _format_structural_cursor_view(self, state: StructuralCursorState) -> str:
+        """Render a structural cursor's position as text.
+
+        Structural cursors have no LSP neighborhood; the view shows the
+        canonical name path, the resolved kind, and — when ``include_body``
+        is set — the serialized source text of the addressed node. The
+        serialized slice is obtained by re-parsing the file and looking up
+        ``state.name_path`` in the backend's ``walk_nodes`` index so the view
+        reflects whatever is on disk at render time.
+        """
+        lines = [
+            f"@ {state.name_path} ({state.kind}) [{state.relative_path}]",
+            f"  cursor: {state.cursor_id} | trail: {len(state.trail)} steps | structural",
+        ]
+
+        if state.include_body:
+            body_text = self._format_structural_node_source(state)
+            if body_text is not None:
+                lines.append("")
+                lines.append("--- body ---")
+                lines.append(body_text)
+                lines.append("--- end body ---")
+
+        lines.append("")
+        lines.append(
+            "Structural cursor: no LSP neighbors. Use cursor_start on a different path to move; "
+            "cursor_replace_body / cursor_insert_before / cursor_insert_after dispatch to the "
+            "container-member backend."
+        )
+        return "\n".join(lines)
+
+    def _format_structural_node_source(self, state: StructuralCursorState) -> str | None:
+        """Return the serialized source text for the node at ``state.name_path``.
+
+        Returns ``None`` when the backend cannot render the addressed node as
+        a standalone source string — which today covers the ``container``
+        wrapper yielded by Python's ``walk_container_members`` (a bare
+        ``cst.Dict``/``cst.List`` has no standalone module serializer
+        attached). Callers should treat ``None`` as "no body available".
+        """
+        backend = self._structural_registry.for_relative_path(state.relative_path)
+        if backend is None:
+            return None
+        # _structural_cache_entry re-parses on mtime change, so the view reflects on-disk state
+        cache_entry = self._structural_cache_entry(backend, state.relative_path)
+        if cache_entry is None:
+            return None
+        match = cache_entry.nodes_by_path.get(state.name_path)
+        if match is None:
+            return None
+        _kind, node = match
+        try:
+            return self._serialize_node_for_display(backend, node)
+        except Exception as e:  # noqa: BLE001
+            # rendering is best-effort: when a backend cannot turn a sub-node
+            # into standalone text, omit the body rather than fail the view
+            log.debug(f"Could not serialize structural node for display: {e}")
+            return None
+
+    @staticmethod
+    def _serialize_node_for_display(backend: StructuralLanguage, node: Any) -> str:
+        """Coerce ``node`` into text using the backend's native rendering.
+
+        LibCST, the JSON CST, tomlkit and ruamel.yaml all expose a
+        ``__str__``/``code`` hook that renders the sub-tree with its original
+        formatting. We try the most faithful options in order and fall back to
+        ``str(node)`` so callers see *something* even for backends without a
+        dedicated renderer.
+        """
+        # libcst nodes expose a `.code` property for module-level rendering
+        code_attr = getattr(node, "code", None)
+        if isinstance(code_attr, str):
+            return code_attr
+        # tomlkit items have a `.as_string()` for their literal text
+        as_string = getattr(node, "as_string", None)
+        if callable(as_string):
+            try:
+                result = as_string()
+            except TypeError:
+                result = None
+            if isinstance(result, str):
+                return result
+        return str(node)
 
     def find_symbols(
         self,
@@ -671,23 +849,135 @@ class CursorManager:
         self._structural_nodes_cache[relative_path] = entry
         return entry
 
+    def apply_container_edit(
+        self,
+        cursor_id: str,
+        operation: str,
+        source: str,
+    ) -> tuple[str, str]:
+        """Apply a container-member edit at the position of a structural cursor.
+
+        Used by the cursor edit tools to dispatch replace/insert operations to
+        the appropriate structural backend. The method reads the file, parses
+        it, calls the matching backend method, serializes, and writes the
+        result atomically. The structural cache is invalidated after the
+        write so subsequent re-anchors see fresh node handles.
+
+        :param cursor_id: the structural cursor whose position to edit.
+        :param operation: one of ``"replace"``, ``"insert_before"``,
+            ``"insert_after"``. Future work can widen this to
+            ``"insert_start"`` / ``"insert_end"`` once the tool surface grows.
+        :param source: the source-text fragment passed to the backend. For
+            replacements this is the bare value expression; for insertions it
+            is the key/value pair (mapping containers) or a bare value
+            (sequence containers).
+        :return: a tuple ``(before_contents, after_contents)`` letting the
+            caller compute a unified-diff summary without re-reading the file.
+        :raises TypeError: if ``cursor_id`` is not a structural cursor.
+        :raises ValueError: for unknown operations or when the backend cannot
+            service the request (e.g. no backend registered for the file).
+        """
+        state = self.get_cursor(cursor_id)
+        if not isinstance(state, StructuralCursorState):
+            raise TypeError(
+                f"Cursor '{cursor_id}' is an LSP cursor; apply_container_edit requires a structural cursor",
+            )
+        if operation not in {"replace", "insert_before", "insert_after"}:
+            raise ValueError(f"unknown container edit operation: {operation!r}")
+
+        # route to a backend by file extension; no backend -> the cursor is stale
+        backend = self._structural_registry.for_relative_path(state.relative_path)
+        if backend is None:
+            raise ValueError(
+                f"No structural backend registered for {state.relative_path!r}; "
+                f"structural cursor '{cursor_id}' cannot dispatch a container edit.",
+            )
+
+        # read fresh content so concurrent on-disk edits are picked up on each call
+        before_contents = self._project.read_file(state.relative_path)
+        tree = backend.parse(before_contents)
+
+        # dispatch to the matching ABC method; each returns a new tree handle
+        if operation == "replace":
+            new_tree = backend.container_replace_member(tree, state.name_path, source)
+        elif operation == "insert_before":
+            new_tree = backend.container_insert_member(
+                tree,
+                state.name_path,
+                source,
+                position="before",
+            )
+        else:  # insert_after
+            new_tree = backend.container_insert_member(
+                tree,
+                state.name_path,
+                source,
+                position="after",
+            )
+
+        after_contents = backend.serialize(new_tree)
+        # short-circuit writes when the backend round-trip is a no-op; this keeps
+        # mtime stable for semantically empty operations and avoids a spurious diff.
+        if after_contents != before_contents:
+            self._write_file_contents(state.relative_path, after_contents)
+        # invalidate the per-file structural cache so re-anchors see fresh node handles
+        self._structural_nodes_cache.pop(state.relative_path, None)
+        return before_contents, after_contents
+
+    def _write_file_contents(self, relative_path: str, contents: str) -> None:
+        """Write ``contents`` to ``relative_path`` using the project's encoding/line-ending.
+
+        Structural edits bypass the LSP buffer (JSON/TOML/YAML have no LSP
+        integration at all, and Python structural edits are semantic so the
+        LSP will pick them up on the next open). We honor the project's
+        configured encoding and newline so the file round-trips cleanly with
+        other tools.
+        """
+        abs_path = os.path.join(self._project.project_root, relative_path)
+        encoding = self._project.project_config.encoding
+        newline = self._project.line_ending.newline_str
+        with open(abs_path, "w", encoding=encoding, newline=newline) as f:
+            f.write(contents)
+
     def reanchor_cursor(
         self,
         cursor_id: str,
         name_path: str | None = None,
         relative_path: str | None = None,
-    ) -> CursorState:
+    ) -> AnyCursorState:
         """
         Re-resolve the cursor's current symbol from the language server, after an edit
         potentially changed line numbers or the symbol's name. The cursor remains on the
         same logical symbol; its stored position is refreshed.
 
+        For structural cursors, re-resolution routes through the backend's
+        ``walk_nodes`` index after invalidating the per-file cache — this
+        catches the case where a container-member edit has rewritten the
+        file on disk and we need the new node handle.
+
         :param cursor_id: the cursor to re-anchor
         :param name_path: override name path (e.g. after a rename); defaults to the current symbol's name path
         :param relative_path: override file path; defaults to the current cursor location's file
-        :return: the updated cursor state
+        :return: the updated cursor state (same kind as the stored one)
         """
         state = self.get_cursor(cursor_id)
+        if isinstance(state, StructuralCursorState):
+            # structural re-anchor: invalidate the per-file cache so walk_nodes
+            # re-indexes against the freshly-written file, then look the path up.
+            resolved_name = name_path if name_path is not None else state.name_path
+            resolved_path = relative_path if relative_path is not None else state.relative_path
+            self._structural_nodes_cache.pop(resolved_path, None)
+            resolution = self.resolve_structural_name_path(resolved_path, resolved_name)
+            if resolution is None:
+                raise ValueError(
+                    f"Structural cursor '{cursor_id}' cannot re-anchor: path "
+                    f"{resolved_name!r} no longer resolves in {resolved_path!r}",
+                )
+            state.relative_path = resolved_path
+            state.name_path = resolution.name_path
+            state.kind = resolution.kind
+            return state
+
         resolved_name = name_path if name_path is not None else state.current_symbol.get_name_path()
         resolved_path = relative_path if relative_path is not None else state.current_location.relative_path
         retriever = self._retriever
@@ -699,6 +989,15 @@ class CursorManager:
     def format_trail(self, cursor_id: str) -> str:
         """Format the cursor's visited trail as text."""
         state = self.get_cursor(cursor_id)
+        if isinstance(state, StructuralCursorState):
+            if not state.trail:
+                return f"Cursor {cursor_id}: no trail (at starting position)"
+            lines = [f"Cursor {cursor_id} trail ({len(state.trail)} steps):"]
+            for i, prior_path in enumerate(state.trail):
+                lines.append(f"  {i + 1}. {state.relative_path}:{prior_path}")
+            lines.append(f"  -> {state.relative_path}:{state.name_path} (current)")
+            return "\n".join(lines)
+
         if not state.trail:
             return f"Cursor {cursor_id}: no trail (at starting position)"
 
