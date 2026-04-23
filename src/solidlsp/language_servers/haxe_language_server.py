@@ -18,14 +18,31 @@ from solidlsp.ls import (
     LanguageServerDependencyProviderSinglePath,
     LSPFileBuffer,
     SolidLanguageServer,
+    SolidLanguageServer,
 )
+from solidlsp.language_servers.common import RequiredCLI
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_types import Hover
 from solidlsp.lsp_protocol_handler.lsp_types import DiagnosticSeverity, InitializeParams
 from solidlsp.settings import SolidLSPSettings
-
 log = logging.getLogger(__name__)
+
+
+_HAXE_COMPILER_REQUIREMENT = RequiredCLI(
+    name="haxe",
+    rationale=(
+        "The Haxe Language Server requires the haxe toolchain to resolve\n"
+        "symbols and references; without it, LSP requests such as\n"
+        "textDocument/references return method-not-found after the\n"
+        "server starts."
+    ),
+    install_hints=[
+        "Homebrew (macOS): brew install haxe",
+        "System package manager (Linux): apt/dnf/pacman install haxe",
+        "Official installer: https://haxe.org/download/",
+    ],
+)
 
 
 class HaxeLanguageServer(SolidLanguageServer):
@@ -70,19 +87,8 @@ class HaxeLanguageServer(SolidLanguageServer):
                 error -32601 because the server cannot build its FIR index.
                 Fail fast with a clear message instead.
             """
-            # check for the haxe compiler up front
-            if shutil.which("haxe") is None:
-                raise RuntimeError(
-                    "Haxe compiler is not installed or not in PATH.\n"
-                    "The Haxe Language Server requires the haxe toolchain to resolve\n"
-                    "symbols and references; without it, LSP requests such as\n"
-                    "textDocument/references return method-not-found after the\n"
-                    "server starts.\n"
-                    "Install options:\n"
-                    "  - Homebrew (macOS): brew install haxe\n"
-                    "  - System package manager (Linux): apt/dnf/pacman install haxe\n"
-                    "  - Official installer: https://haxe.org/download/"
-                )
+            # preflight: haxe compiler must be on PATH
+            _HAXE_COMPILER_REQUIREMENT.resolve_or_raise()
 
             # 1. Check for haxe-language-server in PATH
             system_haxe_ls = shutil.which("haxe-language-server")

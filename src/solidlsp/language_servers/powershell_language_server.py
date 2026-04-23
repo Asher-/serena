@@ -19,9 +19,11 @@ from pathlib import Path
 
 from overrides import override
 
+
+from solidlsp.language_servers.common import RequiredCLI
+from solidlsp.ls import RawDocumentSymbol, SolidLanguageServer
 from solidlsp.ls import RawDocumentSymbol, SolidLanguageServer
 from solidlsp.ls_config import Language, LanguageServerConfig
-from solidlsp.ls_types import SymbolKind
 from solidlsp.ls_utils import FileUtils
 from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
@@ -33,6 +35,22 @@ log = logging.getLogger(__name__)
 PSES_VERSION = "4.4.0"
 PSES_SHA256 = "690b91092989a0f66e6f43986166aaef69d64b559a9fda51feed882e1103fbcc"
 PSES_ALLOWED_HOSTS = ("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com")
+
+
+_PWSH_CLI_REQUIREMENT = RequiredCLI(
+    name="pwsh",
+    rationale=(
+        "PowerShell Editor Services runs inside a PowerShell 7+ host process;\n"
+        "without pwsh on PATH there is nothing to launch the editor-services\n"
+        "script in."
+    ),
+    install_hints=[
+        "Homebrew (macOS): brew install --cask powershell",
+        "Winget (Windows): winget install Microsoft.PowerShell",
+        "Linux: https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-linux",
+        "Official releases: https://github.com/PowerShell/PowerShell",
+    ],
+)
 
 
 class PowerShellLanguageServer(SolidLanguageServer):
@@ -132,30 +150,28 @@ class PowerShellLanguageServer(SolidLanguageServer):
         return str(start_script)
 
     @classmethod
+
     def _setup_runtime_dependency(cls, solidlsp_settings: SolidLSPSettings) -> tuple[str, str, str]:
-        """
-        Check if required PowerShell runtime dependencies are available.
-        Downloads PowerShell Editor Services if not present.
+        """Check that required PowerShell runtime dependencies are available.
 
-        Returns:
-            tuple: (pwsh_path, start_script_path, bundled_modules_path)
+        Resolves the PowerShell Core executable and downloads PowerShell Editor Services
+        on demand.
 
+        :return: a tuple ``(pwsh_path, start_script_path, bundled_modules_path)``.
+        :raises RuntimeError: if pwsh cannot be located on PATH or in any known install
+            location.
         """
-        # Check for PowerShell Core
+        # preflight: resolve pwsh via PATH and platform-specific install locations
         pwsh_path = cls._get_pwsh_path()
         if not pwsh_path:
-            raise RuntimeError(
-                "PowerShell Core (pwsh) is not installed or not in PATH. "
-                "Please install PowerShell 7+ from https://github.com/PowerShell/PowerShell"
-            )
+            raise _PWSH_CLI_REQUIREMENT.build_missing_error()
 
-        # Check for PowerShell Editor Services
+        # ensure PSES is installed; download on miss
         pses_path = cls._get_pses_path(solidlsp_settings)
         if not pses_path:
             log.info("PowerShell Editor Services not found. Downloading...")
             pses_path = cls._download_pses(solidlsp_settings)
 
-        # The bundled modules path is the directory containing PowerShellEditorServices
         bundled_modules_path = str(Path(pses_path).parent)
 
         return pwsh_path, pses_path, bundled_modules_path

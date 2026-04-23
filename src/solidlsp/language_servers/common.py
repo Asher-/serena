@@ -3,7 +3,8 @@ from __future__ import annotations
 import logging
 import os
 import platform
-import subprocess
+import platform
+import shutil
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, cast
@@ -152,6 +153,81 @@ class RuntimeDependencyCollection:
                 expected_sha256=dep.sha256,
                 allowed_hosts=dep.allowed_hosts,
             )
+
+
+@dataclass(kw_only=True)
+class RequiredCLI:
+    """Preflight check for an external CLI tool that a language server requires on PATH.
+
+    Provides fail-fast, construction-time behaviour: when the LSP's backing runtime CLI
+    is absent, raise a :class:`RuntimeError` with an actionable install message instead
+    of letting the server start and fail cryptically on later LSP requests.
+
+    The simple case — a pure :func:`shutil.which` lookup — is handled by
+    :meth:`resolve_or_raise`. Callers that already perform their own richer resolution
+    (e.g. probing well-known install locations or consulting a version manager) can
+    keep that logic and call :meth:`build_missing_error` after their own search has
+    been exhausted; the returned error carries the same rationale and install hints,
+    producing a uniform message across language servers.
+    """
+
+    name: str
+    """the binary name looked up via :func:`shutil.which` (e.g. ``"haxe"``, ``"lean"``)."""
+
+    rationale: str
+    """a free-form explanation of why the CLI is required. Rendered verbatim between
+    the ``"<name> is not installed or not in PATH."`` header and the install-hints
+    block. May contain embedded newlines."""
+
+    install_hints: Sequence[str]
+    """install-option lines, each rendered as a ``"  - <hint>"`` bullet under the
+    ``"Install options:"`` header. Example entry:
+    ``"Homebrew (macOS): brew install haxe"``."""
+
+    def resolve_or_raise(self) -> str:
+        """Resolve the CLI's absolute path via :func:`shutil.which`.
+
+        :return: absolute path to the CLI binary.
+        :raises RuntimeError: if the CLI is not on PATH; the message carries the
+            rationale and install hints.
+        """
+        # lookup on PATH
+        path = shutil.which(self.name)
+        if path is not None:
+            return path
+
+        # no resolver fallback; signal missing CLI with the uniform error
+        raise self.build_missing_error()
+
+    def build_missing_error(self, *, searched: Sequence[str] | None = None) -> RuntimeError:
+        """Build a uniformly-formatted :class:`RuntimeError` for a missing CLI.
+
+        Intended for callers that perform their own resolution (e.g. probing
+        well-known install locations) and need to signal failure after their search
+        has been exhausted. The caller issues the :keyword:`raise` itself so that
+        the traceback attributes the decision to its own call site.
+
+        :param searched: optional paths the caller already probed. When given, they
+            are rendered as a ``"Searched locations:"`` block between the rationale
+            and the install hints.
+        :return: a :class:`RuntimeError` ready to raise.
+        """
+        # header and rationale
+        lines: list[str] = [
+            f"{self.name} is not installed or not in PATH.",
+            self.rationale,
+        ]
+
+        # optional context: paths the caller already probed
+        if searched:
+            lines.append("Searched locations:")
+            lines.extend(f"  - {path}" for path in searched)
+
+        # actionable install hints
+        lines.append("Install options:")
+        lines.extend(f"  - {hint}" for hint in self.install_hints)
+
+        return RuntimeError("\n".join(lines))
 
 
 def build_npm_install_command(package_name: str, version: str, registry: str | None = None) -> list[str]:

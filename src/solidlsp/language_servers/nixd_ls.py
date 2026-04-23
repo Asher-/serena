@@ -15,15 +15,46 @@ from pathlib import Path
 
 from overrides import override
 
+
+
+
 from solidlsp import ls_types
+from solidlsp.language_servers.common import RequiredCLI
 from solidlsp.ls import DocumentSymbols, LSPFileBuffer, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
+from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
+
 
 log = logging.getLogger(__name__)
 
+
+_NIX_CLI_REQUIREMENT = RequiredCLI(
+    name="nix",
+    rationale=(
+        "nixd is a Nix expression evaluator that depends on a working nix\n"
+        "installation at runtime to resolve imports and <nixpkgs>."
+    ),
+    install_hints=[
+        "Official installer: https://nixos.org/download.html",
+        "Determinate Systems (alternative): https://install.determinate.systems/",
+    ],
+)
+
+_NIXD_CLI_REQUIREMENT = RequiredCLI(
+    name="nixd",
+    rationale=(
+        "nixd is the Nix language server used by serena; without its binary\n"
+        "on PATH there is no process to launch."
+    ),
+    install_hints=[
+        "Nix flake: nix profile install github:nix-community/nixd",
+        "nixpkgs: nix-env -iA nixpkgs.nixd",
+        "Homebrew (macOS): brew install nixd",
+    ],
+)
 
 class NixLanguageServer(SolidLanguageServer):
     """
@@ -206,35 +237,26 @@ class NixLanguageServer(SolidLanguageServer):
         return None
 
     @staticmethod
-    def _setup_runtime_dependency():
-        """
-        Check if required Nix runtime dependencies are available.
-        Attempts to install nixd if not present.
-        """
-        # First check if Nix is available (nixd needs it at runtime)
-        if not shutil.which("nix"):
-            print("WARNING: Nix is not installed. nixd requires Nix to function properly.")
-            raise RuntimeError("Nix is required for nixd. Please install Nix from https://nixos.org/download.html")
 
+    def _setup_runtime_dependency():
+        """Check if required Nix runtime dependencies are available.
+
+        Attempts to install nixd via ``nix`` if it is missing.
+        """
+        # preflight: nix itself must be on PATH; nixd relies on it at runtime
+        _NIX_CLI_REQUIREMENT.resolve_or_raise()
+
+        # resolve an already-installed nixd binary from PATH or known install locations
         nixd_path = NixLanguageServer._get_nixd_path()
 
+        # attempt to install nixd via nix when none was found
         if not nixd_path:
             print("nixd not found. Attempting to install...")
-
-            # Try to install with nix if available
             nixd_path = NixLanguageServer._install_nixd_with_nix()
-
             if not nixd_path:
-                raise RuntimeError(
-                    "nixd (Nix Language Server) is not installed.\n"
-                    "Please install nixd using one of the following methods:\n"
-                    "  - Using Nix flakes: nix profile install github:nix-community/nixd\n"
-                    "  - From nixpkgs: nix-env -iA nixpkgs.nixd\n"
-                    "  - On macOS with Homebrew: brew install nixd\n\n"
-                    "After installation, make sure 'nixd' is in your PATH."
-                )
+                raise _NIXD_CLI_REQUIREMENT.build_missing_error()
 
-        # Verify nixd works
+        # verify nixd actually runs
         try:
             result = subprocess.run([nixd_path, "--version"], capture_output=True, text=True, check=False, timeout=5)
             if result.returncode != 0:

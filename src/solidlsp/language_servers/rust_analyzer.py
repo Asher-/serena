@@ -13,11 +13,13 @@ from typing import cast
 
 from overrides import override
 
+
+from solidlsp.language_servers.common import RequiredCLI
+from solidlsp.language_servers.common import RequiredCLI
 from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.settings import SolidLSPSettings
-
 log = logging.getLogger(__name__)
 
 
@@ -149,33 +151,33 @@ class RustAnalyzer(SolidLanguageServer):
                 if path and os.path.isfile(path) and os.access(path, os.X_OK):
                     return path
 
-            # Provide helpful error message with all searched locations
-            searched = [p for p in common_paths if p]
-            install_instructions = [
-                "  - Rustup: rustup component add rust-analyzer",
-                "  - Cargo: cargo install rust-analyzer",
+            # Build platform-specific install hints and raise via the shared helper.
+            install_hints = [
+                "Rustup: rustup component add rust-analyzer",
+                "Cargo: cargo install rust-analyzer",
             ]
             if is_windows:
-                install_instructions.extend(
+                install_hints.extend(
                     [
-                        "  - Scoop: scoop install rust-analyzer",
-                        "  - Chocolatey: choco install rust-analyzer",
-                        "  - Standalone: Download from https://github.com/rust-lang/rust-analyzer/releases",
+                        "Scoop: scoop install rust-analyzer",
+                        "Chocolatey: choco install rust-analyzer",
+                        "Standalone: Download from https://github.com/rust-lang/rust-analyzer/releases",
                     ]
                 )
             else:
-                install_instructions.extend(
+                install_hints.extend(
                     [
-                        "  - Homebrew (macOS): brew install rust-analyzer",
-                        "  - System package manager (Linux): apt/dnf/pacman install rust-analyzer",
+                        "Homebrew (macOS): brew install rust-analyzer",
+                        "System package manager (Linux): apt/dnf/pacman install rust-analyzer",
                     ]
                 )
 
-            raise RuntimeError(
-                "rust-analyzer is not installed or not in PATH.\n"
-                "Searched locations:\n" + "\n".join(f"  - {p}" for p in searched) + "\n"
-                "Please install rust-analyzer via:\n" + "\n".join(install_instructions)
-            )
+            searched = [p for p in common_paths if p]
+            raise RequiredCLI(
+                name="rust-analyzer",
+                rationale="rust-analyzer is the Rust language server used by serena.",
+                install_hints=install_hints,
+            ).build_missing_error(searched=searched)
 
         def _get_or_install_core_dependency(self) -> str:
             return self._ensure_rust_analyzer_installed()

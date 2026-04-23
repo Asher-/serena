@@ -12,12 +12,28 @@ from typing import cast
 
 from overrides import override
 
+
+
+from solidlsp.language_servers.common import RequiredCLI
 from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.settings import SolidLSPSettings
 
 log = logging.getLogger(__name__)
+
+
+_LEAN_CLI_REQUIREMENT = RequiredCLI(
+    name="lean",
+    rationale=(
+        "The Lean 4 language server is invoked as 'lean --server'; without the\n"
+        "lean toolchain on PATH there is no process to start."
+    ),
+    install_hints=[
+        "elan (recommended): curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh",
+        "Install page: https://github.com/leanprover/elan",
+    ],
+)
 
 
 class Lean4LanguageServer(SolidLanguageServer):
@@ -33,15 +49,7 @@ class Lean4LanguageServer(SolidLanguageServer):
             self._repository_root_path = repository_root_path
 
         def _get_or_install_core_dependency(self) -> str:
-            lean_path = shutil.which("lean")
-            if lean_path is None:
-                raise RuntimeError(
-                    "lean is not installed or not in PATH.\n"
-                    "Please install Lean 4 via elan: https://github.com/leanprover/elan\n"
-                    "  curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh\n"
-                    "After installation, make sure 'lean' is available on your PATH."
-                )
-            return lean_path
+            return _LEAN_CLI_REQUIREMENT.resolve_or_raise()
 
         def _create_launch_command(self, core_path: str) -> list[str]:
             return [core_path, "--server"]
