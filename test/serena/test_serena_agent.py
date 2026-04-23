@@ -531,10 +531,12 @@ class TestSerenaAgent:
             replace_symbol_body_tool.apply(name_path=name_path, relative_path=relative_path, body="")
 
     @pytest.mark.parametrize(
-        "serena_agent",
+        "serena_agent,name_path,relative_path",
         [
             pytest.param(
                 Language.TYPESCRIPT,
+                "helperFunction",
+                "index.ts",
                 marks=pytest.mark.typescript,
             ),
         ],
