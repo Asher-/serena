@@ -255,7 +255,7 @@ _LANGUAGE_PYTEST_MARKERS: dict[Language, list[MarkDecorator | Mark]] = {
     Language.CSHARP: [pytest.mark.csharp],
     Language.FSHARP: [pytest.mark.fsharp],
     Language.GO: [pytest.mark.go],
-    Language.HAXE: [pytest.mark.haxe],
+    Language.HAXE: [pytest.mark.haxe, pytest.mark.skipif(_sh.which("haxe") is None, reason="haxe compiler is not installed")],
     Language.JAVA: [pytest.mark.java],
     Language.KOTLIN: [pytest.mark.kotlin, pytest.mark.skipif(is_ci, reason="Kotlin LSP JVM crashes on restart in CI")],
     Language.LEAN4: [pytest.mark.lean4, pytest.mark.skipif(_sh.which("lean") is None, reason="Lean is not installed")],
@@ -327,6 +327,12 @@ def _determine_disabled_languages() -> list[Language]:
     # Disable Rust tests if rust-analyzer is not available
     if _sh.which("rust-analyzer") is None:
         result.append(Language.RUST)
+
+    # Disable Haxe tests if haxe compiler is not available (haxe-language-server
+    # requires the haxe toolchain to resolve references/symbols; without it the
+    # server starts but responds -32601 to textDocument/references).
+    if _sh.which("haxe") is None:
+        result.append(Language.HAXE)
 
     al_tests_enabled = True
     if not al_tests_enabled:
