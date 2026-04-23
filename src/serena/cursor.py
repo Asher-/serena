@@ -55,6 +55,30 @@ DEFAULT_EDGE_TYPES = frozenset(
     }
 )
 
+# operations that require the cursor to be positioned on a container node
+_CONTAINER_POSITIONED_OPERATIONS: frozenset[str] = frozenset({"insert_start", "insert_end"})
+# operations that require the cursor to be positioned on a container's member
+_MEMBER_ANCHORED_OPERATIONS: frozenset[str] = frozenset(
+    {"insert_before", "insert_after", "replace", "remove"}
+)
+# kinds that guarantee the cursor addresses a non-container leaf. Only the
+# kinds on this list can be pre-flagged without inspecting the parsed tree:
+#
+# * ``container_member`` — Python's kind for a dict/list member whose value is
+#   *not* itself a dict or list (the walk re-yields container-valued members
+#   with kind ``container``, overwriting the cache entry; so a cached
+#   ``container_member`` is definitionally a scalar-valued member).
+# * ``string`` / ``number`` / ``boolean`` / ``null`` — JSON array-item scalar
+#   kinds emitted by ``_value_kind``.
+# * ``scalar`` — the TOML / YAML catch-all for array-item scalars.
+#
+# JSON ``member``, TOML ``pair``, YAML ``pair`` are deliberately absent: the
+# walk tags every mapping member with those kinds regardless of whether the
+# value is scalar or compound, so they are not a reliable pre-flag signal.
+_STRUCTURAL_SCALAR_KINDS: frozenset[str] = frozenset(
+    {"container_member", "string", "number", "boolean", "null", "scalar"}
+)
+
 
 @dataclass
 class NeighborSymbol:
@@ -125,9 +149,11 @@ class StructuralCursorState:
     :ivar kind: the :type:`~solidlsp.structural.kinds.KindName` of the resolved
         node captured at ``cursor_start`` time for display.
     :ivar trail: prior canonical name paths visited by this cursor.
-    :ivar include_body: preserved for API parity with :class:`CursorState`;
-        structural cursors always render the serialized node source so this
-        flag is effectively a no-op today.
+    :ivar include_body: when ``True``, ``format_cursor_view`` appends the
+        addressed node's serialized source (a ``--- body ---`` block) to the
+        rendered view. Default ``False``. Mirrors :class:`CursorState` so
+        :class:`~serena.tools.cursor_tools.CursorConfigureTool` can toggle
+        the same display option across LSP and structural cursors.
     """
 
     cursor_id: str
@@ -203,6 +229,24 @@ def _split_name_path_segments(name_path: str) -> list[str]:
             start = i + 1
     segments.append(name_path[start:])
     return segments
+
+
+def _parent_name_path(name_path: str) -> str | None:
+    """Return the enclosing container's name path, or ``None`` for top-level paths.
+
+    Uses :func:`_split_name_path_segments` so keys embedding ``/`` inside
+    ``[...]`` brackets are not accidentally split on their inner slash.
+
+    :param name_path: a canonical structural name path.
+    :return: the prefix formed by dropping the final segment, joined with
+        ``/``; ``None`` when the input has zero or one segments (i.e. no
+        parent container exists for ``insert_before`` / ``insert_after`` /
+        ``replace`` / ``remove`` to anchor against).
+    """
+    segments = _split_name_path_segments(name_path)
+    if len(segments) <= 1:
+        return None
+    return "/".join(segments[:-1])
 
 
 class CursorManager:
@@ -937,6 +981,63 @@ class CursorManager:
         self._structural_nodes_cache[relative_path] = entry
         return entry
 
+    def _validate_container_edit_positioning(
+        self,
+        state: StructuralCursorState,
+        operation: str,
+    ) -> None:
+        """Raise a friendlier :class:`ValueError` for common op/cursor-position mismatches.
+
+        Additive to the backend-level guard: :meth:`apply_container_edit`
+        still dispatches when this method returns, and each backend keeps
+        its own validation for subtler cases (e.g. a
+        :class:`~solidlsp.structural.backends.python.PythonStructuralLanguage`
+        ``container_member`` whose value happens to be a scalar). This check
+        catches the two mismatches whose backend errors the user will hit
+        most often and whose underlying cause is positional:
+
+        * ``insert_start`` / ``insert_end`` on a cursor whose captured
+          ``kind`` is a known scalar (``"string"`` / ``"number"`` /
+          ``"boolean"`` / ``"null"`` / ``"scalar"``) — the value is not a
+          container so no member can be inserted into it.
+        * ``insert_before`` / ``insert_after`` / ``replace`` / ``remove`` on
+          a cursor whose ``name_path`` has no parent segment — there is no
+          enclosing container to host the edit.
+
+        :param state: the structural cursor's state.
+        :param operation: the validated operation name (already known to be
+            a member of ``valid_ops`` in :meth:`apply_container_edit`).
+        :raises ValueError: with a message naming the operation, the
+            cursor's name path and kind, and a concrete retry hint.
+        """
+        # insert_start / insert_end need a container at the cursor's position
+        if operation in _CONTAINER_POSITIONED_OPERATIONS:
+            if state.kind in _STRUCTURAL_SCALAR_KINDS:
+                parent = _parent_name_path(state.name_path)
+                retry_hint = (
+                    f" Use cursor_start on '{parent}' (the enclosing container) then retry."
+                    if parent is not None
+                    else ""
+                )
+                raise ValueError(
+                    f"{operation} requires a cursor positioned on a container, "
+                    f"but cursor '{state.cursor_id}' is on '{state.name_path}' "
+                    f"(kind {state.kind!r}, a scalar value).{retry_hint}"
+                )
+            return
+
+        # before/after/replace/remove need the cursor on a member of some parent container
+        if operation in _MEMBER_ANCHORED_OPERATIONS:
+            parent = _parent_name_path(state.name_path)
+            if parent is None:
+                raise ValueError(
+                    f"{operation} requires a cursor positioned on a container member, "
+                    f"but cursor '{state.cursor_id}' is on top-level path "
+                    f"'{state.name_path}' (kind {state.kind!r}); there is no parent "
+                    f"container to anchor the edit against. Use cursor_start on a "
+                    f"member path nested inside '{state.name_path}' then retry."
+                )
+
     def apply_container_edit(
         self,
         cursor_id: str,
@@ -985,6 +1086,11 @@ class CursorManager:
         }
         if operation not in valid_ops:
             raise ValueError(f"unknown container edit operation: {operation!r}")
+
+        # front-load two common op/cursor-position mismatches with a friendlier
+        # message than the backend-level guard produces; the backend guards
+        # still run for subtler cases this helper cannot detect
+        self._validate_container_edit_positioning(state, operation)
 
         # route to a backend by file extension; no backend -> the cursor is stale
         backend = self._structural_registry.for_relative_path(state.relative_path)

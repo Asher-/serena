@@ -36,6 +36,7 @@ from serena.cursor import (
     StructuralCursorState,
 )
 from serena.tools.cursor_tools import (
+    CursorConfigureTool,
     CursorInsertAfterTool,
     CursorInsertAtEndTool,
     CursorInsertAtStartTool,
@@ -777,6 +778,87 @@ class TestApplyContainerEditValidation:
         with pytest.raises(ValueError, match="unknown container edit operation"):
             manager.apply_container_edit(cid, "wipe", "")
 
+    def test_insert_start_on_python_scalar_member_raises_friendly_error(
+        self, tmp_path: Path,
+    ) -> None:
+        # Python scalar-valued dict member: cursor.kind == "container_member"
+        (tmp_path / "s.py").write_text(self._SOURCE, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, state = manager.start_cursor(
+            name_path='FOO/["members"]/["alpha"]',
+            relative_path="s.py",
+        )
+        assert isinstance(state, StructuralCursorState)
+        assert state.kind == "container_member"
+
+        with pytest.raises(ValueError) as excinfo:
+            manager.apply_container_edit(cid, "insert_start", '"new": 1')
+
+        message = str(excinfo.value)
+        # the friendly message names the op, the cursor, the scalar kind,
+        # and offers the parent path as a retry hint
+        assert "insert_start" in message
+        assert 'FOO/["members"]/["alpha"]' in message
+        assert "scalar" in message
+        assert "cursor_start on 'FOO/[\"members\"]'" in message
+
+    def test_insert_end_on_json_array_scalar_raises_friendly_error(
+        self, tmp_path: Path,
+    ) -> None:
+        # JSON array-item scalar: cursor.kind == "string"
+        (tmp_path / "d.json").write_text(
+            '{"items": ["first", "second"]}\n',
+            encoding="utf-8",
+        )
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, state = manager.start_cursor(
+            name_path="items/[0]",
+            relative_path="d.json",
+        )
+        assert isinstance(state, StructuralCursorState)
+        assert state.kind == "string"
+
+        with pytest.raises(ValueError, match="insert_end requires a cursor positioned on a container"):
+            manager.apply_container_edit(cid, "insert_end", '"third"')
+
+    def test_member_anchored_op_on_top_level_raises_friendly_error(
+        self, tmp_path: Path,
+    ) -> None:
+        # Python top-level assignment: path has no "/" separator, so no parent container
+        (tmp_path / "s.py").write_text(self._SOURCE, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, state = manager.start_cursor(
+            name_path="FOO",
+            relative_path="s.py",
+        )
+        assert isinstance(state, StructuralCursorState)
+
+        with pytest.raises(ValueError) as excinfo:
+            manager.apply_container_edit(cid, "insert_before", '"x": 1')
+
+        message = str(excinfo.value)
+        assert "insert_before" in message
+        assert "top-level path" in message
+        assert "'FOO'" in message
+        assert "no parent container" in message
+
+    def test_validator_is_additive_normal_dispatch_still_works(self, tmp_path: Path) -> None:
+        # pre-check should not fire when the cursor is on a container-valued member
+        (tmp_path / "s.py").write_text(self._SOURCE, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, state = manager.start_cursor(
+            name_path='FOO/["members"]',
+            relative_path="s.py",
+        )
+        assert isinstance(state, StructuralCursorState)
+        # container-valued member: the recursion re-yields with kind "container",
+        # overwriting the earlier "container_member" entry in the cache
+        assert state.kind == "container"
+
+        before, after = manager.apply_container_edit(cid, "insert_end", '"zeta": 99')
+        assert before != after
+        assert '"zeta"' in after
+
 
 class TestStructuralNeighbors:
     """The ``_resolve_structural_neighbors`` helper and its view integration."""
@@ -933,3 +1015,72 @@ class TestNewToolSurface:
         content = file_path.read_text(encoding="utf-8")
         assert "alpha" not in content
         assert '"beta": 2' in content
+
+
+class TestStructuralConfigure:
+    """``CursorConfigureTool.apply`` on a structural cursor toggles ``include_body``."""
+
+    _SOURCE = (
+        "FOO = {\n"
+        '    "members": {\n'
+        '        "alpha": 1,\n'
+        "    },\n"
+        "}\n"
+    )
+
+    def test_include_body_false_by_default_omits_body_block(self, tmp_path: Path) -> None:
+        (tmp_path / "s.py").write_text(self._SOURCE, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, state = manager.start_cursor(
+            name_path='FOO/["members"]/["alpha"]',
+            relative_path="s.py",
+        )
+
+        assert isinstance(state, StructuralCursorState)
+        assert state.include_body is False
+        view = manager.format_cursor_view(cid)
+        assert "--- body ---" not in view
+
+    def test_configure_toggles_include_body_on_structural_cursor(self, tmp_path: Path) -> None:
+        (tmp_path / "s.py").write_text(self._SOURCE, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, state = manager.start_cursor(
+            name_path='FOO/["members"]/["alpha"]',
+            relative_path="s.py",
+        )
+
+        assert isinstance(state, StructuralCursorState)
+
+        project = manager._project  # type: ignore[attr-defined]
+        tool = _bind_tool(CursorConfigureTool, _ToolHarness(manager, project))
+
+        # flipping include_body writes through to the dataclass field
+        view_on = tool.apply(cursor_id=cid, include_body=True)
+        assert state.include_body is True
+        assert "--- body ---" in view_on
+        assert "--- end body ---" in view_on
+
+        # flipping it back off also writes through
+        view_off = tool.apply(cursor_id=cid, include_body=False)
+        assert state.include_body is False
+        assert "--- body ---" not in view_off
+
+    def test_configure_ignores_edge_types_for_structural_cursor(self, tmp_path: Path) -> None:
+        (tmp_path / "s.py").write_text(self._SOURCE, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        cid, _ = manager.start_cursor(
+            name_path='FOO/["members"]',
+            relative_path="s.py",
+        )
+
+        project = manager._project  # type: ignore[attr-defined]
+        tool = _bind_tool(CursorConfigureTool, _ToolHarness(manager, project))
+
+        # structural cursors have no LSP edges; edge_types is silently ignored,
+        # unknown names therefore don't raise (unlike the LSP-cursor branch).
+        view = tool.apply(
+            cursor_id=cid,
+            edge_types=["this-edge-does-not-exist"],
+            include_body=False,
+        )
+        assert "structural" in view

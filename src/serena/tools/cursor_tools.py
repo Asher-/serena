@@ -205,6 +205,16 @@ class CursorFindTool(Tool, ToolMarkerSymbolicRead):
     ``cursor_start``, which requires a unique match). If the search yields exactly one
     symbol a cursor is started there; otherwise the candidate list is returned so the
     caller can disambiguate and follow up with ``cursor_start``.
+
+    This tool goes through the language server and therefore only resolves
+    LSP-visible symbols (classes, functions, methods, top-level variables).
+    Container-member paths surfaced by the structural backend — e.g.
+    ``LAYER1_CLASSES/[7]/["source_file"]`` for a dict/list member inside a
+    Python assignment, or a bare key inside a JSON/TOML/YAML document —
+    are **not** searchable here. To reach a structural member, call
+    :class:`CursorStartTool` directly with the full structural name path;
+    it falls through to the structural backend when the LSP does not
+    surface the symbol.
     """
 
     # noinspection PyDefaultArgument
@@ -418,6 +428,10 @@ class CursorInsertBeforeTool(Tool, ToolMarkerSymbolicEdit):
         sequence-like containers (list, array, sequence). The new member is
         inserted immediately before the cursor's anchor.
 
+        To prepend at the container's head (no sibling anchor required),
+        position the cursor on the container itself and use
+        :class:`CursorInsertAtStartTool` instead.
+
         :param cursor_id: the cursor whose current symbol to insert before.
         :param body: the content to insert; it will be placed immediately before the line
             where the symbol is defined.
@@ -459,6 +473,10 @@ class CursorInsertAfterTool(Tool, ToolMarkerSymbolicEdit):
         containers (dict, object, mapping) or a bare value expression for
         sequence-like containers (list, array, sequence). The new member is
         inserted immediately after the cursor's anchor.
+
+        To append at the container's tail (no sibling anchor required),
+        position the cursor on the container itself and use
+        :class:`CursorInsertAtEndTool` instead.
 
         :param cursor_id: the cursor whose current symbol to insert after.
         :param body: the content to insert; it will be placed on the line following the
