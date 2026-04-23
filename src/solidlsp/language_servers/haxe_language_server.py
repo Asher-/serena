@@ -61,9 +61,29 @@ class HaxeLanguageServer(SolidLanguageServer):
         _DEFAULT_VSHAXE_VERSION = "2.34.2"
         _DEFAULT_VSHAXE_SHA256 = "104d785e3f7b57a7f3debf520d9751f7e7abf3a7e78d203db1a8ff3dc7ca30e2"
 
-        @override
         def _get_or_install_core_dependency(self) -> str:
-            """Find the Haxe Language Server binary."""
+            """Find the Haxe Language Server binary.
+
+            :raises RuntimeError: if the haxe compiler is not available. The
+                language server can start without the compiler (it's a Node.js
+                process) but symbol/reference queries silently degrade to LSP
+                error -32601 because the server cannot build its FIR index.
+                Fail fast with a clear message instead.
+            """
+            # check for the haxe compiler up front
+            if shutil.which("haxe") is None:
+                raise RuntimeError(
+                    "Haxe compiler is not installed or not in PATH.\n"
+                    "The Haxe Language Server requires the haxe toolchain to resolve\n"
+                    "symbols and references; without it, LSP requests such as\n"
+                    "textDocument/references return method-not-found after the\n"
+                    "server starts.\n"
+                    "Install options:\n"
+                    "  - Homebrew (macOS): brew install haxe\n"
+                    "  - System package manager (Linux): apt/dnf/pacman install haxe\n"
+                    "  - Official installer: https://haxe.org/download/"
+                )
+
             # 1. Check for haxe-language-server in PATH
             system_haxe_ls = shutil.which("haxe-language-server")
             if system_haxe_ls:
