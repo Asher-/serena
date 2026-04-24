@@ -109,9 +109,7 @@ class CodeEditor(Generic[TSymbol], ABC):
         :return: the unique symbol
         """
 
-    def _get_statement_end_position(
-        self, symbol: TSymbol, edited_file: "CodeEditor.EditedFile"
-    ) -> PositionInFile:
+    def _get_statement_end_position(self, symbol: TSymbol, edited_file: "CodeEditor.EditedFile") -> PositionInFile:
         """
         Get the end position for statement-level edit operations on the given symbol.
 
@@ -125,9 +123,7 @@ class CodeEditor(Generic[TSymbol], ABC):
         """
         return symbol.get_body_end_position_or_raise()
 
-    def _get_statement_start_position(
-        self, symbol: TSymbol, edited_file: "CodeEditor.EditedFile"
-    ) -> PositionInFile:
+    def _get_statement_start_position(self, symbol: TSymbol, edited_file: "CodeEditor.EditedFile") -> PositionInFile:
         """
         Get the start position for statement-level edit operations on the given symbol.
 
@@ -305,9 +301,7 @@ class CodeEditor(Generic[TSymbol], ABC):
         """
         # validate the range; start > end is a programmer error
         if start_line < 0 or end_line < start_line:
-            raise ValueError(
-                f"Invalid replace_lines range [{start_line}, {end_line}] for {relative_path!r}"
-            )
+            raise ValueError(f"Invalid replace_lines range [{start_line}, {end_line}] for {relative_path!r}")
 
         # perform the delete-then-insert pair inside a single edited_file_context so the
         # file is saved exactly once; the delete spans [start_line, end_line+1) line-starts
@@ -377,9 +371,7 @@ class LanguageServerCodeEditor(CodeEditor[LanguageServerSymbol]):
     def _find_unique_symbol(self, name_path: str, relative_file_path: str) -> LanguageServerSymbol:
         return self._symbol_retriever.find_unique(name_path, within_relative_path=relative_file_path)
 
-    def _get_statement_end_position(
-        self, symbol: LanguageServerSymbol, edited_file: "CodeEditor.EditedFile"
-    ) -> PositionInFile:
+    def _get_statement_end_position(self, symbol: LanguageServerSymbol, edited_file: "CodeEditor.EditedFile") -> PositionInFile:
         # route through the per-language :class:`SymbolExtentStrategy` so Python variable
         # extents (reported as name-only by pyright/jedi) get widened to the enclosing
         # assignment statement's end. Other languages fall through to the identity strategy.
@@ -390,9 +382,7 @@ class LanguageServerCodeEditor(CodeEditor[LanguageServerSymbol]):
         strategy = get_symbol_extent_strategy(edited_file.relative_path)
         return strategy.get_statement_end_position(symbol, edited_file.get_contents(), lsp_end)
 
-    def _get_statement_start_position(
-        self, symbol: LanguageServerSymbol, edited_file: "CodeEditor.EditedFile"
-    ) -> PositionInFile:
+    def _get_statement_start_position(self, symbol: LanguageServerSymbol, edited_file: "CodeEditor.EditedFile") -> PositionInFile:
         # imported lazily to avoid coupling the module graph at import time.
         from serena.symbol_extent import get_symbol_extent_strategy
 

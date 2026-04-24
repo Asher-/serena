@@ -28,7 +28,11 @@ import pytest
 
 from serena.code_editor import CodeEditor
 from serena.symbol import PositionInFile
-from serena.tools.cursor_tools import CursorReplaceRangeTool
+from serena.tools.cursor_tools import (
+    CursorReplaceBetweenTool,
+    CursorReplaceRangeTool,
+    CursorReplaceRangeVerifiedTool,
+)
 
 if TYPE_CHECKING:
     from serena.agent import SerenaAgent
@@ -147,9 +151,7 @@ class TestReplaceLinesUnit:
         # structural side effect on the surviving content
         editor.replace_lines("TagManagerTests.swift", start_line=0, end_line=5, content="")
 
-        assert editor.get("TagManagerTests.swift") == (
-            "\n" "@MainActor struct TagManagerTests {}\n"
-        )
+        assert editor.get("TagManagerTests.swift") == ("\n@MainActor struct TagManagerTests {}\n")
 
     def test_reorders_imports_in_typescript_fixture(self) -> None:
         """
@@ -157,26 +159,16 @@ class TestReplaceLinesUnit:
         gap. Neither statement is a reachable LSP symbol in some TS servers;
         ``replace_lines`` reorders them by rewriting the whole import block.
         """
-        ts = (
-            'import { Z } from "./z";\n'
-            "\n"
-            'import { A } from "./a";\n'
-            'import { M } from "./m";\n'
-            "\n"
-            "export function entry() {}\n"
-        )
+        ts = 'import { Z } from "./z";\n\nimport { A } from "./a";\nimport { M } from "./m";\n\nexport function entry() {}\n'
         editor = _InMemoryCodeEditor({"entry.ts": ts})
 
         # replace lines 0..4 (the three imports and the stray blank line
         # gap between them) with an alphabetised, gap-free import block
-        reordered = 'import { A } from "./a";\n' 'import { M } from "./m";\n' 'import { Z } from "./z";\n'
+        reordered = 'import { A } from "./a";\nimport { M } from "./m";\nimport { Z } from "./z";\n'
         editor.replace_lines("entry.ts", start_line=0, end_line=4, content=reordered)
 
         assert editor.get("entry.ts") == (
-            'import { A } from "./a";\n'
-            'import { M } from "./m";\n'
-            'import { Z } from "./z";\n'
-            "export function entry() {}\n"
+            'import { A } from "./a";\nimport { M } from "./m";\nimport { Z } from "./z";\nexport function entry() {}\n'
         )
 
     def test_updates_single_doc_comment_line_above_class(self) -> None:
@@ -185,12 +177,7 @@ class TestReplaceLinesUnit:
         a ``#`` free-floating comment for the same shape; the primitive treats
         both identically because it operates on bytes, not on syntax.
         """
-        py = (
-            "# pg_hba auth is 127.0.0.1/32 trust\n"
-            "# (stale — needs update)\n"
-            "class BrainPostgresClient:\n"
-            "    pass\n"
-        )
+        py = "# pg_hba auth is 127.0.0.1/32 trust\n# (stale — needs update)\nclass BrainPostgresClient:\n    pass\n"
         editor = _InMemoryCodeEditor({"brain.py": py})
 
         # replace only line 0 (single-line range: start_line == end_line)
@@ -202,10 +189,7 @@ class TestReplaceLinesUnit:
         )
 
         assert editor.get("brain.py") == (
-            "# pg_hba auth: 127.0.0.1/32 trust + LAN trust rules\n"
-            "# (stale — needs update)\n"
-            "class BrainPostgresClient:\n"
-            "    pass\n"
+            "# pg_hba auth: 127.0.0.1/32 trust + LAN trust rules\n# (stale — needs update)\nclass BrainPostgresClient:\n    pass\n"
         )
 
     def test_empty_body_deletes_range_entirely(self) -> None:
@@ -255,12 +239,12 @@ class TestReplaceLinesUnit:
         content inside is replaced verbatim without re-encoding. Covers the
         ``line bounds are UTF-8 aware`` requirement from the handoff.
         """
-        text = "α\nβ中文\nγ\n"
+        text = "α\nβ中文\nγ\n"  # noqa: RUF001 — Greek letters are deliberate UTF-8 multibyte fixture
         editor = _InMemoryCodeEditor({"greek.txt": text})
 
         editor.replace_lines("greek.txt", start_line=1, end_line=1, content="β-替换\n")
 
-        assert editor.get("greek.txt") == "α\nβ-替换\nγ\n"
+        assert editor.get("greek.txt") == "α\nβ-替换\nγ\n"  # noqa: RUF001
 
     def test_invalid_range_raises_value_error(self) -> None:
         """
@@ -283,9 +267,6 @@ class TestReplaceLinesUnit:
 
 
 pytestmark = pytest.mark.python
-
-# reuse the pre-existing python_serena_agent fixture from test_cursor_navigation
-from test.serena.test_cursor_navigation import python_serena_agent  # noqa: E402, F401
 
 
 @pytest.fixture
@@ -334,11 +315,10 @@ class TestCursorReplaceRangeTool:
     uses when responding to a ``cursor_replace_range`` call.
     """
 
-    def test_deletes_detached_top_of_file_comment_block(
-        self, python_serena_agent: "SerenaAgent", throwaway_layout_file: str
-    ) -> None:
+    def test_deletes_detached_top_of_file_comment_block(self, python_serena_agent: "SerenaAgent", throwaway_layout_file: str) -> None:
         """Case (a): top-of-file ``#`` comment block is removed; the rest of
-        the file (imports, class) is untouched."""
+        the file (imports, class) is untouched.
+        """
         tool = python_serena_agent.get_tool(CursorReplaceRangeTool)
 
         result = tool.apply(relative_path=throwaway_layout_file, start_line=0, end_line=2, body="")
@@ -354,11 +334,10 @@ class TestCursorReplaceRangeTool:
         # the class survived intact
         assert "class BrainPostgresClient:" in content
 
-    def test_reorders_imports_across_blank_line_gap(
-        self, python_serena_agent: "SerenaAgent", throwaway_layout_file: str
-    ) -> None:
+    def test_reorders_imports_across_blank_line_gap(self, python_serena_agent: "SerenaAgent", throwaway_layout_file: str) -> None:
         """Case (b): three imports with a stray blank line between them are
-        collapsed into a single alphabetised import block."""
+        collapsed into a single alphabetised import block.
+        """
         tool = python_serena_agent.get_tool(CursorReplaceRangeTool)
 
         # first, remove the header (lines 0..2) via the tool, then reorder the
@@ -382,11 +361,10 @@ class TestCursorReplaceRangeTool:
         # the class survived intact
         assert "class BrainPostgresClient:" in content
 
-    def test_updates_single_doc_comment_line_above_class(
-        self, python_serena_agent: "SerenaAgent", throwaway_layout_file: str
-    ) -> None:
+    def test_updates_single_doc_comment_line_above_class(self, python_serena_agent: "SerenaAgent", throwaway_layout_file: str) -> None:
         """Case (c): rewrite a single ``#`` doc-comment line that sits above a
-        class. ``cursor_replace_body`` cannot reach it (it is not a symbol)."""
+        class. ``cursor_replace_body`` cannot reach it (it is not a symbol).
+        """
         tool = python_serena_agent.get_tool(CursorReplaceRangeTool)
 
         # the doc comment is at line 9 in the fixture (0-based)
@@ -412,3 +390,366 @@ class TestCursorReplaceRangeTool:
 
         with pytest.raises(ValueError):
             tool.apply(relative_path="test_repo/does_not_matter.py", start_line=5, end_line=2, body="")
+
+
+@pytest.fixture
+def throwaway_anchor_file(python_serena_agent: "SerenaAgent") -> Iterator[str]:
+    """
+    Writes a Python file with two top-level symbols separated by a non-symbolic
+    interstitial region (blank lines + a comment block that mimics a ``#if`` /
+    ``#endif`` directive in brace-structured languages). Drives the
+    ``CursorReplaceBetweenTool`` integration tests.
+    """
+    rel_path = "test_repo/_cursor_replace_between_sandbox.py"
+    abs_path = Path(python_serena_agent.get_active_project_or_raise().project_root) / rel_path
+    abs_path.write_text(
+        "class SymAnchorBefore:\n"
+        "    pass\n"
+        "\n"
+        "\n"
+        "# interstitial: pretend this is a #if DEBUG / #endif block\n"
+        "# these lines are not LSP symbols\n"
+        "\n"
+        "\n"
+        "class SymAnchorAfter:\n"
+        "    pass\n"
+    )
+    try:
+        python_serena_agent.reset_language_server_manager()
+    except Exception:
+        pass
+    try:
+        yield rel_path
+    finally:
+        if abs_path.exists():
+            abs_path.unlink()
+        try:
+            python_serena_agent.reset_language_server_manager()
+        except Exception:
+            pass
+
+
+@pytest.fixture
+def throwaway_adjacent_anchor_file(python_serena_agent: "SerenaAgent") -> Iterator[str]:
+    """
+    Writes a Python file with two adjacent top-level symbols — no interstitial
+    lines between them. Drives the ``CursorReplaceBetweenTool`` "no room"
+    error-path test.
+    """
+    rel_path = "test_repo/_cursor_replace_between_adjacent_sandbox.py"
+    abs_path = Path(python_serena_agent.get_active_project_or_raise().project_root) / rel_path
+    abs_path.write_text("class AdjA:\n    pass\nclass AdjB:\n    pass\n")
+    try:
+        python_serena_agent.reset_language_server_manager()
+    except Exception:
+        pass
+    try:
+        yield rel_path
+    finally:
+        if abs_path.exists():
+            abs_path.unlink()
+        try:
+            python_serena_agent.reset_language_server_manager()
+        except Exception:
+            pass
+
+
+class TestCursorReplaceRangeVerifiedTool:
+    """
+    End-to-end tests that drive ``CursorReplaceRangeVerifiedTool`` via
+    ``python_serena_agent.get_tool(...)``; the same code path the MCP server
+    uses when responding to a ``cursor_replace_range_verified`` call.
+    """
+
+    def test_invalid_range_raises_before_any_io(self, python_serena_agent: "SerenaAgent") -> None:
+        """Invalid ranges fail fast before any file I/O or drift check."""
+        tool = python_serena_agent.get_tool(CursorReplaceRangeVerifiedTool)
+
+        with pytest.raises(ValueError, match="invalid range"):
+            tool.apply(
+                relative_path="test_repo/does_not_matter.py",
+                start_line=5,
+                end_line=2,
+                expected_content="",
+                body="",
+            )
+
+    def test_matching_expected_content_applies_edit(self, python_serena_agent: "SerenaAgent", throwaway_layout_file: str) -> None:
+        """When ``expected_content`` matches the file's current lines, the edit applies."""
+        tool = python_serena_agent.get_tool(CursorReplaceRangeVerifiedTool)
+
+        # the first three lines of the fixture are the detached header block
+        expected = "# Orphan header describing the file.\n# Inserted by a prior edit, now detached.\n# Will be removed.\n"
+        result = tool.apply(
+            relative_path=throwaway_layout_file,
+            start_line=0,
+            end_line=2,
+            expected_content=expected,
+            body="",
+        )
+
+        assert "OK" in result
+        assert "Diff:" in result
+
+        abs_path = Path(python_serena_agent.get_active_project_or_raise().project_root) / throwaway_layout_file
+        content = abs_path.read_text()
+        assert "Orphan header" not in content
+
+    def test_drift_detected_raises_with_diff_and_leaves_file_intact(
+        self, python_serena_agent: "SerenaAgent", throwaway_layout_file: str
+    ) -> None:
+        """When ``expected_content`` does not match, the tool raises a diff and
+        leaves the file unmodified.
+        """
+        tool = python_serena_agent.get_tool(CursorReplaceRangeVerifiedTool)
+
+        abs_path = Path(python_serena_agent.get_active_project_or_raise().project_root) / throwaway_layout_file
+        pre = abs_path.read_text()
+
+        wrong_expected = (
+            "# This is what the caller THINKS is at the top of the file\n# but it is actually wrong\n# because the file has shifted\n"
+        )
+        with pytest.raises(ValueError) as excinfo:
+            tool.apply(
+                relative_path=throwaway_layout_file,
+                start_line=0,
+                end_line=2,
+                expected_content=wrong_expected,
+                body="# replacement\n",
+            )
+
+        # the error message must contain "drift detected" and a unified diff
+        msg = str(excinfo.value)
+        assert "drift detected" in msg
+        # unified diff markers
+        assert "---" in msg and "+++" in msg
+        # both the expected and the actual content must appear in the diff
+        assert "Orphan header" in msg
+        assert "caller THINKS" in msg
+
+        # the file must not have been modified
+        assert abs_path.read_text() == pre
+
+    def test_trailing_newline_difference_is_tolerated(self, python_serena_agent: "SerenaAgent", throwaway_layout_file: str) -> None:
+        """A trailing newline in ``expected_content`` (or its absence) does not
+        cause a spurious drift error.
+        """
+        tool = python_serena_agent.get_tool(CursorReplaceRangeVerifiedTool)
+
+        # drop the trailing newline on the expected content
+        expected_without_trailing_newline = (
+            "# Orphan header describing the file.\n# Inserted by a prior edit, now detached.\n# Will be removed."
+        )
+        result = tool.apply(
+            relative_path=throwaway_layout_file,
+            start_line=0,
+            end_line=2,
+            expected_content=expected_without_trailing_newline,
+            body="",
+        )
+
+        assert "OK" in result
+
+    def test_start_line_beyond_file_raises_clear_error(self, python_serena_agent: "SerenaAgent", throwaway_layout_file: str) -> None:
+        """Out-of-bounds ``start_line`` raises a ValueError that names the file's
+        line count.
+        """
+        tool = python_serena_agent.get_tool(CursorReplaceRangeVerifiedTool)
+
+        with pytest.raises(ValueError, match="beyond the file's line count"):
+            tool.apply(
+                relative_path=throwaway_layout_file,
+                start_line=9999,
+                end_line=9999,
+                expected_content="",
+                body="",
+            )
+
+
+class TestCursorReplaceRangeVerifiedVerifyExpectedUnit:
+    """
+    Unit tests for the static ``_verify_expected`` helper; exercise the drift
+    check without going through the full tool pipeline.
+    """
+
+    def test_match_returns_none(self) -> None:
+        pre = "a\nb\nc\nd\n"
+        # no exception means match
+        CursorReplaceRangeVerifiedTool._verify_expected("f.py", pre, 1, 2, "b\nc\n")
+
+    def test_mismatch_raises_with_diff(self) -> None:
+        pre = "a\nb\nc\nd\n"
+        with pytest.raises(ValueError) as excinfo:
+            CursorReplaceRangeVerifiedTool._verify_expected("f.py", pre, 1, 2, "x\ny\n")
+        msg = str(excinfo.value)
+        assert "drift detected" in msg
+        # expected lines and actual lines both appear in the diff
+        assert "-x" in msg and "-y" in msg
+        assert "+b" in msg and "+c" in msg
+
+    def test_trailing_newline_tolerated(self) -> None:
+        pre = "a\nb\nc\n"
+        # expected has no trailing newline
+        CursorReplaceRangeVerifiedTool._verify_expected("f.py", pre, 0, 2, "a\nb\nc")
+
+    def test_crlf_vs_lf_tolerated(self) -> None:
+        pre = "a\nb\nc\n"
+        # expected uses CRLF — splitlines normalises both
+        CursorReplaceRangeVerifiedTool._verify_expected("f.py", pre, 0, 2, "a\r\nb\r\nc\r\n")
+
+    def test_start_line_beyond_file_raises(self) -> None:
+        pre = "a\nb\n"
+        with pytest.raises(ValueError, match="beyond the file's line count"):
+            CursorReplaceRangeVerifiedTool._verify_expected("f.py", pre, 5, 5, "x\n")
+
+
+class TestCursorReplaceBetweenTool:
+    """
+    End-to-end tests that drive ``CursorReplaceBetweenTool`` via
+    ``python_serena_agent.get_tool(...)``; the same code path the MCP server
+    uses when responding to a ``cursor_replace_between`` call.
+    """
+
+    def test_replaces_interstitial_region_between_symbols(self, python_serena_agent: "SerenaAgent", throwaway_anchor_file: str) -> None:
+        """The interstitial region between two anchors is rewritten; the anchors
+        themselves remain intact.
+        """
+        tool = python_serena_agent.get_tool(CursorReplaceBetweenTool)
+
+        result = tool.apply(
+            relative_path=throwaway_anchor_file,
+            before_symbol="SymAnchorBefore",
+            after_symbol="SymAnchorAfter",
+            body="\n# fresh interstitial content\n\n",
+        )
+
+        assert "OK" in result
+        # the result carries the computed range in its trailing annotation
+        assert "between 'SymAnchorBefore' and 'SymAnchorAfter'" in result
+
+        abs_path = Path(python_serena_agent.get_active_project_or_raise().project_root) / throwaway_anchor_file
+        content = abs_path.read_text()
+        # anchors survive
+        assert "class SymAnchorBefore:" in content
+        assert "class SymAnchorAfter:" in content
+        # interstitial was rewritten
+        assert "fresh interstitial content" in content
+        # the original interstitial comments are gone
+        assert "pretend this is a #if DEBUG" not in content
+
+    def test_missing_before_symbol_raises_clear_error(self, python_serena_agent: "SerenaAgent", throwaway_anchor_file: str) -> None:
+        tool = python_serena_agent.get_tool(CursorReplaceBetweenTool)
+
+        with pytest.raises(ValueError) as excinfo:
+            tool.apply(
+                relative_path=throwaway_anchor_file,
+                before_symbol="DoesNotExist",
+                after_symbol="SymAnchorAfter",
+                body="\n",
+            )
+        msg = str(excinfo.value)
+        assert "before_symbol" in msg
+        assert "DoesNotExist" in msg
+
+    def test_missing_after_symbol_raises_clear_error(self, python_serena_agent: "SerenaAgent", throwaway_anchor_file: str) -> None:
+        tool = python_serena_agent.get_tool(CursorReplaceBetweenTool)
+
+        with pytest.raises(ValueError) as excinfo:
+            tool.apply(
+                relative_path=throwaway_anchor_file,
+                before_symbol="SymAnchorBefore",
+                after_symbol="AlsoMissing",
+                body="\n",
+            )
+        msg = str(excinfo.value)
+        assert "after_symbol" in msg
+        assert "AlsoMissing" in msg
+
+    def test_adjacent_symbols_raise_clear_error(self, python_serena_agent: "SerenaAgent", throwaway_adjacent_anchor_file: str) -> None:
+        """When two anchors are adjacent with no interstitial lines between them,
+        the tool refuses the edit and points the caller to cursor_insert_after /
+        cursor_insert_before.
+        """
+        tool = python_serena_agent.get_tool(CursorReplaceBetweenTool)
+
+        with pytest.raises(ValueError) as excinfo:
+            tool.apply(
+                relative_path=throwaway_adjacent_anchor_file,
+                before_symbol="AdjA",
+                after_symbol="AdjB",
+                body="\n",
+            )
+        msg = str(excinfo.value)
+        assert "no interstitial lines" in msg
+        assert "cursor_insert_after" in msg or "cursor_insert_before" in msg
+
+    def test_expected_content_drift_check_integrates(self, python_serena_agent: "SerenaAgent", throwaway_anchor_file: str) -> None:
+        """Passing ``expected_content`` enables the same drift-check as
+        ``cursor_replace_range_verified``: mismatch aborts; match proceeds.
+        """
+        tool = python_serena_agent.get_tool(CursorReplaceBetweenTool)
+        abs_path = Path(python_serena_agent.get_active_project_or_raise().project_root) / throwaway_anchor_file
+        pre = abs_path.read_text()
+
+        # mismatch: drift must be reported
+        with pytest.raises(ValueError, match="drift detected"):
+            tool.apply(
+                relative_path=throwaway_anchor_file,
+                before_symbol="SymAnchorBefore",
+                after_symbol="SymAnchorAfter",
+                body="\n# x\n",
+                expected_content="completely different content\n",
+            )
+        assert abs_path.read_text() == pre
+
+        # match: the interstitial content in the fixture is 4 lines between
+        # the anchors (lines 2..5 inclusive in the fixture).
+        expected = "\n\n# interstitial: pretend this is a #if DEBUG / #endif block\n# these lines are not LSP symbols\n\n\n"
+        result = tool.apply(
+            relative_path=throwaway_anchor_file,
+            before_symbol="SymAnchorBefore",
+            after_symbol="SymAnchorAfter",
+            body="\n# verified replacement\n\n",
+            expected_content=expected,
+        )
+        assert "OK" in result
+        assert "verified replacement" in abs_path.read_text()
+
+    def test_anchors_reresolve_after_file_shift(self, python_serena_agent: "SerenaAgent", throwaway_anchor_file: str) -> None:
+        """After a separate edit shifts the file, anchor-based addressing still
+        targets the interstitial region because anchors re-resolve on every
+        call.
+        """
+        between = python_serena_agent.get_tool(CursorReplaceBetweenTool)
+        range_tool = python_serena_agent.get_tool(CursorReplaceRangeTool)
+
+        abs_path = Path(python_serena_agent.get_active_project_or_raise().project_root) / throwaway_anchor_file
+
+        # shift the file by prepending two blank header lines; absolute indices
+        # that previously pointed at the interstitial are now off by two
+        original = abs_path.read_text()
+        abs_path.write_text("\n\n" + original)
+        try:
+            python_serena_agent.reset_language_server_manager()
+        except Exception:
+            pass
+
+        # anchor-based call must still replace the interstitial correctly
+        result = between.apply(
+            relative_path=throwaway_anchor_file,
+            before_symbol="SymAnchorBefore",
+            after_symbol="SymAnchorAfter",
+            body="\n# post-shift replacement\n\n",
+        )
+        assert "OK" in result
+
+        content = abs_path.read_text()
+        assert "class SymAnchorBefore:" in content
+        assert "class SymAnchorAfter:" in content
+        assert "post-shift replacement" in content
+        assert "pretend this is a #if DEBUG" not in content
+
+        # sanity: the range_tool reference is only to demonstrate which tool the
+        # between tool DOES NOT depend on for range stability (drift would strike
+        # absolute-line callers of cursor_replace_range, but between re-resolved)
+        assert range_tool is not None

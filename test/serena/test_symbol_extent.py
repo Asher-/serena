@@ -118,14 +118,7 @@ class TestPythonStrategyWidensVariableEnd:
 
     def test_dataclass_field_widens_to_statement_end(self) -> None:
         """Dataclass field (AnnAssign inside class body) widens to the full annotation statement."""
-        text = (
-            "from dataclasses import dataclass\n"
-            "\n"
-            "@dataclass\n"
-            "class X:\n"
-            "    a: int = 0\n"
-            "    b: str = \"\"\n"
-        )
+        text = 'from dataclasses import dataclass\n\n@dataclass\nclass X:\n    a: int = 0\n    b: str = ""\n'
         # field `a` is reported at line 4 (0-based); name itself is a single character
         symbol = _make_symbol("a", SymbolKind.Field, name_line=4)
         strategy = PythonSymbolExtentStrategy()

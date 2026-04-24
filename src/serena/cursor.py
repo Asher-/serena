@@ -58,9 +58,7 @@ DEFAULT_EDGE_TYPES = frozenset(
 # operations that require the cursor to be positioned on a container node
 _CONTAINER_POSITIONED_OPERATIONS: frozenset[str] = frozenset({"insert_start", "insert_end"})
 # operations that require the cursor to be positioned on a container's member
-_MEMBER_ANCHORED_OPERATIONS: frozenset[str] = frozenset(
-    {"insert_before", "insert_after", "replace", "remove"}
-)
+_MEMBER_ANCHORED_OPERATIONS: frozenset[str] = frozenset({"insert_before", "insert_after", "replace", "remove"})
 # kinds that guarantee the cursor addresses a non-container leaf. Only the
 # kinds on this list can be pre-flagged without inspecting the parsed tree:
 #
@@ -75,9 +73,7 @@ _MEMBER_ANCHORED_OPERATIONS: frozenset[str] = frozenset(
 # JSON ``member``, TOML ``pair``, YAML ``pair`` are deliberately absent: the
 # walk tags every mapping member with those kinds regardless of whether the
 # value is scalar or compound, so they are not a reliable pre-flag signal.
-_STRUCTURAL_SCALAR_KINDS: frozenset[str] = frozenset(
-    {"container_member", "string", "number", "boolean", "null", "scalar"}
-)
+_STRUCTURAL_SCALAR_KINDS: frozenset[str] = frozenset({"container_member", "string", "number", "boolean", "null", "scalar"})
 
 
 @dataclass
@@ -200,6 +196,7 @@ class _StructuralNodeCacheEntry:
 
     mtime_ns: int
     nodes_by_path: dict[str, tuple[KindName, Any]]
+
 
 def _split_name_path_segments(name_path: str) -> list[str]:
     """Split a structural name path into segments on bracket-depth-0 slashes.
@@ -822,7 +819,7 @@ class CursorManager:
         _kind, node = match
         try:
             return self._serialize_node_for_display(backend, node)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             # rendering is best-effort: when a backend cannot turn a sub-node
             # into standalone text, omit the body rather than fail the view
             log.debug(f"Could not serialize structural node for display: {e}")
@@ -1014,11 +1011,7 @@ class CursorManager:
         if operation in _CONTAINER_POSITIONED_OPERATIONS:
             if state.kind in _STRUCTURAL_SCALAR_KINDS:
                 parent = _parent_name_path(state.name_path)
-                retry_hint = (
-                    f" Use cursor_start on '{parent}' (the enclosing container) then retry."
-                    if parent is not None
-                    else ""
-                )
+                retry_hint = f" Use cursor_start on '{parent}' (the enclosing container) then retry." if parent is not None else ""
                 raise ValueError(
                     f"{operation} requires a cursor positioned on a container, "
                     f"but cursor '{state.cursor_id}' is on '{state.name_path}' "
@@ -1113,7 +1106,7 @@ class CursorManager:
             # insert_before | insert_after | insert_start | insert_end share
             # the container_insert_member signature; the position suffix maps
             # directly to the backend's position parameter.
-            position = operation[len("insert_"):]
+            position = operation[len("insert_") :]
             new_tree = backend.container_insert_member(
                 tree,
                 state.name_path,
@@ -1176,8 +1169,7 @@ class CursorManager:
             resolution = self.resolve_structural_name_path(resolved_path, resolved_name)
             if resolution is None:
                 raise ValueError(
-                    f"Structural cursor '{cursor_id}' cannot re-anchor: path "
-                    f"{resolved_name!r} no longer resolves in {resolved_path!r}",
+                    f"Structural cursor '{cursor_id}' cannot re-anchor: path {resolved_name!r} no longer resolves in {resolved_path!r}",
                 )
             state.relative_path = resolved_path
             state.name_path = resolution.name_path
@@ -1185,9 +1177,9 @@ class CursorManager:
             return state
 
         resolved_name = name_path if name_path is not None else state.current_symbol.get_name_path()
-        resolved_path = relative_path if relative_path is not None else state.current_location.relative_path
+        within_path = relative_path if relative_path is not None else state.current_location.relative_path
         retriever = self._retriever
-        symbol = retriever.find_unique(resolved_name, within_relative_path=resolved_path)
+        symbol = retriever.find_unique(resolved_name, within_relative_path=within_path)
         state.current_symbol = symbol
         state.current_location = symbol.location
         return state

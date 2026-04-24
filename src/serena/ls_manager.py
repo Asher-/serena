@@ -178,8 +178,7 @@ class LanguageServerManager:
                         thread.language_server.stop()
                     except Exception as cleanup_error:
                         log.debug(
-                            f"Ignoring cleanup error while stopping partially-started {thread.language.value} server: "
-                            f"{cleanup_error}"
+                            f"Ignoring cleanup error while stopping partially-started {thread.language.value} server: {cleanup_error}"
                         )
             elif thread.language_server is not None:
                 language_servers[thread.language] = thread.language_server

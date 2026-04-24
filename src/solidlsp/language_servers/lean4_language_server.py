@@ -12,8 +12,6 @@ from typing import cast
 
 from overrides import override
 
-
-
 from solidlsp.language_servers.common import RequiredCLI
 from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
@@ -26,8 +24,7 @@ log = logging.getLogger(__name__)
 _LEAN_CLI_REQUIREMENT = RequiredCLI(
     name="lean",
     rationale=(
-        "The Lean 4 language server is invoked as 'lean --server'; without the\n"
-        "lean toolchain on PATH there is no process to start."
+        "The Lean 4 language server is invoked as 'lean --server'; without the\nlean toolchain on PATH there is no process to start."
     ),
     install_hints=[
         "elan (recommended): curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh",

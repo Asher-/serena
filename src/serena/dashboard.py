@@ -233,7 +233,6 @@ class SerenaDashboardAPI:
             result = self._get_available_languages()
             return result.model_dump()
 
-
         @self._app.route("/get_language_server_status", methods=["GET"])
         def get_language_server_status() -> dict[str, Any]:
             result = self._get_language_server_status()
@@ -575,7 +574,6 @@ class SerenaDashboardAPI:
             return ResponseAvailableLanguages(languages=sorted(available_languages))
 
         return self._agent.execute_task(run, logged=False)
-
 
     def _get_language_server_status(self) -> ResponseLanguageServerStatus:
         """

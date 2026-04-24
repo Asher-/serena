@@ -1235,7 +1235,7 @@ def _mapping_insert_in_place(
     anchor_key: str | None,
     position: str,
 ) -> None:
-    """Splice a ``(key, value)`` pair into ``mapping``'s body list in place.
+    r"""Splice a ``(key, value)`` pair into ``mapping``'s body list in place.
 
     Direct body-list manipulation keeps surrounding trivia / comments
     anchored in place rather than being re-emitted by tomlkit at the end
@@ -1268,7 +1268,7 @@ def _mapping_insert_in_place(
 
 
 def _ensure_block_trailing_newline(value: Any) -> None:
-    """Ensure ``value``'s trivia ends with ``\\n`` so a block-level pair dumps cleanly.
+    r"""Ensure ``value``'s trivia ends with ``\n`` so a block-level pair dumps cleanly.
 
     tomlkit items parsed from ``key = 42`` (without a trailing newline)
     come back with empty trivia. When such an item is spliced into a
@@ -1293,7 +1293,7 @@ def _mapping_remove_in_place(mapping: Any, key_str: str) -> None:
 
 
 def _mapping_replace_value_in_place(mapping: Any, key_str: str, new_value: Any) -> None:
-    """Replace the value of the entry keyed by ``key_str``, preserving key identity and position.
+    r"""Replace the value of the entry keyed by ``key_str``, preserving key identity and position.
 
     The old value's trailing trivia (typically a ``\\n`` for block-level
     pairs) is copied onto the new value, so replacing a pair inside a

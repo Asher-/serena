@@ -19,11 +19,10 @@ from pathlib import Path
 
 from overrides import override
 
-
 from solidlsp.language_servers.common import RequiredCLI
 from solidlsp.ls import RawDocumentSymbol, SolidLanguageServer
-from solidlsp.ls import RawDocumentSymbol, SolidLanguageServer
 from solidlsp.ls_config import Language, LanguageServerConfig
+from solidlsp.ls_types import SymbolKind
 from solidlsp.ls_utils import FileUtils
 from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
@@ -150,7 +149,6 @@ class PowerShellLanguageServer(SolidLanguageServer):
         return str(start_script)
 
     @classmethod
-
     def _setup_runtime_dependency(cls, solidlsp_settings: SolidLSPSettings) -> tuple[str, str, str]:
         """Check that required PowerShell runtime dependencies are available.
 

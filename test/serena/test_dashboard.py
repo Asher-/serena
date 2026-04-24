@@ -70,7 +70,6 @@ def test_available_languages_exclude_project_languages():
     assert Language.ANSIBLE.value in available
 
 
-
 def test_language_server_status_empty_when_no_manager_state():
     dashboard = _make_dashboard(
         project_languages=[Language.PYTHON],

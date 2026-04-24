@@ -77,6 +77,7 @@ def _assert_body_spans_full_literal(view: str, identifier: str, close_char: str)
 
 # --- TypeScript ---------------------------------------------------------------
 
+
 @pytest.fixture(scope="module")
 def typescript_serena_agent() -> Iterator[SerenaAgent]:
     """SerenaAgent configured for the TypeScript test repo."""
@@ -99,13 +100,7 @@ def test_typescript_multiline_array_literal_body(typescript_serena_agent: Serena
     project_root = Path(typescript_serena_agent.get_active_project_or_raise().project_root)
     rel_path = "_cursor_variable_body_widening_sandbox.ts"
     abs_path = project_root / rel_path
-    abs_path.write_text(
-        "export const FOO = [\n"
-        "    1,\n"
-        "    2,\n"
-        "    3,\n"
-        "];\n"
-    )
+    abs_path.write_text("export const FOO = [\n    1,\n    2,\n    3,\n];\n")
 
     try:
         typescript_serena_agent.reset_language_server_manager()
@@ -130,6 +125,7 @@ def test_typescript_multiline_array_literal_body(typescript_serena_agent: Serena
 
 # --- Go -----------------------------------------------------------------------
 
+
 @pytest.fixture(scope="module")
 def go_serena_agent() -> Iterator[SerenaAgent]:
     """SerenaAgent configured for the Go test repo."""
@@ -152,15 +148,7 @@ def test_go_multiline_slice_literal_body(go_serena_agent: SerenaAgent) -> None:
     project_root = Path(go_serena_agent.get_active_project_or_raise().project_root)
     rel_path = "cursor_variable_body_widening_sandbox.go"
     abs_path = project_root / rel_path
-    abs_path.write_text(
-        "package main\n"
-        "\n"
-        "var FOO = []int{\n"
-        "    1,\n"
-        "    2,\n"
-        "    3,\n"
-        "}\n"
-    )
+    abs_path.write_text("package main\n\nvar FOO = []int{\n    1,\n    2,\n    3,\n}\n")
 
     try:
         go_serena_agent.reset_language_server_manager()
@@ -185,6 +173,7 @@ def test_go_multiline_slice_literal_body(go_serena_agent: SerenaAgent) -> None:
 
 # --- Swift --------------------------------------------------------------------
 
+
 @pytest.fixture(scope="module")
 def swift_serena_agent() -> Iterator[SerenaAgent]:
     """SerenaAgent configured for the Swift test repo."""
@@ -207,13 +196,7 @@ def test_swift_multiline_array_literal_body(swift_serena_agent: SerenaAgent) -> 
     project_root = Path(swift_serena_agent.get_active_project_or_raise().project_root)
     rel_path = "src/CursorVariableBodyWideningSandbox.swift"
     abs_path = project_root / rel_path
-    abs_path.write_text(
-        "let FOO: [Int] = [\n"
-        "    1,\n"
-        "    2,\n"
-        "    3,\n"
-        "]\n"
-    )
+    abs_path.write_text("let FOO: [Int] = [\n    1,\n    2,\n    3,\n]\n")
 
     try:
         swift_serena_agent.reset_language_server_manager()

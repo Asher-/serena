@@ -12,7 +12,6 @@ from collections.abc import Iterator
 import pytest
 
 from serena.agent import SerenaAgent
-from serena.config.serena_config import ProjectConfig, RegisteredProject, SerenaConfig
 from serena.cursor import ALL_EDGE_TYPES, DEFAULT_EDGE_TYPES, CursorManager, CursorState, EdgeType, NeighborSymbol
 from serena.project import Project
 from serena.tools.cursor_tools import (
@@ -30,7 +29,7 @@ from serena.tools.cursor_tools import (
     CursorStartTool,
 )
 from solidlsp.ls_config import Language
-from test.conftest import get_repo_path, language_tests_enabled, project_with_ls_context
+from test.conftest import project_with_ls_context
 
 pytestmark = pytest.mark.python
 
@@ -51,35 +50,6 @@ def python_project():
 def cursor_manager(python_project: Project) -> CursorManager:
     """A fresh CursorManager for each test."""
     return CursorManager(python_project)
-
-
-@pytest.fixture(scope="module")
-def python_serena_agent():
-    """SerenaAgent configured for the Python test repo."""
-    if not language_tests_enabled(Language.PYTHON):
-        pytest.skip("Python tests not enabled")
-
-    config = SerenaConfig(gui_log_window=False, web_dashboard=False)
-    repo_path = get_repo_path(Language.PYTHON)
-    project = Project(
-        project_root=str(repo_path),
-        project_config=ProjectConfig(
-            project_name="test_repo_python",
-            languages=[Language.PYTHON],
-            ignored_paths=[],
-            excluded_tools=[],
-            read_only=False,
-            ignore_all_files_in_gitignore=True,
-            initial_prompt="",
-            encoding="utf-8",
-        ),
-        serena_config=config,
-    )
-    config.projects = [RegisteredProject.from_project_instance(project)]
-    agent = SerenaAgent(project="test_repo_python", serena_config=config)
-    agent.execute_task(lambda: None)
-    yield agent
-    agent.on_shutdown(timeout=5)
 
 
 # ===========================================================================
@@ -627,9 +597,7 @@ class TestCursorEditTools:
         content = abs_path.read_text()
         assert "inserted-after-marker" in content
 
-    def test_cursor_insert_after_python_variable_multiline_literal(
-        self, python_serena_agent: SerenaAgent
-    ) -> None:
+    def test_cursor_insert_after_python_variable_multiline_literal(self, python_serena_agent: SerenaAgent) -> None:
         """Regression: cursor_insert_after on a Python module-level variable whose value is a
         multi-line list literal must insert after the closing bracket, not inside the list.
 
@@ -666,8 +634,7 @@ class TestCursorEditTools:
             foo_close_idx = content.index("]")
             bar_idx = content.index("BAR = 42")
             assert bar_idx > foo_close_idx, (
-                f"BAR was inserted at char {bar_idx}, before the FOO closing bracket at {foo_close_idx}. "
-                f"Full content:\n{content}"
+                f"BAR was inserted at char {bar_idx}, before the FOO closing bracket at {foo_close_idx}. Full content:\n{content}"
             )
 
             # the original FOO structure must still be intact
@@ -680,9 +647,7 @@ class TestCursorEditTools:
             except Exception:
                 pass
 
-    def test_cursor_insert_before_python_variable_multiline_literal(
-        self, python_serena_agent: SerenaAgent
-    ) -> None:
+    def test_cursor_insert_before_python_variable_multiline_literal(self, python_serena_agent: SerenaAgent) -> None:
         """Regression (symmetric to insert_after): cursor_insert_before on a Python
         module-level variable whose value is a multi-line list literal must insert
         above the assignment line, not on a continuation line.
@@ -721,8 +686,7 @@ class TestCursorEditTools:
             preceding_idx = content.index("PRECEDING = 0")
             foo_idx = content.index("FOO = [")
             assert preceding_idx < foo_idx, (
-                f"PRECEDING was inserted at char {preceding_idx}, after the FOO "
-                f"assignment at {foo_idx}. Full content:\n{content}"
+                f"PRECEDING was inserted at char {preceding_idx}, after the FOO assignment at {foo_idx}. Full content:\n{content}"
             )
 
             # the original FOO structure must still be intact
@@ -735,9 +699,7 @@ class TestCursorEditTools:
             except Exception:
                 pass
 
-    def test_cursor_insert_after_python_dataclass_field(
-        self, python_serena_agent: SerenaAgent
-    ) -> None:
+    def test_cursor_insert_after_python_dataclass_field(self, python_serena_agent: SerenaAgent) -> None:
         """Regression: cursor_insert_after on a dataclass field (an ``AnnAssign`` inside
         a class body) must land at class-body indent level after the field's full
         annotation statement, not inside the annotation expression.
@@ -752,15 +714,7 @@ class TestCursorEditTools:
         project_root = Path(python_serena_agent.get_active_project_or_raise().project_root)
         rel_path = os.path.join("test_repo", "_cursor_dataclass_field_sandbox.py")
         abs_path = project_root / rel_path
-        abs_path.write_text(
-            "from dataclasses import dataclass\n"
-            "\n"
-            "\n"
-            "@dataclass\n"
-            "class Point:\n"
-            "    x: int = 0\n"
-            "    y: int = 0\n"
-        )
+        abs_path.write_text("from dataclasses import dataclass\n\n\n@dataclass\nclass Point:\n    x: int = 0\n    y: int = 0\n")
 
         try:
             python_serena_agent.reset_language_server_manager()
@@ -782,8 +736,7 @@ class TestCursorEditTools:
             z_idx = content.index("z: int = 0")
             y_idx = content.index("y: int = 0")
             assert x_idx < z_idx < y_idx, (
-                f"z field landed outside the x..y window (x={x_idx}, z={z_idx}, y={y_idx}). "
-                f"Full content:\n{content}"
+                f"z field landed outside the x..y window (x={x_idx}, z={z_idx}, y={y_idx}). Full content:\n{content}"
             )
 
             # the x annotation must not have been mangled by an insertion mid-expression
@@ -796,9 +749,7 @@ class TestCursorEditTools:
             except Exception:
                 pass
 
-    def test_cursor_configure_include_body_widens_python_variable_multiline_literal(
-        self, python_serena_agent: SerenaAgent
-    ) -> None:
+    def test_cursor_configure_include_body_widens_python_variable_multiline_literal(self, python_serena_agent: SerenaAgent) -> None:
         """Regression: cursor_configure include_body=True must display the full multi-line
         literal for a Python Variable whose LSP extent is name-only.
 
@@ -815,13 +766,7 @@ class TestCursorEditTools:
         project_root = Path(python_serena_agent.get_active_project_or_raise().project_root)
         rel_path = os.path.join("test_repo", "_cursor_variable_body_widening_sandbox.py")
         abs_path = project_root / rel_path
-        abs_path.write_text(
-            "FOO = [\n"
-            "    1,\n"
-            "    2,\n"
-            "    3,\n"
-            "]\n"
-        )
+        abs_path.write_text("FOO = [\n    1,\n    2,\n    3,\n]\n")
 
         try:
             python_serena_agent.reset_language_server_manager()

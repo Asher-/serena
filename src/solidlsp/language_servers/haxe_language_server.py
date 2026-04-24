@@ -13,19 +13,19 @@ import zipfile
 
 from overrides import override
 
+from solidlsp.language_servers.common import RequiredCLI
 from solidlsp.ls import (
     LanguageServerDependencyProvider,
     LanguageServerDependencyProviderSinglePath,
     LSPFileBuffer,
     SolidLanguageServer,
-    SolidLanguageServer,
 )
-from solidlsp.language_servers.common import RequiredCLI
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_types import Hover
 from solidlsp.lsp_protocol_handler.lsp_types import DiagnosticSeverity, InitializeParams
 from solidlsp.settings import SolidLSPSettings
+
 log = logging.getLogger(__name__)
 
 

@@ -30,7 +30,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-
 from serena.cursor import (
     CursorManager,
     StructuralCursorState,
@@ -44,7 +43,7 @@ from serena.tools.cursor_tools import (
     CursorRemoveMemberTool,
     CursorReplaceBodyTool,
 )
-from solidlsp.structural.registry import default_structural_backend_registry
+
 
 class _StubRetriever:
     """Minimal ``LanguageServerSymbolRetriever`` stand-in that always misses.
@@ -107,13 +106,7 @@ class TestPythonContainerEdit:
     target is ``FOO/["members"]/["existing"]``.
     """
 
-    _SOURCE = (
-        "FOO = {\n"
-        '    "members": {\n'
-        '        "existing": 1,\n'
-        "    },\n"
-        "}\n"
-    )
+    _SOURCE = 'FOO = {\n    "members": {\n        "existing": 1,\n    },\n}\n'
 
     def test_start_cursor_falls_through_to_structural(self, tmp_path: Path) -> None:
         (tmp_path / "sample.py").write_text(self._SOURCE, encoding="utf-8")
@@ -173,13 +166,7 @@ class TestPythonContainerEdit:
 class TestJsonContainerEdit:
     """Structural cursor + container-member edits on a JSON object."""
 
-    _SOURCE = (
-        "{\n"
-        '    "members": {\n'
-        '        "existing": 1\n'
-        "    }\n"
-        "}\n"
-    )
+    _SOURCE = '{\n    "members": {\n        "existing": 1\n    }\n}\n'
 
     def test_start_cursor_resolves_structural_path(self, tmp_path: Path) -> None:
         (tmp_path / "doc.json").write_text(self._SOURCE, encoding="utf-8")
@@ -236,10 +223,7 @@ class TestJsonContainerEdit:
 class TestTomlContainerEdit:
     """Structural cursor + container-member edits on a TOML document."""
 
-    _SOURCE = (
-        "[members]\n"
-        "existing = 1\n"
-    )
+    _SOURCE = "[members]\nexisting = 1\n"
 
     def test_start_cursor_resolves_structural_path(self, tmp_path: Path) -> None:
         (tmp_path / "config.toml").write_text(self._SOURCE, encoding="utf-8")
@@ -295,10 +279,7 @@ class TestTomlContainerEdit:
 class TestYamlContainerEdit:
     """Structural cursor + container-member edits on a YAML mapping."""
 
-    _SOURCE = (
-        "members:\n"
-        "  existing: 1\n"
-    )
+    _SOURCE = "members:\n  existing: 1\n"
 
     def test_start_cursor_resolves_structural_path(self, tmp_path: Path) -> None:
         (tmp_path / "data.yaml").write_text(self._SOURCE, encoding="utf-8")
@@ -388,9 +369,9 @@ def _bind_tool(tool_cls: type, harness: _ToolHarness) -> Any:
     the structural branch, so replacing the instance's ``agent`` / ``project``
     attributes with the harness is sufficient.
     """
-    tool = tool_cls.__new__(tool_cls)
-    tool.__dict__["agent"] = harness.agent  # noqa: SLF001
-    tool.__dict__["project"] = harness.project  # noqa: SLF001
+    tool = tool_cls.__new__(tool_cls)  # type: ignore[call-overload]
+    tool.__dict__["agent"] = harness.agent
+    tool.__dict__["project"] = harness.project
     return tool
 
 
@@ -405,13 +386,7 @@ class TestCursorEditToolsStructuralBranch:
 
     @pytest.fixture
     def python_manager(self, tmp_path: Path) -> tuple[CursorManager, Any, Path]:
-        source = (
-            "FOO = {\n"
-            '    "members": {\n'
-            '        "existing": 1,\n'
-            "    },\n"
-            "}\n"
-        )
+        source = 'FOO = {\n    "members": {\n        "existing": 1,\n    },\n}\n'
         file_path = tmp_path / "sample.py"
         file_path.write_text(source, encoding="utf-8")
         manager = _make_manager_via_subclass(tmp_path)
@@ -475,12 +450,8 @@ class TestCursorEditToolsStructuralBranch:
         content = file_path.read_text(encoding="utf-8")
         assert '"existing": 1' in content
         assert '"new_field": 2' in content
-        existing_line = next(
-            i for i, line in enumerate(content.splitlines()) if '"existing"' in line
-        )
-        new_field_line = next(
-            i for i, line in enumerate(content.splitlines()) if '"new_field"' in line
-        )
+        existing_line = next(i for i, line in enumerate(content.splitlines()) if '"existing"' in line)
+        new_field_line = next(i for i, line in enumerate(content.splitlines()) if '"new_field"' in line)
         assert new_field_line == existing_line - 1
 
 
@@ -497,13 +468,7 @@ class TestStrongaiRepro:
     """
 
     _SOURCE = (
-        "Instantiation = {\n"
-        '    "members": {\n'
-        '        "pid": "PID",\n'
-        '        "aspect": "Aspect",\n'
-        '        "value": "Any",\n'
-        "    },\n"
-        "}\n"
+        'Instantiation = {\n    "members": {\n        "pid": "PID",\n        "aspect": "Aspect",\n        "value": "Any",\n    },\n}\n'
     )
 
     def test_insert_after_preserves_surroundings(self, tmp_path: Path) -> None:
@@ -534,6 +499,7 @@ class TestStrongaiRepro:
         prov_line = next(i for i, line in enumerate(after.splitlines()) if '"provenance"' in line)
         assert prov_line == value_line + 1
 
+
 class TestContainerRemoveAndAnchored:
     """Remove, insert_start, insert_end at the ``apply_container_edit`` layer.
 
@@ -547,32 +513,10 @@ class TestContainerRemoveAndAnchored:
     # reusable sources per backend — each has a two-member container so
     # insert_start has a neighbor to land before and insert_end has one
     # to land after
-    _PYTHON = (
-        "FOO = {\n"
-        '    "members": {\n'
-        '        "alpha": 1,\n'
-        '        "beta": 2,\n'
-        "    },\n"
-        "}\n"
-    )
-    _JSON = (
-        "{\n"
-        '    "members": {\n'
-        '        "alpha": 1,\n'
-        '        "beta": 2\n'
-        "    }\n"
-        "}\n"
-    )
-    _TOML = (
-        "[members]\n"
-        "alpha = 1\n"
-        "beta = 2\n"
-    )
-    _YAML = (
-        "members:\n"
-        "  alpha: 1\n"
-        "  beta: 2\n"
-    )
+    _PYTHON = 'FOO = {\n    "members": {\n        "alpha": 1,\n        "beta": 2,\n    },\n}\n'
+    _JSON = '{\n    "members": {\n        "alpha": 1,\n        "beta": 2\n    }\n}\n'
+    _TOML = "[members]\nalpha = 1\nbeta = 2\n"
+    _YAML = "members:\n  alpha: 1\n  beta: 2\n"
 
     # --- python ---------------------------------------------------------
 
@@ -759,13 +703,7 @@ class TestContainerRemoveAndAnchored:
 class TestApplyContainerEditValidation:
     """Dispatcher-level validation of the expanded operation set."""
 
-    _SOURCE = (
-        "FOO = {\n"
-        '    "members": {\n'
-        '        "alpha": 1,\n'
-        "    },\n"
-        "}\n"
-    )
+    _SOURCE = 'FOO = {\n    "members": {\n        "alpha": 1,\n    },\n}\n'
 
     def test_unknown_operation_raises(self, tmp_path: Path) -> None:
         (tmp_path / "s.py").write_text(self._SOURCE, encoding="utf-8")
@@ -779,7 +717,8 @@ class TestApplyContainerEditValidation:
             manager.apply_container_edit(cid, "wipe", "")
 
     def test_insert_start_on_python_scalar_member_raises_friendly_error(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         # Python scalar-valued dict member: cursor.kind == "container_member"
         (tmp_path / "s.py").write_text(self._SOURCE, encoding="utf-8")
@@ -803,7 +742,8 @@ class TestApplyContainerEditValidation:
         assert "cursor_start on 'FOO/[\"members\"]'" in message
 
     def test_insert_end_on_json_array_scalar_raises_friendly_error(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         # JSON array-item scalar: cursor.kind == "string"
         (tmp_path / "d.json").write_text(
@@ -822,7 +762,8 @@ class TestApplyContainerEditValidation:
             manager.apply_container_edit(cid, "insert_end", '"third"')
 
     def test_member_anchored_op_on_top_level_raises_friendly_error(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         # Python top-level assignment: path has no "/" separator, so no parent container
         (tmp_path / "s.py").write_text(self._SOURCE, encoding="utf-8")
@@ -863,15 +804,7 @@ class TestApplyContainerEditValidation:
 class TestStructuralNeighbors:
     """The ``_resolve_structural_neighbors`` helper and its view integration."""
 
-    _SOURCE = (
-        "FOO = {\n"
-        '    "members": {\n'
-        '        "alpha": 1,\n'
-        '        "beta": 2,\n'
-        '        "gamma": 3,\n'
-        "    },\n"
-        "}\n"
-    )
+    _SOURCE = 'FOO = {\n    "members": {\n        "alpha": 1,\n        "beta": 2,\n        "gamma": 3,\n    },\n}\n'
 
     def test_container_cursor_yields_direct_children(self, tmp_path: Path) -> None:
         (tmp_path / "s.py").write_text(self._SOURCE, encoding="utf-8")
@@ -935,20 +868,13 @@ class TestStructuralNeighborSplitter:
     def test_nested_brackets(self) -> None:
         from serena.cursor import _split_name_path_segments
 
-        assert _split_name_path_segments("FOO/[7]/[\"x\"]") == ["FOO", "[7]", '["x"]']
+        assert _split_name_path_segments('FOO/[7]/["x"]') == ["FOO", "[7]", '["x"]']
 
 
 class TestNewToolSurface:
     """End-to-end tool dispatch for CursorInsertAtStart / AtEnd / RemoveMember."""
 
-    _SOURCE = (
-        "FOO = {\n"
-        '    "members": {\n'
-        '        "alpha": 1,\n'
-        '        "beta": 2,\n'
-        "    },\n"
-        "}\n"
-    )
+    _SOURCE = 'FOO = {\n    "members": {\n        "alpha": 1,\n        "beta": 2,\n    },\n}\n'
 
     @pytest.fixture
     def py_state(self, tmp_path: Path) -> tuple[CursorManager, Any, Path]:
@@ -1020,13 +946,7 @@ class TestNewToolSurface:
 class TestStructuralConfigure:
     """``CursorConfigureTool.apply`` on a structural cursor toggles ``include_body``."""
 
-    _SOURCE = (
-        "FOO = {\n"
-        '    "members": {\n'
-        '        "alpha": 1,\n'
-        "    },\n"
-        "}\n"
-    )
+    _SOURCE = 'FOO = {\n    "members": {\n        "alpha": 1,\n    },\n}\n'
 
     def test_include_body_false_by_default_omits_body_block(self, tmp_path: Path) -> None:
         (tmp_path / "s.py").write_text(self._SOURCE, encoding="utf-8")
@@ -1056,13 +976,13 @@ class TestStructuralConfigure:
 
         # flipping include_body writes through to the dataclass field
         view_on = tool.apply(cursor_id=cid, include_body=True)
-        assert state.include_body is True
+        assert state.include_body
         assert "--- body ---" in view_on
         assert "--- end body ---" in view_on
 
         # flipping it back off also writes through
         view_off = tool.apply(cursor_id=cid, include_body=False)
-        assert state.include_body is False
+        assert not state.include_body
         assert "--- body ---" not in view_off
 
     def test_configure_ignores_edge_types_for_structural_cursor(self, tmp_path: Path) -> None:

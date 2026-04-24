@@ -14,6 +14,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 
 from serena.cursor import EdgeType, StructuralCursorState
+from serena.symbol import LanguageServerSymbol
 from serena.tools import SUCCESS_RESULT
 from serena.tools.tools_base import Tool, ToolMarkerSymbolicEdit, ToolMarkerSymbolicRead
 from solidlsp.ls_types import SymbolKind
@@ -500,6 +501,7 @@ class CursorInsertAfterTool(Tool, ToolMarkerSymbolicEdit):
         manager.reanchor_cursor(cursor_id)
         return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
 
+
 class CursorInsertAtStartTool(Tool, ToolMarkerSymbolicEdit):
     """
     Insert a member at the beginning of a container. Structural cursors only.
@@ -528,8 +530,7 @@ class CursorInsertAtStartTool(Tool, ToolMarkerSymbolicEdit):
         state = manager.get_cursor(cursor_id)
         if not isinstance(state, StructuralCursorState):
             raise TypeError(
-                f"Cursor '{cursor_id}' is an LSP cursor; "
-                "cursor_insert_at_start requires a structural cursor on a container.",
+                f"Cursor '{cursor_id}' is an LSP cursor; cursor_insert_at_start requires a structural cursor on a container.",
             )
         manager.apply_container_edit(cursor_id, "insert_start", body)
         manager.reanchor_cursor(cursor_id)
@@ -558,8 +559,7 @@ class CursorInsertAtEndTool(Tool, ToolMarkerSymbolicEdit):
         state = manager.get_cursor(cursor_id)
         if not isinstance(state, StructuralCursorState):
             raise TypeError(
-                f"Cursor '{cursor_id}' is an LSP cursor; "
-                "cursor_insert_at_end requires a structural cursor on a container.",
+                f"Cursor '{cursor_id}' is an LSP cursor; cursor_insert_at_end requires a structural cursor on a container.",
             )
         manager.apply_container_edit(cursor_id, "insert_end", body)
         manager.reanchor_cursor(cursor_id)
@@ -619,6 +619,7 @@ class CursorRemoveMemberTool(Tool, ToolMarkerSymbolicEdit):
         manager.reanchor_cursor(cursor_id, name_path=parent_path)
         return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
 
+
 class CursorReplaceRangeTool(Tool, ToolMarkerSymbolicEdit):
     """
     Replace a non-symbolic line range in a file. Unlike ``cursor_replace_body`` and the
@@ -664,8 +665,7 @@ class CursorReplaceRangeTool(Tool, ToolMarkerSymbolicEdit):
         # validate input before any filesystem work so callers see a clean error message
         if start_line < 0 or end_line < start_line:
             raise ValueError(
-                f"cursor_replace_range: invalid range [{start_line}, {end_line}] "
-                f"in {relative_path!r}; require 0 <= start_line <= end_line."
+                f"cursor_replace_range: invalid range [{start_line}, {end_line}] in {relative_path!r}; require 0 <= start_line <= end_line."
             )
 
         # snapshot content so we can report a line-diff summary after the edit
@@ -683,6 +683,246 @@ class CursorReplaceRangeTool(Tool, ToolMarkerSymbolicEdit):
         removed, added = CursorReplaceBodyTool._count_diff_lines(pre_content, post_content)
         diff_summary = f"Diff: -{removed} / +{added} lines"
         return f"{SUCCESS_RESULT}\n{diff_summary}"
+
+
+class CursorReplaceRangeVerifiedTool(Tool, ToolMarkerSymbolicEdit):
+    """
+    Drift-safe variant of ``cursor_replace_range``: the caller supplies the text
+    they expect to find at ``[start_line, end_line]``, and the edit aborts with a
+    unified diff if the file has shifted since the caller last inspected it.
+
+    Typical failure mode prevented: a preceding ``cursor_overview`` / ``cursor_look``
+    is separated from the edit by intervening work that rewrote the file; the
+    previously-correct ``start_line`` / ``end_line`` now point at the wrong content
+    (a ``#endif``, a struct-closing ``}``, etc.); and ``cursor_replace_range`` would
+    overwrite the shifted content blindly. With this tool the mismatch surfaces
+    before any mutation, and the caller can re-resolve the range from a fresh
+    overview.
+
+    Note on the marker: this tool mutates a raw line range rather than an LSP
+    symbol; see the note on ``CursorReplaceRangeTool``.
+    """
+
+    def apply(
+        self,
+        relative_path: str,
+        start_line: int,
+        end_line: int,
+        expected_content: str,
+        body: str,
+    ) -> str:
+        """
+        Replace the file's lines ``[start_line, end_line]`` (inclusive) with
+        ``body`` after verifying the current content of those lines matches
+        ``expected_content``.
+
+        :param relative_path: relative path to the file to edit.
+        :param start_line: the 0-based index of the first line to replace (inclusive).
+        :param end_line: the 0-based index of the last line to replace (inclusive).
+            Must satisfy ``start_line <= end_line``.
+        :param expected_content: the text the caller expects to find at
+            ``[start_line, end_line]``. Compared line-by-line via
+            ``str.splitlines()``, so a single trailing newline on either side is
+            ignored and CRLF/LF line endings are treated as equivalent. On
+            mismatch a ``ValueError`` with a unified diff is raised and the file
+            is left unmodified.
+        :param body: the replacement text. Inserted verbatim; the caller should
+            supply a trailing newline to keep the file line-oriented. Pass an
+            empty string to delete the range with no replacement.
+        :return: a success confirmation and the diff summary.
+        """
+        # validate input before any filesystem work so callers see a clean error message
+        if start_line < 0 or end_line < start_line:
+            raise ValueError(
+                f"cursor_replace_range_verified: invalid range [{start_line}, {end_line}] "
+                f"in {relative_path!r}; require 0 <= start_line <= end_line."
+            )
+
+        # snapshot content for both drift verification and the post-edit diff summary
+        pre_content = self.project.read_file(relative_path)
+
+        # drift check: expected text must match what is currently at the range
+        self._verify_expected(relative_path, pre_content, start_line, end_line, expected_content)
+
+        # execute the edit via the filesystem-level code editor layer (same path as
+        # cursor_replace_range so the two tools share a single mutation implementation)
+        code_editor = self.create_code_editor()
+        code_editor.replace_lines(relative_path, start_line, end_line, body)
+
+        # compute a diff summary for the return value so the caller can verify the
+        # edit size against their intent (mirrors cursor_replace_range)
+        post_content = self.project.read_file(relative_path)
+        removed, added = CursorReplaceBodyTool._count_diff_lines(pre_content, post_content)
+        diff_summary = f"Diff: -{removed} / +{added} lines"
+        return f"{SUCCESS_RESULT}\n{diff_summary}"
+
+    @staticmethod
+    def _verify_expected(
+        relative_path: str,
+        pre_content: str,
+        start_line: int,
+        end_line: int,
+        expected_content: str,
+    ) -> None:
+        """
+        Confirm that the file's lines ``[start_line, end_line]`` (inclusive) match
+        ``expected_content`` line-by-line. Raise ``ValueError`` with a unified
+        diff on mismatch; return silently on match.
+
+        :param relative_path: relative path of the file being edited (for error text).
+        :param pre_content: the file's full current content.
+        :param start_line: inclusive 0-based start line index.
+        :param end_line: inclusive 0-based end line index.
+        :param expected_content: the text the caller expects at the range.
+        """
+        # extract the actual content at the requested line range
+        all_lines = pre_content.splitlines(keepends=True)
+        if start_line >= len(all_lines):
+            raise ValueError(
+                f"cursor_replace_range_verified: start_line={start_line} is beyond the "
+                f"file's line count ({len(all_lines)}) in {relative_path!r}."
+            )
+        actual_slice = all_lines[start_line : end_line + 1]
+        actual_content = "".join(actual_slice)
+
+        # normalise both sides via splitlines so trailing-newline and CRLF/LF
+        # differences do not cause spurious drift errors
+        actual_normalised = actual_content.splitlines()
+        expected_normalised = expected_content.splitlines()
+        if actual_normalised == expected_normalised:
+            return
+
+        # emit a compact unified diff so the caller can see exactly what shifted
+        diff_lines = list(
+            difflib.unified_diff(
+                expected_normalised,
+                actual_normalised,
+                fromfile="expected",
+                tofile=f"actual ({relative_path}:{start_line}-{end_line})",
+                lineterm="",
+            )
+        )
+        raise ValueError(
+            "cursor_replace_range_verified: file drift detected; expected content does "
+            "not match actual content at the requested range. Re-run cursor_overview / "
+            "cursor_look to refresh your view of the file, then retry with the updated "
+            "range and expected content.\n" + "\n".join(diff_lines)
+        )
+
+
+class CursorReplaceBetweenTool(Tool, ToolMarkerSymbolicEdit):
+    """
+    Replace the interstitial region between two anchor symbols with ``body``.
+
+    Both anchors are resolved via the language server on every call — anchors
+    are re-resolved rather than remembered — so the line range is always
+    computed from the file's current structure. Even if the file has shifted
+    between a prior overview and this edit, the anchor-based range is
+    recomputed fresh and still targets the region the caller intends.
+
+    Use this primitive for non-symbolic regions that sit between two nameable
+    LSP symbols: preprocessor-directive blocks (``#if`` / ``#endif`` groups),
+    detached comments, blank-line gaps, or free-floating ``///`` doc comments
+    outside any symbol's extent. The interstitial range is computed as
+    ``[end_of(before_symbol) + 1, start_of(after_symbol) - 1]`` (inclusive).
+
+    When the caller already knows what text currently occupies the range,
+    passing ``expected_content`` adds the same drift check as
+    ``cursor_replace_range_verified``: the edit aborts with a unified diff if
+    the actual content does not match.
+    """
+
+    def apply(
+        self,
+        relative_path: str,
+        before_symbol: str,
+        after_symbol: str,
+        body: str,
+        expected_content: str | None = None,
+    ) -> str:
+        """
+        Replace the lines between ``before_symbol`` (exclusive) and ``after_symbol``
+        (exclusive) with ``body``.
+
+        :param relative_path: relative path to the file both anchors live in.
+        :param before_symbol: LSP name path of the anchor that precedes the
+            interstitial region (e.g. ``"MyClass/firstMethod"``).
+        :param after_symbol: LSP name path of the anchor that follows the
+            interstitial region. Must resolve to a symbol that starts strictly
+            after ``before_symbol`` ends.
+        :param body: the replacement text. Inserted verbatim; the caller should
+            supply a trailing newline to keep the file line-oriented.
+        :param expected_content: optional text the caller expects at the
+            interstitial range, enabling a drift check identical to
+            ``cursor_replace_range_verified``'s. Line-by-line comparison via
+            ``str.splitlines()`` so trailing-newline and CRLF/LF differences are
+            ignored.
+        :return: a success confirmation, the diff summary, and the computed range.
+        """
+        # resolve both anchors on every call so drift is structurally eliminated
+        before = self._resolve_unique_anchor("before_symbol", before_symbol, relative_path)
+        after = self._resolve_unique_anchor("after_symbol", after_symbol, relative_path)
+
+        # compute the inter-symbol line range from the fresh positions
+        before_end = before.get_body_end_position_or_raise().line
+        after_start = after.get_body_start_position_or_raise().line
+        start_line = before_end + 1
+        end_line = after_start - 1
+
+        # reject misordered or touching anchors with a concrete explanation
+        if start_line > end_line:
+            raise ValueError(
+                f"cursor_replace_between: no interstitial lines between "
+                f"{before_symbol!r} (body ends at line {before_end}) and "
+                f"{after_symbol!r} (body starts at line {after_start}); "
+                f"computed range [{start_line}, {end_line}] is empty. "
+                f"Use cursor_insert_after {before_symbol!r} or "
+                f"cursor_insert_before {after_symbol!r} for adjacent symbols."
+            )
+
+        # snapshot and optionally drift-check before mutating
+        pre_content = self.project.read_file(relative_path)
+        if expected_content is not None:
+            CursorReplaceRangeVerifiedTool._verify_expected(relative_path, pre_content, start_line, end_line, expected_content)
+
+        # execute the edit via the filesystem-level code editor layer
+        code_editor = self.create_code_editor()
+        code_editor.replace_lines(relative_path, start_line, end_line, body)
+
+        # compute a diff summary and include the computed range so the caller can
+        # verify the anchors resolved to the lines they expected
+        post_content = self.project.read_file(relative_path)
+        removed, added = CursorReplaceBodyTool._count_diff_lines(pre_content, post_content)
+        diff_summary = f"Diff: -{removed} / +{added} lines"
+        return (
+            f"{SUCCESS_RESULT}\n{diff_summary}\n(replaced lines [{start_line}, {end_line}] between {before_symbol!r} and {after_symbol!r})"
+        )
+
+    def _resolve_unique_anchor(self, role: str, name_path: str, relative_path: str) -> "LanguageServerSymbol":
+        """
+        Look up ``name_path`` on the language server and return the unique match.
+
+        :param role: which anchor role is being resolved (for error messages:
+            ``"before_symbol"`` or ``"after_symbol"``).
+        :param name_path: the LSP name path to resolve.
+        :param relative_path: the file to restrict the lookup to.
+        :return: the single matched ``LanguageServerSymbol``.
+        :raises ValueError: when the anchor fails to resolve uniquely.
+        """
+        manager = self.agent.get_cursor_manager()
+        symbols = manager.find_symbols(name_path, relative_path=relative_path)
+        if not symbols:
+            raise ValueError(
+                f"cursor_replace_between: {role} {name_path!r} did not resolve to any "
+                f"symbol in {relative_path!r}. Verify the name path with cursor_overview."
+            )
+        if len(symbols) > 1:
+            raise ValueError(
+                f"cursor_replace_between: {role} {name_path!r} is ambiguous in "
+                f"{relative_path!r} ({len(symbols)} matches). Disambiguate by using a "
+                f"more specific name path."
+            )
+        return symbols[0]
 
 
 class CursorRenameTool(Tool, ToolMarkerSymbolicEdit):

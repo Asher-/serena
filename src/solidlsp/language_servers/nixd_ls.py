@@ -15,18 +15,13 @@ from pathlib import Path
 
 from overrides import override
 
-
-
-
 from solidlsp import ls_types
 from solidlsp.language_servers.common import RequiredCLI
 from solidlsp.ls import DocumentSymbols, LSPFileBuffer, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
-from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
-
 
 log = logging.getLogger(__name__)
 
@@ -34,8 +29,7 @@ log = logging.getLogger(__name__)
 _NIX_CLI_REQUIREMENT = RequiredCLI(
     name="nix",
     rationale=(
-        "nixd is a Nix expression evaluator that depends on a working nix\n"
-        "installation at runtime to resolve imports and <nixpkgs>."
+        "nixd is a Nix expression evaluator that depends on a working nix\ninstallation at runtime to resolve imports and <nixpkgs>."
     ),
     install_hints=[
         "Official installer: https://nixos.org/download.html",
@@ -45,16 +39,14 @@ _NIX_CLI_REQUIREMENT = RequiredCLI(
 
 _NIXD_CLI_REQUIREMENT = RequiredCLI(
     name="nixd",
-    rationale=(
-        "nixd is the Nix language server used by serena; without its binary\n"
-        "on PATH there is no process to launch."
-    ),
+    rationale=("nixd is the Nix language server used by serena; without its binary\non PATH there is no process to launch."),
     install_hints=[
         "Nix flake: nix profile install github:nix-community/nixd",
         "nixpkgs: nix-env -iA nixpkgs.nixd",
         "Homebrew (macOS): brew install nixd",
     ],
 )
+
 
 class NixLanguageServer(SolidLanguageServer):
     """
@@ -237,7 +229,6 @@ class NixLanguageServer(SolidLanguageServer):
         return None
 
     @staticmethod
-
     def _setup_runtime_dependency():
         """Check if required Nix runtime dependencies are available.
 

@@ -469,7 +469,6 @@ class TestRemoveChild:
             backend.remove_child(tree, (object(), "not-a-key"))
 
 
-
 class TestContainerInsertMember:
     """L3 path-based insertion into mappings and sequences.
 
@@ -506,12 +505,9 @@ class TestContainerInsertMember:
 
     def test_insert_into_nested_table(self) -> None:
         backend = TomlStructuralLanguage()
-        tree = backend.parse("[pkg]\nname = \"hi\"\nversion = \"1\"\n")
-        out = backend.container_insert_member(tree, "pkg", "author = \"me\"", position="end")
-        assert (
-            backend.serialize(out)
-            == "[pkg]\nname = \"hi\"\nversion = \"1\"\nauthor = \"me\"\n"
-        )
+        tree = backend.parse('[pkg]\nname = "hi"\nversion = "1"\n')
+        out = backend.container_insert_member(tree, "pkg", 'author = "me"', position="end")
+        assert backend.serialize(out) == '[pkg]\nname = "hi"\nversion = "1"\nauthor = "me"\n'
 
     def test_insert_after_anchor_in_deep_table(self) -> None:
         # canonical-ish repro: deep [tool.x] with a multi-line body, insert
@@ -520,12 +516,12 @@ class TestContainerInsertMember:
         backend = TomlStructuralLanguage()
         tree = backend.parse("[tool.x]\nfirst = 1\nsecond = 2\nthird = 3\n")
         out = backend.container_insert_member(
-            tree, "tool/x/second", "between = 99", position="after",
+            tree,
+            "tool/x/second",
+            "between = 99",
+            position="after",
         )
-        assert (
-            backend.serialize(out)
-            == "[tool.x]\nfirst = 1\nsecond = 2\nbetween = 99\nthird = 3\n"
-        )
+        assert backend.serialize(out) == "[tool.x]\nfirst = 1\nsecond = 2\nbetween = 99\nthird = 3\n"
 
     def test_insert_into_inline_array_end(self) -> None:
         backend = TomlStructuralLanguage()
@@ -580,9 +576,9 @@ class TestContainerRemoveMember:
 
     def test_remove_from_nested_table(self) -> None:
         backend = TomlStructuralLanguage()
-        tree = backend.parse("[pkg]\nname = \"hi\"\nversion = \"1\"\n")
+        tree = backend.parse('[pkg]\nname = "hi"\nversion = "1"\n')
         out = backend.container_remove_member(tree, "pkg/version")
-        assert backend.serialize(out) == "[pkg]\nname = \"hi\"\n"
+        assert backend.serialize(out) == '[pkg]\nname = "hi"\n'
 
     def test_remove_from_inline_array(self) -> None:
         backend = TomlStructuralLanguage()
@@ -619,9 +615,9 @@ class TestContainerReplaceMember:
 
     def test_replace_nested_mapping_value(self) -> None:
         backend = TomlStructuralLanguage()
-        tree = backend.parse("[pkg]\nname = \"hi\"\nversion = \"1\"\n")
-        out = backend.container_replace_member(tree, "pkg/name", "\"bye\"")
-        assert backend.serialize(out) == "[pkg]\nname = \"bye\"\nversion = \"1\"\n"
+        tree = backend.parse('[pkg]\nname = "hi"\nversion = "1"\n')
+        out = backend.container_replace_member(tree, "pkg/name", '"bye"')
+        assert backend.serialize(out) == '[pkg]\nname = "bye"\nversion = "1"\n'
 
     def test_replace_inline_array_item(self) -> None:
         backend = TomlStructuralLanguage()

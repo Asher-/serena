@@ -14,43 +14,8 @@ import json
 import os
 from pathlib import Path
 
-import pytest
-
 from serena.agent import SerenaAgent
-from serena.config.serena_config import ProjectConfig, RegisteredProject, SerenaConfig
-from serena.project import Project
 from serena.tools.symbol_tools import FindSymbolTool
-from solidlsp.ls_config import Language
-from test.conftest import get_repo_path, language_tests_enabled
-
-
-@pytest.fixture(scope="module")
-def python_serena_agent() -> SerenaAgent:
-    """SerenaAgent configured for the Python test repo."""
-    if not language_tests_enabled(Language.PYTHON):
-        pytest.skip("Python tests not enabled")
-
-    config = SerenaConfig(gui_log_window=False, web_dashboard=False)
-    repo_path = get_repo_path(Language.PYTHON)
-    project = Project(
-        project_root=str(repo_path),
-        project_config=ProjectConfig(
-            project_name="test_repo_python",
-            languages=[Language.PYTHON],
-            ignored_paths=[],
-            excluded_tools=[],
-            read_only=False,
-            ignore_all_files_in_gitignore=True,
-            initial_prompt="",
-            encoding="utf-8",
-        ),
-        serena_config=config,
-    )
-    config.projects = [RegisteredProject.from_project_instance(project)]
-    agent = SerenaAgent(project="test_repo_python", serena_config=config)
-    agent.execute_task(lambda: None)
-    yield agent
-    agent.on_shutdown(timeout=5)
 
 
 def _find_symbol_body(result_json: str, name_path: str) -> str:
@@ -75,9 +40,7 @@ def _find_symbol_body(result_json: str, name_path: str) -> str:
 class TestFindSymbolIncludeBodyWidening:
     """Regression: FindSymbolTool include_body=True must return statement-widened bodies."""
 
-    def test_include_body_widens_python_multiline_variable_literal(
-        self, python_serena_agent: SerenaAgent
-    ) -> None:
+    def test_include_body_widens_python_multiline_variable_literal(self, python_serena_agent: SerenaAgent) -> None:
         """FindSymbolTool(include_body=True) for a Python variable-kind symbol must return the full
         multi-line assignment, not the identifier-only LSP range.
 
@@ -90,13 +53,7 @@ class TestFindSymbolIncludeBodyWidening:
         project_root = Path(python_serena_agent.get_active_project_or_raise().project_root)
         rel_path = os.path.join("test_repo", "_find_symbol_widening_sandbox.py")
         abs_path = project_root / rel_path
-        abs_path.write_text(
-            "FOO = [\n"
-            "    1,\n"
-            "    2,\n"
-            "    3,\n"
-            "]\n"
-        )
+        abs_path.write_text("FOO = [\n    1,\n    2,\n    3,\n]\n")
 
         try:
             python_serena_agent.reset_language_server_manager()
@@ -121,9 +78,7 @@ class TestFindSymbolIncludeBodyWidening:
             except Exception:
                 pass
 
-    def test_include_body_is_unchanged_for_non_variable_kinds(
-        self, python_serena_agent: SerenaAgent
-    ) -> None:
+    def test_include_body_is_unchanged_for_non_variable_kinds(self, python_serena_agent: SerenaAgent) -> None:
         """Widening must be a no-op for symbols whose LSP extent is already statement-scoped.
 
         Functions/methods/classes already have full-statement extents; the widening helper
@@ -135,10 +90,7 @@ class TestFindSymbolIncludeBodyWidening:
         project_root = Path(python_serena_agent.get_active_project_or_raise().project_root)
         rel_path = os.path.join("test_repo", "_find_symbol_widening_function_sandbox.py")
         abs_path = project_root / rel_path
-        abs_path.write_text(
-            "def greet(name: str) -> str:\n"
-            "    return f\"hello, {name}\"\n"
-        )
+        abs_path.write_text('def greet(name: str) -> str:\n    return f"hello, {name}"\n')
 
         try:
             python_serena_agent.reset_language_server_manager()
@@ -160,9 +112,7 @@ class TestFindSymbolIncludeBodyWidening:
             except Exception:
                 pass
 
-    def test_include_body_widens_dataclass_field(
-        self, python_serena_agent: SerenaAgent
-    ) -> None:
+    def test_include_body_widens_dataclass_field(self, python_serena_agent: SerenaAgent) -> None:
         """Dataclass ``field`` assignments are reported as Variable by the Python LSP with
         identifier-only extents; FindSymbolTool(include_body=True) must widen to the
         full ``name: type = default`` assignment.

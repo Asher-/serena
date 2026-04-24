@@ -6,7 +6,6 @@ instead, the manager is constructed with the successfully-started servers, and c
 an unavailable language receive a typed :class:`LanguageUnavailableError`.
 """
 
-
 from __future__ import annotations
 
 import logging
@@ -31,11 +30,9 @@ from serena.ls_manager import LanguageServerFactory, LanguageServerManager, Lang
 from serena.project import Project
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import Language
-from solidlsp.ls_config import Language
 
 
 class _ScriptedLanguageServerFactory(LanguageServerFactory):
-
     def __init__(self, failures: dict[Language, Exception] | None = None) -> None:
         # stored as instance state only; the base constructor is deliberately not invoked because
         # it validates paths and builds file filters, neither of which is needed here
@@ -60,7 +57,7 @@ class _ScriptedLanguageServerFactory(LanguageServerFactory):
         return mock_server
 
     def clear_failure(self, language: Language) -> None:
-        """allows a test to flip a previously-failing language to healthy before a restart."""
+        """Allows a test to flip a previously-failing language to healthy before a restart."""
         self._failures.pop(language, None)
 
 
@@ -162,7 +159,6 @@ class TestRestartRecoversUnavailableLanguage:
             manager.restart_language_server(Language.SCALA)
 
 
-
 class TestActivationMessageWaitsForLsInit:
     """
     Covers the race between `SerenaAgent.activate_project_from_path_or_name` returning and
@@ -235,9 +231,7 @@ class TestActivationMessageWaitsForLsInit:
         finally:
             agent.on_shutdown(timeout=5)
 
-    def test_activation_message_falls_back_to_still_initializing_on_timeout(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_activation_message_falls_back_to_still_initializing_on_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # shrink the bounded wait so the test does not have to sleep 10 seconds to
         # observe the fallback path; the scripted factory blocks on a gate that is never
         # released within the patched timeout, guaranteeing wait_until_done times out

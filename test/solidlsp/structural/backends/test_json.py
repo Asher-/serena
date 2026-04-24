@@ -907,19 +907,7 @@ class TestJsonContainerMemberEdits:
     preserve formatting for multi-line and nested containers.
     """
 
-    _MULTI = (
-        "{\n"
-        '  "a": 1,\n'
-        '  "nested": {\n'
-        '    "x": 10,\n'
-        '    "y": 20\n'
-        "  },\n"
-        '  "list": [\n'
-        "    1,\n"
-        "    2\n"
-        "  ]\n"
-        "}\n"
-    )
+    _MULTI = '{\n  "a": 1,\n  "nested": {\n    "x": 10,\n    "y": 20\n  },\n  "list": [\n    1,\n    2\n  ]\n}\n'
 
     def test_insert_at_end_of_root_object(self, backend: JsonStructuralLanguage) -> None:
         tree = backend.parse(self._MULTI)
@@ -927,13 +915,13 @@ class TestJsonContainerMemberEdits:
         serialized = backend.serialize(new_tree)
         assert '"c": 3' in serialized
         # original shape preserved: newlines and 2-space indent
-        assert "  \"c\": 3\n}" in serialized
+        assert '  "c": 3\n}' in serialized
 
     def test_insert_into_nested_object(self, backend: JsonStructuralLanguage) -> None:
         tree = backend.parse(self._MULTI)
         new_tree = backend.container_insert_member(tree, "nested", '"z": 30', position="end")
         serialized = backend.serialize(new_tree)
-        assert "    \"z\": 30\n  }" in serialized
+        assert '    "z": 30\n  }' in serialized
 
     def test_insert_before_nested_member(self, backend: JsonStructuralLanguage) -> None:
         tree = backend.parse(self._MULTI)
@@ -971,7 +959,7 @@ class TestJsonContainerMemberEdits:
         assert '"x"' not in serialized
         assert '"y": 20' in serialized
         # the nested close-brace still has 2-space indent
-        assert "    \"y\": 20\n  }" in serialized
+        assert '    "y": 20\n  }' in serialized
 
     def test_remove_nested_array_item(self, backend: JsonStructuralLanguage) -> None:
         tree = backend.parse(self._MULTI)

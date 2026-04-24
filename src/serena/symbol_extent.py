@@ -33,9 +33,7 @@ class SymbolExtentStrategy(ABC):
     """
 
     @abstractmethod
-    def get_statement_end_position(
-        self, symbol: LanguageServerSymbol, file_text: str, lsp_end: PositionInFile
-    ) -> PositionInFile:
+    def get_statement_end_position(self, symbol: LanguageServerSymbol, file_text: str, lsp_end: PositionInFile) -> PositionInFile:
         """
         Get the end position of the statement containing the given symbol.
 
@@ -47,9 +45,7 @@ class SymbolExtentStrategy(ABC):
         """
 
     @abstractmethod
-    def get_statement_start_position(
-        self, symbol: LanguageServerSymbol, file_text: str, lsp_start: PositionInFile
-    ) -> PositionInFile:
+    def get_statement_start_position(self, symbol: LanguageServerSymbol, file_text: str, lsp_start: PositionInFile) -> PositionInFile:
         """
         Get the start position of the statement containing the given symbol.
 
@@ -69,14 +65,10 @@ class IdentitySymbolExtentStrategy(SymbolExtentStrategy):
     which no statement-widening implementation exists yet.
     """
 
-    def get_statement_end_position(
-        self, symbol: LanguageServerSymbol, file_text: str, lsp_end: PositionInFile
-    ) -> PositionInFile:
+    def get_statement_end_position(self, symbol: LanguageServerSymbol, file_text: str, lsp_end: PositionInFile) -> PositionInFile:
         return lsp_end
 
-    def get_statement_start_position(
-        self, symbol: LanguageServerSymbol, file_text: str, lsp_start: PositionInFile
-    ) -> PositionInFile:
+    def get_statement_start_position(self, symbol: LanguageServerSymbol, file_text: str, lsp_start: PositionInFile) -> PositionInFile:
         return lsp_start
 
 
@@ -93,13 +85,9 @@ class PythonSymbolExtentStrategy(SymbolExtentStrategy):
     """
 
     # variable-like kinds for which LSP Python servers typically report name-only extents
-    _VARIABLE_KINDS: frozenset[SymbolKind] = frozenset(
-        {SymbolKind.Variable, SymbolKind.Constant, SymbolKind.Field, SymbolKind.Property}
-    )
+    _VARIABLE_KINDS: frozenset[SymbolKind] = frozenset({SymbolKind.Variable, SymbolKind.Constant, SymbolKind.Field, SymbolKind.Property})
 
-    def get_statement_end_position(
-        self, symbol: LanguageServerSymbol, file_text: str, lsp_end: PositionInFile
-    ) -> PositionInFile:
+    def get_statement_end_position(self, symbol: LanguageServerSymbol, file_text: str, lsp_end: PositionInFile) -> PositionInFile:
         # restrict widening to variable-like symbols — other kinds already get statement-level extents
         if symbol.symbol_kind not in self._VARIABLE_KINDS:
             return lsp_end
@@ -114,9 +102,7 @@ class PythonSymbolExtentStrategy(SymbolExtentStrategy):
         # callers.
         return PositionInFile(line=node.end_lineno - 1, col=node.end_col_offset)
 
-    def get_statement_start_position(
-        self, symbol: LanguageServerSymbol, file_text: str, lsp_start: PositionInFile
-    ) -> PositionInFile:
+    def get_statement_start_position(self, symbol: LanguageServerSymbol, file_text: str, lsp_start: PositionInFile) -> PositionInFile:
         if symbol.symbol_kind not in self._VARIABLE_KINDS:
             return lsp_start
 
@@ -126,9 +112,7 @@ class PythonSymbolExtentStrategy(SymbolExtentStrategy):
 
         return PositionInFile(line=node.lineno - 1, col=node.col_offset)
 
-    def _find_containing_statement(
-        self, symbol: LanguageServerSymbol, file_text: str
-    ) -> ast.Assign | ast.AnnAssign | ast.AugAssign | None:
+    def _find_containing_statement(self, symbol: LanguageServerSymbol, file_text: str) -> ast.Assign | ast.AnnAssign | ast.AugAssign | None:
         """
         Find the narrowest assignment-like AST node containing the symbol.
 
@@ -173,9 +157,7 @@ class PythonSymbolExtentStrategy(SymbolExtentStrategy):
         return best
 
     @staticmethod
-    def _node_assigns_name(
-        node: ast.Assign | ast.AnnAssign | ast.AugAssign, name: str
-    ) -> bool:
+    def _node_assigns_name(node: ast.Assign | ast.AnnAssign | ast.AugAssign, name: str) -> bool:
         """
         Check whether the given assignment node binds the given name anywhere in its targets.
 
@@ -259,10 +241,10 @@ def compute_widened_body_text(symbol: LanguageServerSymbol, project: Project) ->
     if wide_start.line >= len(file_lines):
         return ""
     if wide_start.line == wide_end.line:
-        return file_lines[wide_start.line][wide_start.col:wide_end.col]
-    pieces: list[str] = [file_lines[wide_start.line][wide_start.col:]]
+        return file_lines[wide_start.line][wide_start.col : wide_end.col]
+    pieces: list[str] = [file_lines[wide_start.line][wide_start.col :]]
     for i in range(wide_start.line + 1, min(wide_end.line, len(file_lines))):
         pieces.append(file_lines[i])
     if wide_end.line < len(file_lines):
-        pieces.append(file_lines[wide_end.line][:wide_end.col])
+        pieces.append(file_lines[wide_end.line][: wide_end.col])
     return "".join(pieces)

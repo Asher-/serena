@@ -502,16 +502,13 @@ class TestContainerMemberCanonicalRepro:
 
     def test_adds_one_field_without_disturbing_others(self, backend: PythonStructuralLanguage) -> None:
         # mirrors the Instantiation-dict shape from strongai/code-graph/core/schema.py:79-88
-        source = (
-            "INSTANTIATION = {\n"
-            '    "kind": "instantiation",\n'
-            '    "schema_version": 1,\n'
-            '    "provenance": "explicit",\n'
-            "}\n"
-        )
+        source = 'INSTANTIATION = {\n    "kind": "instantiation",\n    "schema_version": 1,\n    "provenance": "explicit",\n}\n'
         tree = backend.parse(source)
         new_tree = backend.container_insert_member(
-            tree, "INSTANTIATION", '"metadata": None', position="end",
+            tree,
+            "INSTANTIATION",
+            '"metadata": None',
+            position="end",
         )
         result = backend.serialize(new_tree)
         expected = (

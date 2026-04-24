@@ -3,8 +3,8 @@ from __future__ import annotations
 import logging
 import os
 import platform
-import platform
 import shutil
+import subprocess
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, cast

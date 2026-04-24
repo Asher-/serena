@@ -700,14 +700,14 @@ def _walk_container_members(
         return
 
     if isinstance(container, cst.List):
-        for index, element in enumerate(container.elements):
+        for index, list_item in enumerate(container.elements):
             # * spread has no usable index identity; skip it
-            if not isinstance(element, cst.Element):
+            if not isinstance(list_item, cst.Element):
                 continue
             member_path = f"{container_path}/[{index}]"
-            yield member_path, _CONTAINER_MEMBER_KIND, element
-            if isinstance(element.value, cst.Dict | cst.List):
-                yield from _walk_container_members(element.value, member_path)
+            yield member_path, _CONTAINER_MEMBER_KIND, list_item
+            if isinstance(list_item.value, cst.Dict | cst.List):
+                yield from _walk_container_members(list_item.value, member_path)
         return
 
 
@@ -772,8 +772,7 @@ def _split_member_path(member_path: str) -> tuple[str, str]:
     last = member_path[slash_idx + 1 :] if slash_idx >= 0 else member_path
     if not _is_bracketed_segment(last):
         raise ValueError(
-            f"member path {member_path!r} does not end in a bracketed segment; "
-            f"cannot split into container path + member segment",
+            f"member path {member_path!r} does not end in a bracketed segment; cannot split into container path + member segment",
         )
     if slash_idx < 0:
         raise ValueError(
@@ -928,9 +927,9 @@ def _container_with_replaced_value(
         new_element: cst.BaseDictElement | cst.BaseElement = element.with_changes(value=new_value)
     else:
         idx = _find_list_element_index(container, segment)
-        element = container.elements[idx]
-        assert isinstance(element, cst.Element)
-        new_element = element.with_changes(value=new_value)
+        list_item = container.elements[idx]
+        assert isinstance(list_item, cst.Element)
+        new_element = list_item.with_changes(value=new_value)
     elements = list(container.elements)
     elements[idx] = new_element
     return container.with_changes(elements=tuple(elements))
@@ -1022,7 +1021,7 @@ class _SingleNodeReplacer(cst.CSTTransformer):
         self.replacement = replacement
         self.replaced = False
 
-    def on_leave(self, original_node: cst.CSTNode, updated_node: cst.CSTNode) -> cst.CSTNode:
+    def on_leave(self, original_node: cst.CSTNode, updated_node: cst.CSTNode) -> Any:  # type: ignore[override]
         # identity check on the ORIGINAL node so we act on the user-supplied handle,
         # not on any transformer-reshaped copy
         if original_node is self.target:
@@ -1393,8 +1392,7 @@ class PythonStructuralLanguage(StructuralLanguage):
             if kind in {"assignment", "class", "function", "method", "import", "decorator"}:
                 if not isinstance(node, cst.SimpleStatementLine):
                     raise ValueError(
-                        f"path {container_path!r} resolves to a non-assignment {kind!r} node "
-                        f"which cannot be used as a container",
+                        f"path {container_path!r} resolves to a non-assignment {kind!r} node which cannot be used as a container",
                     )
                 inner = node.body[0] if node.body else None
                 if not isinstance(inner, cst.Assign | cst.AnnAssign):
@@ -1412,8 +1410,7 @@ class PythonStructuralLanguage(StructuralLanguage):
                 if isinstance(node.value, cst.Dict | cst.List):
                     return node.value
                 raise ValueError(
-                    f"path {container_path!r} addresses a container member whose value "
-                    f"is not itself a dict or list",
+                    f"path {container_path!r} addresses a container member whose value is not itself a dict or list",
                 )
         raise ValueError(f"no addressable node at path {container_path!r}")
 

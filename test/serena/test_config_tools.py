@@ -7,7 +7,6 @@ through different front-doors (the dashboard HTTP endpoint vs. the MCP tool), so
 shape assertions parallel guards against the two surfaces drifting apart.
 """
 
-
 from __future__ import annotations
 
 import json

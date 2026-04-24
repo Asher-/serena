@@ -418,7 +418,6 @@ class TestRemoveChild:
             backend.remove_child(tree, (object(), "not-a-key"))
 
 
-
 class TestContainerInsertMember:
     """L3 path-based insertion into YAML mappings and sequences.
 
@@ -455,12 +454,9 @@ class TestContainerInsertMember:
 
     def test_insert_into_nested_mapping(self) -> None:
         backend = YamlStructuralLanguage()
-        tree = backend.parse("pkg:\n  name: hi\n  version: \"1\"\n")
+        tree = backend.parse('pkg:\n  name: hi\n  version: "1"\n')
         out = backend.container_insert_member(tree, "pkg", "author: me", position="end")
-        assert (
-            backend.serialize(out)
-            == "pkg:\n  name: hi\n  version: \"1\"\n  author: me\n"
-        )
+        assert backend.serialize(out) == 'pkg:\n  name: hi\n  version: "1"\n  author: me\n'
 
     def test_insert_into_block_sequence_end(self) -> None:
         backend = YamlStructuralLanguage()
@@ -518,7 +514,7 @@ class TestContainerRemoveMember:
 
     def test_remove_from_nested_mapping(self) -> None:
         backend = YamlStructuralLanguage()
-        tree = backend.parse("pkg:\n  name: hi\n  version: \"1\"\n")
+        tree = backend.parse('pkg:\n  name: hi\n  version: "1"\n')
         out = backend.container_remove_member(tree, "pkg/version")
         assert backend.serialize(out) == "pkg:\n  name: hi\n"
 
@@ -551,9 +547,9 @@ class TestContainerReplaceMember:
 
     def test_replace_nested_mapping_value(self) -> None:
         backend = YamlStructuralLanguage()
-        tree = backend.parse("pkg:\n  name: hi\n  version: \"1\"\n")
+        tree = backend.parse('pkg:\n  name: hi\n  version: "1"\n')
         out = backend.container_replace_member(tree, "pkg/name", "bye")
-        assert backend.serialize(out) == "pkg:\n  name: bye\n  version: \"1\"\n"
+        assert backend.serialize(out) == 'pkg:\n  name: bye\n  version: "1"\n'
 
     def test_replace_sequence_item(self) -> None:
         backend = YamlStructuralLanguage()
