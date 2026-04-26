@@ -2,6 +2,7 @@
 The Serena Model Context Protocol (MCP) Server
 """
 
+import atexit
 import sys
 from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import asynccontextmanager
@@ -340,20 +341,38 @@ class SerenaMCPFactory:
             port=port,
             instructions=instructions,
         )
+        # Register tools once at server creation, not per SSE session: the MCP
+        # SDK enters server_lifespan per Server.run() (i.e. per SSE connection),
+        # so per-session registration would race on the shared tool dict.
+        openai_tool_compatible = self.context.name in ["chatgpt", "codex", "oaicompat-agent"]
+        self._set_mcp_tools(mcp, openai_tool_compatible=openai_tool_compatible)
+
+        # Tear down the agent at process exit, not per SSE session: calling
+        # agent.on_shutdown() in server_lifespan's finally block killed the
+        # language server on every client disconnect, breaking other concurrent
+        # sessions with "No active project" and 15-min hangs (regression from 48025c7d).
+        atexit.register(self._on_process_exit)
+
         return mcp
 
     @asynccontextmanager
     async def server_lifespan(self, mcp_server: FastMCP) -> AsyncIterator[None]:
-        """Manage server startup and shutdown lifecycle."""
-        openai_tool_compatible = self.context.name in ["chatgpt", "codex", "oaicompat-agent"]
-        self._set_mcp_tools(mcp_server, openai_tool_compatible=openai_tool_compatible)
-        log.info("MCP server lifetime setup complete")
+        """Per-SSE-session lifespan; intentionally a no-op.
+
+        The MCP SDK enters this context per Server.run(), which FastMCP invokes
+        per SSE connection. Tool registration and agent shutdown live in
+        create_mcp_server, not here.
+        """
+        log.info("MCP session opened")
         try:
             yield
         finally:
-            log.info("MCP server shutting down")
-            if self.agent is not None:
-                self.agent.on_shutdown()
+            log.info("MCP session closed")
+
+    def _on_process_exit(self) -> None:
+        """Tear down the agent at process exit (atexit handler)."""
+        if self.agent is not None:
+            self.agent.on_shutdown()
 
     def _get_initial_instructions(self) -> str:
         assert self.agent is not None
