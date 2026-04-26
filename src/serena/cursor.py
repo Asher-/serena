@@ -42,18 +42,13 @@ class EdgeType(Enum):
 
 ALL_EDGE_TYPES = frozenset(EdgeType)
 
-# Edge types that are enabled by default (the most commonly useful ones)
-DEFAULT_EDGE_TYPES = frozenset(
-    {
-        EdgeType.CONTAINS,
-        EdgeType.REFERENCES,
-        EdgeType.REFERENCED_BY,
-        EdgeType.CALLS,
-        EdgeType.CALLED_BY,
-        EdgeType.INHERITS,
-        EdgeType.INHERITED_BY,
-    }
-)
+# A new cursor starts with no edges resolved. Resolving REFERENCES /
+# REFERENCED_BY / CALLS / etc. is a per-symbol LSP cost that can be
+# minutes on large indexed projects (SourceKit-LSP on iina, e.g.), so the
+# agent must opt in to the edges it wants — either at start time via the
+# ``edge_types`` parameter on ``cursor_start`` / ``cursor_find``, or after
+# the fact via ``cursor_configure``.
+DEFAULT_EDGE_TYPES: frozenset[EdgeType] = frozenset()
 
 # operations that require the cursor to be positioned on a container node
 _CONTAINER_POSITIONED_OPERATIONS: frozenset[str] = frozenset({"insert_start", "insert_end"})
@@ -313,6 +308,7 @@ class CursorManager:
         name_path: str,
         relative_path: str | None = None,
         cursor_id: str | None = None,
+        edge_types: frozenset[EdgeType] | None = None,
     ) -> tuple[str, AnyCursorState]:
         """
         Start a new cursor at a symbol identified by name_path.
@@ -333,6 +329,15 @@ class CursorManager:
         :param relative_path: optional file path to narrow the search.
             Required to enable the structural fallback.
         :param cursor_id: optional explicit cursor ID; auto-generated if None
+        :param edge_types: edges the cursor should resolve when its
+            neighborhood is rendered. ``None`` (default) leaves the cursor
+            with the empty :data:`DEFAULT_EDGE_TYPES` set — the cursor
+            renders only its current position and no neighbors are queried.
+            Pass an explicit frozenset to opt the cursor into specific
+            edges; the same set can be expanded or contracted later via
+            :meth:`CursorState.active_edge_types` (or, at the tool layer,
+            via ``cursor_configure``). Ignored for structural cursors,
+            which carry no LSP edges.
         :return: tuple of (cursor_id, cursor_state); the state is either an
             LSP :class:`CursorState` or a :class:`StructuralCursorState`.
         """
@@ -372,6 +377,7 @@ class CursorManager:
             cursor_id=assigned_id,
             current_symbol=symbol,
             current_location=location,
+            active_edge_types=edge_types if edge_types is not None else DEFAULT_EDGE_TYPES,
         )
         self._cursors[assigned_id] = state
         return assigned_id, state
@@ -714,27 +720,34 @@ class CursorManager:
                 lines.append(body_text)
                 lines.append("--- end body ---")
 
-        # Neighbors grouped by edge type
-        neighbors = self.resolve_neighbors(cursor_id)
-        neighbors_by_edge: dict[EdgeType, list[NeighborSymbol]] = {}
-        for n in neighbors:
-            neighbors_by_edge.setdefault(n.edge_type, []).append(n)
+        # Neighbors grouped by edge type. Skip the LSP query entirely when
+        # the cursor has no edges configured — that's the agent's signal
+        # they didn't ask for a neighborhood, and resolving even one edge
+        # can be a multi-minute LSP call on large indexed projects.
+        if state.active_edge_types:
+            neighbors = self.resolve_neighbors(cursor_id)
+            neighbors_by_edge: dict[EdgeType, list[NeighborSymbol]] = {}
+            for n in neighbors:
+                neighbors_by_edge.setdefault(n.edge_type, []).append(n)
 
-        if neighbors_by_edge:
-            lines.append("")
-            for edge_type in EdgeType:
-                edge_neighbors = neighbors_by_edge.get(edge_type)
-                if edge_neighbors:
-                    lines.append(f"  {edge_type.value}:")
-                    for n in edge_neighbors:
-                        lines.append(f"    {n.format_compact()}")
+            if neighbors_by_edge:
+                lines.append("")
+                for edge_type in EdgeType:
+                    edge_neighbors = neighbors_by_edge.get(edge_type)
+                    if edge_neighbors:
+                        lines.append(f"  {edge_type.value}:")
+                        for n in edge_neighbors:
+                            lines.append(f"    {n.format_compact()}")
+            else:
+                active_names = sorted(e.value for e in state.active_edge_types)
+                lines.append("")
+                lines.append(f"  (no neighbors found via active edges: {', '.join(active_names)})")
         else:
             lines.append("")
-            lines.append("  (no neighbors found)")
+            lines.append("  (no edges configured — call cursor_configure with edge_types=[...] to resolve a neighborhood)")
 
         lines.append("")
         lines.append("Use cursor_move to navigate to a neighbor, cursor_look to re-examine.")
-
         return "\n".join(lines)
 
     def _format_widened_body(self, symbol: LanguageServerSymbol) -> str | None:
@@ -874,10 +887,17 @@ class CursorManager:
         self,
         symbol: LanguageServerSymbol,
         cursor_id: str | None = None,
+        edge_types: frozenset[EdgeType] | None = None,
     ) -> tuple[str, CursorState]:
         """
         Register a cursor positioned on an already-resolved symbol (e.g. one returned by
         ``find_symbols``). Used by ``cursor_find`` when the search is unique.
+
+        :param edge_types: edges the cursor should resolve when its
+            neighborhood is rendered. ``None`` (default) leaves the cursor
+            with the empty :data:`DEFAULT_EDGE_TYPES` set; pass an explicit
+            frozenset to opt in. See :meth:`start_cursor` for the full
+            rationale (per-symbol LSP cost on large indexed projects).
         """
         location = symbol.location
         if cursor_id is None:
@@ -890,6 +910,7 @@ class CursorManager:
             cursor_id=cursor_id,
             current_symbol=symbol,
             current_location=location,
+            active_edge_types=edge_types if edge_types is not None else DEFAULT_EDGE_TYPES,
         )
         self._cursors[cursor_id] = state
         return cursor_id, state

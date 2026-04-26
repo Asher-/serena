@@ -30,6 +30,10 @@ prompts:
     (exact-match, unique) or `cursor_find` (pattern / substring search), then navigate along LSP graph edges with
     `cursor_move` / `cursor_look` / `cursor_configure` (edge types: contains, references, referenced-by, calls,
     called-by, inherits, inherited-by). Use `cursor_overview` to list top-level symbols in a file.
+    A new cursor renders only its position; pass `edge_types=[...]` to `cursor_start` / `cursor_find`, or call
+    `cursor_configure` afterwards, to opt the cursor into specific neighbor edges. Resolving `references` /
+    `referenced-by` / `calls` is a per-symbol LSP cost that can run minutes on large indexed projects, so ask
+    only for the edges you actually need at the current step and expand or contract later.
     You only read symbol bodies when you need to — set `include_body=True` on `cursor_configure` (or `cursor_find`)
     for the current position only.
     {% elif 'find_symbol' in available_tools %}

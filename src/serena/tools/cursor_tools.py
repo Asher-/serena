@@ -20,6 +20,27 @@ from serena.tools.tools_base import Tool, ToolMarkerSymbolicEdit, ToolMarkerSymb
 from solidlsp.ls_types import SymbolKind
 
 
+def _parse_edge_types(edge_types: list[str]) -> frozenset[EdgeType]:
+    """
+    Parse a list of edge type names into a frozenset of :class:`EdgeType`.
+
+    :param edge_types: edge type names. Empty list yields an empty
+        frozenset (no edges) — callers that want "all edges" must spell
+        them out, since silently expanding empty to all reintroduces the
+        per-symbol LSP cost the opt-in model is meant to avoid.
+    :return: validated frozenset of edge types.
+    :raises ValueError: when ``edge_types`` contains an unrecognised name.
+    """
+    parsed: set[EdgeType] = set()
+    for name in edge_types:
+        try:
+            parsed.add(EdgeType(name))
+        except ValueError:
+            valid_names = [e.value for e in EdgeType]
+            raise ValueError(f"Unknown edge type '{name}'. Valid edge types: {valid_names}")
+    return frozenset(parsed)
+
+
 class CursorStartTool(Tool, ToolMarkerSymbolicRead):
     """
     Start a navigation cursor at a symbol for incremental code exploration.
@@ -27,15 +48,24 @@ class CursorStartTool(Tool, ToolMarkerSymbolicRead):
     (containment, references, calls, type hierarchy).
     """
 
+    # noinspection PyDefaultArgument
     def apply(
         self,
         name_path: str,
         relative_path: str = "",
         cursor_id: str = "",
+        edge_types: list[str] = [],  # noqa: B006
     ) -> str:
         """
-        Start a new cursor at the specified symbol. Returns the symbol's neighborhood
-        showing all reachable symbols via active edge types.
+        Start a new cursor at the specified symbol and return its view.
+
+        The cursor starts with **no edges resolved** by default — only the
+        symbol's position is shown. To see neighbors (children, references,
+        callers, supertypes, etc.), pass ``edge_types`` here, or call
+        ``cursor_configure`` afterwards. Resolving REFERENCES /
+        REFERENCED_BY / CALLS via the language server can be a per-symbol
+        cost of multiple minutes on large indexed projects, so the cursor
+        only does what you explicitly asked for.
 
         ``name_path`` accepts two grammars:
 
@@ -61,16 +91,24 @@ class CursorStartTool(Tool, ToolMarkerSymbolicRead):
             Required for the structural fallback (the backend is chosen by
             file extension).
         :param cursor_id: optional explicit cursor ID. Auto-generated if empty.
-        :return: the cursor view showing the symbol and its neighborhood.
+        :param edge_types: edges to resolve when rendering the
+            neighborhood. Empty (default) renders only the cursor's
+            position. Valid names: ``contains``, ``references``,
+            ``referenced-by``, ``calls``, ``called-by``, ``inherits``,
+            ``inherited-by``. Ignored for structural cursors.
+        :return: the cursor view; if ``edge_types`` is empty the view
+            shows only the symbol's position with a hint to configure
+            edges later.
         """
+        parsed_edge_types = _parse_edge_types(edge_types) if edge_types else None
         manager = self.agent.get_cursor_manager()
         cid, _state = manager.start_cursor(
             name_path=name_path,
             relative_path=relative_path or None,
             cursor_id=cursor_id or None,
+            edge_types=parsed_edge_types,
         )
         return manager.format_cursor_view(cid)
-
 
 class CursorMoveTool(Tool, ToolMarkerSymbolicRead):
     """
@@ -135,10 +173,15 @@ class CursorConfigureTool(Tool, ToolMarkerSymbolicRead):
         Configure the cursor's active edge types and display options.
 
         :param cursor_id: the ID of the cursor to configure.
-        :param edge_types: list of edge type names to enable. If empty, all edge types are enabled.
-            Valid values: contains, references, referenced-by, calls, called-by, inherits, inherited-by.
+        :param edge_types: list of edge type names to make active. The
+            previous set is replaced wholesale, so this both expands and
+            contracts the configured edges. Empty list **clears** the
+            active set (no neighbors will be resolved); spell out every
+            edge you want when you want them all. Valid names:
+            ``contains``, ``references``, ``referenced-by``, ``calls``,
+            ``called-by``, ``inherits``, ``inherited-by``.
         :param include_body: whether to include the symbol's source code body in the cursor view.
-        :return: confirmation of the new configuration and updated cursor view.
+        :return: the updated cursor view.
         """
         manager = self.agent.get_cursor_manager()
         state = manager.get_cursor(cursor_id)
@@ -150,22 +193,13 @@ class CursorConfigureTool(Tool, ToolMarkerSymbolicRead):
             state.include_body = include_body
             return manager.format_cursor_view(cursor_id)
 
-        if edge_types:
-            valid_types: set[EdgeType] = set()
-            for name in edge_types:
-                try:
-                    valid_types.add(EdgeType(name))
-                except ValueError:
-                    valid_names = [e.value for e in EdgeType]
-                    raise ValueError(f"Unknown edge type '{name}'. Valid edge types: {valid_names}")
-            state.active_edge_types = frozenset(valid_types)
-        else:
-            state.active_edge_types = frozenset(EdgeType)
-
+        # Empty list explicitly clears the active set — see docstring. The
+        # previous "empty == all edges" sugar is gone because each implicit
+        # all-edges resolution can be a multi-minute LSP cost.
+        state.active_edge_types = _parse_edge_types(edge_types)
         state.include_body = include_body
 
         return manager.format_cursor_view(cursor_id)
-
 
 class CursorHistoryTool(Tool, ToolMarkerSymbolicRead):
     """
@@ -230,6 +264,7 @@ class CursorFindTool(Tool, ToolMarkerSymbolicRead):
         substring_matching: bool = False,
         max_matches: int = -1,
         cursor_id: str = "",
+        edge_types: list[str] = [],  # noqa: B006
         max_answer_chars: int = -1,
     ) -> str:
         """
@@ -255,6 +290,11 @@ class CursorFindTool(Tool, ToolMarkerSymbolicRead):
             substring (e.g. ``"Foo/get"`` matches ``"Foo/getValue"``).
         :param max_matches: maximum permitted matches; -1 (default) means no limit.
         :param cursor_id: optional cursor ID to use when the match is unique. Auto-generated otherwise.
+        :param edge_types: edges to resolve when the match is unique and a
+            cursor is started. Empty (default) renders only the cursor's
+            position; pass an explicit list to opt in. Same valid names as
+            :class:`CursorConfigureTool`. Has no effect when the search
+            returns multiple candidates.
         :param max_answer_chars: maximum characters for the candidate-list output; -1 means use default.
         :return: a cursor view (unique match) or a JSON-formatted candidate list.
         """
@@ -263,6 +303,7 @@ class CursorFindTool(Tool, ToolMarkerSymbolicRead):
         assert max_matches != 0, "max_matches must be > 0 or equal to -1."
         parsed_include_kinds: Sequence[SymbolKind] | None = [SymbolKind(k) for k in include_kinds] if include_kinds else None
         parsed_exclude_kinds: Sequence[SymbolKind] | None = [SymbolKind(k) for k in exclude_kinds] if exclude_kinds else None
+        parsed_edge_types = _parse_edge_types(edge_types) if edge_types else None
         manager = self.agent.get_cursor_manager()
         symbols = manager.find_symbols(
             name_path_pattern,
@@ -277,10 +318,13 @@ class CursorFindTool(Tool, ToolMarkerSymbolicRead):
             return f"No symbols found matching '{name_path_pattern}'."
 
         if n_matches == 1:
-            cid, _ = manager.register_cursor_at_symbol(symbols[0], cursor_id=cursor_id or None)
+            cid, _ = manager.register_cursor_at_symbol(
+                symbols[0],
+                cursor_id=cursor_id or None,
+                edge_types=parsed_edge_types,
+            )
             view = manager.format_cursor_view(cid)
             return f"Found unique match; started cursor {cid}.\n\n{view}"
-
         def candidate_list_json() -> str:
             candidate_dicts = [
                 s.to_dict(

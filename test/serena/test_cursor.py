@@ -333,9 +333,8 @@ class TestResolveNeighbors:
         mock_ls.request_type_hierarchy_supertypes.return_value = []
         mock_ls.request_type_hierarchy_subtypes.return_value = []
 
-        cid, _ = manager.start_cursor("MyClass")
+        cid, _ = manager.start_cursor("MyClass", edge_types=ALL_EDGE_TYPES)
         return manager, cid, mock_ls
-
     @patch("serena.cursor.LanguageServerSymbolRetriever")
     def test_contains_edge_resolves_children(self, mock_retriever_cls):
         children = [
@@ -623,11 +622,10 @@ class TestFormatting:
             request_type_hierarchy_subtypes=MagicMock(return_value=[]),
         )
 
-        cid, _ = manager.start_cursor("Leaf")
+        cid, _ = manager.start_cursor("Leaf", edge_types=ALL_EDGE_TYPES)
         view = manager.format_cursor_view(cid)
 
-        assert "(no neighbors found)" in view
-
+        assert "no neighbors found" in view
 
 # ── CursorManager: find_symbols / register_cursor_at_symbol / reanchor_cursor ──
 

@@ -46,7 +46,9 @@ class TestCursorStartAndLook:
 class TestContainsEdge:
     def test_class_contains_methods(self, cursor_manager: CursorManager):
         """A class cursor should see its methods via the contains edge."""
-        cid, _ = cursor_manager.start_cursor("UserService", relative_path="test_repo/services.py")
+        cid, _ = cursor_manager.start_cursor(
+            "UserService", relative_path="test_repo/services.py", edge_types=frozenset({EdgeType.CONTAINS})
+        )
         try:
             neighbors = cursor_manager.resolve_neighbors(cid)
             contains = [n for n in neighbors if n.edge_type == EdgeType.CONTAINS]
@@ -59,7 +61,9 @@ class TestContainsEdge:
 
     def test_outer_class_contains_nested(self, cursor_manager: CursorManager):
         """OuterClass should contain NestedClass via contains edge."""
-        cid, _ = cursor_manager.start_cursor("OuterClass", relative_path="test_repo/nested.py")
+        cid, _ = cursor_manager.start_cursor(
+            "OuterClass", relative_path="test_repo/nested.py", edge_types=frozenset({EdgeType.CONTAINS})
+        )
         try:
             neighbors = cursor_manager.resolve_neighbors(cid)
             contains = [n for n in neighbors if n.edge_type == EdgeType.CONTAINS]
@@ -151,7 +155,9 @@ class TestFormatCursorView:
 
     def test_view_lists_neighbors(self, cursor_manager: CursorManager):
         """The cursor view should show neighbors grouped by edge type."""
-        cid, _ = cursor_manager.start_cursor("UserService", relative_path="test_repo/services.py")
+        cid, _ = cursor_manager.start_cursor(
+            "UserService", relative_path="test_repo/services.py", edge_types=frozenset({EdgeType.CONTAINS})
+        )
         try:
             view = cursor_manager.format_cursor_view(cid)
             # Should at least show contains section with methods

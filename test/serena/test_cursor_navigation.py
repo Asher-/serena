@@ -191,10 +191,10 @@ class TestNeighborResolution:
 class TestEdgeTypeConfiguration:
     """Test configuring which edge types are active."""
 
-    def test_default_edge_types(self, cursor_manager: CursorManager) -> None:
-        """Default edge types include all 7 types."""
-        assert DEFAULT_EDGE_TYPES == ALL_EDGE_TYPES
-
+    def test_default_edge_types_empty(self, cursor_manager: CursorManager) -> None:
+        """A new cursor starts with no edges resolved — the agent opts in."""
+        assert DEFAULT_EDGE_TYPES == frozenset()
+        assert DEFAULT_EDGE_TYPES <= ALL_EDGE_TYPES
     def test_configure_subset(self, cursor_manager: CursorManager) -> None:
         """Cursor can be configured to only follow a subset of edge types."""
         cid, _ = cursor_manager.start_cursor("UserService")
@@ -211,13 +211,12 @@ class TestFormatting:
 
     def test_format_cursor_view_contains_symbol_name(self, cursor_manager: CursorManager) -> None:
         """format_cursor_view includes the current symbol name and location."""
-        cid, _ = cursor_manager.start_cursor("UserService")
+        cid, _ = cursor_manager.start_cursor("UserService", edge_types=frozenset({EdgeType.CONTAINS}))
         view = cursor_manager.format_cursor_view(cid)
         assert "UserService" in view
         assert "cursor: " + cid in view
         assert "trail: 0 steps" in view
         assert "contains:" in view
-
     def test_format_trail_empty(self, cursor_manager: CursorManager) -> None:
         """format_trail reports no trail at starting position."""
         cid, _ = cursor_manager.start_cursor("UserService")
@@ -306,8 +305,7 @@ class TestCursorToolsIntegration:
     def test_cursor_start_and_look(self, python_serena_agent: SerenaAgent) -> None:
         """cursor_start places a cursor and returns a neighborhood view."""
         start_tool = python_serena_agent.get_tool(CursorStartTool)
-        result = start_tool.apply(name_path="UserService")
-
+        result = start_tool.apply(name_path="UserService", edge_types=["contains"])
         assert "UserService" in result
         assert "cursor:" in result
         assert "contains:" in result
@@ -328,8 +326,7 @@ class TestCursorToolsIntegration:
     def test_cursor_move_and_history(self, python_serena_agent: SerenaAgent) -> None:
         """cursor_move navigates to a neighbor; cursor_history shows the trail."""
         start_tool = python_serena_agent.get_tool(CursorStartTool)
-        start_tool.apply(name_path="UserService", cursor_id="nav-test")
-
+        start_tool.apply(name_path="UserService", cursor_id="nav-test", edge_types=["contains"])
         move_tool = python_serena_agent.get_tool(CursorMoveTool)
         move_result = move_tool.apply(cursor_id="nav-test", target_name="create_user")
         assert "create_user" in move_result
@@ -392,8 +389,7 @@ class TestCursorToolsIntegration:
         history_tool = python_serena_agent.get_tool(CursorHistoryTool)
 
         # Start at a class
-        start_tool.apply(name_path="UserService", cursor_id="full-nav")
-
+        start_tool.apply(name_path="UserService", cursor_id="full-nav", edge_types=["contains"])
         # Move to a method
         move_tool.apply(cursor_id="full-nav", target_name="create_user")
 
@@ -441,8 +437,8 @@ class TestCursorToolsIntegration:
         result = start_tool.apply(
             name_path="OuterClass",
             relative_path=os.path.join("test_repo", "nested.py"),
+            edge_types=["contains"],
         )
-
         assert "OuterClass" in result
         # Should see NestedClass and nested_test as children
         assert "NestedClass" in result or "nested_test" in result
@@ -457,7 +453,7 @@ class TestCursorFindAndOverview:
     def test_cursor_find_unique_starts_cursor(self, python_serena_agent: SerenaAgent) -> None:
         """cursor_find with a unique match starts a cursor and returns its view."""
         find_tool = python_serena_agent.get_tool(CursorFindTool)
-        result = find_tool.apply(name_path_pattern="/UserService", cursor_id="find-unique")
+        result = find_tool.apply(name_path_pattern="/UserService", cursor_id="find-unique", edge_types=["contains"])
         assert "started cursor" in result
         assert "UserService" in result
         assert "contains:" in result
