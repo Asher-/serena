@@ -1,0 +1,86 @@
+# Issue #5909 — Scrub by Mouse Drag Mishandles Next Video
+
+## ROOT CAUSE
+`iina/PlayerCore.swift:952-963` (`PlayerCore.seek(percent:forceExact:)`) — the
+clamp `percent.clamped(to: 0..<100)` only protects against the literal value
+`100.0`; it produces `100.0.nextDown` ≈ `99.99999999999999%`, which is still
+close enough to EOF that mpv's `absolute-percent+exact` seek triggers an
+end-of-file in the demuxer and auto-advances the playlist. Combined with
+`PlaySliderCell.awakeFromNib` (maxValue=100) and
+`PlayerWindowController.updatePlayTime` (`iina/PlayerWindowController.swift:606-633`)
+overwriting `playSlider.doubleValue` while the user is still tracking the
+mouse, this turns a single drag-past-end into a cascade.
+
+## CONTROL FLOW
+1. User presses on the scrubber knob and drags rightward.
+   `PlaySliderCell.startTracking` (`iina/PlaySliderCell.swift:181-188`) pauses
+   the player and begins continuous mouse tracking. NSSliderCell will keep
+   recomputing `doubleValue` from the cursor's X position and emitting the
+   action on every change.
+2. As the cursor passes the right edge of the slider, `sender.doubleValue` is
+   pinned to `maxValue` (100, set in `PlaySliderCell.awakeFromNib`).
+   `PlayerWindowController.playSliderChanges`
+   (`iina/PlayerWindowController.swift:689-693`) computes
+   `percentage = 100 * sender.doubleValue / sender.maxValue == 100` and calls
+   `player.seek(percent: 100, forceExact: !followGlobalSeekTypeWhenAdjustSlider)`.
+3. `PlayerCore.seek(percent:)` clamps via `percent.clamped(to: 0..<100)`. The
+   `FloatingPoint.clamped` extension (`iina/Extensions.swift:413-421`) returns
+   `range.upperBound.nextDown` for any input ≥ upperBound — i.e.
+   ~`99.99999999999999`. The command sent is
+   `seek 99.99999999999999 absolute-percent+exact`.
+4. mpv resolves the percent against `info.videoDuration`, lands either a hair
+   before the final frame or, for videos with sparse keyframes, at EOF as the
+   inline comment in `seek(percent:)` already warns; it then fires
+   `MPV_EVENT_END_FILE` and auto-advances to the next playlist entry.
+5. On the new file the standard pipeline runs:
+   `fileStarted` (`iina/PlayerCore.swift:2000`) →
+   `fileLoaded` (`iina/PlayerCore.swift:2087`) →
+   `playbackRestarted` (`iina/PlayerCore.swift:2302-2308`) which calls
+   `syncUI(.time)`. That dispatches to
+   `currentController.updatePlayTime(..., andProgressBar: true)`, which
+   executes `playSlider.doubleValue = percentage` with
+   `percentage = pos/duration*100 ≈ 0` for the freshly opened file
+   (`iina/PlayerWindowController.swift:629-631`).
+6. NSSliderCell is *still* in its tracking loop because the user has not
+   released the mouse. The cell's next `continueTracking` tick recomputes the
+   slider value from the cursor's X position — which is still pinned at the
+   right edge — and writes `doubleValue` back to `100`, then emits the action
+   message. We are back at step 2.
+7. The loop repeats once per file, cascading through the playlist for as long
+   as the user keeps the mouse button down past the right edge of the
+   scrubber.
+
+## WHY IT CASCADES
+The clamp in `seek(percent:)` is effectively cosmetic: `0..<100` excludes only
+the exact value `100.0`, and the resulting `nextDown(100)` is indistinguishable
+from EOF for any real video (the time delta is on the order of `1e-14 *
+duration` seconds, well below mpv's seek precision and any keyframe gap). The
+author already knew this — the inline comment on line 956 admits "it still
+won't work for videos with large keyframe interval." What turns one accidental
+advance into an unbounded cascade is that nothing suppresses the slider's
+tracking session across the file change: `updatePlayTime` overwrites
+`playSlider.doubleValue` to ~0 after each new file loads, and on the next mouse
+tick NSSliderCell snaps the value back to the cursor's still-pinned position
+(~100), which fires `playSliderChanges` again. Each iteration of this loop is
+a fresh near-100% seek that mpv resolves to EOF on the new file, so the
+playlist marches forward one entry per cycle. The drag-time pause performed by
+`PlaySliderCell.startTracking` does not save us — the seeks are explicit
+commands, not natural playback reaching EOF.
+
+## SUGGESTED FIX
+Make the clamp actually safe by clamping in the time domain rather than the
+percent domain. Inside `PlayerCore.seek(percent:forceExact:)`, when
+`info.videoDuration` is known, convert to seconds, clamp to
+`max(0, duration - safetyMargin)` (e.g., `duration - 1.0` second), and dispatch
+`seek <seconds> absolute+exact` instead of
+`seek <percent> absolute-percent+exact`. That keeps the seek strictly inside
+the file regardless of keyframe layout and removes the EOF trigger that drives
+the cascade — the slider drag will then plateau at "near end of current file"
+the way the user expects, and the playlist will only advance when the file is
+actually allowed to finish (or when the user releases the scrubber). A
+complementary belt-and-braces change is to short-circuit
+`PlayerWindowController.updatePlayTime`'s `playSlider.doubleValue = percentage`
+assignment while the slider's cell `isHighlighted` (i.e., while the user is
+dragging), so that even if a future regression reintroduces an EOF-triggering
+seek, the tracking session does not get re-armed by the controller stomping on
+the slider value.

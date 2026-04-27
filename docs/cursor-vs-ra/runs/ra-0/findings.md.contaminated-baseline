@@ -1,0 +1,95 @@
+# Investigation: Issue #5909 — Scrub by Mouse Drag Mishandles Next Video
+
+## ROOT CAUSE
+
+`iina/PlayerCore.swift:951–963` (method `seek(percent:forceExact:)`) — the
+clamp `percent.clamped(to: 0..<100)` only excludes the *literal* value 100,
+leaving values like `99.999…` that mpv still interprets as past-EOF for
+files with large keyframe intervals. While the user holds the play slider
+at its rightmost position during a drag, every slider tick re-issues that
+near-100 percent seek; each one triggers an mpv playlist advance, so each
+new file is immediately advanced again.
+
+## CONTROL FLOW
+
+1. User mouse-down on the play slider in the OSC. `PlaySliderCell.startTracking`
+   (`iina/PlaySliderCell.swift:165–172`) records `isPausedBeforeSeeking` and
+   calls `playerCore.pause()`.
+2. While the mouse is dragged, AppKit fires the slider's action repeatedly.
+   Action target is `MainWindowController.playSliderChanges`
+   (`iina/MainWindowController.swift:3245–3261`), whose only guard is
+   `state.active && state != .loading` — it does **not** filter the
+   intermediate `.starting` / `.loaded` states that occur during an
+   in-flight playlist advance.
+3. The override calls `super.playSliderChanges(sender)` →
+   `PlayerWindowController.playSliderChanges` (`iina/PlayerWindowController.swift:688–692`),
+   which computes `percentage = 100 * sender.doubleValue / sender.maxValue`
+   (the slider is fixed to `minValue=0, maxValue=100` in
+   `PlaySliderCell.awakeFromNib` at `iina/PlaySliderCell.swift:39–42`, so
+   the value is already a percent and reaches exactly 100 at the right edge)
+   and calls `player.seek(percent: percentage, forceExact: …)`.
+4. `PlayerCore.seek(percent:forceExact:)` runs the conditional clamp
+   `if let duration = info.videoDuration?.second, duration > 0 { percent = percent.clamped(to: 0..<100) }`.
+   `FloatingPoint.clamped(to: Range)` (`iina/Extensions.swift:413–420`) maps
+   `100.0` to `range.upperBound.nextDown` ≈ `99.99999999999999`. mpv is
+   then sent `seek 99.99999999999999 absolute-percent[+exact]`.
+5. For files whose nearest keyframe is far from the end (the case the
+   inline comment already calls out: *"however, it still won't work for
+   videos with large keyframe interval"*), mpv resolves that target onto
+   the final keyframe, hits EOF, and — per `keep-open=no` /
+   "play next item automatically" — opens the next playlist entry. mpv
+   emits `MPV_EVENT_END_FILE`, then `MPV_EVENT_START_FILE`, then
+   `MPV_EVENT_FILE_LOADED` (`iina/MPVController.swift:1139–1204`). On the
+   START_FILE the player state flips to `.starting`; on FILE_LOADED to
+   `.loaded` and `info.videoDuration` is **overwritten** with the new
+   file's duration (`iina/PlayerCore.swift:2087–2155`). Note that
+   `videoDuration` is never set to `nil` between files — only overwritten —
+   so the conditional clamp keeps firing throughout.
+6. The user is still mid-drag with the cursor pinned at the right edge of
+   the slider. The next AppKit drag event fires `playSliderChanges` again;
+   `sender.doubleValue` is again `100`; `percent` is again clamped to
+   `99.999…`; `player.seek(percent: 99.999…)` is dispatched against the
+   *new* current file. mpv treats this as past-EOF for file 2 too, and
+   advances to file 3.
+7. Steps 5–6 repeat once per slider action message. Because the slider
+   action fires at AppKit's drag rate (many per second) while mpv resolves
+   each advance asynchronously, several files can be burned through in a
+   single sustained drag — the user-visible "cascade".
+
+## WHY IT CASCADES
+
+The clamp is only strong enough to prevent the literal `100.0` being sent
+to mpv; it is not strong enough to keep the seek target on the *current
+file*. mpv's `seek absolute-percent` interprets the percent against
+whatever file is currently loaded, and a target sufficiently close to 100
+will resolve onto the last keyframe / EOF for files with sparse
+keyframes — which is exactly the regime where the inline comment already
+admits the workaround fails. Because the action handler treats every drag
+tick as an independent seek and never asks "did the file change since the
+last tick?", every subsequent tick re-applies the same near-EOF percent to
+whichever file mpv is now on. The slider is a *percentage* control, so the
+user's mouse position carries no information about the absolute identity
+of the file being scrubbed — there is nothing in the data path that ties a
+given drag to a specific playlist entry. The pause performed by
+`PlaySliderCell.startTracking` does not help: the seeks themselves are
+what trigger the EOF, not natural playback.
+
+## SUGGESTED FIX
+
+Make the clamp robust against mpv's keyframe rounding by working in
+*absolute seconds* with a small explicit safety margin, and route the
+slider seek through that. Concretely, in
+`PlayerCore.seek(percent:forceExact:)` (`iina/PlayerCore.swift:951–963`),
+when `info.videoDuration?.second` is available, compute
+`let safeEnd = max(0, duration - 0.5)` (or similar small constant — long
+enough to fall before the final keyframe even on long-GOP encodes), turn
+the requested `percent` into seconds via `min(percent / 100 * duration, safeEnd)`,
+and emit `mpv.command(.seek, args: ["\(safeSeconds)", "absolute+exact"])`
+instead of `absolute-percent`. This guarantees the target lands strictly
+before EOF for the *current* file, so a held-at-the-end drag becomes a
+no-op steady state on the last file rather than a cascade. As a belt-and-
+braces secondary guard, `MainWindowController.playSliderChanges`
+(`iina/MainWindowController.swift:3245–3261`) should additionally reject
+events while `player.info.state == .starting` (not just `.loading`) so
+that the slider is inert during the brief handoff window between
+`MPV_EVENT_START_FILE` and `MPV_EVENT_FILE_LOADED`.

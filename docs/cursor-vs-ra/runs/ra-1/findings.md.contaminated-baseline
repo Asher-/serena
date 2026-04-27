@@ -1,0 +1,28 @@
+# Issue #5909 — Scrub by Mouse Drag Mishandles Next Video
+
+## ROOT CAUSE
+
+`iina/PlayerWindowController.swift:605–631` (`updatePlayTime`) — the slider's `doubleValue` is unconditionally rewritten by `syncUI(.time)` (and its `MPV_EVENT_SEEK` / `MPV_EVENT_PLAYBACK_RESTART` callers) while the user is mid-drag, so the slider is reset to the new file's position-percentage (≈0) the instant mpv advances to the next file. NSSliderCell's default tracking then re-snaps the knob to the cursor's still-rightmost position on the next `mouseDragged`, re-firing `playSliderChanges` and seeking near-EOF of the new file — repeating once per file.
+
+The `seek(percent:forceExact:)` clamp in `iina/PlayerCore.swift:952–963` is the secondary contributor: its `0..<100` half-open clamp returns `100.0.nextDown` (≈99.99999999999999%, see `iina/Extensions.swift:413–420`), which mpv treats as effectively EOF — particularly with non-exact seeks or large-keyframe-interval files (acknowledged by the comment at `PlayerCore.swift:953–956`). That is what gives each cascading seek the "trigger next file" effect; the drag-vs-update race is what makes it cascade.
+
+## CONTROL FLOW
+
+1. **`mouseDown` on slider** → `PlaySliderCell.startTracking` (`iina/PlaySliderCell.swift:175–184`) calls `playerCore.pause()` and records `isPausedBeforeSeeking`.
+2. **User drags right edge** → NSSliderCell's default `continueTracking` (not overridden — confirmed) maps the cursor's *absolute* position along the track to `doubleValue`. With `continuous="YES"` and `maxValue="100"` (`iina/Base.lproj/MainWindowController.xib:447–448`), every change fires `playSliderChanges`.
+3. **`PlayerWindowController.playSliderChanges`** (`iina/PlayerWindowController.swift:689–693`): `percentage = 100 * sender.doubleValue / sender.maxValue` → `player.seek(percent: 100, forceExact: !followGlobalSeekTypeWhenAdjustSlider)`.
+4. **`PlayerCore.seek(percent:forceExact:)`** (`iina/PlayerCore.swift:952–963`) clamps `100` → `100.0.nextDown` (≈99.99999999999999%) and issues `mpv "seek <pct> absolute-percent+exact"`.
+5. **mpv reaches EOF for file 1** (per the in-source comment at line 953: "mpv will play next file automatically when seek to EOF … still won't work for videos with large keyframe interval"). It emits `MPV_EVENT_END_FILE` then loads file 2, emitting `MPV_EVENT_START_FILE` / `MPV_EVENT_FILE_LOADED` / `MPV_EVENT_PLAYBACK_RESTART` (`iina/MPVController.swift:1139–1186`).
+6. **`fileLoaded`** (`iina/PlayerCore.swift:2087–2153`) replaces `info.videoDuration` and `info.videoPosition` with file 2's values (position ≈ 0).
+7. **`MPV_EVENT_PLAYBACK_RESTART` handler** (`iina/MPVController.swift:1169–1184`) calls `player.syncUI(.time)`, which dispatches to `updatePlayTime` on main.
+8. **`PlayerWindowController.updatePlayTime`** (`iina/PlayerWindowController.swift:605–631`) executes `playSlider.doubleValue = percentage` at line 630 with `percentage = 0`. **The slider knob jumps from 100 to 0 mid-drag**, with no guard against doing so during tracking.
+9. **The user's mouse is still pressed at the right edge.** The next `mouseDragged` invokes `NSSliderCell.continueTracking`, which re-derives `doubleValue` from absolute cursor geometry, snapping it back to `100`. The 0 → 100 transition fires `playSliderChanges` again.
+10. Step 4 repeats against file 2. mpv advances to file 3. **Cascade.** The chain breaks only on `mouseUp` (`PlaySliderCell.stopTracking`, `iina/PlaySliderCell.swift:185–190`) or playlist exhaustion.
+
+## WHY IT CASCADES
+
+The two coupled defects are: (a) `seek(percent:)`'s clamp is too loose — `0..<100` with `Double.nextDown` produces a percentage so close to 100 that mpv's auto-advance fires anyway, especially under non-exact seek or coarse keyframes; and (b) `updatePlayTime` has no notion of "the user is currently dragging the slider," so when the file-change events fire `syncUI(.time)`, the slider gets stomped to the new file's 0% position. NSSliderCell's tracking is *absolute-cursor-driven*, not delta-driven, so the next mouse event re-snaps the knob from 0 back to maxValue and the IBAction fires another seek. Each iteration of the loop seeks to ~99.99% of the new file, mpv advances to the file after that, the slider is reset again, and the cycle repeats — exactly the "drag delta applied across files" behavior the report describes (it is not actually a delta; it is the cursor being repeatedly re-mapped to maxValue against a slider whose value keeps being reset under it).
+
+## SUGGESTED FIX
+
+Block external mutation of `playSlider.doubleValue` while the slider is being tracked. Concretely: add a `var isTracking: Bool = false` to `PlaySliderCell` (`iina/PlaySliderCell.swift`), set it `true` in `startTracking` (line 175) and `false` in `stopTracking` (line 185), then in `PlayerWindowController.updatePlayTime` (line 628–630) guard the assignment: `if !(playSlider.customCell.isTracking) { playSlider.doubleValue = percentage }`. This breaks the cascade chain by leaving the knob pinned at maxValue throughout the drag, so subsequent `mouseDragged` events at the right edge cause no value change and no further IBAction fires. As a hardening measure, also tightening the clamp in `PlayerCore.seek(percent:)` (line 959) to a duration-based "stay-at-least-N-frames-from-end" bound (e.g., clamp the *seconds* target to `duration - max(0.5, 1.0/fps)` rather than clamping the *percent* via `nextDown`) would keep mpv from auto-advancing on the *first* drag-past-EOF as well, but the dragging-while-stomped issue is what produces the multi-file cascade and is fixed by the guard alone.
