@@ -5,21 +5,24 @@ topic_root: topic://project.serena.cursor-vs-ra
 # Pilot for iina/iina#5909 "Scrub by Mouse Drag Mishandles Next Video".
 #
 # Both arms run the SAME prompt (templates/agent-prompt.md, embedded below).
-# Only the tool surface differs:
-#   - cursor-arm-worker: 8 cursor tools (locality-preserving navigation)
-#   - ra-arm-worker:     4 RA tools (random-access symbol search)
-# Symbol bodies are reachable through each paradigm's own surface
-# (cursor_configure include_body=true; find_symbol include_body=true).
-# Raw file-read tools are NOT exposed — that would conflate paradigm
-# difference with access granularity.
+# Tool-surface isolation is enforced at the MCP-server layer via per-arm
+# Serena contexts (cursor-arm-context.yml / ra-arm-context.yml). The cursor
+# arm's serena physically does not register find_symbol /
+# find_referencing_symbols / get_symbols_overview / search_for_pattern;
+# the RA arm's serena physically does not register the cursor_* family.
+# The agent's tool list therefore reflects exactly its arm — there is
+# nothing to "leak" via --allowedTools advisory mode.
 #
-# 3 runs per arm for variance. Each task spawns its own stdio serena
-# (mcp-config.json), so each Claude gets a fresh per-process MCP session
-# and a fresh CursorManager. The shared-SSE/launchd model from earlier
-# revisions is dropped: opt-in edge resolution (DEFAULT_EDGE_TYPES =
-# frozenset()) removes the cold-start LSP tax that motivated sharing one
-# long-running serena, and a single SSE process serialised concurrent
-# tasks anyway (task_executor is a single-threaded queue).
+# History: an earlier revision relied on --disallowedTools at the claude CLI
+# layer to block cross-arm tools. That broke MCP loading entirely (the
+# claude CLI failed to spawn its serena child when --disallowedTools listed
+# many MCP tool names alongside many --allowedTools entries — agents saw
+# only Write and ToolSearch and either fabricated or aborted). Per-arm
+# contexts are the clean fix.
+#
+# 3 runs per arm for variance. Each task spawns its own stdio serena via
+# its arm's mcp-config-*.json, so each Claude gets a fresh per-process MCP
+# session and a fresh CursorManager.
 #
 # Each task writes findings.md (final hypothesis text) under runs/<id>/.
 # Per-task transcript with tool calls is recorded by orchestrate's
@@ -32,7 +35,7 @@ tasks:
     skip_preamble: true
     options:
       mcp_config:
-        - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
+        - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config-cursor.json
       strict_mcp_config: true
       allowed_tools:
         - mcp__serena__cursor_start
@@ -44,11 +47,6 @@ tasks:
         - mcp__serena__cursor_history
         - mcp__serena__cursor_close
         - Write
-      disallowed_tools:
-        - mcp__serena__find_symbol
-        - mcp__serena__find_referencing_symbols
-        - mcp__serena__get_symbols_overview
-        - mcp__serena__search_for_pattern
       builtin_tools: "Write,ToolSearch"
     prompt: &agent_prompt |
       You are investigating a bug in the IINA macOS video player codebase (Swift, at /Users/asher/Projects/iina). The codebase uses SourceKit-LSP. You have a set of code-navigation and reading tools available — consult your tool list to see what you have. If MCP tools (names starting with `mcp__`) are not visible at session start, use the ToolSearch tool to discover them (e.g. query "serena").
@@ -95,7 +93,7 @@ tasks:
     skip_preamble: true
     options:
       mcp_config:
-        - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
+        - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config-cursor.json
       strict_mcp_config: true
       allowed_tools:
         - mcp__serena__cursor_start
@@ -107,11 +105,6 @@ tasks:
         - mcp__serena__cursor_history
         - mcp__serena__cursor_close
         - Write
-      disallowed_tools:
-        - mcp__serena__find_symbol
-        - mcp__serena__find_referencing_symbols
-        - mcp__serena__get_symbols_overview
-        - mcp__serena__search_for_pattern
       builtin_tools: "Write,ToolSearch"
     prompt: *agent_prompt
 
@@ -121,7 +114,7 @@ tasks:
     skip_preamble: true
     options:
       mcp_config:
-        - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
+        - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config-cursor.json
       strict_mcp_config: true
       allowed_tools:
         - mcp__serena__cursor_start
@@ -133,11 +126,6 @@ tasks:
         - mcp__serena__cursor_history
         - mcp__serena__cursor_close
         - Write
-      disallowed_tools:
-        - mcp__serena__find_symbol
-        - mcp__serena__find_referencing_symbols
-        - mcp__serena__get_symbols_overview
-        - mcp__serena__search_for_pattern
       builtin_tools: "Write,ToolSearch"
     prompt: *agent_prompt
 
@@ -147,7 +135,7 @@ tasks:
     skip_preamble: true
     options:
       mcp_config:
-        - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
+        - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config-ra.json
       strict_mcp_config: true
       allowed_tools:
         - mcp__serena__find_symbol
@@ -155,15 +143,6 @@ tasks:
         - mcp__serena__get_symbols_overview
         - mcp__serena__search_for_pattern
         - Write
-      disallowed_tools:
-        - mcp__serena__cursor_start
-        - mcp__serena__cursor_find
-        - mcp__serena__cursor_move
-        - mcp__serena__cursor_look
-        - mcp__serena__cursor_configure
-        - mcp__serena__cursor_overview
-        - mcp__serena__cursor_history
-        - mcp__serena__cursor_close
       builtin_tools: "Write,ToolSearch"
     prompt: *agent_prompt
 
@@ -173,7 +152,7 @@ tasks:
     skip_preamble: true
     options:
       mcp_config:
-        - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
+        - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config-ra.json
       strict_mcp_config: true
       allowed_tools:
         - mcp__serena__find_symbol
@@ -181,15 +160,6 @@ tasks:
         - mcp__serena__get_symbols_overview
         - mcp__serena__search_for_pattern
         - Write
-      disallowed_tools:
-        - mcp__serena__cursor_start
-        - mcp__serena__cursor_find
-        - mcp__serena__cursor_move
-        - mcp__serena__cursor_look
-        - mcp__serena__cursor_configure
-        - mcp__serena__cursor_overview
-        - mcp__serena__cursor_history
-        - mcp__serena__cursor_close
       builtin_tools: "Write,ToolSearch"
     prompt: *agent_prompt
 
@@ -199,7 +169,7 @@ tasks:
     skip_preamble: true
     options:
       mcp_config:
-        - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
+        - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config-ra.json
       strict_mcp_config: true
       allowed_tools:
         - mcp__serena__find_symbol
@@ -207,14 +177,5 @@ tasks:
         - mcp__serena__get_symbols_overview
         - mcp__serena__search_for_pattern
         - Write
-      disallowed_tools:
-        - mcp__serena__cursor_start
-        - mcp__serena__cursor_find
-        - mcp__serena__cursor_move
-        - mcp__serena__cursor_look
-        - mcp__serena__cursor_configure
-        - mcp__serena__cursor_overview
-        - mcp__serena__cursor_history
-        - mcp__serena__cursor_close
       builtin_tools: "Write,ToolSearch"
     prompt: *agent_prompt

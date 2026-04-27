@@ -1,0 +1,42 @@
+description: Random-access arm for the cursor-vs-RA pilot. find_symbol / find_referencing_symbols / get_symbols_overview / search_for_pattern only; cursor_* navigation is physically excluded so the agent cannot reach for it.
+prompt: |
+  You are operating with a random-access symbol toolset. Use find_symbol and
+  find_referencing_symbols (LSP-backed), get_symbols_overview (file structure),
+  and search_for_pattern (regex). Each call is independent — there is no
+  cursor or path memory between calls.
+excluded_tools:
+  - cursor_start
+  - cursor_find
+  - cursor_move
+  - cursor_look
+  - cursor_configure
+  - cursor_overview
+  - cursor_history
+  - cursor_close
+  - cursor_insert_after
+  - cursor_insert_before
+  - cursor_insert_at_start
+  - cursor_insert_at_end
+  - cursor_replace_body
+  - cursor_replace_between
+  - cursor_replace_range
+  - cursor_replace_range_verified
+  - cursor_remove_member
+  - cursor_rename
+  - safe_delete_symbol
+  - delete_memory
+  - edit_memory
+  - list_memories
+  - read_memory
+  - rename_memory
+  - write_memory
+  - activate_project
+  - check_onboarding_performed
+  - get_current_config
+  - initial_instructions
+  - onboarding
+included_optional_tools:
+  - find_symbol
+  - find_referencing_symbols
+  - get_symbols_overview
+tool_description_overrides: {}

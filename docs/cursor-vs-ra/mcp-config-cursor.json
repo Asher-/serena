@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "serena": {
+      "command": "/opt/homebrew/bin/uv",
+      "args": [
+        "run",
+        "--directory",
+        "/Users/asher/Dropbox/Projects/claude/serena",
+        "serena",
+        "start-mcp-server",
+        "--project",
+        "/Users/asher/Projects/iina",
+        "--context",
+        "/Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/cursor-arm-context.yml",
+        "--transport",
+        "stdio",
+        "--enable-web-dashboard",
+        "false",
+        "--enable-gui-log-window",
+        "false"
+      ]
+    }
+  }
+}
