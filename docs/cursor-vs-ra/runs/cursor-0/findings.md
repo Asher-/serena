@@ -1,0 +1,24 @@
+# Issue #5909 — Scrub by Mouse Drag Mishandles Next Video
+
+## ROOT CAUSE
+
+`iina/PlayerWindowController.swift:631` (the `playSlider.doubleValue = percentage` write inside `updatePlayTime`) — the slider's value is overwritten from mpv-reported position while the user is actively tracking the slider, which lets `NSSliderCell.continueTracking` re-fire the action repeatedly. The clamp in `PlayerCore.seek(percent:forceExact:)` at `iina/PlayerCore.swift:952` (which uses `FloatingPoint.clamped(to: 0..<100)` from `iina/Extensions.swift:413-420`, evaluating to `100.0.nextDown` ≈ 99.99999999999999) supplies the seek-target that mpv treats as EOF and uses to auto-advance, but it is the externally driven slider reset during tracking that turns a single advance into the cascade.
+
+## CONTROL FLOW
+
+1. User mouse-downs on the play slider. `PlaySlider.mouseDown` (`iina/PlaySlider.swift:104`) calls `super.mouseDown`, which routes to `PlaySliderCell.startTracking` (`iina/PlaySliderCell.swift:175`). That method calls `playerCore.pause()` and lets `NSSliderCell` begin its tracking session.
+2. User drags rightward past the visual end of the bar. `NSSliderCell.continueTracking` clamps the cell's `doubleValue` to the slider's `maxValue` (100) and fires the action.
+3. The action target `PlayerWindowController.playSliderChanges` (`iina/PlayerWindowController.swift:689-692`) computes `percentage = 100 * sender.doubleValue / sender.maxValue` = 100 and calls `player.seek(percent: 100, forceExact: ...)`.
+4. `PlayerCore.seek(percent:forceExact:)` (`iina/PlayerCore.swift:952-963`) clamps via `percent.clamped(to: 0..<100)`. The custom `FloatingPoint.clamped(to: Range)` (`iina/Extensions.swift:413-420`) returns `range.upperBound.nextDown` for inputs ≥ 100, i.e. ≈ 99.99999999999999. It then issues `mpv.command(.seek, ["99.999…", "absolute-percent+exact"])`.
+5. mpv interprets that target as effectively EOF and auto-advances to the next playlist entry (the inline comment at `PlayerCore.swift:954-956` describes this behavior and admits the clamp "still won't work for videos with large keyframe interval").
+6. The new file loads. mpv reports position = 0 / new duration. The periodic `syncUITimer` invokes `PlayerWindowController.updatePlayTime` (`iina/PlayerWindowController.swift:606-632`) on the main thread, which executes `playSlider.doubleValue = percentage` (line 631) and resets the slider value to ~0 — even though the user is still actively tracking it.
+7. The user's mouse is still past the bar's right edge. The next `mouseDragged` event delivered to the still-active `NSSliderCell` tracking session causes `continueTracking` to re-snap `doubleValue` from ~0 back to `maxValue` (100). Because the value changed, the cell fires the action again.
+8. Goto step 3 — another seek to ~100%, another mpv advance, another external reset, another re-snap. The playlist cascades one file per cycle for as long as the user keeps dragging.
+
+## WHY IT CASCADES
+
+Two design assumptions collide. First, the existing EOF guard in `seek(percent:)` only avoids the literal value 100; `nextDown(100)` is so close to 100 that mpv still treats the seek as EOF and advances the playlist (one advance per call). Second, `updatePlayTime` writes back to `playSlider.doubleValue` unconditionally — including while the slider is being tracked by the user. Each file advance therefore externally yanks the slider value back to ~0, after which `NSSliderCell.continueTracking` immediately re-snaps it to `maxValue` (the user's mouse is still past the right edge), generating a fresh value-change action. That action re-enters `playSliderChanges`, re-issues a near-100% seek, advances the playlist again, and the cycle repeats. Without the external reset the slider would remain pinned at `maxValue` for the entire drag and the action would fire exactly once; with it, the system has built itself a self-driving loop that consumes one playlist entry per mouse-moved event.
+
+## SUGGESTED FIX
+
+Suppress external writes to `playSlider.doubleValue` while the cell is mid-tracking. Add a flag (e.g. `isDragging`) to `PlaySliderCell`, set it to `true` in `startTracking` and back to `false` in `stopTracking`, then gate the assignment in `PlayerWindowController.updatePlayTime` (line 631) so it only runs when the cell is not dragging — for example: `if !(playSlider.cell as? PlaySliderCell)?.isDragging ?? false { playSlider.doubleValue = percentage }`. This preserves the desired single advance (the one near-100% seek the user explicitly initiated still fires, mpv advances, and after `stopTracking` runs `playerCore.resume()` the new file plays from 0 as expected) while breaking the self-driving feedback loop: with the slider value left untouched during tracking, `NSSliderCell` has no value-change to react to on subsequent mouse events, so no further `playSliderChanges` actions are emitted and no further files are skipped.
