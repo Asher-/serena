@@ -1,0 +1,30 @@
+# Cursor-paradigm arm of the cursor-vs-RA pilot.
+#
+# Loaded as a serena CONTEXT (passed via --context <path>), NOT a mode.
+# Reason: SerenaAgent._create_base_toolset wraps mode definitions in
+# NamedToolInclusionDefinition that drops fixed_tools/excluded_tools for
+# default_modes; only contexts and base_modes have their tool inclusions
+# applied, and the CLI does not expose --base-mode. Contexts are appended
+# whole as ToolInclusionDefinitions, so fixed_tools wins via ToolSet.apply
+# (src/serena/agent.py:133). The context is the agent's prompt-bearing
+# environment; we replace the standard `agent` context entirely.
+#
+# The system prompt below replicates the standard `agent` context's
+# initial-instructions-at-startup behavior (via init.instructions over the
+# MCP transport), and fixed_tools wipes the tool surface to exactly the
+# eight cursor navigation tools.
+description: Cursor-paradigm arm for the cursor-vs-RA pilot.
+prompt: |
+  You are running in an agent context.
+
+  You are operating in the cursor arm of a code-navigation paradigm comparison.
+  Your only available tools are the cursor family. Use them to investigate the bug.
+fixed_tools:
+  - cursor_start
+  - cursor_find
+  - cursor_move
+  - cursor_look
+  - cursor_configure
+  - cursor_overview
+  - cursor_history
+  - cursor_close

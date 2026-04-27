@@ -1,0 +1,41 @@
+project: /Users/asher/Projects/iina
+coordinator: cursor-vs-ra-smoke
+topic_root: topic://project.serena.cursor-vs-ra
+tasks:
+  - id: cursor-smoke
+    roots: [topic://project.serena.cursor-vs-ra]
+    prompt: |
+      Begin the investigation. Follow your system prompt's instructions and write the final report ending with the literal token DONE.
+    findings: /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/runs/cursor-smoke/findings.md
+    skip_preamble: true
+    options:
+      agent: cursor-arm-worker
+      mcp_config:
+        - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
+      strict_mcp_config: true
+      allowed_tools:
+        - mcp__serena__cursor_start
+        - mcp__serena__cursor_find
+        - mcp__serena__cursor_move
+        - mcp__serena__cursor_look
+        - mcp__serena__cursor_configure
+        - mcp__serena__cursor_overview
+        - mcp__serena__cursor_history
+        - mcp__serena__cursor_close
+
+  - id: ra-smoke
+    roots: [topic://project.serena.cursor-vs-ra]
+    prompt: |
+      Begin the investigation. Follow your system prompt's instructions and write the final report ending with the literal token DONE.
+    findings: /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/runs/ra-smoke/findings.md
+    skip_preamble: true
+    options:
+      agent: ra-arm-worker
+      mcp_config:
+        - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
+      strict_mcp_config: true
+      allowed_tools:
+        - mcp__serena__find_symbol
+        - mcp__serena__find_referencing_symbols
+        - mcp__serena__get_symbols_overview
+        - mcp__serena__search_for_pattern

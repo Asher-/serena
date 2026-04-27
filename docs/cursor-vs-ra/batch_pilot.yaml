@@ -1,0 +1,172 @@
+project: /Users/asher/Projects/iina
+coordinator: cursor-vs-ra-pilot
+topic_root: topic://project.serena.cursor-vs-ra
+
+# Pilot for iina/iina#5909 "Scrub by Mouse Drag Mishandles Next Video".
+#
+# Both arms run the SAME prompt (templates/agent-prompt.md, embedded below).
+# Only the tool surface differs:
+#   - cursor-arm-worker: 8 cursor tools (locality-preserving navigation)
+#   - ra-arm-worker:     4 RA tools (random-access symbol search)
+# Symbol bodies are reachable through each paradigm's own surface
+# (cursor_configure include_body=true; find_symbol include_body=true).
+# Raw file-read tools are NOT exposed — that would conflate paradigm
+# difference with access granularity.
+#
+# 3 runs per arm for variance. Each task spawns its own stdio serena
+# (mcp-config.json), so each Claude gets a fresh per-process MCP session
+# and a fresh CursorManager. The shared-SSE/launchd model from earlier
+# revisions is dropped: opt-in edge resolution (DEFAULT_EDGE_TYPES =
+# frozenset()) removes the cold-start LSP tax that motivated sharing one
+# long-running serena, and a single SSE process serialised concurrent
+# tasks anyway (task_executor is a single-threaded queue).
+#
+# Each task writes findings.md (final hypothesis text) under runs/<id>/.
+# Per-task transcript with tool calls is recorded by orchestrate's
+# session machinery under /Users/asher/.claude-server/<session-id>/.
+
+tasks:
+  - id: cursor-0
+    roots: [topic://project.serena.cursor-vs-ra]
+    findings: /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/runs/cursor-0/findings.md
+    skip_preamble: true
+    options:
+      agent: cursor-arm-worker
+      mcp_config:
+        - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
+      strict_mcp_config: true
+      allowed_tools:
+        - mcp__serena__cursor_start
+        - mcp__serena__cursor_find
+        - mcp__serena__cursor_move
+        - mcp__serena__cursor_look
+        - mcp__serena__cursor_configure
+        - mcp__serena__cursor_overview
+        - mcp__serena__cursor_history
+        - mcp__serena__cursor_close
+    prompt: &agent_prompt |
+      You are investigating a bug in the IINA macOS video player codebase (Swift, at /Users/asher/Projects/iina). The codebase uses SourceKit-LSP. You have a set of code-navigation and reading tools available — consult your tool list to see what you have.
+
+      # Bug report (issue #5909)
+
+      Title: "Scrub by Mouse Drag Mishandles Next Video"
+
+      Reproduction: Open a folder of three or more videos in IINA. Drag the playback scrubber past the end of the currently-playing video. Expected: scrubbing stops at end of file, playback advances to the next file, position resets to 0. Observed: the player cascades through multiple files in the playlist as the user keeps dragging, behaving as if the drag delta were being applied across files rather than clamped to the current one.
+
+      Symptom area (starting hint, not a constraint): drag-handler / scrub UI → playback control → playlist advance → end-of-file logic.
+
+      # Your task
+
+      Investigate the code path and produce a written hypothesis identifying the root cause:
+
+      1. The specific function(s) responsible.
+      2. The specific control-flow that produces the cascade.
+      3. Why the existing code cascades instead of clamping.
+      4. What change would fix it (one or two lines of suggested logic; no patch needed).
+
+      If you become confident the bug is elsewhere than the symptom area suggests, follow the evidence — the symptom area is a starting hint, not a boundary.
+
+      # Output format
+
+      When you have a hypothesis you are confident in, write a final report:
+
+      - ROOT CAUSE: <file>:<lines> — <one-sentence statement>
+      - CONTROL FLOW: numbered steps tracing the cascade from drag event to bug
+      - WHY IT CASCADES: a one-paragraph explanation
+      - SUGGESTED FIX: a one-paragraph description of the change that would fix it
+
+      End your final message with the literal token: DONE
+
+      # Working notes
+
+      - Cite file paths and line numbers in your reasoning so they can be verified.
+      - If you change direction during the investigation, say so explicitly. Pivots and dead ends are normal.
+      - Token cost is being measured but is not a target. Investigate as much as the task warrants.
+
+  - id: cursor-1
+    roots: [topic://project.serena.cursor-vs-ra]
+    findings: /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/runs/cursor-1/findings.md
+    skip_preamble: true
+    options:
+      agent: cursor-arm-worker
+      mcp_config:
+        - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
+      strict_mcp_config: true
+      allowed_tools:
+        - mcp__serena__cursor_start
+        - mcp__serena__cursor_find
+        - mcp__serena__cursor_move
+        - mcp__serena__cursor_look
+        - mcp__serena__cursor_configure
+        - mcp__serena__cursor_overview
+        - mcp__serena__cursor_history
+        - mcp__serena__cursor_close
+    prompt: *agent_prompt
+
+  - id: cursor-2
+    roots: [topic://project.serena.cursor-vs-ra]
+    findings: /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/runs/cursor-2/findings.md
+    skip_preamble: true
+    options:
+      agent: cursor-arm-worker
+      mcp_config:
+        - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
+      strict_mcp_config: true
+      allowed_tools:
+        - mcp__serena__cursor_start
+        - mcp__serena__cursor_find
+        - mcp__serena__cursor_move
+        - mcp__serena__cursor_look
+        - mcp__serena__cursor_configure
+        - mcp__serena__cursor_overview
+        - mcp__serena__cursor_history
+        - mcp__serena__cursor_close
+    prompt: *agent_prompt
+
+  - id: ra-0
+    roots: [topic://project.serena.cursor-vs-ra]
+    findings: /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/runs/ra-0/findings.md
+    skip_preamble: true
+    options:
+      agent: ra-arm-worker
+      mcp_config:
+        - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
+      strict_mcp_config: true
+      allowed_tools:
+        - mcp__serena__find_symbol
+        - mcp__serena__find_referencing_symbols
+        - mcp__serena__get_symbols_overview
+        - mcp__serena__search_for_pattern
+    prompt: *agent_prompt
+
+  - id: ra-1
+    roots: [topic://project.serena.cursor-vs-ra]
+    findings: /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/runs/ra-1/findings.md
+    skip_preamble: true
+    options:
+      agent: ra-arm-worker
+      mcp_config:
+        - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
+      strict_mcp_config: true
+      allowed_tools:
+        - mcp__serena__find_symbol
+        - mcp__serena__find_referencing_symbols
+        - mcp__serena__get_symbols_overview
+        - mcp__serena__search_for_pattern
+    prompt: *agent_prompt
+
+  - id: ra-2
+    roots: [topic://project.serena.cursor-vs-ra]
+    findings: /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/runs/ra-2/findings.md
+    skip_preamble: true
+    options:
+      agent: ra-arm-worker
+      mcp_config:
+        - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
+      strict_mcp_config: true
+      allowed_tools:
+        - mcp__serena__find_symbol
+        - mcp__serena__find_referencing_symbols
+        - mcp__serena__get_symbols_overview
+        - mcp__serena__search_for_pattern
+    prompt: *agent_prompt
