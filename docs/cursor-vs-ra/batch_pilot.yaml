@@ -31,7 +31,6 @@ tasks:
     findings: /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/runs/cursor-0/findings.md
     skip_preamble: true
     options:
-      agent: cursor-arm-worker
       mcp_config:
         - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
       strict_mcp_config: true
@@ -44,6 +43,7 @@ tasks:
         - mcp__serena__cursor_overview
         - mcp__serena__cursor_history
         - mcp__serena__cursor_close
+        - Write
     prompt: &agent_prompt |
       You are investigating a bug in the IINA macOS video player codebase (Swift, at /Users/asher/Projects/iina). The codebase uses SourceKit-LSP. You have a set of code-navigation and reading tools available — consult your tool list to see what you have.
 
@@ -88,7 +88,6 @@ tasks:
     findings: /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/runs/cursor-1/findings.md
     skip_preamble: true
     options:
-      agent: cursor-arm-worker
       mcp_config:
         - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
       strict_mcp_config: true
@@ -101,6 +100,7 @@ tasks:
         - mcp__serena__cursor_overview
         - mcp__serena__cursor_history
         - mcp__serena__cursor_close
+        - Write
     prompt: *agent_prompt
 
   - id: cursor-2
@@ -108,7 +108,6 @@ tasks:
     findings: /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/runs/cursor-2/findings.md
     skip_preamble: true
     options:
-      agent: cursor-arm-worker
       mcp_config:
         - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
       strict_mcp_config: true
@@ -121,6 +120,7 @@ tasks:
         - mcp__serena__cursor_overview
         - mcp__serena__cursor_history
         - mcp__serena__cursor_close
+        - Write
     prompt: *agent_prompt
 
   - id: ra-0
@@ -128,7 +128,6 @@ tasks:
     findings: /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/runs/ra-0/findings.md
     skip_preamble: true
     options:
-      agent: ra-arm-worker
       mcp_config:
         - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
       strict_mcp_config: true
@@ -137,6 +136,7 @@ tasks:
         - mcp__serena__find_referencing_symbols
         - mcp__serena__get_symbols_overview
         - mcp__serena__search_for_pattern
+        - Write
     prompt: *agent_prompt
 
   - id: ra-1
@@ -144,7 +144,6 @@ tasks:
     findings: /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/runs/ra-1/findings.md
     skip_preamble: true
     options:
-      agent: ra-arm-worker
       mcp_config:
         - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
       strict_mcp_config: true
@@ -153,6 +152,7 @@ tasks:
         - mcp__serena__find_referencing_symbols
         - mcp__serena__get_symbols_overview
         - mcp__serena__search_for_pattern
+        - Write
     prompt: *agent_prompt
 
   - id: ra-2
@@ -160,7 +160,6 @@ tasks:
     findings: /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/runs/ra-2/findings.md
     skip_preamble: true
     options:
-      agent: ra-arm-worker
       mcp_config:
         - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
       strict_mcp_config: true
@@ -169,4 +168,5 @@ tasks:
         - mcp__serena__find_referencing_symbols
         - mcp__serena__get_symbols_overview
         - mcp__serena__search_for_pattern
+        - Write
     prompt: *agent_prompt

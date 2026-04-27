@@ -1,15 +1,29 @@
 project: /Users/asher/Projects/iina
 coordinator: cursor-vs-ra-smoke
 topic_root: topic://project.serena.cursor-vs-ra
+
+# Smoke test for the orchestrate-honors-per-task-config fix.
+#
+# Goal: verify that orchestrate threads each task's options.{mcp_config,
+# strict_mcp_config, allowed_tools} into the claude-server connect call so
+# the spawned CLI session has exactly the constrained tool surface the YAML
+# requests, and that the parent session itself writes findings.md (no
+# subagent dispatch). This is the test that would have caught cursor-0's
+# silent missing-findings.md failure pre-launch.
+#
+# Pass criteria (assert after `orchestrate` exits):
+#   1. /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/runs/cursor-smoke/findings.md exists and is non-empty.
+#   2. /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/runs/ra-smoke/findings.md exists and is non-empty.
+#   3. Each session log shows the agent calling at least one of its arm-specific
+#      tools (cursor_overview / cursor_start ... or get_symbols_overview /
+#      find_symbol ...) — proving the strict-mcp-config gate worked.
+
 tasks:
   - id: cursor-smoke
     roots: [topic://project.serena.cursor-vs-ra]
-    prompt: |
-      Begin the investigation. Follow your system prompt's instructions and write the final report ending with the literal token DONE.
     findings: /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/runs/cursor-smoke/findings.md
     skip_preamble: true
     options:
-      agent: cursor-arm-worker
       mcp_config:
         - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
       strict_mcp_config: true
@@ -22,15 +36,19 @@ tasks:
         - mcp__serena__cursor_overview
         - mcp__serena__cursor_history
         - mcp__serena__cursor_close
+        - Write
+    prompt: |
+      Smoke test of the cursor-arm tool surface.
+
+      Use mcp__serena__cursor_overview on iina/MainWindowController.swift to list its top-level symbols. Summarise the result in two short bullet points: (1) how many top-level symbols, (2) the name of the first one.
+
+      Then write the summary to your findings file via the Write tool. Final message must end with the literal token DONE.
 
   - id: ra-smoke
     roots: [topic://project.serena.cursor-vs-ra]
-    prompt: |
-      Begin the investigation. Follow your system prompt's instructions and write the final report ending with the literal token DONE.
     findings: /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/runs/ra-smoke/findings.md
     skip_preamble: true
     options:
-      agent: ra-arm-worker
       mcp_config:
         - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config.json
       strict_mcp_config: true
@@ -39,3 +57,10 @@ tasks:
         - mcp__serena__find_referencing_symbols
         - mcp__serena__get_symbols_overview
         - mcp__serena__search_for_pattern
+        - Write
+    prompt: |
+      Smoke test of the random-access tool surface.
+
+      Use mcp__serena__find_symbol with name_path="MainWindowController" relative_path="iina/MainWindowController.swift" to locate the top-level controller class. Then use mcp__serena__search_for_pattern with substring_pattern="playSliderChanges" relative_path="iina" to find the IBAction handler. Summarise the result in two short bullet points: (1) the file:line of the MainWindowController declaration, (2) the file:line of playSliderChanges.
+
+      Then write the summary to your findings file via the Write tool. Final message must end with the literal token DONE.
