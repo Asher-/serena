@@ -1,0 +1,69 @@
+# Investigation Aborted: Required Tools Unavailable
+
+## Status
+
+I was unable to perform this investigation. The task description states:
+
+> The codebase uses SourceKit-LSP. You have a set of code-navigation and reading tools available — consult your tool list to see what you have.
+
+In this session the only tool available to me is `Write`. I attempted to invoke the
+following common tool names and all of them returned "No such tool available":
+
+- `Read`, `Edit`, `Glob`, `Grep`, `LS`, `Task`, `Bash`
+- `find_symbol`, `search_for_pattern`, `read_file`, `list_dir`
+- `mcp__serena__find_symbol`, `serena__find_symbol`
+- `lsp_definition`, `sourcekit_lsp`, `lsp`, `codeSearch`, `search`
+
+Without any way to enumerate, read, or search files in `/Users/asher/Projects/iina`, I
+have no means to:
+
+1. Locate the scrubber drag handler (e.g. `PlaySliderCell` / `PlaySlider`).
+2. Trace the seek path through `PlayerCore` / `MPVController` to the mpv command layer.
+3. Verify how end-of-file is detected and how playlist advance is wired (e.g. the
+   `keep-open=always` behavior, `playlist-next` invocation, or the `eof-reached`
+   property handling).
+4. Cite specific file paths and line numbers, which the report format requires.
+
+## Why I am not producing a hypothetical report
+
+The IRONCLAD instruction in the user's global CLAUDE.md is:
+
+> NEVER make up, guess, fabricate, or hack ANY value that you don't know.
+> "Close enough" is fabrication. "Probably works" is fabrication.
+
+The required output schema —
+
+    ROOT CAUSE: <file>:<lines> — <one-sentence statement>
+
+— forces concrete citations. Producing those from prior knowledge of IINA, without
+reading the working tree at the current commit (`develop` @ `eea7b809`), would be
+fabrication. Even if my recollection of the structure (e.g. `PlaySliderCell.swift`
+calling `PlayerCore.seek`, mpv's `keep-open` interacting with `time-pos` writes past
+duration) happens to match reality, line numbers and exact control flow on this
+specific commit are not knowable to me without reading the code.
+
+## Educated direction (explicitly NOT a hypothesis, just a pointer for the next run)
+
+Should the investigation be re-run with proper tools, the most likely region to
+examine first — based on the symptom of a *cumulative* cascade across files rather
+than a single overshoot — is the seek implementation that converts the slider's
+fractional position into an absolute time. If the slider's "100%" is interpreted
+relative to a stale duration (the previously playing file's), or if seek-past-EOF
+triggers `playlist-next` while the drag handler keeps issuing further seeks whose
+deltas are then re-applied to the *new* file's timeline, that would produce the
+observed cascade. The candidate functions to inspect would be in:
+
+- `iina/PlaySliderCell.swift` (drag handling: `mouseDown`, `continueTracking`,
+  `stopTracking`)
+- `iina/PlayerCore.swift` (e.g. `seek(percent:)`, `seek(absoluteSecond:)`)
+- `iina/MPVController.swift` (the actual mpv property writes / commands)
+- The end-of-file path that calls `playlist-next` or equivalent
+
+But again — I cannot verify any of this in this session, so I am not asserting it
+as a hypothesis. It is a starting point for a properly-tooled re-run only.
+
+## Recommendation
+
+Re-run this task in a session where at least `Read`, `Grep`, and `Glob` (or
+equivalent SourceKit-LSP / Serena tools) are enabled. Without them, the only
+honest output I can produce is this acknowledgment.

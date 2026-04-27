@@ -32,9 +32,9 @@ tasks:
         - mcp__serena__find_referencing_symbols
         - mcp__serena__get_symbols_overview
         - mcp__serena__search_for_pattern
-      builtin_tools: "Write"
+      builtin_tools: "Write,ToolSearch"
     prompt: &agent_prompt |
-      You are investigating a bug in the IINA macOS video player codebase (Swift, at /Users/asher/Projects/iina). The codebase uses SourceKit-LSP. You have a set of code-navigation and reading tools available — consult your tool list to see what you have.
+      You are investigating a bug in the IINA macOS video player codebase (Swift, at /Users/asher/Projects/iina). The codebase uses SourceKit-LSP. You have a set of code-navigation and reading tools available — consult your tool list to see what you have. If MCP tools (names starting with `mcp__`) are not visible at session start, use the ToolSearch tool to discover them (e.g. query "serena").
 
       # Bug report (issue #5909)
 
@@ -95,7 +95,7 @@ tasks:
         - mcp__serena__cursor_overview
         - mcp__serena__cursor_history
         - mcp__serena__cursor_close
-      builtin_tools: "Write"
+      builtin_tools: "Write,ToolSearch"
     prompt: *agent_prompt
 
   - id: ra-1
@@ -121,7 +121,7 @@ tasks:
         - mcp__serena__cursor_overview
         - mcp__serena__cursor_history
         - mcp__serena__cursor_close
-      builtin_tools: "Write"
+      builtin_tools: "Write,ToolSearch"
     prompt: *agent_prompt
 
   - id: ra-2
@@ -147,5 +147,5 @@ tasks:
         - mcp__serena__cursor_overview
         - mcp__serena__cursor_history
         - mcp__serena__cursor_close
-      builtin_tools: "Write"
+      builtin_tools: "Write,ToolSearch"
     prompt: *agent_prompt

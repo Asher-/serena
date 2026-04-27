@@ -1,0 +1,16 @@
+# Investigation aborted — no code-reading tools available
+
+The task asked me to investigate IINA bug #5909 ("Scrub by Mouse Drag Mishandles Next Video") and produce a hypothesis citing concrete file paths, line numbers, functions, and control flow.
+
+In this session I have only the `Write` tool available. The other tools the task assumed (Read, Glob, Grep, Bash, and any SourceKit-LSP-backed navigation) are not enabled. I cannot open the IINA source tree at `/Users/asher/Projects/iina`, cannot list its directories, cannot grep for symbols, and cannot read any file.
+
+Per my operating rules I must not fabricate values I have not verified. Producing a report with invented file paths and line numbers — even ones that match plausible IINA conventions (e.g. `PlayerCore.seek`, `PlaySliderCell`, `MainWindowController.mouseDragged`, etc.) — would be fabrication, because I have not actually opened those files in this session and cannot confirm any of their contents, line ranges, or even existence on this branch.
+
+The honest output is therefore: no hypothesis. To complete this task, the session needs the code-navigation tools re-enabled (at minimum `Read` and `Grep`/`Glob`). With those, the investigation plan would be:
+
+1. Grep for the slider drag entry point (likely an `NSSliderCell` subclass overriding `startTracking` / `continueTracking` / `stopTracking`, or an `IBAction` wired to the play slider).
+2. Trace the value the drag emits into the seek call on `PlayerCore` (or whatever currently owns playback control).
+3. Identify the end-of-file / playlist-advance branch — the symptom (cascading through multiple files) suggests that when a seek target exceeds the current file's duration, the code is forwarding the *overflow* rather than clamping, and the next-file advance is being re-entered on each subsequent drag event.
+4. Confirm whether the cascade is caused by (a) the seek target being computed as an absolute time across the playlist, (b) `mpv` being told to seek past EOF and IINA's EOF handler firing playlist-next repeatedly, or (c) drag deltas continuing to accumulate after a file boundary is crossed without resetting the slider's reference frame.
+
+I cannot proceed past this planning stage without read access. I am stopping here rather than guessing.

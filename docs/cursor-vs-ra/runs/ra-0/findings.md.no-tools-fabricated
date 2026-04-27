@@ -1,0 +1,117 @@
+# Findings — IINA issue #5909 (Scrub by Mouse Drag Mishandles Next Video)
+
+## Investigation status: BLOCKED — no code-reading tools available
+
+In this session the only tool exposed to me via the function schema is
+`Write`. I have no `Read`, `Grep`, `Glob`, `Bash`, LSP, or any other
+mechanism to open files in the IINA repository at
+`/Users/asher/Projects/iina`. The task brief stated that
+code-navigation/reading tools were available, but they are not present
+in my tool list.
+
+The task asks for a report in the form
+`ROOT CAUSE: <file>:<lines> — …`. Producing that without having read
+the code would be fabrication, which I will not do. I therefore cannot
+deliver the requested final report. What follows is the most I can
+honestly contribute given the constraint: a structured hypothesis
+about the *shape* of the bug, framed so a follow-up investigator with
+read access can confirm or refute it quickly. No specific symbols,
+paths, or line numbers are claimed, because I have not verified any.
+
+## What I would have looked at, in order
+
+1. The scrub UI control — wherever the playback slider lives in the
+   main player window XIB/Swift view controller. Specifically: the
+   `IBAction` (or target/action) for the slider, and any
+   `mouseDown` / `mouseDragged` / `mouseUp` overrides on a custom
+   slider subclass. The interesting question is whether scrubbing is
+   driven by *continuous slider value changes* (slider value → seek)
+   or by an explicit drag tracking loop.
+2. The seek path that the scrub action calls into — the player core
+   method that translates a slider value into an mpv seek command.
+   Key questions:
+   - Is the slider value interpreted as an absolute time in seconds,
+     or as a fraction `[0, 1]` of the current file's duration?
+   - At the moment a seek is dispatched, *which* file's duration is
+     used to interpret the slider value?
+3. The end-of-file → playlist-advance logic — the handler that
+   responds to mpv's `end-file` / `eof-reached` event (or equivalent
+   IINA notification) and calls `playlistNext` / increments the
+   playlist index.
+4. Any state that the scrub UI keeps across a single drag gesture —
+   in particular, whether it caches the current file's duration at
+   `mouseDown` or re-reads it on every `mouseDragged`.
+
+## Hypothesised shape of the bug
+
+The cascading symptom is consistent with one of two architectural
+mistakes; without source access I cannot tell which is operative.
+
+**Hypothesis A — slider value is a fraction of "current" duration,
+re-read on every drag tick.**
+During a drag, each mouse-moved event computes
+`seekTime = sliderFraction * currentDuration` and dispatches a seek.
+If the user drags past the right edge, the seek lands at or beyond
+end-of-file, mpv emits `end-file`, IINA advances the playlist, and
+`currentDuration` now refers to the *new* file. The drag is still
+in progress, so the next mouse-moved event computes a new
+`seekTime` against the new (likely shorter or different) duration,
+again past the end, advancing again. Repeat → cascade.
+
+**Hypothesis B — slider value is absolute seconds, but the scrub
+handler does not stop dispatching across a file change.**
+Each drag tick sends `seek <T> absolute`. The first one beyond
+EOF triggers playlist advance. The next one, sent into the new
+file, is still a large `T` that exceeds the new file's duration,
+triggering another advance. Etc.
+
+In both hypotheses the missing safeguard is the same: the scrub
+gesture treats "what file am I scrubbing" as something that can
+change mid-gesture, when it should be pinned for the duration of
+the drag.
+
+## Why it cascades rather than clamps (general)
+
+Two things have to be true simultaneously:
+- the seek-on-drag path does not clamp the requested time to
+  `[0, currentDuration]` (or, equivalently, does not clamp the
+  slider value to `[0, 1]` and then refuse to seek past EOF), AND
+- the scrub gesture continues to issue seeks after the active file
+  has changed under it, rather than terminating the gesture or
+  ignoring further drag events until `mouseUp`.
+
+If either guard were present, the cascade could not happen: the
+first guard prevents the first over-the-edge seek from triggering
+EOF at all (the player would just sit at the last frame); the
+second guard prevents subsequent drag ticks from acting on a file
+the user did not start scrubbing.
+
+## Suggested fix (shape only)
+
+Two complementary single-line changes, either of which alone would
+likely stop the cascade:
+
+1. In the scrub seek dispatcher, clamp the requested time to
+   `max(0, min(requested, duration - epsilon))` so a drag past
+   the right edge parks at the last frame instead of crossing EOF.
+   This preserves the "scrubbing stops at end of file" half of the
+   expected behaviour.
+2. In the drag handler, capture the playing file's identity (path
+   or playlist index) at `mouseDown`, and on each subsequent
+   `mouseDragged` bail out early if the current file no longer
+   matches. This prevents a still-active gesture from steering a
+   different file. (The "advance to next file on `mouseUp` past
+   the end" behaviour, if desired, can be implemented separately
+   in the mouse-up handler.)
+
+## What I need to turn this into a real report
+
+Read access to the IINA repo, or the contents of:
+
+- the player window's slider/scrub control class (the custom
+  `NSSlider` subclass and/or its action handler),
+- the player core's seek method that the scrub handler calls,
+- the EOF / playlist-advance handler.
+
+With those three files I can confirm which hypothesis applies and
+give exact `<file>:<lines>` citations.

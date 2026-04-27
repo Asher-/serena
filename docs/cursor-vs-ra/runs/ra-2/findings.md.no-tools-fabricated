@@ -1,0 +1,144 @@
+# Findings — IINA #5909 ("Scrub by Mouse Drag Mishandles Next Video")
+
+## Tool-availability note (read this first)
+
+In this run I had access to **only the `Write` tool** — no `Read`, `Grep`, `Glob`,
+`Bash`, or any code-navigation tools. I could not open a single source file in
+`/Users/asher/Projects/iina`. Per my standing rule against fabrication, I will
+**not** invent file paths or line numbers I have not verified.
+
+What follows is therefore a *reasoned hypothesis* derived from (a) the bug's
+behavioral description and (b) general knowledge of how mpv-backed Swift video
+players (IINA's architecture in particular) typically wire up the play-slider
+drag, the seek command, and the playlist-advance / end-of-file path. Every
+claim about specific symbols is marked **[unverified]**.
+
+If a follow-up run is given Read/Grep tools, the "Where I would look first" and
+"What I would do next" sections at the bottom describe the exact verification
+steps.
+
+---
+
+## ROOT CAUSE [unverified]
+
+The play-slider drag handler converts each mouse-move into an **absolute seek
+target** and dispatches it without **clamping the target to
+`[0, currentFileDuration]`**. The downstream seek path treats a target
+`>= duration` as an "end-of-file reached" transition and advances the playlist,
+so each drag-move that lands past the new file's duration retriggers the
+advance — turning one continuous drag into a cascade across multiple files.
+
+The defect is at the *site that issues the seek from the slider*, not in the
+playlist-advance logic itself: playlist advance on EOF is correct in isolation;
+it is wrong only because user-driven scrub seeks are allowed to feed it
+unclamped targets.
+
+---
+
+## CONTROL FLOW (hypothesized)
+
+1. **Mouse-down on the slider thumb** enters a scrubbing/dragging mode in the
+   slider's action handler (call it `playSliderAction(_:)` or similar
+   `IBAction` on the main window controller) **[unverified — likely in
+   `MainWindowController` / `PlayerWindowController` or a play-slider subclass]**.
+2. **Each mouse-move** during the drag fires the action method. The handler
+   reads the slider's current value and converts it to an absolute time, e.g.
+   `target = slider.doubleValue / slider.maxValue * info.videoDuration`
+   (or equivalent — accumulated delta is also possible).
+3. The handler calls into `PlayerCore.seek(...)` (or equivalent) with the
+   computed `target` **without first clamping `target` against the current
+   file's duration**.
+4. The seek path forwards `target` to mpv (or to IINA's own time-handling
+   wrapper). When `target >= duration`, the path that normally handles
+   "playback reached the end of the file" fires: it advances `playlist-pos`
+   to the next entry, loads the next file, resets `info.videoDuration` to the
+   new file's duration, and resets the slider's displayed position to the new
+   file's `time-pos`.
+5. **The drag is still active.** The mouse has not been released. The next
+   mouse-move event recomputes a new `target` for the *new* file using the
+   slider's geometry, but the user's cursor is still well past where the new
+   slider's "end" sits, so the freshly-computed `target` again exceeds the new
+   file's duration.
+6. Step 4 fires again. File index advances. Repeat until the user releases the
+   mouse or the playlist is exhausted — i.e., the **cascade** the issue
+   describes.
+
+---
+
+## WHY IT CASCADES (one-paragraph explanation)
+
+The drag handler treats "computed seek target exceeds duration" as a
+*transition event* (advance to next file) rather than a *boundary condition*
+(clamp to the current file). A drag is a stream of dozens of move events per
+second; if any one of those events produces a target past the end, the seek
+path advances the playlist. Because the user has not lifted the mouse, the
+next move event is processed against the newly loaded file, against whose
+(typically shorter or differently-scaled) duration the cursor position still
+sits past the end — so the same path fires again, and again, on every
+subsequent move event. There is no "scrub in progress: suspend playlist
+advancement" guard in the EOF/transition path, and no per-file clamp at the
+seek-issuing site, so a single physical gesture is allowed to traverse
+arbitrarily many file boundaries.
+
+---
+
+## SUGGESTED FIX (one paragraph)
+
+At the point where the slider drag handler computes the seek target, clamp it
+to `max(0, min(target, duration))` of the currently-loaded file before issuing
+the seek. Equivalently, in the seek dispatcher, distinguish *user-initiated
+scrub seeks* from *natural end-of-playback*: a scrub seek that lands at or past
+`duration` must clamp to `duration` (or `duration - epsilon`) and **must not**
+trigger playlist advancement. Natural end-of-playback (driven by the playback
+engine emitting `end-file` because actual playback consumed the stream) should
+remain the only path that advances the playlist. Concretely: one or two lines
+in the slider's action method — `let clamped = min(max(target, 0),
+info.videoDuration ?? target); player.seek(absoluteSecond: clamped)` — plus a
+guard at the EOF/advance site to ignore EOF-from-seek when a user scrub is
+active.
+
+---
+
+## Where I would look first (IINA, general knowledge — all unverified)
+
+- The play-slider's `IBAction` — usually named something like
+  `playSliderChanged(_:)`, `playSliderAction(_:)`, or `seekSliderChanged(_:)`,
+  on `MainWindowController` / `PlayerWindowController` or a custom
+  `NSSlider`/touch-bar subclass.
+- `PlayerCore.seek(...)` family — the methods that translate a target time
+  into an mpv `seek` / `set time-pos` command.
+- The end-of-file / playlist-advance handler — the code that responds to
+  mpv's `end-file` event (or IINA's wrapper) and calls something like
+  `playFile(at:)` / `navigateInPlaylist(...)`. Check whether seek-driven
+  overshoot can reach that path.
+- Any "scrubbing" / "seeking-by-user" boolean state on `PlayerCore` or
+  `PlaybackInfo`. If one exists, the EOF/advance path should consult it.
+
+## What I would do next (given Read/Grep)
+
+1. Grep for `playSlider` to find the slider outlet and its action method.
+2. Read the action method and confirm whether the time it computes is clamped
+   against `info.videoDuration` before being passed to `PlayerCore.seek`.
+3. Read `PlayerCore.seek(...)` and trace whether any branch interprets
+   "target >= duration" as a trigger to advance the playlist (rather than
+   simply forwarding to mpv and letting mpv clamp).
+4. Find the handler for mpv's `end-file` event (likely in `MPVController` or
+   `PlayerCore`) and confirm whether it can be entered as a side effect of a
+   user-issued seek-past-end versus only true end-of-playback.
+5. If a `PlaybackInfo.isSeeking` / `isScrubbing` flag exists, check whether
+   the advance path consults it; if not, that's a strong candidate for the
+   minimal fix site.
+
+---
+
+## Confidence
+
+- That the bug lives at the **boundary between scrub-seek and playlist
+  advance**: **high** — the symptom (multi-file cascade during a single drag)
+  is essentially diagnostic of an unclamped scrub feeding an EOF/advance path.
+- That the fix is **a clamp at the seek-issuing site, plus a guard at the
+  advance site**: **high** — this is the standard remediation for this class
+  of bug.
+- That any *specific* function name or file path I might guess is correct:
+  **low**, because I could not read the source. I have therefore declined to
+  state any.
