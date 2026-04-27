@@ -157,7 +157,7 @@ class TestCursorMovement:
     def test_move_to_ambiguous_target_with_path(self, cursor_manager: CursorManager) -> None:
         """When a target name appears in multiple neighbors, relative_path narrows it."""
         # __init__ exists in many classes; disambiguate by providing relative path
-        cid, _ = cursor_manager.start_cursor("UserService")
+        cid, _ = cursor_manager.start_cursor("UserService", edge_types=frozenset({EdgeType.CONTAINS}))
         state = cursor_manager.move_cursor(
             cid,
             "__init__",
@@ -171,7 +171,7 @@ class TestNeighborResolution:
 
     def test_contains_edge(self, cursor_manager: CursorManager) -> None:
         """Contains edge returns children of a class."""
-        cid, _ = cursor_manager.start_cursor("UserService")
+        cid, _ = cursor_manager.start_cursor("UserService", edge_types=frozenset({EdgeType.CONTAINS}))
         neighbors = cursor_manager.resolve_neighbors(cid)
         contains_names = {n.name for n in neighbors if n.edge_type == EdgeType.CONTAINS}
         # UserService should contain __init__, create_user, get_user, list_users, delete_user
@@ -181,7 +181,11 @@ class TestNeighborResolution:
 
     def test_referenced_by_edge(self, cursor_manager: CursorManager) -> None:
         """Referenced-by edge finds symbols that reference the current symbol."""
-        cid, _ = cursor_manager.start_cursor("User", relative_path=os.path.join("test_repo", "models.py"))
+        cid, _ = cursor_manager.start_cursor(
+            "User",
+            relative_path=os.path.join("test_repo", "models.py"),
+            edge_types=frozenset({EdgeType.REFERENCED_BY}),
+        )
         neighbors = cursor_manager.resolve_neighbors(cid)
         referenced_by = [n for n in neighbors if n.edge_type == EdgeType.REFERENCED_BY]
         # User is referenced by services.py and other files

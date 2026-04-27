@@ -90,7 +90,11 @@ class TestNavigationAndTrail:
         Navigate from OuterClass -> NestedClass -> find_me to avoid ambiguity
         issues with 'user' substring matching in the services module.
         """
-        cid, _ = cursor_manager.start_cursor("OuterClass", relative_path="test_repo/nested.py")
+        cid, _ = cursor_manager.start_cursor(
+            "OuterClass",
+            relative_path="test_repo/nested.py",
+            edge_types=frozenset({EdgeType.CONTAINS}),
+        )
         try:
             cursor_manager.move_cursor(cid, "NestedClass")
             cursor_manager.move_cursor(cid, "find_me")
