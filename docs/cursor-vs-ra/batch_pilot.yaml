@@ -44,6 +44,12 @@ tasks:
         - mcp__serena__cursor_history
         - mcp__serena__cursor_close
         - Write
+      disallowed_tools:
+        - mcp__serena__find_symbol
+        - mcp__serena__find_referencing_symbols
+        - mcp__serena__get_symbols_overview
+        - mcp__serena__search_for_pattern
+      builtin_tools: "Write"
     prompt: &agent_prompt |
       You are investigating a bug in the IINA macOS video player codebase (Swift, at /Users/asher/Projects/iina). The codebase uses SourceKit-LSP. You have a set of code-navigation and reading tools available — consult your tool list to see what you have.
 
@@ -101,6 +107,12 @@ tasks:
         - mcp__serena__cursor_history
         - mcp__serena__cursor_close
         - Write
+      disallowed_tools:
+        - mcp__serena__find_symbol
+        - mcp__serena__find_referencing_symbols
+        - mcp__serena__get_symbols_overview
+        - mcp__serena__search_for_pattern
+      builtin_tools: "Write"
     prompt: *agent_prompt
 
   - id: cursor-2
@@ -121,6 +133,12 @@ tasks:
         - mcp__serena__cursor_history
         - mcp__serena__cursor_close
         - Write
+      disallowed_tools:
+        - mcp__serena__find_symbol
+        - mcp__serena__find_referencing_symbols
+        - mcp__serena__get_symbols_overview
+        - mcp__serena__search_for_pattern
+      builtin_tools: "Write"
     prompt: *agent_prompt
 
   - id: ra-0
@@ -137,6 +155,16 @@ tasks:
         - mcp__serena__get_symbols_overview
         - mcp__serena__search_for_pattern
         - Write
+      disallowed_tools:
+        - mcp__serena__cursor_start
+        - mcp__serena__cursor_find
+        - mcp__serena__cursor_move
+        - mcp__serena__cursor_look
+        - mcp__serena__cursor_configure
+        - mcp__serena__cursor_overview
+        - mcp__serena__cursor_history
+        - mcp__serena__cursor_close
+      builtin_tools: "Write"
     prompt: *agent_prompt
 
   - id: ra-1
@@ -153,6 +181,16 @@ tasks:
         - mcp__serena__get_symbols_overview
         - mcp__serena__search_for_pattern
         - Write
+      disallowed_tools:
+        - mcp__serena__cursor_start
+        - mcp__serena__cursor_find
+        - mcp__serena__cursor_move
+        - mcp__serena__cursor_look
+        - mcp__serena__cursor_configure
+        - mcp__serena__cursor_overview
+        - mcp__serena__cursor_history
+        - mcp__serena__cursor_close
+      builtin_tools: "Write"
     prompt: *agent_prompt
 
   - id: ra-2
@@ -169,4 +207,14 @@ tasks:
         - mcp__serena__get_symbols_overview
         - mcp__serena__search_for_pattern
         - Write
+      disallowed_tools:
+        - mcp__serena__cursor_start
+        - mcp__serena__cursor_find
+        - mcp__serena__cursor_move
+        - mcp__serena__cursor_look
+        - mcp__serena__cursor_configure
+        - mcp__serena__cursor_overview
+        - mcp__serena__cursor_history
+        - mcp__serena__cursor_close
+      builtin_tools: "Write"
     prompt: *agent_prompt
