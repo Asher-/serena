@@ -45,12 +45,20 @@ import render_trace  # noqa: E402
 
 
 PILOT_RUNS = [
+    # cursor JSONLs are from the 2026-04-28 v3e sequential pilot (post the
+    # tightened-prompt requiring an explicit falsification test that
+    # distinguishes seek-side enabler from post-seek cascade trigger). The
+    # findings.md were blocked by the user-level require-authority-read.sh
+    # hook on the agent's Write call (--settings override didn't take this run;
+    # root cause TBD), but the JSONL traces are complete and are what the
+    # judge consumes regardless. RA JSONLs unchanged from the 9-0 baseline
+    # (RA arm was not re-run).
     {"id": "cursor-0", "arm": "cursor",
-     "jsonl": "/Users/asher/.claude/projects/-Users-asher-Projects-iina/944d7def-a78e-4a40-8f28-f8f936be07ba.jsonl"},
+     "jsonl": "/Users/asher/.claude/projects/-Users-asher-Projects-iina/bfbc7b60-7f4f-4715-b0ae-4de58963f11b.jsonl"},
     {"id": "cursor-1", "arm": "cursor",
-     "jsonl": "/Users/asher/.claude/projects/-Users-asher-Projects-iina/ddb1ef9c-56a5-47d8-896f-13af2ccbf21a.jsonl"},
+     "jsonl": "/Users/asher/.claude/projects/-Users-asher-Projects-iina/73458692-cbce-4d6d-a749-51135fe5fc5d.jsonl"},
     {"id": "cursor-2", "arm": "cursor",
-     "jsonl": "/Users/asher/.claude/projects/-Users-asher-Projects-iina/0e48b227-39ca-4104-b9ee-ca87d82d7364.jsonl"},
+     "jsonl": "/Users/asher/.claude/projects/-Users-asher-Projects-iina/c1f50041-8842-40cc-bed7-1b482a054f2c.jsonl"},
     {"id": "ra-0", "arm": "ra",
      "jsonl": "/Users/asher/.claude/projects/-Users-asher-Projects-iina/777ca131-5f25-4f66-a6d8-721beb840fc8.jsonl"},
     {"id": "ra-1", "arm": "ra",
@@ -164,12 +172,24 @@ def main():
             "findings": str(verdict_path),
             "skip_preamble": True,
             "options": {
-                # Minimal blast radius: only Write. No MCP tools, no ToolSearch.
-                "allowed_tools": ["Write"],
+                # Minimal blast radius. We deliberately OMIT --allowedTools.
+                # On 2026-04-28 we discovered that passing `--allowedTools Write`
+                # alongside `--settings <path>` causes claude CLI to ignore the
+                # settings-file's hooks override (judges hit user-level
+                # require-authority-read.sh despite an empty PreToolUse: []
+                # in judge.json). With --allowedTools omitted the override
+                # works: builtin_tools="Write" restricts the BUILTIN set to Write,
+                # and no --mcp-config means no MCP tools are available, so no
+                # whitelist is needed.
                 "builtin_tools": "Write",
                 "model": args.model,
-            },
-            "prompt": prompt,
+                # Override user-level SessionStart and PreToolUse hooks so the
+                # judge's verdict context isn't polluted with ~180KB of
+                # brain-context and so the require-authority-read.sh /
+                # block-source-reads.sh hooks don't fire. See
+                # memory://serena/project/claude-cli-mcp-tools-need-project-settings-override.
+                "settings": "/Users/asher/.claude/orchestrate-settings/judge.json",
+            },            "prompt": prompt,
         })
 
     batch = {

@@ -5,13 +5,34 @@ topic_root: topic://project.serena.cursor-vs-ra
 # Cursor-arm half of the pilot. Run this then batch_ra.yaml — sequential
 # halves keep concurrency at 3.
 #
-# allowed_tools count is bounded at 6: empirical testing (2026-04-27) showed
-# claude CLI 2.1.118 and 2.1.119 silently skip MCP child spawn when
-# --allowedTools has 7+ entries. uv subprocess never starts, agents
-# fabricate alternative strategies. 6 entries (5 cursor + Write) is the
-# proven cap; cursor_configure, cursor_history, cursor_close are dropped
-# to stay under the threshold. See cursor-arm-context.yml for the MCP-
-# layer tool-surface isolation.
+# Tool isolation:
+#   - cursor-arm-context.yml's `excluded_tools` is the hard MCP-level
+#     boundary: the serena MCP server physically does not advertise
+#     search_for_pattern, find_symbol, find_referencing_symbols,
+#     get_symbols_overview, the edit tools, or memory tools. That is the
+#     only thing actually keeping the arms isolated.
+#   - `--tools Write,ToolSearch` (via builtin_tools) restricts the BUILTIN
+#     tool surface to those two so the agent cannot reach for Read / Bash /
+#     Grep / Edit / Glob.
+#   - We do NOT pass `--allowedTools`. It's a soft model-level hint (not a
+#     hard limit) and triggers claude CLI 2.1.119's deferred-tools gating
+#     pathologies. See memory://serena/project/claude-cli-allowed-tools-threshold.
+#   - `settings: ~/.claude/orchestrate-settings/cursor-arm.json` overrides
+#     claude CLI's settings hierarchy at the runtime layer, replacing the
+#     user-level SessionStart hook (which dumps ~180KB of brain-context and
+#     corrupts deferred-tools registration so the model sees no MCP tools).
+#     Without this override, orchestrate-spawned cursor sessions list only
+#     Write+ToolSearch and call ToolSearch 30-60x finding nothing. See
+#     memory://serena/project/claude-cli-mcp-tools-need-project-settings-override.
+#
+# v3 surface (post commits e7bbe1c7 cursor_grep + 04f077a3 opt-in projection
+# + b77c80a2 cursor.lsp_timing + 310bc850 required-because + cursor_narrate):
+# cursor_grep is the breadth-discovery primitive (textual regex → cursor at
+# every enclosing LSP symbol) — directly targeting the v2 judge's #1
+# complaint that cursor traces explored narrower surfaces than RA.
+# cursor_narrate writes a fresh `why` onto a cursor without moving —
+# directly targeting the v2 judge's #2 complaint that cursor traces had
+# near-silent turns. The prompt below teaches both.
 
 tasks:
   - id: cursor-0
@@ -22,14 +43,8 @@ tasks:
       mcp_config:
         - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config-cursor.json
       strict_mcp_config: true
-      allowed_tools:
-        - mcp__serena__cursor_start
-        - mcp__serena__cursor_find
-        - mcp__serena__cursor_move
-        - mcp__serena__cursor_look
-        - mcp__serena__cursor_overview
-        - Write
       builtin_tools: "Write,ToolSearch"
+      settings: /Users/asher/.claude/orchestrate-settings/cursor-arm.json
     prompt: &agent_prompt |
       You are investigating a bug in the IINA macOS video player codebase (Swift, at /Users/asher/Projects/iina). The codebase uses SourceKit-LSP. You have a set of code-navigation and reading tools available — consult your tool list to see what you have. If MCP tools (names starting with `mcp__`) are not visible at session start, use the ToolSearch tool to discover them (e.g. query "serena").
 
@@ -47,10 +62,37 @@ tasks:
 
       1. The specific function(s) responsible.
       2. The specific control-flow that produces the cascade.
-      3. Why the existing code cascades instead of clamping.
-      4. What change would fix it (one or two lines of suggested logic; no patch needed).
+      3. Why the existing code cascades instead of clamping. **The bug is described as a *cascade* across multiple files — that explicitly means the action re-fires once per file. So your analysis MUST identify TWO things, not one:** (a) the **seek-side enabler** — the code that allows a single drag tick to advance the playlist (e.g. an over-permissive clamp, an unconditional EOF seek); AND (b) the **post-seek cascade trigger** — the code that, AFTER mpv has rolled to the next file, re-fires the same drag-action handler against the new file. A complete answer must trace the post-seek pathway from mpv's event handlers back into the slider/IBAction layer; if you stop at the seek-side enabler you have explained at most one playlist advance, not the cascade. Locate the specific symbols on BOTH sides — including any handlers in `MPVController` or comparable mpv-event code, any "playback restart" / "playback advance" / "syncUI" / "updatePlayTime" pathway, and any unconditional writes back to the slider's value during tracking.
+      4. What change would fix it (one or two lines of suggested logic; no patch needed). The fix may live on either side of the cascade loop; identify which side and why.
 
       If you become confident the bug is elsewhere than the symptom area suggests, follow the evidence — the symptom area is a starting hint, not a boundary.
+
+      Do NOT satisfice on the first plausible explanation. The bug is described as a *cascade*; a single explanation that accounts for one playlist advance does not explain a cascade. Before declaring "I have enough" you must pass the following structural gate:
+
+        FALSIFICATION TEST. Articulate, in writing inside your report's WHY IT CASCADES section, the specific alternative mechanism your hypothesis must rule out. The form is: "if my proposed fix landed but [SPECIFIC ALTERNATIVE MECHANISM] still occurred, would the cascade still happen?" Then answer the question. To answer it honestly you must have actually inspected the code that implements the alternative — narrating "I'll look at X" without an actual tool call against X is failure of this gate. The alternative you articulate cannot be a strawman; it must be a real candidate that, on the evidence available, could plausibly close the cascade loop.
+
+      Concretely: a complete report identifies (a) the seek-side enabler, (b) the post-seek cascade trigger, AND (c) at least one alternative candidate for (b) that you considered and ruled out by reading code, with the file:line citation for that ruling-out. If you cannot produce (c), you are satisficing — keep investigating.
+
+      # Cursor surface — how to use it
+
+      Every navigational cursor tool (`cursor_start`, `cursor_find`, `cursor_grep`, `cursor_move`, `cursor_narrate`) requires a `because` argument. `because` is your **goal in understanding** for the action — the semantic question this hop, search, or position lets you answer that the previous one did not. Phrase it as the gap in your understanding the action closes; not a description of where you are going, not a hypothesis about what you will find.
+
+      ✓ "to confirm whether the slider rewrite during tracking is what re-fires the action against the new file, or whether AppKit is doing the re-fire on its own"
+      ✓ "to figure out which layer suppresses repeat seeks once mpv has rolled the playlist over — the slider tick path or the seek-side clamp"
+      ✗ "to find playSliderChanges" (mechanical — describes where, not why)
+      ✗ "I think the bug is in PlayerCore.seek" (hypothesis about code structure)
+      ✗ "to look at the drag handler" (no semantic question)
+
+      Each `because` is rendered as a `why: <text>` line above the cursor's anchor on every subsequent projection, so a fresh reader of the trace can reconstruct your reasoning chain alongside the symbolic positions. Treat it as the trace's primary record of intent.
+
+      Available primitives:
+      - `cursor_start(name_path, because, ...)` — start at a known unique symbol.
+      - `cursor_find(name_path_pattern, because, ...)` — search for symbols by name pattern; opens a cursor at the unique match or returns a candidate list.
+      - `cursor_grep(substring_pattern, because, ...)` — textual regex over the codebase that opens a cursor at every enclosing LSP symbol. The breadth-discovery primitive: prefer this over a chain of `cursor_find` / per-file overviews when you need to map *all* sites of a behaviour (every site that mutates a flag, every handler for an event, every caller of a method). A single `cursor_grep` call replaces repeated find/look chains.
+      - `cursor_move(cursor_id, target_name, because, ...)` — walk an LSP edge from the current position (contains, references, referenced-by, calls, called-by, inherits, inherited-by).
+      - `cursor_narrate(cursor_id, because)` — replace the cursor's recorded `why` without moving. Use it between hops when looking at a position has changed your hypothesis and you want the new question captured before the next move. The narration is a *semantic goal*, not a description of where the cursor is.
+
+      The full cursor surface (`cursor_look`, `cursor_overview`, `cursor_configure`, `cursor_history`, `cursor_close`) is also available. `cursor_configure(cursor_id, include_chain=true, include_siblings=true, include_gist=true)` widens a single hop's projection layer-by-layer when context warrants; `cursor_configure(cursor_id, edge_types=[...])` resolves a configurable subset of LSP neighbors (per-edge resolution can be slow on large indexed projects, so pass only what you need).
 
       # Output format
 
@@ -70,6 +112,7 @@ tasks:
       - Token cost is being measured but is not a target. Investigate as much as the task warrants.
 
   - id: cursor-1
+    depends_on: [cursor-0]
     roots: [topic://project.serena.cursor-vs-ra]
     findings: /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/runs/cursor-1/findings.md
     skip_preamble: true
@@ -77,17 +120,12 @@ tasks:
       mcp_config:
         - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config-cursor.json
       strict_mcp_config: true
-      allowed_tools:
-        - mcp__serena__cursor_start
-        - mcp__serena__cursor_find
-        - mcp__serena__cursor_move
-        - mcp__serena__cursor_look
-        - mcp__serena__cursor_overview
-        - Write
       builtin_tools: "Write,ToolSearch"
+      settings: /Users/asher/.claude/orchestrate-settings/cursor-arm.json
     prompt: *agent_prompt
 
   - id: cursor-2
+    depends_on: [cursor-1]
     roots: [topic://project.serena.cursor-vs-ra]
     findings: /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/runs/cursor-2/findings.md
     skip_preamble: true
@@ -95,12 +133,6 @@ tasks:
       mcp_config:
         - /Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/mcp-config-cursor.json
       strict_mcp_config: true
-      allowed_tools:
-        - mcp__serena__cursor_start
-        - mcp__serena__cursor_find
-        - mcp__serena__cursor_move
-        - mcp__serena__cursor_look
-        - mcp__serena__cursor_overview
-        - Write
       builtin_tools: "Write,ToolSearch"
+      settings: /Users/asher/.claude/orchestrate-settings/cursor-arm.json
     prompt: *agent_prompt

@@ -1,0 +1,90 @@
+{
+  "out_dir": "/Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/runs/judge/20260428T074512Z",
+  "coordinator": "cursor-vs-ra-judge-20260428T074512Z",
+  "model": "claude-opus-4-7",
+  "seed": 42,
+  "topic_root": "topic://project.serena.cursor-vs-ra",
+  "template": "/Users/asher/Dropbox/Projects/claude/serena/docs/cursor-vs-ra/templates/blind-judge-prompt.md",
+  "pairs": [
+    {
+      "pair_id": "pair-00-cursor-0-vs-ra-0",
+      "cursor_id": "cursor-0",
+      "ra_id": "ra-0",
+      "cursor_was_a": false,
+      "trace_a_id": "ra-0",
+      "trace_b_id": "cursor-0"
+    },
+    {
+      "pair_id": "pair-01-cursor-0-vs-ra-1",
+      "cursor_id": "cursor-0",
+      "ra_id": "ra-1",
+      "cursor_was_a": true,
+      "trace_a_id": "cursor-0",
+      "trace_b_id": "ra-1"
+    },
+    {
+      "pair_id": "pair-02-cursor-0-vs-ra-2",
+      "cursor_id": "cursor-0",
+      "ra_id": "ra-2",
+      "cursor_was_a": true,
+      "trace_a_id": "cursor-0",
+      "trace_b_id": "ra-2"
+    },
+    {
+      "pair_id": "pair-03-cursor-1-vs-ra-0",
+      "cursor_id": "cursor-1",
+      "ra_id": "ra-0",
+      "cursor_was_a": true,
+      "trace_a_id": "cursor-1",
+      "trace_b_id": "ra-0"
+    },
+    {
+      "pair_id": "pair-04-cursor-1-vs-ra-1",
+      "cursor_id": "cursor-1",
+      "ra_id": "ra-1",
+      "cursor_was_a": false,
+      "trace_a_id": "ra-1",
+      "trace_b_id": "cursor-1"
+    },
+    {
+      "pair_id": "pair-05-cursor-1-vs-ra-2",
+      "cursor_id": "cursor-1",
+      "ra_id": "ra-2",
+      "cursor_was_a": false,
+      "trace_a_id": "ra-2",
+      "trace_b_id": "cursor-1"
+    },
+    {
+      "pair_id": "pair-06-cursor-2-vs-ra-0",
+      "cursor_id": "cursor-2",
+      "ra_id": "ra-0",
+      "cursor_was_a": false,
+      "trace_a_id": "ra-0",
+      "trace_b_id": "cursor-2"
+    },
+    {
+      "pair_id": "pair-07-cursor-2-vs-ra-1",
+      "cursor_id": "cursor-2",
+      "ra_id": "ra-1",
+      "cursor_was_a": true,
+      "trace_a_id": "cursor-2",
+      "trace_b_id": "ra-1"
+    },
+    {
+      "pair_id": "pair-08-cursor-2-vs-ra-2",
+      "cursor_id": "cursor-2",
+      "ra_id": "ra-2",
+      "cursor_was_a": true,
+      "trace_a_id": "cursor-2",
+      "trace_b_id": "ra-2"
+    }
+  ],
+  "trace_chars": {
+    "cursor-0": 93630,
+    "cursor-1": 101774,
+    "cursor-2": 62593,
+    "ra-0": 114810,
+    "ra-1": 125636,
+    "ra-2": 80466
+  }
+}

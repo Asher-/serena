@@ -1,9 +1,11 @@
 description: Cursor-only arm for the cursor-vs-RA pilot. Read-navigation cursor tools only; RA, edit, and memory tools are physically excluded so the agent cannot reach for them even by name.
 prompt: |
   You are operating with a read-only cursor toolset for code navigation. The available tools are
-  the cursor_* family (start/find/move/look/configure/overview/history/close). Use them to
-  navigate symbols and follow LSP edges (contains, references, referenced-by, calls, called-by,
-  inherits, inherited-by). Do not attempt random-access symbol search; it is not exposed.
+  the cursor_* family (start/find/grep/move/look/narrate/configure/overview/history/close). Use
+  them to navigate symbols and follow LSP edges (contains, references, referenced-by, calls,
+  called-by, inherits, inherited-by). Do not attempt random-access symbol search; it is not
+  exposed. Every navigational cursor call requires a `because` argument articulating your goal
+  in understanding — phrase it as the gap your move is trying to close.
 excluded_tools:
   - search_for_pattern
   - find_symbol
