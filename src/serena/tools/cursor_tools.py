@@ -362,6 +362,150 @@ class CursorFindTool(Tool, ToolMarkerSymbolicRead):
         return self._limit_length(result, max_answer_chars, shortened_result_factories=[shortened_relative_path_to_name_paths])
 
 
+class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
+    """
+    Find a textual pattern and start a cursor at every enclosing symbol.
+
+    cursor_grep is the symbol-aware sibling of ``search_for_pattern``: it
+    runs the same regex pipeline but, for each hit that lives inside an
+    LSP-addressable symbol, opens a fresh cursor at that enclosing symbol
+    so the agent can navigate each hit's neighborhood symbolically -- read
+    the body, walk references, follow calls. Hits that fall outside any
+    addressable symbol are counted in the report but no cursor is opened
+    for them (they have no LSP handle to anchor on).
+
+    Use this when you want to *explore* the symbols that contain a
+    pattern. Use ``search_for_pattern`` when you only need to *read* the
+    matched lines and have no follow-up navigation in mind.
+    """
+
+    def apply(
+        self,
+        substring_pattern: str,
+        relative_path: str = "",
+        paths_include_glob: str = "",
+        paths_exclude_glob: str = "",
+        restrict_to_code_files: bool = True,
+        max_matches: int = 20,
+        context_lines_before: int = 0,
+        context_lines_after: int = 0,
+        max_answer_chars: int = -1,
+    ) -> str:
+        """
+        Find a regex pattern and open one cursor per enclosing symbol.
+
+        Pattern Matching Logic:
+            For each match, the returned report contains the full lines where
+            the substring pattern is found, optionally with context lines.
+            The pattern is compiled with ``re.DOTALL``, so ``.`` matches
+            newlines -- never put ``.*`` at the very beginning or end of the
+            pattern, and prefer non-greedy quantifiers where possible.
+
+        Cursor Creation Logic:
+            For each match that falls inside an LSP-addressable symbol, a
+            cursor is opened at the enclosing symbol. Multiple hits inside
+            the same symbol collapse to a single cursor (one cursor per
+            unique enclosing symbol). When the number of unique enclosing
+            symbols exceeds ``max_matches``, only the first ``max_matches``
+            symbols receive cursors; the rest are listed in a deferred
+            section without cursor IDs.
+
+        :param substring_pattern: regular expression for a substring pattern
+            to search for.
+        :param relative_path: only sub-paths of this path (relative to the
+            project root) are searched. Pointing at a single file restricts
+            the search to that file. Must exist.
+        :param paths_include_glob: glob pattern restricting which files to
+            include in the search. Empty disables include filtering.
+        :param paths_exclude_glob: glob pattern excluding files; takes
+            precedence over ``paths_include_glob``. Empty disables exclude.
+        :param restrict_to_code_files: when ``True`` (the default), the
+            search is confined to files an analyser can address symbolically
+            -- the only files where enclosing-symbol grouping is meaningful.
+        :param max_matches: maximum number of cursors to open (one per
+            unique enclosing symbol). Additional groups beyond this cap are
+            listed without cursor IDs. ``-1`` means no cap.
+        :param context_lines_before: number of lines of context to include
+            before each match in the report.
+        :param context_lines_after: number of lines of context to include
+            after each match in the report.
+        :param max_answer_chars: maximum characters for the returned output;
+            ``-1`` uses the configured default.
+        :return: a multi-cursor report listing each opened cursor's anchor
+            and hit count, plus any deferred symbols that would have
+            received a cursor if not for ``max_matches``.
+        """
+        manager = self.agent.get_cursor_manager()
+        groups, n_unsymboled = manager.find_pattern_with_enclosing_symbols(
+            substring_pattern=substring_pattern,
+            relative_path=relative_path or None,
+            paths_include_glob=paths_include_glob,
+            paths_exclude_glob=paths_exclude_glob,
+            restrict_to_code_files=restrict_to_code_files,
+            context_lines_before=context_lines_before,
+            context_lines_after=context_lines_after,
+        )
+
+        # nothing landed inside an LSP symbol -- short-circuit to a clean
+        # message rather than a header with zero entries
+        if not groups:
+            if n_unsymboled == 0:
+                return f"No matches for {substring_pattern!r}."
+            return (
+                f"Found {n_unsymboled} match(es) for {substring_pattern!r}, "
+                f"none inside any LSP-addressable symbol. "
+                f"Use search_for_pattern for the file-level listing."
+            )
+
+        # cap cursor creation at max_matches; the remainder are listed
+        # without cursors so the agent can decide whether to widen
+        if max_matches < 0:
+            opened_groups = groups
+            deferred = []
+        else:
+            opened_groups = groups[:max_matches]
+            deferred = groups[max_matches:]
+
+        opened_cursors: list[tuple[str, LanguageServerSymbol, list[str]]] = []
+        for sym, hits in opened_groups:
+            cid, _ = manager.register_cursor_at_symbol(sym)
+            opened_cursors.append((cid, sym, hits))
+
+        # build the multi-cursor report header
+        n_hits = sum(len(hits) for _, hits in groups)
+        header_parts = [
+            f"Found {n_hits} match(es) across {len(groups)} symbol(s).",
+            f"Started {len(opened_cursors)} cursor(s)"
+            + (f"; {len(deferred)} symbol(s) deferred." if deferred else "."),
+        ]
+        if n_unsymboled:
+            header_parts.append(
+                f"{n_unsymboled} hit(s) outside any LSP symbol (use search_for_pattern)."
+            )
+        lines: list[str] = [" ".join(header_parts), ""]
+
+        # per-cursor anchor + indented hit display strings
+        for cid, _sym, hits in opened_cursors:
+            anchor = manager.format_cursor_view(cid).splitlines()[0]
+            lines.append(f"[{cid}]  {anchor}    {len(hits)} hit(s)")
+            for hit in hits:
+                for hit_line in hit.splitlines():
+                    lines.append(f"    {hit_line}")
+            lines.append("")
+
+        # deferred groups: just identifiers + counts so the agent can
+        # rerun with a tighter pattern or a higher cap
+        if deferred:
+            lines.append("-- Deferred (no cursor opened; tighten the pattern or raise max_matches) --")
+            for sym, hits in deferred:
+                rel = sym.location.relative_path or "?"
+                lines.append(
+                    f"  @ {sym.get_name_path()} :{sym.symbol_kind_name}@{rel}    {len(hits)} hit(s)"
+                )
+
+        return self._limit_length("\n".join(lines).rstrip() + "\n", max_answer_chars)
+
+
 class CursorReplaceBodyTool(Tool, ToolMarkerSymbolicEdit):
     """
     Replace the body of the symbol at the cursor's current position.

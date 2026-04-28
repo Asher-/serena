@@ -515,6 +515,91 @@ class TestCursorFindAndOverview:
             overview_tool.apply(relative_path="does/not/exist.py")
 
 
+
+class TestCursorGrep:
+    """Integration tests for cursor_grep over the Python test repo."""
+
+    def test_cursor_grep_starts_cursor_at_enclosing_symbol(self, python_serena_agent: SerenaAgent) -> None:
+        """cursor_grep opens a cursor at the symbol containing each match."""
+        from serena.tools.cursor_tools import CursorGrepTool
+
+        grep_tool = python_serena_agent.get_tool(CursorGrepTool)
+        # the docstring/body of UserService.create_user contains "create_user"
+        result = grep_tool.apply(
+            substring_pattern=r"def create_user\b",
+            relative_path=os.path.join("test_repo", "services.py"),
+        )
+        assert "Started" in result and "cursor" in result
+        # the report header counts matches and symbols
+        assert re.search(r"Found \d+ match\(es\) across \d+ symbol\(s\)", result)
+        # the cursor's anchor mentions the enclosing method's name path
+        assert "UserService/create_user" in result or "create_user" in result
+        # at least one cursor id was assigned
+        assert re.search(r"\[c\w+\]", result)
+
+    def test_cursor_grep_collapses_multiple_hits_to_one_cursor(self, python_serena_agent: SerenaAgent) -> None:
+        """Multiple hits inside one method collapse to a single cursor."""
+        from serena.tools.cursor_tools import CursorGrepTool
+
+        grep_tool = python_serena_agent.get_tool(CursorGrepTool)
+        # 'self.users' appears 3+ times inside UserService.create_user / get_user / etc.
+        # Confine to a single method to make the collapse-to-one-cursor assertion
+        # robust against the symbol-resolution layer's grouping choices.
+        result = grep_tool.apply(
+            substring_pattern=r"raise ValueError\(f\"User with ID",
+            relative_path=os.path.join("test_repo", "services.py"),
+        )
+        # exactly one enclosing symbol for this very specific pattern
+        cursor_ids = re.findall(r"\[(c\w+)\]", result)
+        assert len(cursor_ids) == 1, f"expected one cursor, got {cursor_ids}"
+
+    def test_cursor_grep_no_matches(self, python_serena_agent: SerenaAgent) -> None:
+        """cursor_grep returns a clear message when no symbol-resident matches exist."""
+        from serena.tools.cursor_tools import CursorGrepTool
+
+        grep_tool = python_serena_agent.get_tool(CursorGrepTool)
+        result = grep_tool.apply(
+            substring_pattern=r"__absolutely_no_such_token_xyzzy__",
+            relative_path=os.path.join("test_repo", "services.py"),
+        )
+        assert "No matches" in result or "none inside any LSP-addressable symbol" in result
+
+    def test_cursor_grep_max_matches_caps_cursor_creation(self, python_serena_agent: SerenaAgent) -> None:
+        """When more enclosing symbols match than max_matches allows, the rest go in a deferred section."""
+        from serena.tools.cursor_tools import CursorGrepTool
+
+        grep_tool = python_serena_agent.get_tool(CursorGrepTool)
+        # ``def \w+_user`` matches every method whose name ends in ``_user``
+        # in services.py (create_user, get_user, delete_user). That gives
+        # three distinct enclosing symbols, so max_matches=2 reliably
+        # exercises the deferred path.
+        result = grep_tool.apply(
+            substring_pattern=r"def \w+_user\(",
+            relative_path=os.path.join("test_repo", "services.py"),
+            max_matches=2,
+        )
+        # exactly two cursors opened -- the rest get deferred
+        cursor_ids = re.findall(r"\[(c\w+)\]", result)
+        assert len(cursor_ids) == 2, f"expected two cursors, got {cursor_ids}"
+        assert "Deferred" in result
+
+    def test_cursor_grep_opens_cursors_in_manager(self, python_serena_agent: SerenaAgent) -> None:
+        """The cursors reported by cursor_grep are real cursors managed by the agent."""
+        from serena.tools.cursor_tools import CursorGrepTool, CursorLookTool
+
+        grep_tool = python_serena_agent.get_tool(CursorGrepTool)
+        look_tool = python_serena_agent.get_tool(CursorLookTool)
+        result = grep_tool.apply(
+            substring_pattern=r"raise ValueError\(f\"User with ID",
+            relative_path=os.path.join("test_repo", "services.py"),
+        )
+        cursor_ids = re.findall(r"\[(c\w+)\]", result)
+        assert cursor_ids, "expected at least one opened cursor"
+        # cursor_look on the reported id must succeed (cursor is registered)
+        view = look_tool.apply(cursor_id=cursor_ids[0])
+        assert "create_user" in view
+
+
 # ===========================================================================
 # Cursor Edit tool tests — use a throwaway file so we can assert and revert.
 # ===========================================================================

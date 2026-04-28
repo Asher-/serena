@@ -1219,6 +1219,141 @@ class CursorManager:
             within_relative_path=relative_path,
         )
 
+    def find_pattern_with_enclosing_symbols(
+        self,
+        substring_pattern: str,
+        relative_path: str | None = None,
+        paths_include_glob: str = "",
+        paths_exclude_glob: str = "",
+        restrict_to_code_files: bool = True,
+        context_lines_before: int = 0,
+        context_lines_after: int = 0,
+    ) -> tuple[list[tuple[LanguageServerSymbol, list[str]]], int]:
+        """Find regex matches grouped by their enclosing LSP symbol.
+
+        Each match is associated with the smallest LSP symbol that contains
+        its hit line; matches that fall outside any addressable LSP symbol
+        are counted but not surfaced (the caller -- typically
+        :class:`~serena.tools.cursor_tools.CursorGrepTool` -- has nowhere
+        to anchor a cursor for them, so they are reported as a count
+        rather than returned).
+
+        :param substring_pattern: regular expression compiled with
+            ``re.DOTALL``; mirrors :class:`~serena.tools.file_tools.SearchForPatternTool`
+            semantics.
+        :param relative_path: search root relative to the project. ``None``
+            (the default) searches every non-ignored file.
+        :param paths_include_glob: glob pattern restricting the file set.
+            Empty disables include filtering.
+        :param paths_exclude_glob: glob pattern excluding files; takes
+            precedence over ``paths_include_glob``. Empty disables exclude.
+        :param restrict_to_code_files: when ``True`` (the default), the
+            search is confined to files an analyser can address
+            symbolically -- the only files where enclosing-symbol grouping
+            is meaningful.
+        :param context_lines_before: extra lines rendered alongside each
+            hit's matched line in the returned display strings.
+        :param context_lines_after: extra lines rendered alongside each
+            hit's matched line in the returned display strings.
+        :return: a 2-tuple ``(groups, n_unsymboled)``. ``groups`` is a list
+            of ``(enclosing_symbol, hit_display_strings)`` tuples in
+            discovery order -- one tuple per unique enclosing symbol.
+            ``n_unsymboled`` counts matches that landed outside any
+            addressable LSP symbol (skipped for cursor-creation purposes).
+        :raises FileNotFoundError: when ``relative_path`` does not exist
+            on disk.
+        """
+        # locate and validate the search scope
+        rel = relative_path or ""
+        abs_path = os.path.join(self._project.project_root, rel)
+        if not os.path.exists(abs_path):
+            raise FileNotFoundError(f"Relative path {rel!r} does not exist.")
+
+        # delegate the regex pass to the project search machinery so the
+        # result set matches what SearchForPatternTool would surface
+        if restrict_to_code_files:
+            matches = self._project.search_source_files_for_pattern(
+                pattern=substring_pattern,
+                relative_path=rel,
+                context_lines_before=context_lines_before,
+                context_lines_after=context_lines_after,
+                paths_include_glob=paths_include_glob.strip() or None,
+                paths_exclude_glob=paths_exclude_glob.strip() or None,
+            )
+        else:
+            from serena.util.file_system import scan_directory
+            from serena.util.text_utils import search_files
+            if os.path.isfile(abs_path):
+                rel_paths_to_search = [rel]
+            else:
+                _dirs, rel_paths_to_search = scan_directory(
+                    path=abs_path,
+                    recursive=True,
+                    is_ignored_dir=self._project.is_ignored_path,
+                    is_ignored_file=self._project.is_ignored_path,
+                    relative_to=self._project.project_root,
+                )
+            matches = search_files(
+                rel_paths_to_search,
+                substring_pattern,
+                context_lines_before=context_lines_before,
+                context_lines_after=context_lines_after,
+                file_reader=self._project.read_file,
+                root_path=self._project.project_root,
+                paths_include_glob=paths_include_glob or None,
+                paths_exclude_glob=paths_exclude_glob or None,
+            )
+
+        # resolve enclosing LSP symbol per match; first occurrence per
+        # (rel_path, name_path) becomes the group's anchor symbol so the
+        # caller can register a cursor at it
+        retriever = self._retriever
+        groups: dict[tuple[str, str], LanguageServerSymbol] = {}
+        hits_per_group: dict[tuple[str, str], list[str]] = {}
+        group_order: list[tuple[str, str]] = []
+        n_unsymboled = 0
+
+        for match in matches:
+            assert match.source_file_path is not None
+            rel_path = match.source_file_path
+            # MatchedConsecutiveLines.line_number is 1-indexed; the LSP
+            # request expects 0-indexed line numbers
+            matched_line = match.matched_lines[0]
+            line_0idx = matched_line.line_number - 1
+            # query at the first non-whitespace column so the LSP's
+            # innermost-container lookup lands on actual code -- column 0
+            # of an indented line falls in the leading-whitespace gutter
+            # and some LSP implementations return None for it
+            line_content = matched_line.line_content or ""
+            stripped = line_content.lstrip()
+            col_0idx = len(line_content) - len(stripped) if stripped else 0
+            if not retriever.can_analyze_file(rel_path):
+                n_unsymboled += 1
+                continue
+            try:
+                ls = retriever.get_language_server(rel_path)
+                sym_dict = ls.request_containing_symbol(rel_path, line_0idx, col_0idx, strict=False)
+            except Exception as e:
+                # rendering is best-effort: when the LSP cannot answer the
+                # containment query for one file, skip the hit rather than
+                # fail the whole search
+                log.debug(f"Could not resolve containing symbol for {rel_path}:{line_0idx}: {e}")
+                sym_dict = None
+            if sym_dict is None:
+                n_unsymboled += 1
+                continue
+            sym = LanguageServerSymbol(sym_dict)
+            name_path = sym.get_name_path()
+            key = (rel_path, name_path)
+            if key not in groups:
+                groups[key] = sym
+                hits_per_group[key] = []
+                group_order.append(key)
+            hits_per_group[key].append(match.to_display_string())
+
+        # build the ordered result preserving discovery order
+        return [(groups[k], hits_per_group[k]) for k in group_order], n_unsymboled
+
     def register_cursor_at_symbol(
         self,
         symbol: LanguageServerSymbol,
