@@ -762,6 +762,95 @@ class TestProjectionToggles:
         assert "<- src/m.py" in view  # chain present
         assert "gist" not in view  # gist absent
 
+
+
+# ── CursorManager: per-edge LSP timing instrumentation ──────────────────
+
+
+class TestResolveNeighborsTiming:
+    """Verify that ``resolve_neighbors`` emits per-edge wall-clock telemetry.
+
+    The instrumentation lets developers diagnose which LSP edges dominate
+    cost on a given project (SourceKit-LSP REFERENCES / INHERITS can be
+    multi-minutes per symbol on large indexed projects). Each edge logs
+    its elapsed wall-clock + neighbor count at INFO level under the
+    ``cursor.lsp_timing`` channel; a final summary line lists the total
+    plus a per-edge breakdown.
+    """
+
+    @patch("serena.cursor.LanguageServerSymbolRetriever")
+    def test_per_edge_timing_emitted_under_cursor_lsp_timing(self, mock_retriever_cls, caplog):
+        """Each active edge type emits an info-level timing record under cursor.lsp_timing."""
+        manager = _make_manager()
+        sym = _make_symbol(name="MyClass", kind_name="Class", rel_path="src/m.py", line=10, col=0)
+        mock_retriever = mock_retriever_cls.return_value
+        mock_retriever.find_unique.return_value = sym
+        mock_retriever.get_language_server.return_value = MagicMock(
+            request_definition=MagicMock(return_value=[]),
+            request_referencing_symbols=MagicMock(return_value=[]),
+            request_call_hierarchy_outgoing=MagicMock(return_value=[]),
+            request_call_hierarchy_incoming=MagicMock(return_value=[]),
+            request_type_hierarchy_supertypes=MagicMock(return_value=[]),
+            request_type_hierarchy_subtypes=MagicMock(return_value=[]),
+        )
+
+        cid, _ = manager.start_cursor("MyClass", edge_types=frozenset({EdgeType.CONTAINS, EdgeType.REFERENCES}))
+        with caplog.at_level("INFO", logger="cursor.lsp_timing"):
+            manager.resolve_neighbors(cid)
+
+        records = [r for r in caplog.records if r.name == "cursor.lsp_timing"]
+        # at minimum: one record per active edge + a final summary
+        assert len(records) >= 3
+        edge_lines = [r.getMessage() for r in records if "edge=" in r.getMessage()]
+        # the two opted-in edges must each be timed
+        assert any("edge=contains" in m for m in edge_lines)
+        assert any("edge=references" in m for m in edge_lines)
+        # an edge we did not opt into must NOT be timed (gating respected)
+        assert not any("edge=inherits" in m for m in edge_lines)
+
+    @patch("serena.cursor.LanguageServerSymbolRetriever")
+    def test_timing_summary_lists_total_and_breakdown(self, mock_retriever_cls, caplog):
+        """The final summary line includes a total_ms field and a per-edge breakdown."""
+        manager = _make_manager()
+        sym = _make_symbol(name="MyClass", kind_name="Class", rel_path="src/m.py", line=10, col=0)
+        mock_retriever = mock_retriever_cls.return_value
+        mock_retriever.find_unique.return_value = sym
+        mock_retriever.get_language_server.return_value = MagicMock(
+            request_definition=MagicMock(return_value=[]),
+            request_referencing_symbols=MagicMock(return_value=[]),
+            request_call_hierarchy_outgoing=MagicMock(return_value=[]),
+            request_call_hierarchy_incoming=MagicMock(return_value=[]),
+            request_type_hierarchy_supertypes=MagicMock(return_value=[]),
+            request_type_hierarchy_subtypes=MagicMock(return_value=[]),
+        )
+
+        cid, _ = manager.start_cursor("MyClass", edge_types=frozenset({EdgeType.CONTAINS}))
+        with caplog.at_level("INFO", logger="cursor.lsp_timing"):
+            manager.resolve_neighbors(cid)
+
+        # find the summary line
+        summary = next(
+            (r.getMessage() for r in caplog.records if "resolve_neighbors total_ms=" in r.getMessage()),
+            None,
+        )
+        assert summary is not None, [r.getMessage() for r in caplog.records]
+        assert "total_ms=" in summary
+        assert "contains=" in summary  # per-edge breakdown contains the active edge
+
+    @patch("serena.cursor.LanguageServerSymbolRetriever")
+    def test_no_summary_when_no_active_edges(self, mock_retriever_cls, caplog):
+        """A cursor with no active edges emits no summary line (and no per-edge records)."""
+        manager = _make_manager()
+        sym = _make_symbol(name="MyClass", kind_name="Class", rel_path="src/m.py", line=10, col=0)
+        mock_retriever_cls.return_value.find_unique.return_value = sym
+
+        cid, _ = manager.start_cursor("MyClass")  # default: no edges
+        with caplog.at_level("INFO", logger="cursor.lsp_timing"):
+            manager.resolve_neighbors(cid)
+
+        timing_records = [r for r in caplog.records if r.name == "cursor.lsp_timing"]
+        assert timing_records == []
+
 # ── CursorManager: find_symbols / register_cursor_at_symbol / reanchor_cursor ──
 
 

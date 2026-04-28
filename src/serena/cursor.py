@@ -7,6 +7,7 @@ Provides a stateful cursor that can be positioned on a symbol and moved along LS
 
 import logging
 import os
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -629,8 +630,34 @@ class CursorManager:
         line = location.line
         col = location.column
 
-        # Contains: children of the current symbol
+        # per-edge timing: lets developers diagnose which LSP edges dominate
+        # wall-clock cost on a given project (SourceKit-LSP REFERENCES /
+        # INHERITS can be multi-minutes per symbol on large indexed
+        # projects). Each edge logs its elapsed wall-clock + neighbor count
+        # at INFO level under the ``cursor.lsp_timing`` logger so callers
+        # can grep one channel without filter noise.
+        timing_log = logging.getLogger("cursor.lsp_timing")
+        per_edge_timing: dict[EdgeType, float] = {}
+        per_edge_counts: dict[EdgeType, int] = {}
+
+        def _record_edge(edge: EdgeType, started_at: float, count: int) -> None:
+            elapsed = time.perf_counter() - started_at
+            per_edge_timing[edge] = elapsed
+            per_edge_counts[edge] = count
+            timing_log.info(
+                "cursor=%s edge=%s elapsed_ms=%.1f neighbors=%d",
+                cursor_id,
+                edge.value,
+                elapsed * 1000.0,
+                count,
+            )
+
+        total_started = time.perf_counter()
+
+        # Contains: children of the current symbol (in-process iteration; no LSP roundtrip)
         if EdgeType.CONTAINS in state.active_edge_types:
+            t0 = time.perf_counter()
+            n_before = len(neighbors)
             for child in symbol.iter_children():
                 neighbors.append(
                     NeighborSymbol(
@@ -642,6 +669,7 @@ class CursorManager:
                         edge_type=EdgeType.CONTAINS,
                     )
                 )
+            _record_edge(EdgeType.CONTAINS, t0, len(neighbors) - n_before)
 
         retriever = self._retriever
         ls = retriever.get_language_server(rel_path)
@@ -649,6 +677,8 @@ class CursorManager:
 
         # References: symbols that THIS symbol references (definitions it points to)
         if EdgeType.REFERENCES in state.active_edge_types:
+            t0 = time.perf_counter()
+            n_before = len(neighbors)
             try:
                 definitions = ls.request_definition(rel_path, line, col)
                 for defn in definitions:
@@ -673,9 +703,12 @@ class CursorManager:
             except SolidLSPException as e:
                 log.debug(f"Failed to resolve definitions for cursor: {e}")
                 failed_edge_types.append(EdgeType.REFERENCES)
+            _record_edge(EdgeType.REFERENCES, t0, len(neighbors) - n_before)
 
         # Referenced-by: symbols that reference THIS symbol
         if EdgeType.REFERENCED_BY in state.active_edge_types:
+            t0 = time.perf_counter()
+            n_before = len(neighbors)
             try:
                 ref_symbols = ls.request_referencing_symbols(rel_path, line, col, include_imports=False, include_self=False)
                 for ref in ref_symbols:
@@ -696,9 +729,12 @@ class CursorManager:
             except SolidLSPException as e:
                 log.debug(f"Failed to resolve referencing symbols for cursor: {e}")
                 failed_edge_types.append(EdgeType.REFERENCED_BY)
+            _record_edge(EdgeType.REFERENCED_BY, t0, len(neighbors) - n_before)
 
         # Calls: symbols that this symbol calls (outgoing calls)
         if EdgeType.CALLS in state.active_edge_types:
+            t0 = time.perf_counter()
+            n_before = len(neighbors)
             try:
                 outgoing = ls.request_call_hierarchy_outgoing(rel_path, line, col)
                 for outgoing_call in outgoing:
@@ -707,9 +743,12 @@ class CursorManager:
             except SolidLSPException as e:
                 log.debug(f"Failed to resolve outgoing calls for cursor: {e}")
                 failed_edge_types.append(EdgeType.CALLS)
+            _record_edge(EdgeType.CALLS, t0, len(neighbors) - n_before)
 
         # Called-by: symbols that call this symbol (incoming calls)
         if EdgeType.CALLED_BY in state.active_edge_types:
+            t0 = time.perf_counter()
+            n_before = len(neighbors)
             try:
                 incoming = ls.request_call_hierarchy_incoming(rel_path, line, col)
                 for incoming_call in incoming:
@@ -718,9 +757,12 @@ class CursorManager:
             except SolidLSPException as e:
                 log.debug(f"Failed to resolve incoming calls for cursor: {e}")
                 failed_edge_types.append(EdgeType.CALLED_BY)
+            _record_edge(EdgeType.CALLED_BY, t0, len(neighbors) - n_before)
 
         # Inherits: supertypes of the current symbol
         if EdgeType.INHERITS in state.active_edge_types:
+            t0 = time.perf_counter()
+            n_before = len(neighbors)
             try:
                 supertypes = ls.request_type_hierarchy_supertypes(rel_path, line, col)
                 for item in supertypes:
@@ -728,9 +770,12 @@ class CursorManager:
             except SolidLSPException as e:
                 log.debug(f"Failed to resolve supertypes for cursor: {e}")
                 failed_edge_types.append(EdgeType.INHERITS)
+            _record_edge(EdgeType.INHERITS, t0, len(neighbors) - n_before)
 
         # Inherited-by: subtypes of the current symbol
         if EdgeType.INHERITED_BY in state.active_edge_types:
+            t0 = time.perf_counter()
+            n_before = len(neighbors)
             try:
                 subtypes = ls.request_type_hierarchy_subtypes(rel_path, line, col)
                 for item in subtypes:
@@ -738,10 +783,27 @@ class CursorManager:
             except SolidLSPException as e:
                 log.debug(f"Failed to resolve subtypes for cursor: {e}")
                 failed_edge_types.append(EdgeType.INHERITED_BY)
+            _record_edge(EdgeType.INHERITED_BY, t0, len(neighbors) - n_before)
 
         if failed_edge_types:
             names = ", ".join(e.value for e in failed_edge_types)
             log.warning(f"Cursor {cursor_id}: {len(failed_edge_types)} edge type(s) failed to resolve: {names}")
+
+        # summary line: total wall-clock + per-edge breakdown so a single
+        # ``cursor.lsp_timing`` log entry captures the whole resolution
+        total_elapsed = time.perf_counter() - total_started
+        if per_edge_timing:
+            breakdown = ", ".join(
+                f"{e.value}={per_edge_timing[e] * 1000.0:.1f}ms/{per_edge_counts[e]}"
+                for e in EdgeType
+                if e in per_edge_timing
+            )
+            timing_log.info(
+                "cursor=%s resolve_neighbors total_ms=%.1f [%s]",
+                cursor_id,
+                total_elapsed * 1000.0,
+                breakdown,
+            )
 
         return neighbors
 
