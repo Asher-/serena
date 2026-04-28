@@ -45,20 +45,22 @@ import render_trace  # noqa: E402
 
 
 PILOT_RUNS = [
-    # cursor JSONLs are from the 2026-04-28 v3e sequential pilot (post the
-    # tightened-prompt requiring an explicit falsification test that
-    # distinguishes seek-side enabler from post-seek cascade trigger). The
-    # findings.md were blocked by the user-level require-authority-read.sh
-    # hook on the agent's Write call (--settings override didn't take this run;
-    # root cause TBD), but the JSONL traces are complete and are what the
-    # judge consumes regardless. RA JSONLs unchanged from the 9-0 baseline
-    # (RA arm was not re-run).
+    # cursor JSONLs are from the 2026-04-28 v3f sequential pilot. v3f re-ran
+    # the cursor arm via claude-server orchestrate after the bridge.go HOME
+    # override + paired --permission-mode=bypassPermissions landed (see
+    # memory://serena/project/cursor-vs-ra-v3-result-and-9-0-blocker). All
+    # three cursor sessions wrote findings.md cleanly with zero hook errors
+    # and zero permission prompts. The same FALSIFICATION TEST gate from
+    # v3e was kept in batch_cursor.yaml so the cursor traces still trace
+    # both the seek-side enabler AND the post-seek cascade trigger and rule
+    # out an alternative. RA JSONLs unchanged from the 9-0 baseline (RA arm
+    # was not re-run).
     {"id": "cursor-0", "arm": "cursor",
-     "jsonl": "/Users/asher/.claude/projects/-Users-asher-Projects-iina/bfbc7b60-7f4f-4715-b0ae-4de58963f11b.jsonl"},
+     "jsonl": "/Users/asher/.claude/projects/-Users-asher-Projects-iina/e5ed03bb-1fcd-4c70-9ed5-4ae6ba188c17.jsonl"},
     {"id": "cursor-1", "arm": "cursor",
-     "jsonl": "/Users/asher/.claude/projects/-Users-asher-Projects-iina/73458692-cbce-4d6d-a749-51135fe5fc5d.jsonl"},
+     "jsonl": "/Users/asher/.claude/projects/-Users-asher-Projects-iina/136cb40f-c286-4c88-a7ee-fcfe6edb78e6.jsonl"},
     {"id": "cursor-2", "arm": "cursor",
-     "jsonl": "/Users/asher/.claude/projects/-Users-asher-Projects-iina/c1f50041-8842-40cc-bed7-1b482a054f2c.jsonl"},
+     "jsonl": "/Users/asher/.claude/projects/-Users-asher-Projects-iina/398a13ac-a87f-496b-8f14-add8833374c8.jsonl"},
     {"id": "ra-0", "arm": "ra",
      "jsonl": "/Users/asher/.claude/projects/-Users-asher-Projects-iina/777ca131-5f25-4f66-a6d8-721beb840fc8.jsonl"},
     {"id": "ra-1", "arm": "ra",
