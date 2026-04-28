@@ -45,7 +45,7 @@ ALL_EDGE_TYPES = frozenset(EdgeType)
 # A new cursor starts with no edges resolved. Resolving REFERENCES /
 # REFERENCED_BY / CALLS / etc. is a per-symbol LSP cost that can be
 # minutes on large indexed projects (SourceKit-LSP on iina, e.g.), so the
-# agent must opt in to the edges it wants — either at start time via the
+# agent must opt in to the edges it wants -- either at start time via the
 # ``edge_types`` parameter on ``cursor_start`` / ``cursor_find``, or after
 # the fact via ``cursor_configure``.
 DEFAULT_EDGE_TYPES: frozenset[EdgeType] = frozenset()
@@ -57,18 +57,25 @@ _MEMBER_ANCHORED_OPERATIONS: frozenset[str] = frozenset({"insert_before", "inser
 # kinds that guarantee the cursor addresses a non-container leaf. Only the
 # kinds on this list can be pre-flagged without inspecting the parsed tree:
 #
-# * ``container_member`` — Python's kind for a dict/list member whose value is
+# * ``container_member`` -- Python's kind for a dict/list member whose value is
 #   *not* itself a dict or list (the walk re-yields container-valued members
 #   with kind ``container``, overwriting the cache entry; so a cached
 #   ``container_member`` is definitionally a scalar-valued member).
-# * ``string`` / ``number`` / ``boolean`` / ``null`` — JSON array-item scalar
+# * ``string`` / ``number`` / ``boolean`` / ``null`` -- JSON array-item scalar
 #   kinds emitted by ``_value_kind``.
-# * ``scalar`` — the TOML / YAML catch-all for array-item scalars.
+# * ``scalar`` -- the TOML / YAML catch-all for array-item scalars.
 #
 # JSON ``member``, TOML ``pair``, YAML ``pair`` are deliberately absent: the
 # walk tags every mapping member with those kinds regardless of whether the
 # value is scalar or compound, so they are not a reliable pre-flag signal.
 _STRUCTURAL_SCALAR_KINDS: frozenset[str] = frozenset({"container_member", "string", "number", "boolean", "null", "scalar"})
+
+# Maximum siblings/contains entries shown inline before truncation.
+_MAX_INLINE_LIST = 12
+# Last-N hops shown in the trail block (excludes the current position marker).
+_TRAIL_TAIL_LENGTH = 5
+# Character cap for the gist line so the projection stays compact.
+_GIST_MAX_CHARS = 140
 
 
 @dataclass
@@ -92,13 +99,45 @@ class NeighborSymbol:
         return "?"
 
     def format_compact(self) -> str:
-        parts = [self.name]
+        """Render as ``name :Kind@file:line:`` -- a single, parseable handle.
+
+        ``Kind`` is omitted when empty (e.g. the REFERENCES edge yields
+        unnamed-kind targets) so the result still reads cleanly. ``detail``
+        (an optional one-liner attached to call-hierarchy items) is
+        appended after the location with an em-dash separator so a reader
+        can quote it without paraphrasing.
+        """
         if self.kind:
-            parts.append(f"({self.kind})")
-        parts.append(f"[{self.location_str}]")
+            head = f"{self.name} :{self.kind}@{self.location_str}:"
+        else:
+            head = f"{self.name} @{self.location_str}:"
         if self.detail:
-            parts.append(f"— {self.detail}")
-        return " ".join(parts)
+            return f"{head}  -- {self.detail}"
+        return head
+
+
+@dataclass(frozen=True)
+class CursorTrailEntry:
+    """A prior position recorded by ``CursorState.record_move``.
+
+    Captures the symbol's name and kind at trail-write time alongside its
+    location so the rendered trail survives subsequent edits without an
+    LSP round-trip. Read by ``CursorManager._render_trail`` to project
+    the trail as a chain of ``name :Kind@file:line:`` handles.
+
+    :ivar relative_path: project-relative path of the symbol identifier.
+    :ivar line: 0-indexed line of the symbol's selection range start.
+    :ivar column: 0-indexed column of the symbol's selection range start.
+    :ivar name: the symbol's plain name as captured at trail-write time.
+    :ivar kind: the symbol's LSP kind name (e.g. ``"Method"``) at
+        trail-write time. Empty string when unavailable.
+    """
+
+    relative_path: str | None
+    line: int | None
+    column: int | None
+    name: str
+    kind: str
 
 
 @dataclass
@@ -108,13 +147,27 @@ class CursorState:
     cursor_id: str
     current_symbol: LanguageServerSymbol
     current_location: LanguageServerSymbolLocation
-    trail: list[LanguageServerSymbolLocation] = field(default_factory=list)
+    trail: list[CursorTrailEntry] = field(default_factory=list)
     active_edge_types: frozenset[EdgeType] = DEFAULT_EDGE_TYPES
     include_body: bool = False
 
     def record_move(self, new_symbol: LanguageServerSymbol, new_location: LanguageServerSymbolLocation) -> None:
-        """Record moving the cursor to a new symbol."""
-        self.trail.append(self.current_location)
+        """Record moving the cursor to a new symbol.
+
+        Stores the symbol-side metadata (name + kind) of the position
+        being left so the trail rendering can show a ``name :Kind`` handle
+        for each prior hop without re-querying the language server.
+        """
+        # snapshot the position we are leaving as a self-describing trail entry
+        self.trail.append(
+            CursorTrailEntry(
+                relative_path=self.current_location.relative_path,
+                line=self.current_location.line,
+                column=self.current_location.column,
+                name=self.current_symbol.name,
+                kind=self.current_symbol.symbol_kind_name,
+            )
+        )
         self.current_symbol = new_symbol
         self.current_location = new_location
 
@@ -241,6 +294,57 @@ def _parent_name_path(name_path: str) -> str | None:
     return "/".join(segments[:-1])
 
 
+def _format_loc_str(relative_path: str | None, line: int | None) -> str:
+    """Format a ``file:line`` cite for the symbolic projection.
+
+    Returns ``"?"`` when no location information is available, the bare
+    relative path when the line is unknown, and ``"path:line"`` (1-indexed
+    for human reading) when both are present.
+    """
+    if relative_path and line is not None:
+        return f"{relative_path}:{line + 1}"
+    if relative_path:
+        return relative_path
+    return "?"
+
+
+def _gist_from_body(body: str | None) -> str | None:
+    """Extract a one-sentence gist from a symbol body.
+
+    Walks the body line by line, skipping decorators, signature lines
+    (``def`` / ``class`` / ``async def``), and bracket-only delimiters,
+    returning the first substantive content stripped of leading and
+    trailing docstring-quote characters and capped at
+    :data:`_GIST_MAX_CHARS`. Returns ``None`` when no substantive line
+    is found so callers can omit the gist row entirely.
+    """
+    if not body:
+        return None
+    skip_prefixes = ("def ", "async def ", "class ", "@", "function ", "interface ", "struct ", "enum ")
+    bracket_only = {"{", "}", "(", ")", "[", "]"}
+    for raw_line in body.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        if stripped in bracket_only:
+            continue
+        if stripped.startswith(skip_prefixes):
+            continue
+        # peel docstring openers: triple-quote first (single-line ``"""x"""``),
+        # then any leftover loose quotes / comment markers
+        cleaned = stripped
+        if cleaned.startswith(('"""', "'''")):
+            cleaned = cleaned[3:]
+        if cleaned.endswith(('"""', "'''")):
+            cleaned = cleaned[:-3]
+        cleaned = cleaned.lstrip("\"'").rstrip("\"'").lstrip("#").strip()
+        # if peeling left only a quote remnant (e.g. ``"""`` alone), continue
+        if not cleaned or cleaned in {'"""', "'''"}:
+            continue
+        return cleaned[:_GIST_MAX_CHARS]
+    return None
+
+
 class CursorManager:
     """
     Manages cursor state and resolves LSP graph edges for navigation.
@@ -289,7 +393,7 @@ class CursorManager:
         """Return the cursor strictly as an LSP :class:`CursorState`.
 
         Raises :class:`TypeError` when the cursor is a
-        :class:`StructuralCursorState` — callers that cannot operate on
+        :class:`StructuralCursorState` -- callers that cannot operate on
         structural cursors use this accessor to fail fast.
         """
         state = self.get_cursor(cursor_id)
@@ -331,7 +435,7 @@ class CursorManager:
         :param cursor_id: optional explicit cursor ID; auto-generated if None
         :param edge_types: edges the cursor should resolve when its
             neighborhood is rendered. ``None`` (default) leaves the cursor
-            with the empty :data:`DEFAULT_EDGE_TYPES` set — the cursor
+            with the empty :data:`DEFAULT_EDGE_TYPES` set -- the cursor
             renders only its current position and no neighbors are queried.
             Pass an explicit frozenset to opt the cursor into specific
             edges; the same set can be expanded or contracted later via
@@ -434,12 +538,12 @@ class CursorManager:
                 symbol = retriever.find_unique(candidate.name, within_relative_path=candidate.relative_path)
                 location = symbol.location
         else:
-            # Multiple candidates — try exact name match
+            # Multiple candidates -- try exact name match
             exact = [n for n in candidates if n.name == target_name]
             if len(exact) == 1:
                 candidate = exact[0]
             else:
-                names = [f"  {n.name} ({n.kind}) [{n.location_str}]" for n in candidates]
+                names = [f"  {n.format_compact()}" for n in candidates]
                 raise ValueError(f"Ambiguous target '{target_name}'. Candidates:\n" + "\n".join(names))
             retriever = self._retriever
             symbol = retriever.find_unique(candidate.name, within_relative_path=candidate.relative_path)
@@ -686,30 +790,82 @@ class CursorManager:
         return self._neighbor_from_hierarchy_item(item, edge_type)  # type: ignore[arg-type]
 
     def format_cursor_view(self, cursor_id: str) -> str:
-        """
-        Format the current cursor position and its neighborhood as structured text.
+        """Render the cursor as a compact symbolic projection.
 
-        :param cursor_id: the cursor to format
-        :return: human-readable text representation
+        The projection is built from six layered facts:
+
+        * **Anchor** -- ``@ name :Kind@file:start-end:`` placing the
+          cursor on a stable handle that includes its body extent.
+        * **Trail** -- last-N prior hops with ``<- here`` marking the
+          current position. Omitted when no prior hop has been recorded.
+        * **Chain** -- ascending hierarchy from the immediate enclosing
+          symbol up to the file, each as ``<- name :Kind@file:line:``.
+        * **Edge blocks** -- one block per active edge type that produced
+          neighbors. Outgoing edges (calls, references, inherits) carry a
+          ``->`` arrow, incoming (called-by, referenced-by,
+          inherited-by) a ``<-`` arrow. ``contains`` collapses to a
+          single inline list.
+        * **Siblings** -- peer names alongside the current symbol.
+        * **Gist** -- one-sentence body extract.
+
+        The optional ``--- body ---`` block is appended when
+        ``state.include_body`` is set, preserving the existing opt-in for
+        full source.
+
+        :param cursor_id: the cursor to format.
+        :return: the multi-line projection.
         """
         state = self.get_cursor(cursor_id)
         if isinstance(state, StructuralCursorState):
             return self._format_structural_cursor_view(state)
+
         symbol = state.current_symbol
         location = state.current_location
 
         lines: list[str] = []
 
-        # Header: current symbol
-        loc_str = ""
-        if location.relative_path and location.line is not None:
-            loc_str = f" [{location.relative_path}:{location.line + 1}]"
-        lines.append(f"@ {symbol.get_name_path()} ({symbol.symbol_kind_name}){loc_str}")
-        lines.append(f"  cursor: {state.cursor_id} | trail: {len(state.trail)} steps")
+        # anchor: the cursor's own handle with body extent
+        lines.append(self._render_anchor(symbol, location))
 
-        # Body (if configured): prefer the statement-widened slice so Python variable
-        # symbols whose LSP extent is name-only display the full assignment (e.g. a
-        # multi-line list literal); fall back to the LSP-reported body otherwise.
+        # trail: prior hops + current marked '<- here'; only when at least one prior hop exists
+        trail_block = self._render_trail(state)
+        if trail_block:
+            lines.append("")
+            lines.extend(trail_block)
+
+        # chain: ascending hierarchy, ending at the file
+        chain_block = self._render_chain(symbol, location)
+        if chain_block:
+            lines.append("")
+            lines.extend(chain_block)
+
+        # edge blocks: only when the cursor opted into edges
+        if state.active_edge_types:
+            neighbors = self.resolve_neighbors(cursor_id)
+            neighbors_by_edge: dict[EdgeType, list[NeighborSymbol]] = {}
+            for n in neighbors:
+                neighbors_by_edge.setdefault(n.edge_type, []).append(n)
+            for edge_type in EdgeType:
+                edge_neighbors = neighbors_by_edge.get(edge_type)
+                if not edge_neighbors:
+                    continue
+                lines.append("")
+                lines.extend(self._render_edge_block(edge_type, edge_neighbors))
+
+        # siblings: peer symbols at the same level
+        sibling_line = self._render_siblings(symbol, location)
+        if sibling_line:
+            lines.append("")
+            lines.append(sibling_line)
+
+        # gist: first substantive body line
+        gist_line = self._render_gist(symbol)
+        if gist_line:
+            lines.append("")
+            lines.append(gist_line)
+
+        # body block (opt-in): full statement-widened body for symbols whose
+        # LSP extent is name-only; falls back to the LSP-reported body
         if state.include_body:
             body_text = self._format_widened_body(symbol)
             if body_text is None:
@@ -720,35 +876,135 @@ class CursorManager:
                 lines.append(body_text)
                 lines.append("--- end body ---")
 
-        # Neighbors grouped by edge type. Skip the LSP query entirely when
-        # the cursor has no edges configured — that's the agent's signal
-        # they didn't ask for a neighborhood, and resolving even one edge
-        # can be a multi-minute LSP call on large indexed projects.
-        if state.active_edge_types:
-            neighbors = self.resolve_neighbors(cursor_id)
-            neighbors_by_edge: dict[EdgeType, list[NeighborSymbol]] = {}
-            for n in neighbors:
-                neighbors_by_edge.setdefault(n.edge_type, []).append(n)
-
-            if neighbors_by_edge:
-                lines.append("")
-                for edge_type in EdgeType:
-                    edge_neighbors = neighbors_by_edge.get(edge_type)
-                    if edge_neighbors:
-                        lines.append(f"  {edge_type.value}:")
-                        for n in edge_neighbors:
-                            lines.append(f"    {n.format_compact()}")
-            else:
-                active_names = sorted(e.value for e in state.active_edge_types)
-                lines.append("")
-                lines.append(f"  (no neighbors found via active edges: {', '.join(active_names)})")
-        else:
-            lines.append("")
-            lines.append("  (no edges configured — call cursor_configure with edge_types=[...] to resolve a neighborhood)")
-
-        lines.append("")
-        lines.append("Use cursor_move to navigate to a neighbor, cursor_look to re-examine.")
         return "\n".join(lines)
+
+    def _render_anchor(self, symbol: LanguageServerSymbol, location: LanguageServerSymbolLocation) -> str:
+        """Render the cursor anchor as ``@ name :Kind@file:start-end:``.
+
+        The end line is the body end position (when available); when only
+        the start line is known the form collapses to ``@ name :Kind@file:line:``.
+        """
+        name_path = symbol.get_name_path()
+        kind = symbol.symbol_kind_name
+        rel = location.relative_path
+        if rel is None or location.line is None:
+            cite = _format_loc_str(rel, location.line)
+            return f"@ {name_path} :{kind}@{cite}:"
+        start_line = location.line + 1
+        end_pos = symbol.body_end_position
+        end_line = end_pos["line"] + 1 if end_pos else None
+        if end_line is None or end_line == start_line:
+            return f"@ {name_path} :{kind}@{rel}:{start_line}:"
+        return f"@ {name_path} :{kind}@{rel}:{start_line}-{end_line}:"
+
+    def _render_trail(self, state: CursorState) -> list[str]:
+        """Render the cursor's trail block, last-N prior hops + ``<- here`` marker.
+
+        Returns an empty list when the trail is empty so the caller skips
+        the section header entirely. Each hop is rendered as
+        ``name :Kind@file:line:``; the current position is the final entry
+        with the ``<- here`` marker appended.
+        """
+        if not state.trail:
+            return []
+        lines = ["trail"]
+        for entry in state.trail[-_TRAIL_TAIL_LENGTH:]:
+            cite = _format_loc_str(entry.relative_path, entry.line)
+            if entry.kind:
+                lines.append(f"   {entry.name} :{entry.kind}@{cite}:")
+            else:
+                lines.append(f"   {entry.name} @{cite}:")
+        # current position with the '<- here' marker so readers can locate themselves
+        cur_cite = _format_loc_str(state.current_location.relative_path, state.current_location.line)
+        cur_kind = state.current_symbol.symbol_kind_name
+        cur_name = state.current_symbol.name
+        if cur_kind:
+            lines.append(f"   {cur_name} :{cur_kind}@{cur_cite}:    <- here")
+        else:
+            lines.append(f"   {cur_name} @{cur_cite}:    <- here")
+        return lines
+
+    def _render_chain(self, symbol: LanguageServerSymbol, location: LanguageServerSymbolLocation) -> list[str]:
+        """Render the ascending containment chain up to (and including) the file.
+
+        Walks ``symbol.iter_ancestors(up_to_symbol_kind=SymbolKind.File)``
+        for symbol-level ancestors, then appends the file path itself as
+        the outermost frame. Returns an empty list when nothing is known
+        about the symbol's location.
+        """
+        lines: list[str] = []
+        for ancestor in symbol.iter_ancestors(up_to_symbol_kind=SymbolKind.File):
+            anc_kind = ancestor.symbol_kind_name
+            anc_loc = ancestor.location
+            cite = _format_loc_str(anc_loc.relative_path, anc_loc.line)
+            if anc_kind:
+                lines.append(f"   <- {ancestor.name} :{anc_kind}@{cite}:")
+            else:
+                lines.append(f"   <- {ancestor.name} @{cite}:")
+        # file frame: the bottommost <- entry, no line number
+        if location.relative_path:
+            lines.append(f"   <- {location.relative_path}")
+        elif not lines:
+            return []
+        return ["chain", *lines]
+
+    def _render_edge_block(self, edge_type: EdgeType, neighbors: list[NeighborSymbol]) -> list[str]:
+        """Render one edge type's neighbors as a block.
+
+        ``contains`` collapses to a single inline ``contains v  a, b, c``
+        line because membership is high-cardinality and rarely benefits
+        from per-entry locations. Outgoing edges (calls, references,
+        inherits) carry a ``->`` arrow header; incoming (called-by,
+        referenced-by, inherited-by) a ``<-``. Each entry under those
+        renders on a single line via :meth:`NeighborSymbol.format_compact`.
+        """
+        if edge_type == EdgeType.CONTAINS:
+            names = [n.name for n in neighbors[:_MAX_INLINE_LIST]]
+            tail = "" if len(neighbors) <= _MAX_INLINE_LIST else f", ... (+{len(neighbors) - _MAX_INLINE_LIST})"
+            return [f"contains v  {', '.join(names)}{tail}"]
+
+        outgoing = {EdgeType.CALLS, EdgeType.REFERENCES, EdgeType.INHERITS}
+        arrow = "->" if edge_type in outgoing else "<-"
+        header = f"{edge_type.value} {arrow}"
+        block = [header]
+        for n in neighbors:
+            block.append(f"   {n.format_compact()}")
+        return block
+
+    def _render_siblings(self, symbol: LanguageServerSymbol, location: LanguageServerSymbolLocation) -> str | None:
+        """Render an inline list of peer names, or ``None`` when no parent is known.
+
+        Filters the parent's children by (name, line) so the cursor's own
+        symbol is excluded even when overload indices share the same
+        plain name. Caps the list at :data:`_MAX_INLINE_LIST` and appends
+        ``(+N)`` when more peers exist.
+        """
+        parent = symbol.get_parent()
+        if parent is None:
+            return None
+        names: list[str] = []
+        skipped = 0
+        cur_name = symbol.name
+        cur_line = location.line
+        for child in parent.iter_children():
+            # exclude self by (name, line) tuple so overload-distinct siblings still surface
+            if child.name == cur_name and child.line == cur_line:
+                continue
+            if len(names) >= _MAX_INLINE_LIST:
+                skipped += 1
+                continue
+            names.append(child.name)
+        if not names:
+            return None
+        tail = "" if skipped == 0 else f", ... (+{skipped})"
+        return f"siblings    {', '.join(names)}{tail}"
+
+    def _render_gist(self, symbol: LanguageServerSymbol) -> str | None:
+        """Render the symbol's gist, or ``None`` when no body is available."""
+        gist = _gist_from_body(symbol.body)
+        if gist is None:
+            return None
+        return f"gist        {gist}"
 
     def _format_widened_body(self, symbol: LanguageServerSymbol) -> str | None:
         """
@@ -769,52 +1025,132 @@ class CursorManager:
         return compute_widened_body_text(symbol, self._project)
 
     def _format_structural_cursor_view(self, state: StructuralCursorState) -> str:
-        """Render a structural cursor's position as text.
+        """Render a structural cursor's position as a compact symbolic projection.
 
-        Structural cursors have no LSP neighborhood; the view shows the
-        canonical name path, the resolved kind, the node's direct members
-        (CONTAINS-edged structural neighbors) and — when ``include_body``
-        is set — the serialized source text of the addressed node. The
-        neighbor listing and the serialized slice are obtained by
-        re-reading the file so the view reflects on-disk state at render
-        time.
+        Mirrors :meth:`format_cursor_view` for non-LSP cursors: the LSP
+        graph is empty, so calls/references/inheritance are absent, but
+        the cursor still gets an anchor, trail, chain (derived from the
+        canonical name path's segments), contains list, siblings, and a
+        gist drawn from the backend's serialized node text.
         """
-        lines = [
-            f"@ {state.name_path} ({state.kind}) [{state.relative_path}]",
-            f"  cursor: {state.cursor_id} | trail: {len(state.trail)} steps | structural",
-        ]
+        lines: list[str] = []
 
-        # members of the addressed node — present only when the cursor is on
-        # a container; leaf members produce an empty list and no block is shown
+        # anchor: structural anchor lacks a single line, so no line range
+        kind_str = state.kind or ""
+        if kind_str:
+            lines.append(f"@ {state.name_path} :{kind_str}@{state.relative_path}:")
+        else:
+            lines.append(f"@ {state.name_path} @{state.relative_path}:")
+
+        # trail: prior name_paths + current marked '<- here'
+        if state.trail:
+            lines.append("")
+            lines.append("trail")
+            for prior_path in state.trail[-_TRAIL_TAIL_LENGTH:]:
+                lines.append(f"   {prior_path} @{state.relative_path}:")
+            lines.append(f"   {state.name_path} @{state.relative_path}:    <- here")
+
+        # chain: ascending name-path segments, ending at the file
+        chain_block = self._render_structural_chain(state)
+        if chain_block:
+            lines.append("")
+            lines.extend(chain_block)
+
+        # contains: structural members of the addressed node, inline
         children = self._resolve_structural_neighbors(state)
         if children:
             lines.append("")
-            lines.append("  contains:")
-            for child in children:
-                lines.append(f"    {child.name} ({child.kind})")
+            names = [c.name for c in children[:_MAX_INLINE_LIST]]
+            tail = "" if len(children) <= _MAX_INLINE_LIST else f", ... (+{len(children) - _MAX_INLINE_LIST})"
+            lines.append(f"contains v  {', '.join(names)}{tail}")
 
-        if state.include_body:
-            body_text = self._format_structural_node_source(state)
-            if body_text is not None:
-                lines.append("")
-                lines.append("--- body ---")
-                lines.append(body_text)
-                lines.append("--- end body ---")
+        # siblings: peer members under the same parent name path
+        sibling_line = self._render_structural_siblings(state)
+        if sibling_line:
+            lines.append("")
+            lines.append(sibling_line)
 
-        lines.append("")
-        lines.append(
-            "Structural cursor: LSP edges are inactive. Use cursor_start on a member "
-            "path to move; cursor_replace_body / cursor_insert_before / "
-            "cursor_insert_after / cursor_insert_at_start / cursor_insert_at_end / "
-            "cursor_remove_member dispatch to the container-member backend."
-        )
+        # gist: first substantive line of the serialized node text
+        body_text = self._format_structural_node_source(state)
+        gist = _gist_from_body(body_text)
+        if gist:
+            lines.append("")
+            lines.append(f"gist        {gist}")
+
+        # body block (opt-in): the addressed node's serialized source
+        if state.include_body and body_text is not None:
+            lines.append("")
+            lines.append("--- body ---")
+            lines.append(body_text)
+            lines.append("--- end body ---")
+
         return "\n".join(lines)
+
+    def _render_structural_chain(self, state: StructuralCursorState) -> list[str]:
+        """Render a structural cursor's chain by walking up its name-path segments.
+
+        Each ancestor name path resolves through the structural cache so
+        its kind decorates the chain entry. The final frame is the file
+        path itself, mirroring :meth:`_render_chain`.
+        """
+        backend = self._structural_registry.for_relative_path(state.relative_path)
+        cache_entry = self._structural_cache_entry(backend, state.relative_path) if backend is not None else None
+        ancestor_paths: list[str] = []
+        path = _parent_name_path(state.name_path)
+        while path is not None:
+            ancestor_paths.append(path)
+            path = _parent_name_path(path)
+        # render immediate parent first, root last (mirroring iter_ancestors order)
+        chain_lines: list[str] = []
+        for anc_path in ancestor_paths:
+            kind: str = ""
+            if cache_entry is not None:
+                match = cache_entry.nodes_by_path.get(anc_path)
+                if match is not None:
+                    kind = match[0]
+            if kind:
+                chain_lines.append(f"   <- {anc_path} :{kind}@{state.relative_path}:")
+            else:
+                chain_lines.append(f"   <- {anc_path} @{state.relative_path}:")
+        # file frame
+        chain_lines.append(f"   <- {state.relative_path}")
+        return ["chain", *chain_lines]
+
+    def _render_structural_siblings(self, state: StructuralCursorState) -> str | None:
+        """Render peer members under the structural cursor's parent path."""
+        parent_path = _parent_name_path(state.name_path)
+        if parent_path is None:
+            return None
+        backend = self._structural_registry.for_relative_path(state.relative_path)
+        if backend is None:
+            return None
+        cache_entry = self._structural_cache_entry(backend, state.relative_path)
+        if cache_entry is None:
+            return None
+        parent_segment_count = len(_split_name_path_segments(parent_path))
+        peers: list[str] = []
+        skipped = 0
+        for candidate_path in cache_entry.nodes_by_path:
+            if not candidate_path.startswith(parent_path + "/"):
+                continue
+            if len(_split_name_path_segments(candidate_path)) != parent_segment_count + 1:
+                continue
+            if candidate_path == state.name_path:
+                continue
+            if len(peers) >= _MAX_INLINE_LIST:
+                skipped += 1
+                continue
+            peers.append(candidate_path)
+        if not peers:
+            return None
+        tail = "" if skipped == 0 else f", ... (+{skipped})"
+        return f"siblings    {', '.join(peers)}{tail}"
 
     def _format_structural_node_source(self, state: StructuralCursorState) -> str | None:
         """Return the serialized source text for the node at ``state.name_path``.
 
         Returns ``None`` when the backend cannot render the addressed node as
-        a standalone source string — which today covers the ``container``
+        a standalone source string -- which today covers the ``container``
         wrapper yielded by Python's ``walk_container_members`` (a bare
         ``cst.Dict``/``cst.List`` has no standalone module serializer
         attached). Callers should treat ``None`` as "no body available".
@@ -925,7 +1261,7 @@ class CursorManager:
         Routes through the structural backend registry: if a backend is registered
         for the file's extension, the file is parsed (with per-file caching keyed
         on mtime) and ``walk_nodes`` is indexed by name path. Synthetic paths like
-        ``Class/method/if_stmt#0`` resolve to the same dict — the structural
+        ``Class/method/if_stmt#0`` resolve to the same dict -- the structural
         backend decides what is addressable.
 
         Returns ``None`` rather than raising when the file is outside a registered
@@ -947,7 +1283,7 @@ class CursorManager:
         if cache_entry is None:
             return None
 
-        # O(1) dict lookup — walk_nodes already produced canonical name paths
+        # O(1) dict lookup -- walk_nodes already produced canonical name paths
         match = cache_entry.nodes_by_path.get(name_path)
         if match is None:
             return None
@@ -1016,10 +1352,10 @@ class CursorManager:
 
         * ``insert_start`` / ``insert_end`` on a cursor whose captured
           ``kind`` is a known scalar (``"string"`` / ``"number"`` /
-          ``"boolean"`` / ``"null"`` / ``"scalar"``) — the value is not a
+          ``"boolean"`` / ``"null"`` / ``"scalar"``) -- the value is not a
           container so no member can be inserted into it.
         * ``insert_before`` / ``insert_after`` / ``replace`` / ``remove`` on
-          a cursor whose ``name_path`` has no parent segment — there is no
+          a cursor whose ``name_path`` has no parent segment -- there is no
           enclosing container to host the edit.
 
         :param state: the structural cursor's state.
@@ -1171,7 +1507,7 @@ class CursorManager:
         same logical symbol; its stored position is refreshed.
 
         For structural cursors, re-resolution routes through the backend's
-        ``walk_nodes`` index after invalidating the per-file cache — this
+        ``walk_nodes`` index after invalidating the per-file cache -- this
         catches the case where a container-member edit has rewritten the
         file on disk and we need the new node handle.
 
@@ -1221,17 +1557,13 @@ class CursorManager:
             return f"Cursor {cursor_id}: no trail (at starting position)"
 
         lines = [f"Cursor {cursor_id} trail ({len(state.trail)} steps):"]
-        for i, loc in enumerate(state.trail):
-            loc_str = ""
-            if loc.relative_path and loc.line is not None:
-                loc_str = f"{loc.relative_path}:{loc.line + 1}"
-            else:
-                loc_str = str(loc.relative_path or "?")
+        for i, entry in enumerate(state.trail):
+            loc_str = _format_loc_str(entry.relative_path, entry.line)
             lines.append(f"  {i + 1}. {loc_str}")
 
         # Current position
         cur = state.current_location
-        if cur.relative_path and cur.line is not None:
-            lines.append(f"  -> {cur.relative_path}:{cur.line + 1} (current)")
+        cur_str = _format_loc_str(cur.relative_path, cur.line)
+        lines.append(f"  -> {cur_str} (current)")
 
         return "\n".join(lines)

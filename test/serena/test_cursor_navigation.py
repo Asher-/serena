@@ -151,8 +151,19 @@ class TestCursorMovement:
         final_state = cursor_manager.get_cursor(cid2)
 
         assert len(final_state.trail) == 2
-        assert final_state.trail[0] == initial_loc2
-        assert final_state.trail[1] == mid_loc
+        # trail entries are CursorTrailEntry records (location + symbol metadata) so
+        # we compare on the location-shaped fields rather than full equality with
+        # LanguageServerSymbolLocation, which carries no name/kind.
+        assert (
+            final_state.trail[0].relative_path == initial_loc2.relative_path
+            and final_state.trail[0].line == initial_loc2.line
+            and final_state.trail[0].column == initial_loc2.column
+        )
+        assert (
+            final_state.trail[1].relative_path == mid_loc.relative_path
+            and final_state.trail[1].line == mid_loc.line
+            and final_state.trail[1].column == mid_loc.column
+        )
 
     def test_move_to_ambiguous_target_with_path(self, cursor_manager: CursorManager) -> None:
         """When a target name appears in multiple neighbors, relative_path narrows it."""
@@ -214,13 +225,16 @@ class TestFormatting:
     """Test format_cursor_view and format_trail output."""
 
     def test_format_cursor_view_contains_symbol_name(self, cursor_manager: CursorManager) -> None:
-        """format_cursor_view includes the current symbol name and location."""
+        """format_cursor_view anchors on the current symbol and renders edge blocks."""
         cid, _ = cursor_manager.start_cursor("UserService", edge_types=frozenset({EdgeType.CONTAINS}))
         view = cursor_manager.format_cursor_view(cid)
-        assert "UserService" in view
-        assert "cursor: " + cid in view
-        assert "trail: 0 steps" in view
-        assert "contains:" in view
+        # the anchor is ``@ name :Kind@file:line:`` in the new symbolic projection
+        assert "@ UserService :Class@" in view
+        # cursor metadata no longer leaks into the view body
+        assert "cursor: " + cid not in view
+        assert "trail: 0 steps" not in view
+        # contains collapses to an inline list under the ``contains v`` arrow
+        assert "contains v" in view
     def test_format_trail_empty(self, cursor_manager: CursorManager) -> None:
         """format_trail reports no trail at starting position."""
         cid, _ = cursor_manager.start_cursor("UserService")
@@ -283,10 +297,8 @@ class TestNeighborSymbol:
             detail="some detail",
         )
         formatted = n.format_compact()
-        assert "foo" in formatted
-        assert "(Function)" in formatted
-        assert "src/main.py:11" in formatted
-        assert "— some detail" in formatted
+        # new format glues kind and location: ``name :Kind@file:line:``
+        assert formatted == "foo :Function@src/main.py:11:  -- some detail"
 
 
 # ===========================================================================
@@ -311,21 +323,21 @@ class TestCursorToolsIntegration:
         start_tool = python_serena_agent.get_tool(CursorStartTool)
         result = start_tool.apply(name_path="UserService", edge_types=["contains"])
         assert "UserService" in result
-        assert "cursor:" in result
-        assert "contains:" in result
+        # cursor_start prefixes the projection with the assigned id, mirroring cursor_find
+        assert "Started cursor" in result
+        assert "contains v" in result
         assert "create_user" in result
 
-        # Extract cursor ID from result
-        # Format: "  cursor: c1 | trail: 0 steps"
-        match = re.search(r"cursor: (\S+)", result)
+        # Extract cursor ID from the ``Started cursor <id>.`` prefix line
+        match = re.search(r"Started cursor (\S+)\.", result)
         assert match, f"Could not find cursor ID in result: {result}"
         cid = match.group(1)
 
-        # cursor_look should return the same view
+        # cursor_look returns the projection without the started-cursor prefix
         look_tool = python_serena_agent.get_tool(CursorLookTool)
         look_result = look_tool.apply(cursor_id=cid)
         assert "UserService" in look_result
-        assert "contains:" in look_result
+        assert "contains v" in look_result
 
     def test_cursor_move_and_history(self, python_serena_agent: SerenaAgent) -> None:
         """cursor_move navigates to a neighbor; cursor_history shows the trail."""
@@ -348,7 +360,7 @@ class TestCursorToolsIntegration:
         configure_tool = python_serena_agent.get_tool(CursorConfigureTool)
         result = configure_tool.apply(cursor_id="cfg-test", edge_types=["contains"])
         # After configuring to only show "contains", we should still see children
-        assert "contains:" in result
+        assert "contains v" in result
         # Other edge types should not appear (unless they happen to have zero results,
         # in which case they wouldn't appear anyway)
 
@@ -431,9 +443,11 @@ class TestCursorToolsIntegration:
             edge_types=["inherits", "inherited-by"],
         )
         # If the Python LSP supports type hierarchy, we should see BaseModel
-        # If not, the cursor gracefully shows "(no neighbors found)"
-        # Either outcome is acceptable — the test validates no crashes
-        assert "inherit-test" in result or "cursor:" in result
+        # If not, the projection silently omits the inheritance edge blocks --
+        # the new format has no "(no neighbors found)" filler. Either outcome is
+        # acceptable; the test validates no crashes by checking that the anchor
+        # for the configured cursor still renders.
+        assert "@ User" in result
 
     def test_navigate_nested_class(self, python_serena_agent: SerenaAgent) -> None:
         """Navigate to a nested class via the contains edge."""
@@ -460,7 +474,7 @@ class TestCursorFindAndOverview:
         result = find_tool.apply(name_path_pattern="/UserService", cursor_id="find-unique", edge_types=["contains"])
         assert "started cursor" in result
         assert "UserService" in result
-        assert "contains:" in result
+        assert "contains v" in result
 
     def test_cursor_find_multiple_returns_candidates(self, python_serena_agent: SerenaAgent) -> None:
         """cursor_find with a non-unique pattern returns a candidate list without starting a cursor."""

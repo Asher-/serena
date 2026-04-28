@@ -845,7 +845,8 @@ class TestStructuralNeighbors:
         )
 
         view = manager.format_cursor_view(cid)
-        assert "contains:" in view
+        # contains collapses to an inline list under the ``contains v`` arrow header
+        assert "contains v" in view
         assert '["alpha"]' in view
         assert '["beta"]' in view
         assert '["gamma"]' in view
@@ -1003,4 +1004,7 @@ class TestStructuralConfigure:
             edge_types=["this-edge-does-not-exist"],
             include_body=False,
         )
-        assert "structural" in view
+        # the structural projection anchors on the canonical name path and
+        # surfaces the kind captured at start time -- no LSP edge metadata
+        assert '@ FOO/["members"]' in view
+        assert ":container@" in view

@@ -74,7 +74,8 @@ class TestMarkdownCursorOverview:
         overview_tool = markdown_serena_agent.get_tool(CursorOverviewTool)
         result = overview_tool.apply(relative_path="README.md")
         assert "Top-level symbols in README.md" in result
-        assert "Test Repository (Namespace)" in result
+        # overview entries share the symbolic-projection ``name :Kind@file:line:`` shape
+        assert "Test Repository :Namespace@README.md:1:" in result
 
     def test_overview_missing_file_raises(self, markdown_serena_agent: SerenaAgent) -> None:
         """cursor_overview raises FileNotFoundError for a missing Markdown file."""
@@ -99,7 +100,8 @@ class TestMarkdownCursorBody:
             cursor_id="md-overview",
         )
         assert "Overview" in start_result
-        assert "(Namespace)" in start_result
+        # the new symbolic projection glues kind into ``:Kind@file:line:`` form
+        assert ":Namespace@" in start_result
 
         # body is sourced from the M4 backend via _MdSymbolRef.body_range,
         # routed through the LSP server's documentSymbol range

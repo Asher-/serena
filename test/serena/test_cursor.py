@@ -55,6 +55,12 @@ def _make_symbol(
     sym.body = body
     sym.get_name_path.return_value = name_path or name
     sym.location = LanguageServerSymbolLocation(relative_path=rel_path, line=line, column=col)
+    # symbolic-projection helpers consult these; default to a symbol with no
+    # body extent, no ancestors, and no parent so tests exercising the new
+    # format pass without rewiring every fixture
+    sym.body_end_position = None
+    sym.iter_ancestors.return_value = iter([])
+    sym.get_parent.return_value = None
 
     child_mocks = []
     for c in children or []:
@@ -113,15 +119,18 @@ class TestNeighborSymbol:
     def test_format_compact_basic(self):
         n = NeighborSymbol(name="bar", kind="Method", relative_path="x.py", line=5, column=0, edge_type=EdgeType.CALLS)
         formatted = n.format_compact()
-        assert "bar" in formatted
-        assert "(Method)" in formatted
-        assert "[x.py:6]" in formatted
+        assert formatted == "bar :Method@x.py:6:"
+
+    def test_format_compact_no_kind(self):
+        n = NeighborSymbol(name="bar", kind="", relative_path="x.py", line=5, column=0, edge_type=EdgeType.REFERENCES)
+        formatted = n.format_compact()
+        assert formatted == "bar @x.py:6:"
 
     def test_format_compact_with_detail(self):
         n = NeighborSymbol(
             name="bar", kind="Method", relative_path="x.py", line=5, column=0, edge_type=EdgeType.CALLS, detail="returns int"
         )
-        assert "— returns int" in n.format_compact()
+        assert n.format_compact() == "bar :Method@x.py:6:  -- returns int"
 
 
 # ── CursorState ──────────────────────────────────────────────────────────
@@ -533,7 +542,7 @@ class TestResolveNeighbors:
 
 class TestFormatting:
     @patch("serena.cursor.LanguageServerSymbolRetriever")
-    def test_format_cursor_view_header(self, mock_retriever_cls):
+    def test_format_cursor_view_anchor(self, mock_retriever_cls):
         manager = _make_manager()
         sym = _make_symbol(name="MyClass", kind_name="Class", rel_path="src/m.py", line=10, name_path="MyClass")
         mock_retriever = mock_retriever_cls.return_value
@@ -550,10 +559,13 @@ class TestFormatting:
         cid, _ = manager.start_cursor("MyClass")
         view = manager.format_cursor_view(cid)
 
-        assert "@ MyClass (Class)" in view
-        assert "m.py:11" in view  # 0-indexed line 10 → displayed as 11
-        assert f"cursor: {cid}" in view
-        assert "trail: 0 steps" in view
+        # anchor combines name, kind, and location into a parseable handle
+        assert "@ MyClass :Class@src/m.py:11" in view  # 0-indexed line 10 -> displayed as 11
+        # cursor metadata is no longer rendered into the view itself
+        assert f"cursor: {cid}" not in view
+        assert "trail: 0 steps" not in view
+        # the chain frame ends with the file path
+        assert "<- src/m.py" in view
 
     @patch("serena.cursor.LanguageServerSymbolRetriever")
     def test_format_trail_empty(self, mock_retriever_cls):
@@ -608,7 +620,13 @@ class TestFormatting:
         assert "def func(): pass" in view
 
     @patch("serena.cursor.LanguageServerSymbolRetriever")
-    def test_format_cursor_view_no_neighbors_message(self, mock_retriever_cls):
+    def test_format_cursor_view_no_neighbors_silent(self, mock_retriever_cls):
+        """When no neighbors are found, the projection omits edge blocks silently.
+
+        The legacy ``(no neighbors found ...)`` filler was dropped along with
+        the trailing ``Use cursor_move ...`` footer to keep the projection
+        compact -- callers infer absence from the missing block.
+        """
         manager = _make_manager()
         sym = _make_symbol(name="Leaf", children=[])
         mock_retriever = mock_retriever_cls.return_value
@@ -625,7 +643,11 @@ class TestFormatting:
         cid, _ = manager.start_cursor("Leaf", edge_types=ALL_EDGE_TYPES)
         view = manager.format_cursor_view(cid)
 
-        assert "no neighbors found" in view
+        # absence of edge blocks is the signal -- no filler text
+        assert "no neighbors found" not in view
+        assert "no edges configured" not in view
+        # the anchor still appears
+        assert "@ Leaf :Class" in view
 
 # ── CursorManager: find_symbols / register_cursor_at_symbol / reanchor_cursor ──
 

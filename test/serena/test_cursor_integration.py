@@ -147,13 +147,15 @@ class TestEdgeTypeConfiguration:
 
 class TestFormatCursorView:
     def test_view_contains_symbol_info(self, cursor_manager: CursorManager):
-        """format_cursor_view should include the symbol name, kind, and location."""
+        """format_cursor_view should anchor the cursor with name, kind, and location."""
         cid, _ = cursor_manager.start_cursor("UserService", relative_path="test_repo/services.py")
         try:
             view = cursor_manager.format_cursor_view(cid)
-            assert "UserService" in view
+            # the anchor renders as ``@ name :Kind@file:line:`` in the new projection
+            assert "@ UserService :Class@" in view
             assert "services.py" in view
-            assert f"cursor: {cid}" in view
+            # cursor metadata is no longer rendered into the view body
+            assert f"cursor: {cid}" not in view
         finally:
             cursor_manager.close_cursor(cid)
 
@@ -164,8 +166,8 @@ class TestFormatCursorView:
         )
         try:
             view = cursor_manager.format_cursor_view(cid)
-            # Should at least show contains section with methods
-            assert "contains:" in view
+            # contains collapses to an inline list with the ``v`` arrow header
+            assert "contains v" in view
             assert "create_user" in view
         finally:
             cursor_manager.close_cursor(cid)

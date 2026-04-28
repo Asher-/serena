@@ -59,7 +59,7 @@ class CursorStartTool(Tool, ToolMarkerSymbolicRead):
         """
         Start a new cursor at the specified symbol and return its view.
 
-        The cursor starts with **no edges resolved** by default — only the
+        The cursor starts with **no edges resolved** by default -- only the
         symbol's position is shown. To see neighbors (children, references,
         callers, supertypes, etc.), pass ``edge_types`` here, or call
         ``cursor_configure`` afterwards. Resolving REFERENCES /
@@ -69,11 +69,11 @@ class CursorStartTool(Tool, ToolMarkerSymbolicRead):
 
         ``name_path`` accepts two grammars:
 
-        1. **LSP symbol path** (e.g. ``"MyClass/my_method"``) — the
+        1. **LSP symbol path** (e.g. ``"MyClass/my_method"``) -- the
            language-server-backed form used by ``find_symbol``. This
            resolves through the language server and supports the full
            LSP neighborhood.
-        2. **Structural descent path** — addresses a member inside a
+        2. **Structural descent path** -- addresses a member inside a
            container literal (dict/list/object/array/mapping/sequence)
            that the language server does not surface as a symbol. When the
            LSP lookup misses and ``relative_path`` is provided, the cursor
@@ -96,9 +96,10 @@ class CursorStartTool(Tool, ToolMarkerSymbolicRead):
             position. Valid names: ``contains``, ``references``,
             ``referenced-by``, ``calls``, ``called-by``, ``inherits``,
             ``inherited-by``. Ignored for structural cursors.
-        :return: the cursor view; if ``edge_types`` is empty the view
-            shows only the symbol's position with a hint to configure
-            edges later.
+        :return: a ``Started cursor <id>.`` line followed by the cursor's
+            symbolic projection. The prefix mirrors :class:`CursorFindTool`'s
+            output so callers can extract the cursor handle uniformly across
+            both entry points.
         """
         parsed_edge_types = _parse_edge_types(edge_types) if edge_types else None
         manager = self.agent.get_cursor_manager()
@@ -108,7 +109,9 @@ class CursorStartTool(Tool, ToolMarkerSymbolicRead):
             cursor_id=cursor_id or None,
             edge_types=parsed_edge_types,
         )
-        return manager.format_cursor_view(cid)
+        # prefix the projection with the assigned cursor id so callers can
+        # parse the handle without inspecting the projection body
+        return f"Started cursor {cid}.\n\n{manager.format_cursor_view(cid)}"
 
 class CursorMoveTool(Tool, ToolMarkerSymbolicRead):
     """
@@ -1018,16 +1021,17 @@ class CursorOverviewTool(Tool, ToolMarkerSymbolicRead):
 
     def apply(self, relative_path: str, cursor_id: str = "", max_answer_chars: int = -1) -> str:
         """
-        Show the top-level symbols in a file as a cursor view.
+        Show the top-level symbols in a file as a compact symbolic listing.
 
         Internally this delegates to the language server symbol retriever to find top-level
-        symbols and starts a cursor on the file's container with only the ``contains`` edge
-        so the output is a flat listing of top-level symbols in the file.
+        symbols and renders each as a stable ``name :Kind@file:line:`` handle, mirroring the
+        anchor format produced by ``format_cursor_view`` so callers see one unified
+        symbolic projection across the cursor surface.
 
         :param relative_path: relative path to the source file.
         :param cursor_id: optional cursor ID for the started cursor. Auto-generated otherwise.
         :param max_answer_chars: maximum characters for the returned output; -1 means use default.
-        :return: the cursor view listing top-level symbols under ``contains``.
+        :return: a compact listing of top-level symbols, one per line.
         """
         import os
 
@@ -1047,14 +1051,17 @@ class CursorOverviewTool(Tool, ToolMarkerSymbolicRead):
         if not top_level:
             return f"No top-level symbols found in {relative_path}."
 
-        # Use the first top-level symbol as a foothold; show its siblings by reading
-        # the overview directly rather than trying to force the cursor onto a synthetic file node.
+        # render each symbol as ``name :Kind@file:line:`` -- the same handle shape
+        # used by format_cursor_view's anchor and by NeighborSymbol.format_compact,
+        # so the agent can treat overview entries and cursor projections uniformly.
         lines: list[str] = [f"Top-level symbols in {relative_path}:"]
         for sym in top_level:
             line = sym.line
             loc = f"{relative_path}:{line + 1}" if line is not None else relative_path
-            lines.append(f"  {sym.name} ({sym.symbol_kind_name}) [{loc}]")
-        lines.append("")
-        lines.append("Use cursor_start with a name path to position on a specific symbol.")
+            kind = sym.symbol_kind_name
+            if kind:
+                lines.append(f"  {sym.name} :{kind}@{loc}:")
+            else:
+                lines.append(f"  {sym.name} @{loc}:")
         result = "\n".join(lines)
         return self._limit_length(result, max_answer_chars)
