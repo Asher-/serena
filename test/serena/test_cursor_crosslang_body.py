@@ -105,6 +105,7 @@ def test_typescript_multiline_array_literal_body(typescript_serena_agent: Serena
     try:
         typescript_serena_agent.reset_language_server_manager()
         start_tool.apply(
+            because="test fixture: exercising the tool behaviour",
             name_path="FOO",
             relative_path=rel_path,
             cursor_id="ts-var-body",
@@ -153,6 +154,7 @@ def test_go_multiline_slice_literal_body(go_serena_agent: SerenaAgent) -> None:
     try:
         go_serena_agent.reset_language_server_manager()
         start_tool.apply(
+            because="test fixture: exercising the tool behaviour",
             name_path="FOO",
             relative_path=rel_path,
             cursor_id="go-var-body",
@@ -201,6 +203,7 @@ def test_swift_multiline_array_literal_body(swift_serena_agent: SerenaAgent) -> 
     try:
         swift_serena_agent.reset_language_server_manager()
         start_tool.apply(
+            because="test fixture: exercising the tool behaviour",
             name_path="FOO",
             relative_path=rel_path,
             cursor_id="swift-var-body",

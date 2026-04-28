@@ -49,9 +49,11 @@ class CursorStartTool(Tool, ToolMarkerSymbolicRead):
     """
 
     # noinspection PyDefaultArgument
+    # noinspection PyDefaultArgument
     def apply(
         self,
         name_path: str,
+        because: str,
         relative_path: str = "",
         cursor_id: str = "",
         edge_types: list[str] = [],  # noqa: B006
@@ -66,6 +68,25 @@ class CursorStartTool(Tool, ToolMarkerSymbolicRead):
         REFERENCED_BY / CALLS via the language server can be a per-symbol
         cost of multiple minutes on large indexed projects, so the cursor
         only does what you explicitly asked for.
+
+        ``because`` is required and articulates your **goal in
+        understanding**: the semantic question you are trying to answer.
+        Phrase it as the gap in your understanding the move closes, not
+        a description of where you are navigating or a hypothesis about
+        code structure. Examples:
+
+        ✓ "to understand how session expiry interacts with rate limiting
+           after a user reconnects"
+        ✓ "to figure out which layer normalises the timestamp -- the
+           ingest path or the renderer"
+        ✗ "to find UserService.create_user" (mechanical)
+        ✗ "I think the bug is in services.py" (hypothesis about code
+           structure)
+        ✗ "to look at the auth flow" (no semantic question)
+
+        The reasoning is recorded on the cursor and rendered as ``why:
+        <text>`` above the anchor on every subsequent projection so the
+        trace shows your intent alongside the symbolic position.
 
         ``name_path`` accepts two grammars:
 
@@ -87,6 +108,10 @@ class CursorStartTool(Tool, ToolMarkerSymbolicRead):
           sequence indices as ``[N]``. Example: ``members/existing``.
 
         :param name_path: name path of the symbol to start at (see grammar above).
+        :param because: your **goal in understanding** for starting this
+            cursor -- the semantic question this position lets you
+            answer. Required: phrase as the gap in understanding the
+            move closes, not a description of where you are going.
         :param relative_path: optional file path to narrow the symbol search.
             Required for the structural fallback (the backend is chosen by
             file extension).
@@ -103,12 +128,14 @@ class CursorStartTool(Tool, ToolMarkerSymbolicRead):
         """
         parsed_edge_types = _parse_edge_types(edge_types) if edge_types else None
         manager = self.agent.get_cursor_manager()
-        cid, _state = manager.start_cursor(
+        cid, state = manager.start_cursor(
             name_path=name_path,
             relative_path=relative_path or None,
             cursor_id=cursor_id or None,
             edge_types=parsed_edge_types,
         )
+        # record the agent's stated goal so subsequent projections render it
+        state.last_reasoning = because
         # prefix the projection with the assigned cursor id so callers can
         # parse the handle without inspecting the projection body
         return f"Started cursor {cid}.\n\n{manager.format_cursor_view(cid)}"
@@ -123,13 +150,35 @@ class CursorMoveTool(Tool, ToolMarkerSymbolicRead):
         self,
         cursor_id: str,
         target_name: str,
+        because: str,
         target_relative_path: str = "",
     ) -> str:
         """
         Move the cursor to a neighboring symbol. Returns the new position's neighborhood.
 
+        ``because`` is required and articulates your **goal in
+        understanding**: the semantic question this hop lets you answer
+        that the previous position did not. Phrase as the gap in your
+        understanding the move closes -- not a description of where
+        you are going or a hypothesis about what the target contains.
+        Examples:
+
+        ✓ "to confirm the rate limiter sees the same clock the auth
+           middleware does"
+        ✓ "to check whether this method is the only path that decrements
+           the quota or whether there is a parallel one"
+        ✗ "to look at create_user" (mechanical)
+        ✗ "I think this is where validation happens" (hypothesis about
+           code structure)
+
+        The reasoning replaces the cursor's prior reasoning and is
+        rendered as ``why: <text>`` above the anchor on every subsequent
+        projection.
+
         :param cursor_id: the ID of the cursor to move (shown in cursor output).
         :param target_name: name of the symbol to move to. Must be visible in the current neighborhood.
+        :param because: your **goal in understanding** for this hop --
+            the semantic question this neighbor lets you answer. Required.
         :param target_relative_path: optional file path to disambiguate if multiple neighbors share the same name.
         :return: the updated cursor view at the new position.
         """
@@ -139,6 +188,8 @@ class CursorMoveTool(Tool, ToolMarkerSymbolicRead):
             target_name=target_name,
             target_relative_path=target_relative_path or None,
         )
+        # update the cursor's reasoning to reflect the goal of this hop
+        manager.get_cursor(cursor_id).last_reasoning = because
         return manager.format_cursor_view(cursor_id)
 
 
@@ -286,9 +337,11 @@ class CursorFindTool(Tool, ToolMarkerSymbolicRead):
     """
 
     # noinspection PyDefaultArgument
+    # noinspection PyDefaultArgument
     def apply(
         self,
         name_path_pattern: str,
+        because: str,
         relative_path: str = "",
         depth: int = 0,
         include_body: bool = False,
@@ -312,7 +365,27 @@ class CursorFindTool(Tool, ToolMarkerSymbolicRead):
         cursor view is returned. Otherwise, the list of candidate symbols is returned so
         you can refine the pattern or call ``cursor_start`` with a more specific one.
 
+        ``because`` is required and articulates your **goal in
+        understanding**: the semantic question the search lets you
+        answer. Phrase as the gap in your understanding -- not a
+        description of what you are searching for. Examples:
+
+        ✓ "to find which subsystem owns timezone normalisation so I can
+           reason about cross-tz aggregation"
+        ✓ "to confirm whether quota enforcement happens at the API
+           boundary or further inside the service"
+        ✗ "to find UserService" (mechanical)
+        ✗ "looking for the auth code" (no semantic question)
+
+        When the search yields a unique match the reasoning is
+        recorded on the started cursor and rendered above its anchor.
+        For multi-match results the reasoning is included in the
+        candidate-list header so the trace still carries intent.
+
         :param name_path_pattern: name path matching pattern.
+        :param because: your **goal in understanding** for this search
+            -- the semantic question the result lets you answer.
+            Required.
         :param relative_path: optional file or directory to restrict the search to.
         :param depth: depth up to which descendants shall be included for each match. Ignored
             when ``include_body=True``. Default 0.
@@ -348,14 +421,16 @@ class CursorFindTool(Tool, ToolMarkerSymbolicRead):
         n_matches = len(symbols)
 
         if n_matches == 0:
-            return f"No symbols found matching '{name_path_pattern}'."
+            return f"why: {because}\n\nNo symbols found matching '{name_path_pattern}'."
 
         if n_matches == 1:
-            cid, _ = manager.register_cursor_at_symbol(
+            cid, state = manager.register_cursor_at_symbol(
                 symbols[0],
                 cursor_id=cursor_id or None,
                 edge_types=parsed_edge_types,
             )
+            # record the agent's stated goal on the started cursor
+            state.last_reasoning = because
             view = manager.format_cursor_view(cid)
             return f"Found unique match; started cursor {cid}.\n\n{view}"
         def candidate_list_json() -> str:
@@ -380,7 +455,7 @@ class CursorFindTool(Tool, ToolMarkerSymbolicRead):
             rel_path_to_name_paths: defaultdict[str, list[str]] = defaultdict(list)
             for s in symbols:
                 rel_path_to_name_paths[s.location.relative_path or "unknown"].append(s.get_name_path())
-            return f"{summary}\n{self._to_json(rel_path_to_name_paths)}"
+            return f"why: {because}\n\n{summary}\n{self._to_json(rel_path_to_name_paths)}"
 
         def shortened_relative_path_to_name_paths() -> str:
             rel_path_to_name_paths: defaultdict[str, list[str]] = defaultdict(list)
@@ -388,7 +463,7 @@ class CursorFindTool(Tool, ToolMarkerSymbolicRead):
                 rel_path_to_name_paths[s.location.relative_path or "unknown"].append(s.get_name_path())
             return f"Candidates (shortened):\n{self._to_json(rel_path_to_name_paths)}"
 
-        result = f"Found {n_matches} matching symbols; pick one and call cursor_start on its name path.\n{candidate_list_json()}"
+        result = f"why: {because}\n\nFound {n_matches} matching symbols; pick one and call cursor_start on its name path.\n{candidate_list_json()}"
         return self._limit_length(result, max_answer_chars, shortened_result_factories=[shortened_relative_path_to_name_paths])
 
 
@@ -412,6 +487,7 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
     def apply(
         self,
         substring_pattern: str,
+        because: str,
         relative_path: str = "",
         paths_include_glob: str = "",
         paths_exclude_glob: str = "",
@@ -438,10 +514,26 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
             unique enclosing symbol). When the number of unique enclosing
             symbols exceeds ``max_matches``, only the first ``max_matches``
             symbols receive cursors; the rest are listed in a deferred
-            section without cursor IDs.
+            section without cursor IDs. The agent's ``because`` is recorded
+            on each opened cursor so subsequent projections render it.
+
+        ``because`` is required and articulates your **goal in
+        understanding** -- the semantic question the search lets you
+        answer, not a description of what you are searching for.
+        Examples:
+
+        ✓ "to map every site that mutates the quota counter so I can
+           reason about race conditions under concurrent withdrawal"
+        ✓ "to find where the timezone fallback is applied so I can decide
+           whether the bug lives in ingest or render"
+        ✗ "to grep for self.users" (mechanical)
+        ✗ "looking for ValueError" (no semantic question)
 
         :param substring_pattern: regular expression for a substring pattern
             to search for.
+        :param because: your **goal in understanding** for this search --
+            the semantic question the result lets you answer. Required.
+            Recorded on every opened cursor.
         :param relative_path: only sub-paths of this path (relative to the
             project root) are searched. Pointing at a single file restricts
             the search to that file. Must exist.
@@ -480,8 +572,9 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
         # message rather than a header with zero entries
         if not groups:
             if n_unsymboled == 0:
-                return f"No matches for {substring_pattern!r}."
+                return f"why: {because}\n\nNo matches for {substring_pattern!r}."
             return (
+                f"why: {because}\n\n"
                 f"Found {n_unsymboled} match(es) for {substring_pattern!r}, "
                 f"none inside any LSP-addressable symbol. "
                 f"Use search_for_pattern for the file-level listing."
@@ -498,10 +591,13 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
 
         opened_cursors: list[tuple[str, LanguageServerSymbol, list[str]]] = []
         for sym, hits in opened_groups:
-            cid, _ = manager.register_cursor_at_symbol(sym)
+            cid, state = manager.register_cursor_at_symbol(sym)
+            # record the agent's stated goal on every opened cursor
+            state.last_reasoning = because
             opened_cursors.append((cid, sym, hits))
 
-        # build the multi-cursor report header
+        # build the multi-cursor report header (lead with the agent's why so
+        # the trace shows intent before observation)
         n_hits = sum(len(hits) for _, hits in groups)
         header_parts = [
             f"Found {n_hits} match(es) across {len(groups)} symbol(s).",
@@ -512,11 +608,16 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
             header_parts.append(
                 f"{n_unsymboled} hit(s) outside any LSP symbol (use search_for_pattern)."
             )
-        lines: list[str] = [" ".join(header_parts), ""]
+        lines: list[str] = [f"why: {because}", "", " ".join(header_parts), ""]
 
         # per-cursor anchor + indented hit display strings
         for cid, _sym, hits in opened_cursors:
             anchor = manager.format_cursor_view(cid).splitlines()[0]
+            # anchor line of a cursor whose last_reasoning was just set
+            # is the ``why: ...`` line; we want the actual ``@ ...`` anchor
+            # for the report instead, so skip past the why line
+            view_lines = manager.format_cursor_view(cid).splitlines()
+            anchor = next((line for line in view_lines if line.startswith("@ ")), view_lines[0])
             lines.append(f"[{cid}]  {anchor}    {len(hits)} hit(s)")
             for hit in hits:
                 for hit_line in hit.splitlines():
@@ -1193,7 +1294,7 @@ class CursorOverviewTool(Tool, ToolMarkerSymbolicRead):
     use case of the old ``get_symbols_overview`` tool in cursor-first form.
     """
 
-    def apply(self, relative_path: str, cursor_id: str = "", max_answer_chars: int = -1) -> str:
+    def apply(self, relative_path: str, because: str, cursor_id: str = "", max_answer_chars: int = -1) -> str:
         """
         Show the top-level symbols in a file as a compact symbolic listing.
 
@@ -1202,10 +1303,26 @@ class CursorOverviewTool(Tool, ToolMarkerSymbolicRead):
         anchor format produced by ``format_cursor_view`` so callers see one unified
         symbolic projection across the cursor surface.
 
+        ``because`` is required and articulates your **goal in
+        understanding** for asking for this overview -- the semantic
+        question the file's structure lets you answer. Phrase as the
+        gap in your understanding, not what you expect the file to
+        contain. Examples:
+
+        ✓ "to learn what subsystems are co-located in services.py before
+           deciding where to place the new throttle"
+        ✓ "to confirm whether models.py defines its own validation or
+           delegates to a shared utility"
+        ✗ "to look at services.py" (no semantic question)
+        ✗ "to find UserService" (use cursor_find)
+
         :param relative_path: relative path to the source file.
+        :param because: your **goal in understanding** for asking for
+            this listing -- the semantic question the file's structure
+            lets you answer. Required.
         :param cursor_id: optional cursor ID for the started cursor. Auto-generated otherwise.
         :param max_answer_chars: maximum characters for the returned output; -1 means use default.
-        :return: a compact listing of top-level symbols, one per line.
+        :return: a compact listing of top-level symbols, one per line, prefixed with the agent's stated why.
         """
         import os
 
@@ -1223,12 +1340,13 @@ class CursorOverviewTool(Tool, ToolMarkerSymbolicRead):
             )
         top_level = retriever.get_symbol_overview(relative_path).get(relative_path, [])
         if not top_level:
-            return f"No top-level symbols found in {relative_path}."
+            return f"why: {because}\n\nNo top-level symbols found in {relative_path}."
 
         # render each symbol as ``name :Kind@file:line:`` -- the same handle shape
         # used by format_cursor_view's anchor and by NeighborSymbol.format_compact,
         # so the agent can treat overview entries and cursor projections uniformly.
-        lines: list[str] = [f"Top-level symbols in {relative_path}:"]
+        # The agent's why prefixes the listing so the trace shows intent before observation.
+        lines: list[str] = [f"why: {because}", "", f"Top-level symbols in {relative_path}:"]
         for sym in top_level:
             line = sym.line
             loc = f"{relative_path}:{line + 1}" if line is not None else relative_path
@@ -1239,3 +1357,46 @@ class CursorOverviewTool(Tool, ToolMarkerSymbolicRead):
                 lines.append(f"  {sym.name} @{loc}:")
         result = "\n".join(lines)
         return self._limit_length(result, max_answer_chars)
+
+
+
+class CursorNarrateTool(Tool, ToolMarkerSymbolicRead):
+    """
+    Record the agent's goal in understanding on a cursor without moving it.
+
+    Use ``cursor_narrate`` to attach a fresh ``why`` to a cursor between
+    navigation calls -- e.g. after looking at a position and forming a
+    new hypothesis, or after the previous reasoning was answered and
+    the next move's goal is different. The recorded text replaces the
+    cursor's prior reasoning and is rendered as ``why: <text>`` above
+    the anchor on every subsequent projection.
+
+    The narration is a *semantic goal* -- the gap in your understanding
+    you are now trying to close -- not a description of where the
+    cursor is or a hypothesis about code structure. See
+    :class:`CursorStartTool` for the same authoring discipline.
+    """
+
+    def apply(self, cursor_id: str, because: str) -> str:
+        """
+        Update the cursor's recorded ``why`` and return its updated view.
+
+        :param cursor_id: the ID of the cursor whose reasoning to update.
+        :param because: your **goal in understanding** at this cursor's
+            current position -- the semantic question you are now trying
+            to answer. Replaces any prior reasoning recorded on the
+            cursor.
+
+            ✓ "to confirm whether the rate limiter respects the same
+               clock as auth"
+            ✓ "to figure out whether ingest or render normalises tz"
+            ✗ "I'm here looking at create_user" (mechanical)
+            ✗ "I think this is the bug" (hypothesis about code structure)
+
+        :return: the updated cursor view, with ``why: <text>`` rendered
+            above the anchor.
+        """
+        manager = self.agent.get_cursor_manager()
+        state = manager.get_cursor(cursor_id)
+        state.last_reasoning = because
+        return manager.format_cursor_view(cursor_id)

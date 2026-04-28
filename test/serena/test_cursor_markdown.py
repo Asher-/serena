@@ -72,7 +72,7 @@ class TestMarkdownCursorOverview:
         # CursorOverviewTool only emits top-level symbols; nested headings are
         # reachable via cursor_start name_path segments.
         overview_tool = markdown_serena_agent.get_tool(CursorOverviewTool)
-        result = overview_tool.apply(relative_path="README.md")
+        result = overview_tool.apply(because="test fixture: exercising the tool behaviour", relative_path="README.md")
         assert "Top-level symbols in README.md" in result
         # overview entries share the symbolic-projection ``name :Kind@file:line:`` shape
         assert "Test Repository :Namespace@README.md:1:" in result
@@ -82,7 +82,7 @@ class TestMarkdownCursorOverview:
         # mirrors the Python-side test for parity across language backends
         overview_tool = markdown_serena_agent.get_tool(CursorOverviewTool)
         with pytest.raises(FileNotFoundError):
-            overview_tool.apply(relative_path="does/not/exist.md")
+            overview_tool.apply(because="test fixture: exercising the tool behaviour", relative_path="does/not/exist.md")
 
 
 class TestMarkdownCursorBody:
@@ -95,6 +95,7 @@ class TestMarkdownCursorBody:
         configure_tool = markdown_serena_agent.get_tool(CursorConfigureTool)
 
         start_result = start_tool.apply(
+            because="test fixture: exercising the tool behaviour",
             relative_path="README.md",
             name_path="Test Repository/Overview",
             cursor_id="md-overview",

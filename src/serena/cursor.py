@@ -147,12 +147,18 @@ class CursorState:
     """The state of a single navigation cursor.
 
     Carries the cursor's current position, its trail of prior positions,
-    the active LSP-edge set used when neighbors are resolved, and a small
+    the active LSP-edge set used when neighbors are resolved, a small
     bundle of *projection toggles* controlling which optional sections of
-    :meth:`CursorManager.format_cursor_view` render. The toggles default
-    to ``False`` so a fresh cursor projects just its anchor (plus any
-    edge blocks the active edge set produces): the agent opts into
-    additional layers via ``cursor_configure`` when context warrants.
+    :meth:`CursorManager.format_cursor_view` render, and the last
+    *reasoning* string (the agent's stated semantic goal for being at
+    this position). The toggles default to ``False`` so a fresh cursor
+    projects just its anchor (plus any edge blocks the active edge set
+    produces): the agent opts into additional layers via
+    ``cursor_configure`` when context warrants. ``last_reasoning`` is
+    updated by every navigational tool call (``cursor_start`` /
+    ``cursor_find`` / ``cursor_move`` / ``cursor_narrate``) so the
+    projection always carries the most-recently-articulated intent
+    above the anchor.
 
     :ivar cursor_id: stable handle the manager uses to look up the cursor.
     :ivar current_symbol: the LSP symbol the cursor currently addresses.
@@ -171,6 +177,9 @@ class CursorState:
         inline list of peer names under the same parent.
     :ivar include_gist: when ``True``, the projection includes a
         one-line extract of the symbol body.
+    :ivar last_reasoning: the agent's most-recent stated semantic goal.
+        Rendered as ``why: <text>`` above the anchor whenever set.
+        ``None`` (the default) suppresses the line entirely.
     """
 
     cursor_id: str
@@ -183,6 +192,7 @@ class CursorState:
     include_trail: bool = False
     include_siblings: bool = False
     include_gist: bool = False
+    last_reasoning: str | None = None
 
     def record_move(self, new_symbol: LanguageServerSymbol, new_location: LanguageServerSymbolLocation) -> None:
         """Record moving the cursor to a new symbol.
@@ -242,6 +252,9 @@ class StructuralCursorState:
         Default ``False``.
     :ivar include_gist: when ``True``, the projection includes a
         one-line extract of the serialized node text. Default ``False``.
+    :ivar last_reasoning: the agent's most-recent stated semantic goal.
+        Rendered as ``why: <text>`` above the anchor whenever set.
+        ``None`` (the default) suppresses the line entirely.
     """
 
     cursor_id: str
@@ -254,6 +267,7 @@ class StructuralCursorState:
     include_trail: bool = False
     include_siblings: bool = False
     include_gist: bool = False
+    last_reasoning: str | None = None
 
 
 AnyCursorState = CursorState | StructuralCursorState
@@ -901,11 +915,17 @@ class CursorManager:
     def format_cursor_view(self, cursor_id: str) -> str:
         """Render the cursor as a compact symbolic projection.
 
-        The projection is built from six layered facts; only the **anchor**
+        The projection is built from layered facts; only the **anchor**
         and **edge blocks** render unconditionally. Every other layer is
         gated by an ``include_*`` toggle on the cursor state so a fresh
-        cursor projects just its position by default:
+        cursor projects just its position by default. When the cursor's
+        ``last_reasoning`` is set, a ``why: <text>`` line is rendered
+        ABOVE the anchor so the agent's stated semantic goal frames every
+        view of the cursor:
 
+        * **Why** -- ``why: <reasoning>`` -- the agent's most-recent
+          stated semantic goal. Rendered above the anchor. Always shown
+          when ``state.last_reasoning`` is set.
         * **Anchor** -- ``@ name :Kind@file:start-end:`` placing the
           cursor on a stable handle that includes its body extent.
           Always rendered.
@@ -939,6 +959,12 @@ class CursorManager:
         location = state.current_location
 
         lines: list[str] = []
+
+        # why: agent's stated semantic goal, rendered above the anchor so the
+        # judge / reader always sees intent before observation
+        if state.last_reasoning:
+            lines.append(f"why: {state.last_reasoning}")
+            lines.append("")
 
         # anchor: the cursor's own handle with body extent (always rendered)
         lines.append(self._render_anchor(symbol, location))
@@ -1152,9 +1178,15 @@ class CursorManager:
         the cursor still gets an anchor (always), a contains list (when
         the addressed node has members), and -- gated by the same
         ``include_*`` toggles as the LSP path -- a trail, chain,
-        siblings, and gist.
+        siblings, and gist. The agent's ``last_reasoning`` is rendered
+        above the anchor whenever set, mirroring the LSP path.
         """
         lines: list[str] = []
+
+        # why: agent's stated semantic goal, rendered above the anchor
+        if state.last_reasoning:
+            lines.append(f"why: {state.last_reasoning}")
+            lines.append("")
 
         # anchor: structural anchor lacks a single line, so no line range
         kind_str = state.kind or ""

@@ -321,7 +321,7 @@ class TestCursorToolsIntegration:
     def test_cursor_start_and_look(self, python_serena_agent: SerenaAgent) -> None:
         """cursor_start places a cursor and returns a neighborhood view."""
         start_tool = python_serena_agent.get_tool(CursorStartTool)
-        result = start_tool.apply(name_path="UserService", edge_types=["contains"])
+        result = start_tool.apply(because="test fixture: exercising the tool behaviour", name_path="UserService", edge_types=["contains"])
         assert "UserService" in result
         # cursor_start prefixes the projection with the assigned id, mirroring cursor_find
         assert "Started cursor" in result
@@ -342,9 +342,9 @@ class TestCursorToolsIntegration:
     def test_cursor_move_and_history(self, python_serena_agent: SerenaAgent) -> None:
         """cursor_move navigates to a neighbor; cursor_history shows the trail."""
         start_tool = python_serena_agent.get_tool(CursorStartTool)
-        start_tool.apply(name_path="UserService", cursor_id="nav-test", edge_types=["contains"])
+        start_tool.apply(because="test fixture: exercising the tool behaviour", name_path="UserService", cursor_id="nav-test", edge_types=["contains"])
         move_tool = python_serena_agent.get_tool(CursorMoveTool)
-        move_result = move_tool.apply(cursor_id="nav-test", target_name="create_user")
+        move_result = move_tool.apply(because="test fixture: exercising the tool behaviour", cursor_id="nav-test", target_name="create_user")
         assert "create_user" in move_result
 
         history_tool = python_serena_agent.get_tool(CursorHistoryTool)
@@ -355,7 +355,7 @@ class TestCursorToolsIntegration:
     def test_cursor_configure_edge_types(self, python_serena_agent: SerenaAgent) -> None:
         """cursor_configure changes which edge types are shown."""
         start_tool = python_serena_agent.get_tool(CursorStartTool)
-        start_tool.apply(name_path="UserService", cursor_id="cfg-test")
+        start_tool.apply(because="test fixture: exercising the tool behaviour", name_path="UserService", cursor_id="cfg-test")
 
         configure_tool = python_serena_agent.get_tool(CursorConfigureTool)
         result = configure_tool.apply(cursor_id="cfg-test", edge_types=["contains"])
@@ -367,7 +367,7 @@ class TestCursorToolsIntegration:
     def test_cursor_configure_invalid_edge_type(self, python_serena_agent: SerenaAgent) -> None:
         """cursor_configure raises for an invalid edge type name."""
         start_tool = python_serena_agent.get_tool(CursorStartTool)
-        start_tool.apply(name_path="UserService", cursor_id="cfg-err")
+        start_tool.apply(because="test fixture: exercising the tool behaviour", name_path="UserService", cursor_id="cfg-err")
 
         configure_tool = python_serena_agent.get_tool(CursorConfigureTool)
         with pytest.raises(ValueError, match="Unknown edge type"):
@@ -376,7 +376,7 @@ class TestCursorToolsIntegration:
     def test_cursor_close(self, python_serena_agent: SerenaAgent) -> None:
         """cursor_close removes the cursor."""
         start_tool = python_serena_agent.get_tool(CursorStartTool)
-        start_tool.apply(name_path="UserService", cursor_id="close-test")
+        start_tool.apply(because="test fixture: exercising the tool behaviour", name_path="UserService", cursor_id="close-test")
 
         close_tool = python_serena_agent.get_tool(CursorCloseTool)
         result = close_tool.apply(cursor_id="close-test")
@@ -391,7 +391,7 @@ class TestCursorToolsIntegration:
     def test_cursor_include_body(self, python_serena_agent: SerenaAgent) -> None:
         """cursor_configure with include_body=True shows the symbol body."""
         start_tool = python_serena_agent.get_tool(CursorStartTool)
-        start_tool.apply(name_path="UserService/create_user", cursor_id="body-test")
+        start_tool.apply(because="test fixture: exercising the tool behaviour", name_path="UserService/create_user", cursor_id="body-test")
 
         configure_tool = python_serena_agent.get_tool(CursorConfigureTool)
         result = configure_tool.apply(cursor_id="body-test", include_body=True)
@@ -405,9 +405,9 @@ class TestCursorToolsIntegration:
         history_tool = python_serena_agent.get_tool(CursorHistoryTool)
 
         # Start at a class
-        start_tool.apply(name_path="UserService", cursor_id="full-nav", edge_types=["contains"])
+        start_tool.apply(because="test fixture: exercising the tool behaviour", name_path="UserService", cursor_id="full-nav", edge_types=["contains"])
         # Move to a method
-        move_tool.apply(cursor_id="full-nav", target_name="create_user")
+        move_tool.apply(because="test fixture: exercising the tool behaviour", cursor_id="full-nav", target_name="create_user")
 
         # Check trail has one step
         history = history_tool.apply(cursor_id="full-nav")
@@ -417,8 +417,8 @@ class TestCursorToolsIntegration:
         """Multiple cursors can be active simultaneously."""
         start_tool = python_serena_agent.get_tool(CursorStartTool)
 
-        r1 = start_tool.apply(name_path="UserService", cursor_id="multi-1")
-        r2 = start_tool.apply(name_path="Item", cursor_id="multi-2")
+        r1 = start_tool.apply(because="test fixture: exercising the tool behaviour", name_path="UserService", cursor_id="multi-1")
+        r2 = start_tool.apply(because="test fixture: exercising the tool behaviour", name_path="Item", cursor_id="multi-2")
 
         assert "UserService" in r1
         assert "Item" in r2
@@ -435,7 +435,7 @@ class TestCursorToolsIntegration:
         start_tool = python_serena_agent.get_tool(CursorStartTool)
         configure_tool = python_serena_agent.get_tool(CursorConfigureTool)
 
-        start_tool.apply(name_path="User", cursor_id="inherit-test", relative_path=os.path.join("test_repo", "models.py"))
+        start_tool.apply(because="test fixture: exercising the tool behaviour", name_path="User", cursor_id="inherit-test", relative_path=os.path.join("test_repo", "models.py"))
 
         # Configure to only show inheritance edges
         result = configure_tool.apply(
@@ -453,6 +453,7 @@ class TestCursorToolsIntegration:
         """Navigate to a nested class via the contains edge."""
         start_tool = python_serena_agent.get_tool(CursorStartTool)
         result = start_tool.apply(
+            because="test fixture: exercising the tool behaviour",
             name_path="OuterClass",
             relative_path=os.path.join("test_repo", "nested.py"),
             edge_types=["contains"],
@@ -471,7 +472,7 @@ class TestCursorFindAndOverview:
     def test_cursor_find_unique_starts_cursor(self, python_serena_agent: SerenaAgent) -> None:
         """cursor_find with a unique match starts a cursor and returns its view."""
         find_tool = python_serena_agent.get_tool(CursorFindTool)
-        result = find_tool.apply(name_path_pattern="/UserService", cursor_id="find-unique", edge_types=["contains"])
+        result = find_tool.apply(because="test fixture: exercising the tool behaviour", name_path_pattern="/UserService", cursor_id="find-unique", edge_types=["contains"])
         assert "started cursor" in result
         assert "UserService" in result
         assert "contains v" in result
@@ -479,7 +480,7 @@ class TestCursorFindAndOverview:
     def test_cursor_find_multiple_returns_candidates(self, python_serena_agent: SerenaAgent) -> None:
         """cursor_find with a non-unique pattern returns a candidate list without starting a cursor."""
         find_tool = python_serena_agent.get_tool(CursorFindTool)
-        result = find_tool.apply(name_path_pattern="__init__")
+        result = find_tool.apply(because="test fixture: exercising the tool behaviour", name_path_pattern="__init__")
         # Many __init__ methods exist; the result should list candidates and NOT start a cursor.
         assert "started cursor" not in result
         assert "matching symbols" in result or "Candidates" in result
@@ -487,13 +488,14 @@ class TestCursorFindAndOverview:
     def test_cursor_find_no_match(self, python_serena_agent: SerenaAgent) -> None:
         """cursor_find returns a clear message when no symbol matches."""
         find_tool = python_serena_agent.get_tool(CursorFindTool)
-        result = find_tool.apply(name_path_pattern="__absolutely_no_such_symbol__")
+        result = find_tool.apply(because="test fixture: exercising the tool behaviour", name_path_pattern="__absolutely_no_such_symbol__")
         assert "No symbols found" in result
 
     def test_cursor_find_substring(self, python_serena_agent: SerenaAgent) -> None:
         """cursor_find with substring_matching=True matches partial names."""
         find_tool = python_serena_agent.get_tool(CursorFindTool)
         result = find_tool.apply(
+            because="test fixture: exercising the tool behaviour",
             name_path_pattern="create_u",
             substring_matching=True,
             relative_path=os.path.join("test_repo", "services.py"),
@@ -503,7 +505,7 @@ class TestCursorFindAndOverview:
     def test_cursor_overview(self, python_serena_agent: SerenaAgent) -> None:
         """cursor_overview lists top-level symbols in a file."""
         overview_tool = python_serena_agent.get_tool(CursorOverviewTool)
-        result = overview_tool.apply(relative_path=os.path.join("test_repo", "services.py"))
+        result = overview_tool.apply(because="test fixture: exercising the tool behaviour", relative_path=os.path.join("test_repo", "services.py"))
         assert "Top-level symbols" in result
         assert "UserService" in result
         assert "ItemService" in result
@@ -512,7 +514,7 @@ class TestCursorFindAndOverview:
         """cursor_overview raises FileNotFoundError for a missing file."""
         overview_tool = python_serena_agent.get_tool(CursorOverviewTool)
         with pytest.raises(FileNotFoundError):
-            overview_tool.apply(relative_path="does/not/exist.py")
+            overview_tool.apply(because="test fixture: exercising the tool behaviour", relative_path="does/not/exist.py")
 
 
 
@@ -526,6 +528,7 @@ class TestCursorGrep:
         grep_tool = python_serena_agent.get_tool(CursorGrepTool)
         # the docstring/body of UserService.create_user contains "create_user"
         result = grep_tool.apply(
+            because="test fixture: exercising the tool behaviour",
             substring_pattern=r"def create_user\b",
             relative_path=os.path.join("test_repo", "services.py"),
         )
@@ -546,6 +549,7 @@ class TestCursorGrep:
         # Confine to a single method to make the collapse-to-one-cursor assertion
         # robust against the symbol-resolution layer's grouping choices.
         result = grep_tool.apply(
+            because="test fixture: exercising the tool behaviour",
             substring_pattern=r"raise ValueError\(f\"User with ID",
             relative_path=os.path.join("test_repo", "services.py"),
         )
@@ -559,6 +563,7 @@ class TestCursorGrep:
 
         grep_tool = python_serena_agent.get_tool(CursorGrepTool)
         result = grep_tool.apply(
+            because="test fixture: exercising the tool behaviour",
             substring_pattern=r"__absolutely_no_such_token_xyzzy__",
             relative_path=os.path.join("test_repo", "services.py"),
         )
@@ -574,6 +579,7 @@ class TestCursorGrep:
         # three distinct enclosing symbols, so max_matches=2 reliably
         # exercises the deferred path.
         result = grep_tool.apply(
+            because="test fixture: exercising the tool behaviour",
             substring_pattern=r"def \w+_user\(",
             relative_path=os.path.join("test_repo", "services.py"),
             max_matches=2,
@@ -590,6 +596,7 @@ class TestCursorGrep:
         grep_tool = python_serena_agent.get_tool(CursorGrepTool)
         look_tool = python_serena_agent.get_tool(CursorLookTool)
         result = grep_tool.apply(
+            because="test fixture: exercising the tool behaviour",
             substring_pattern=r"raise ValueError\(f\"User with ID",
             relative_path=os.path.join("test_repo", "services.py"),
         )
@@ -598,6 +605,150 @@ class TestCursorGrep:
         # cursor_look on the reported id must succeed (cursor is registered)
         view = look_tool.apply(cursor_id=cursor_ids[0])
         assert "create_user" in view
+
+
+
+class TestCursorNarration:
+    """Integration tests for the ``because`` narration channel.
+
+    Each navigational tool (cursor_start / cursor_find / cursor_move /
+    cursor_grep / cursor_overview) requires a ``because`` argument
+    articulating the agent's goal in understanding. The reasoning is
+    recorded on the cursor (when one is created) or prefixed onto the
+    response (overview / multi-match find), and is rendered as ``why:
+    <text>`` above the anchor on every subsequent projection.
+    cursor_narrate updates the reasoning between hops without moving
+    the cursor.
+    """
+
+    def test_cursor_start_renders_why_above_anchor(self, python_serena_agent: SerenaAgent) -> None:
+        """cursor_start records ``because`` and the projection renders it above the anchor."""
+        from serena.tools.cursor_tools import CursorStartTool
+
+        start_tool = python_serena_agent.get_tool(CursorStartTool)
+        result = start_tool.apply(
+            name_path="UserService",
+            because="to understand which subsystems share state via the user_db dict",
+            cursor_id="why-test-1",
+        )
+        # ``why: <text>`` appears above the anchor
+        assert "why: to understand which subsystems share state" in result
+        assert result.index("why: ") < result.index("@ UserService")
+
+    def test_cursor_move_replaces_reasoning(self, python_serena_agent: SerenaAgent) -> None:
+        """cursor_move records a fresh ``because`` that replaces the prior reasoning."""
+        from serena.tools.cursor_tools import CursorMoveTool, CursorStartTool
+
+        start_tool = python_serena_agent.get_tool(CursorStartTool)
+        move_tool = python_serena_agent.get_tool(CursorMoveTool)
+        start_tool.apply(
+            name_path="UserService",
+            because="initial reasoning -- to map the class surface",
+            cursor_id="why-test-2",
+            edge_types=["contains"],
+        )
+        result = move_tool.apply(
+            cursor_id="why-test-2",
+            target_name="create_user",
+            because="now to confirm whether create_user is the only mutation site for user_db",
+        )
+        # the new reasoning has replaced the old one
+        assert "to confirm whether create_user is the only mutation site" in result
+        assert "initial reasoning" not in result
+
+    def test_cursor_narrate_updates_reasoning_without_moving(self, python_serena_agent: SerenaAgent) -> None:
+        """cursor_narrate updates ``last_reasoning`` and re-renders without moving."""
+        from serena.tools.cursor_tools import CursorNarrateTool, CursorStartTool
+
+        start_tool = python_serena_agent.get_tool(CursorStartTool)
+        narrate_tool = python_serena_agent.get_tool(CursorNarrateTool)
+        start_tool.apply(
+            name_path="UserService",
+            because="orig",
+            cursor_id="why-test-3",
+        )
+        result = narrate_tool.apply(
+            cursor_id="why-test-3",
+            because="now: to understand whether the dict mutation is the source of the race",
+        )
+        assert "to understand whether the dict mutation is the source of the race" in result
+        assert "orig" not in result
+
+    def test_cursor_find_unique_records_because(self, python_serena_agent: SerenaAgent) -> None:
+        """A unique cursor_find records ``because`` on the started cursor."""
+        from serena.tools.cursor_tools import CursorFindTool
+
+        find_tool = python_serena_agent.get_tool(CursorFindTool)
+        result = find_tool.apply(
+            name_path_pattern="/UserService",
+            because="to confirm UserService is the canonical user-state owner",
+            cursor_id="why-test-4",
+            edge_types=["contains"],
+        )
+        assert "to confirm UserService is the canonical user-state owner" in result
+        assert "why: to confirm" in result
+
+    def test_cursor_grep_records_because_on_each_opened_cursor(self, python_serena_agent: SerenaAgent) -> None:
+        """cursor_grep records the agent's ``because`` on every opened cursor."""
+        from serena.tools.cursor_tools import CursorGrepTool, CursorLookTool
+
+        grep_tool = python_serena_agent.get_tool(CursorGrepTool)
+        look_tool = python_serena_agent.get_tool(CursorLookTool)
+        result = grep_tool.apply(
+            substring_pattern=r"def \w+_user\(",
+            because="to find every method whose name ends in _user so I can audit the touchpoints",
+            relative_path=os.path.join("test_repo", "services.py"),
+            max_matches=2,
+        )
+        # the report header carries the why
+        assert "why: to find every method" in result
+        # the recorded reasoning is on each opened cursor (visible via cursor_look)
+        cursor_ids = re.findall(r"\[(c\w+)\]", result)
+        assert cursor_ids
+        view = look_tool.apply(cursor_id=cursor_ids[0])
+        assert "to find every method" in view
+
+    def test_cursor_overview_prefixes_listing_with_why(self, python_serena_agent: SerenaAgent) -> None:
+        """cursor_overview prefixes the listing with the agent's ``because``."""
+        from serena.tools.cursor_tools import CursorOverviewTool
+
+        overview_tool = python_serena_agent.get_tool(CursorOverviewTool)
+        result = overview_tool.apply(
+            relative_path=os.path.join("test_repo", "services.py"),
+            because="to enumerate the service-layer top-level symbols before deciding where to drill in",
+        )
+        assert result.startswith("why: to enumerate the service-layer")
+        assert "Top-level symbols" in result
+
+    def test_because_is_required(self, python_serena_agent: SerenaAgent) -> None:
+        """All navigational cursor tools reject calls that omit ``because``."""
+        from serena.tools.cursor_tools import (
+            CursorFindTool,
+            CursorGrepTool,
+            CursorMoveTool,
+            CursorNarrateTool,
+            CursorOverviewTool,
+            CursorStartTool,
+        )
+
+        start_tool = python_serena_agent.get_tool(CursorStartTool)
+        find_tool = python_serena_agent.get_tool(CursorFindTool)
+        move_tool = python_serena_agent.get_tool(CursorMoveTool)
+        grep_tool = python_serena_agent.get_tool(CursorGrepTool)
+        overview_tool = python_serena_agent.get_tool(CursorOverviewTool)
+        narrate_tool = python_serena_agent.get_tool(CursorNarrateTool)
+        with pytest.raises(TypeError, match="because"):
+            start_tool.apply(name_path="UserService")  # type: ignore[call-arg]
+        with pytest.raises(TypeError, match="because"):
+            find_tool.apply(name_path_pattern="/UserService")  # type: ignore[call-arg]
+        with pytest.raises(TypeError, match="because"):
+            move_tool.apply(cursor_id="x", target_name="y")  # type: ignore[call-arg]
+        with pytest.raises(TypeError, match="because"):
+            grep_tool.apply(substring_pattern="foo")  # type: ignore[call-arg]
+        with pytest.raises(TypeError, match="because"):
+            overview_tool.apply(relative_path=os.path.join("test_repo", "services.py"))  # type: ignore[call-arg]
+        with pytest.raises(TypeError, match="because"):
+            narrate_tool.apply(cursor_id="x")  # type: ignore[call-arg]
 
 
 # ===========================================================================
@@ -637,6 +788,7 @@ class TestCursorEditTools:
         look_tool = python_serena_agent.get_tool(CursorLookTool)
 
         start_tool.apply(
+            because="test fixture: exercising the tool behaviour",
             name_path="sandbox_fn",
             relative_path=throwaway_python_file,
             cursor_id="edit-replace",
@@ -659,6 +811,7 @@ class TestCursorEditTools:
         insert_tool = python_serena_agent.get_tool(CursorInsertBeforeTool)
 
         start_tool.apply(
+            because="test fixture: exercising the tool behaviour",
             name_path="other_fn",
             relative_path=throwaway_python_file,
             cursor_id="edit-before",
@@ -682,6 +835,7 @@ class TestCursorEditTools:
         insert_tool = python_serena_agent.get_tool(CursorInsertAfterTool)
 
         start_tool.apply(
+            because="test fixture: exercising the tool behaviour",
             name_path="sandbox_fn",
             relative_path=throwaway_python_file,
             cursor_id="edit-after",
@@ -717,6 +871,7 @@ class TestCursorEditTools:
         try:
             python_serena_agent.reset_language_server_manager()
             start_tool.apply(
+                because="test fixture: exercising the tool behaviour",
                 name_path="FOO",
                 relative_path=rel_path,
                 cursor_id="var-after",
@@ -769,6 +924,7 @@ class TestCursorEditTools:
         try:
             python_serena_agent.reset_language_server_manager()
             start_tool.apply(
+                because="test fixture: exercising the tool behaviour",
                 name_path="FOO",
                 relative_path=rel_path,
                 cursor_id="var-before",
@@ -818,6 +974,7 @@ class TestCursorEditTools:
         try:
             python_serena_agent.reset_language_server_manager()
             start_tool.apply(
+                because="test fixture: exercising the tool behaviour",
                 name_path="Point/x",
                 relative_path=rel_path,
                 cursor_id="field-after",
@@ -870,6 +1027,7 @@ class TestCursorEditTools:
         try:
             python_serena_agent.reset_language_server_manager()
             start_tool.apply(
+                because="test fixture: exercising the tool behaviour",
                 name_path="FOO",
                 relative_path=rel_path,
                 cursor_id="var-body",
@@ -908,6 +1066,7 @@ class TestCursorEditTools:
         rename_tool = python_serena_agent.get_tool(CursorRenameTool)
 
         start_tool.apply(
+            because="test fixture: exercising the tool behaviour",
             name_path="sandbox_fn",
             relative_path=throwaway_python_file,
             cursor_id="edit-rename",
@@ -932,6 +1091,7 @@ class TestCursorEditTools:
         # Position with a real symbol first, then override its location.
         start_tool = python_serena_agent.get_tool(CursorStartTool)
         start_tool.apply(
+            because="test fixture: exercising the tool behaviour",
             name_path="UserService",
             relative_path=os.path.join("test_repo", "services.py"),
             cursor_id="no-loc",
