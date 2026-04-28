@@ -141,8 +141,36 @@ class CursorTrailEntry:
 
 
 @dataclass
+
 class CursorState:
-    """The state of a single navigation cursor."""
+    """The state of a single navigation cursor.
+
+    Carries the cursor's current position, its trail of prior positions,
+    the active LSP-edge set used when neighbors are resolved, and a small
+    bundle of *projection toggles* controlling which optional sections of
+    :meth:`CursorManager.format_cursor_view` render. The toggles default
+    to ``False`` so a fresh cursor projects just its anchor (plus any
+    edge blocks the active edge set produces): the agent opts into
+    additional layers via ``cursor_configure`` when context warrants.
+
+    :ivar cursor_id: stable handle the manager uses to look up the cursor.
+    :ivar current_symbol: the LSP symbol the cursor currently addresses.
+    :ivar current_location: a snapshot of ``current_symbol``'s location
+        captured at cursor-creation / move time.
+    :ivar trail: prior positions recorded by :meth:`record_move`.
+    :ivar active_edge_types: edges resolved when the projection renders
+        neighbors. Empty (the default) means no edges are queried.
+    :ivar include_body: when ``True``, the projection appends a
+        ``--- body ---`` block with the symbol's source.
+    :ivar include_chain: when ``True``, the projection includes the
+        ascending containment chain ending at the file path.
+    :ivar include_trail: when ``True``, the projection includes the
+        last-N prior hops with a ``<- here`` marker on the current.
+    :ivar include_siblings: when ``True``, the projection includes the
+        inline list of peer names under the same parent.
+    :ivar include_gist: when ``True``, the projection includes a
+        one-line extract of the symbol body.
+    """
 
     cursor_id: str
     current_symbol: LanguageServerSymbol
@@ -150,6 +178,10 @@ class CursorState:
     trail: list[CursorTrailEntry] = field(default_factory=list)
     active_edge_types: frozenset[EdgeType] = DEFAULT_EDGE_TYPES
     include_body: bool = False
+    include_chain: bool = False
+    include_trail: bool = False
+    include_siblings: bool = False
+    include_gist: bool = False
 
     def record_move(self, new_symbol: LanguageServerSymbol, new_location: LanguageServerSymbolLocation) -> None:
         """Record moving the cursor to a new symbol.
@@ -173,6 +205,7 @@ class CursorState:
 
 
 @dataclass
+
 class StructuralCursorState:
     """The state of a cursor positioned on a structural (non-LSP) node.
 
@@ -198,6 +231,16 @@ class StructuralCursorState:
         rendered view. Default ``False``. Mirrors :class:`CursorState` so
         :class:`~serena.tools.cursor_tools.CursorConfigureTool` can toggle
         the same display option across LSP and structural cursors.
+    :ivar include_chain: when ``True``, the projection includes the
+        ascending name-path chain ending at the file path. Default ``False``.
+    :ivar include_trail: when ``True``, the projection includes the
+        last-N prior name paths with a ``<- here`` marker on the current.
+        Default ``False``.
+    :ivar include_siblings: when ``True``, the projection includes the
+        inline list of peer member name paths under the same parent.
+        Default ``False``.
+    :ivar include_gist: when ``True``, the projection includes a
+        one-line extract of the serialized node text. Default ``False``.
     """
 
     cursor_id: str
@@ -206,6 +249,10 @@ class StructuralCursorState:
     kind: KindName
     trail: list[str] = field(default_factory=list)
     include_body: bool = False
+    include_chain: bool = False
+    include_trail: bool = False
+    include_siblings: bool = False
+    include_gist: bool = False
 
 
 AnyCursorState = CursorState | StructuralCursorState
@@ -792,21 +839,28 @@ class CursorManager:
     def format_cursor_view(self, cursor_id: str) -> str:
         """Render the cursor as a compact symbolic projection.
 
-        The projection is built from six layered facts:
+        The projection is built from six layered facts; only the **anchor**
+        and **edge blocks** render unconditionally. Every other layer is
+        gated by an ``include_*`` toggle on the cursor state so a fresh
+        cursor projects just its position by default:
 
         * **Anchor** -- ``@ name :Kind@file:start-end:`` placing the
           cursor on a stable handle that includes its body extent.
-        * **Trail** -- last-N prior hops with ``<- here`` marking the
-          current position. Omitted when no prior hop has been recorded.
-        * **Chain** -- ascending hierarchy from the immediate enclosing
-          symbol up to the file, each as ``<- name :Kind@file:line:``.
+          Always rendered.
         * **Edge blocks** -- one block per active edge type that produced
           neighbors. Outgoing edges (calls, references, inherits) carry a
           ``->`` arrow, incoming (called-by, referenced-by,
           inherited-by) a ``<-`` arrow. ``contains`` collapses to a
-          single inline list.
-        * **Siblings** -- peer names alongside the current symbol.
-        * **Gist** -- one-sentence body extract.
+          single inline list. Rendered when ``state.active_edge_types``
+          is non-empty.
+        * **Trail** -- last-N prior hops with ``<- here`` marking the
+          current position. Gated by ``state.include_trail``.
+        * **Chain** -- ascending hierarchy from the immediate enclosing
+          symbol up to the file. Gated by ``state.include_chain``.
+        * **Siblings** -- peer names alongside the current symbol. Gated
+          by ``state.include_siblings``.
+        * **Gist** -- one-sentence body extract. Gated by
+          ``state.include_gist``.
 
         The optional ``--- body ---`` block is appended when
         ``state.include_body`` is set, preserving the existing opt-in for
@@ -824,20 +878,22 @@ class CursorManager:
 
         lines: list[str] = []
 
-        # anchor: the cursor's own handle with body extent
+        # anchor: the cursor's own handle with body extent (always rendered)
         lines.append(self._render_anchor(symbol, location))
 
-        # trail: prior hops + current marked '<- here'; only when at least one prior hop exists
-        trail_block = self._render_trail(state)
-        if trail_block:
-            lines.append("")
-            lines.extend(trail_block)
+        # trail: prior hops + current marked '<- here'; opt-in via include_trail
+        if state.include_trail:
+            trail_block = self._render_trail(state)
+            if trail_block:
+                lines.append("")
+                lines.extend(trail_block)
 
-        # chain: ascending hierarchy, ending at the file
-        chain_block = self._render_chain(symbol, location)
-        if chain_block:
-            lines.append("")
-            lines.extend(chain_block)
+        # chain: ascending hierarchy ending at the file; opt-in via include_chain
+        if state.include_chain:
+            chain_block = self._render_chain(symbol, location)
+            if chain_block:
+                lines.append("")
+                lines.extend(chain_block)
 
         # edge blocks: only when the cursor opted into edges
         if state.active_edge_types:
@@ -852,17 +908,19 @@ class CursorManager:
                 lines.append("")
                 lines.extend(self._render_edge_block(edge_type, edge_neighbors))
 
-        # siblings: peer symbols at the same level
-        sibling_line = self._render_siblings(symbol, location)
-        if sibling_line:
-            lines.append("")
-            lines.append(sibling_line)
+        # siblings: peer symbols at the same level; opt-in via include_siblings
+        if state.include_siblings:
+            sibling_line = self._render_siblings(symbol, location)
+            if sibling_line:
+                lines.append("")
+                lines.append(sibling_line)
 
-        # gist: first substantive body line
-        gist_line = self._render_gist(symbol)
-        if gist_line:
-            lines.append("")
-            lines.append(gist_line)
+        # gist: first substantive body line; opt-in via include_gist
+        if state.include_gist:
+            gist_line = self._render_gist(symbol)
+            if gist_line:
+                lines.append("")
+                lines.append(gist_line)
 
         # body block (opt-in): full statement-widened body for symbols whose
         # LSP extent is name-only; falls back to the LSP-reported body
@@ -1029,9 +1087,10 @@ class CursorManager:
 
         Mirrors :meth:`format_cursor_view` for non-LSP cursors: the LSP
         graph is empty, so calls/references/inheritance are absent, but
-        the cursor still gets an anchor, trail, chain (derived from the
-        canonical name path's segments), contains list, siblings, and a
-        gist drawn from the backend's serialized node text.
+        the cursor still gets an anchor (always), a contains list (when
+        the addressed node has members), and -- gated by the same
+        ``include_*`` toggles as the LSP path -- a trail, chain,
+        siblings, and gist.
         """
         lines: list[str] = []
 
@@ -1042,21 +1101,22 @@ class CursorManager:
         else:
             lines.append(f"@ {state.name_path} @{state.relative_path}:")
 
-        # trail: prior name_paths + current marked '<- here'
-        if state.trail:
+        # trail: prior name_paths + current marked '<- here'; opt-in
+        if state.include_trail and state.trail:
             lines.append("")
             lines.append("trail")
             for prior_path in state.trail[-_TRAIL_TAIL_LENGTH:]:
                 lines.append(f"   {prior_path} @{state.relative_path}:")
             lines.append(f"   {state.name_path} @{state.relative_path}:    <- here")
 
-        # chain: ascending name-path segments, ending at the file
-        chain_block = self._render_structural_chain(state)
-        if chain_block:
-            lines.append("")
-            lines.extend(chain_block)
+        # chain: ascending name-path segments ending at the file; opt-in
+        if state.include_chain:
+            chain_block = self._render_structural_chain(state)
+            if chain_block:
+                lines.append("")
+                lines.extend(chain_block)
 
-        # contains: structural members of the addressed node, inline
+        # contains: structural members of the addressed node, inline (always rendered when present)
         children = self._resolve_structural_neighbors(state)
         if children:
             lines.append("")
@@ -1064,18 +1124,20 @@ class CursorManager:
             tail = "" if len(children) <= _MAX_INLINE_LIST else f", ... (+{len(children) - _MAX_INLINE_LIST})"
             lines.append(f"contains v  {', '.join(names)}{tail}")
 
-        # siblings: peer members under the same parent name path
-        sibling_line = self._render_structural_siblings(state)
-        if sibling_line:
-            lines.append("")
-            lines.append(sibling_line)
+        # siblings: peer members under the same parent name path; opt-in
+        if state.include_siblings:
+            sibling_line = self._render_structural_siblings(state)
+            if sibling_line:
+                lines.append("")
+                lines.append(sibling_line)
 
-        # gist: first substantive line of the serialized node text
+        # gist: first substantive line of the serialized node text; opt-in
         body_text = self._format_structural_node_source(state)
-        gist = _gist_from_body(body_text)
-        if gist:
-            lines.append("")
-            lines.append(f"gist        {gist}")
+        if state.include_gist:
+            gist = _gist_from_body(body_text)
+            if gist:
+                lines.append("")
+                lines.append(f"gist        {gist}")
 
         # body block (opt-in): the addressed node's serialized source
         if state.include_body and body_text is not None:

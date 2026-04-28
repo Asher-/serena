@@ -166,14 +166,26 @@ class CursorConfigureTool(Tool, ToolMarkerSymbolicRead):
     """
 
     # noinspection PyDefaultArgument
+    # noinspection PyDefaultArgument
     def apply(
         self,
         cursor_id: str,
         edge_types: list[str] = [],  # noqa: B006
         include_body: bool = False,
+        include_chain: bool = False,
+        include_trail: bool = False,
+        include_siblings: bool = False,
+        include_gist: bool = False,
     ) -> str:
         """
-        Configure the cursor's active edge types and display options.
+        Configure the cursor's active edge types and projection toggles.
+
+        The projection has six layers; only the **anchor** and **edge
+        blocks** render unconditionally. Trail, chain, siblings, and gist
+        are opt-in: a fresh cursor projects just its position so the
+        agent can widen the view layer-by-layer when context warrants.
+        Each ``include_*`` flag is replaced wholesale -- pass ``True``
+        to render the layer, ``False`` (the default) to suppress it.
 
         :param cursor_id: the ID of the cursor to configure.
         :param edge_types: list of edge type names to make active. The
@@ -183,17 +195,31 @@ class CursorConfigureTool(Tool, ToolMarkerSymbolicRead):
             edge you want when you want them all. Valid names:
             ``contains``, ``references``, ``referenced-by``, ``calls``,
             ``called-by``, ``inherits``, ``inherited-by``.
-        :param include_body: whether to include the symbol's source code body in the cursor view.
+        :param include_body: when ``True``, the projection appends a
+            ``--- body ---`` block with the symbol's full source.
+        :param include_chain: when ``True``, the projection includes the
+            ascending containment chain (immediate enclosing symbol up
+            through the file).
+        :param include_trail: when ``True``, the projection includes the
+            last-N prior hops with a ``<- here`` marker on the current.
+        :param include_siblings: when ``True``, the projection includes
+            an inline list of peer names alongside the current symbol.
+        :param include_gist: when ``True``, the projection includes a
+            one-line extract of the symbol's body.
         :return: the updated cursor view.
         """
         manager = self.agent.get_cursor_manager()
         state = manager.get_cursor(cursor_id)
 
         # structural cursors carry no LSP edges; silently ignore edge_types so the
-        # tool stays uniform across cursor kinds. include_body still toggles whether
-        # the view renders the node's serialized source.
+        # tool stays uniform across cursor kinds. The projection toggles still
+        # apply -- structural views honour the same include_* flags.
         if isinstance(state, StructuralCursorState):
             state.include_body = include_body
+            state.include_chain = include_chain
+            state.include_trail = include_trail
+            state.include_siblings = include_siblings
+            state.include_gist = include_gist
             return manager.format_cursor_view(cursor_id)
 
         # Empty list explicitly clears the active set — see docstring. The
@@ -201,6 +227,10 @@ class CursorConfigureTool(Tool, ToolMarkerSymbolicRead):
         # all-edges resolution can be a multi-minute LSP cost.
         state.active_edge_types = _parse_edge_types(edge_types)
         state.include_body = include_body
+        state.include_chain = include_chain
+        state.include_trail = include_trail
+        state.include_siblings = include_siblings
+        state.include_gist = include_gist
 
         return manager.format_cursor_view(cursor_id)
 

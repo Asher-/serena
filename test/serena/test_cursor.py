@@ -542,6 +542,7 @@ class TestResolveNeighbors:
 
 class TestFormatting:
     @patch("serena.cursor.LanguageServerSymbolRetriever")
+
     def test_format_cursor_view_anchor(self, mock_retriever_cls):
         manager = _make_manager()
         sym = _make_symbol(name="MyClass", kind_name="Class", rel_path="src/m.py", line=10, name_path="MyClass")
@@ -557,6 +558,9 @@ class TestFormatting:
         )
 
         cid, _ = manager.start_cursor("MyClass")
+        # the chain block is opt-in (default off); ask for it before asserting
+        # the chain frame ends with the file path
+        manager.get_cursor(cid).include_chain = True
         view = manager.format_cursor_view(cid)
 
         # anchor combines name, kind, and location into a parseable handle
@@ -648,6 +652,115 @@ class TestFormatting:
         assert "no edges configured" not in view
         # the anchor still appears
         assert "@ Leaf :Class" in view
+
+
+
+# ── CursorManager: opt-in projection toggles ─────────────────────────────
+
+
+class TestProjectionToggles:
+    """Verify that include_chain / include_trail / include_siblings / include_gist
+    each independently gate their corresponding projection layer.
+
+    The default is terse: a fresh cursor projects only its anchor (plus any
+    edge blocks the active edge set produces). Each layer renders only
+    when its toggle is on.
+    """
+
+    @patch("serena.cursor.LanguageServerSymbolRetriever")
+    def test_default_renders_only_anchor(self, mock_retriever_cls):
+        """A fresh cursor with no toggles set renders just the anchor + (empty) edge set."""
+        manager = _make_manager()
+        sym = _make_symbol(name="MyClass", kind_name="Class", rel_path="src/m.py", line=10)
+        mock_retriever_cls.return_value.find_unique.return_value = sym
+
+        cid, _ = manager.start_cursor("MyClass")
+        view = manager.format_cursor_view(cid)
+
+        # only the anchor line; no chain / trail / siblings / gist sections
+        assert view.startswith("@ MyClass :Class@src/m.py:")
+        assert "<-" not in view  # no chain frame
+        assert "trail" not in view  # no trail header
+        assert "siblings" not in view  # no siblings section
+        assert "gist" not in view  # no gist section
+
+    @patch("serena.cursor.LanguageServerSymbolRetriever")
+    def test_include_chain_renders_chain(self, mock_retriever_cls):
+        """include_chain=True restores the ascending containment chain."""
+        manager = _make_manager()
+        sym = _make_symbol(name="MyClass", kind_name="Class", rel_path="src/m.py", line=10)
+        mock_retriever_cls.return_value.find_unique.return_value = sym
+
+        cid, _ = manager.start_cursor("MyClass")
+        manager.get_cursor(cid).include_chain = True
+        view = manager.format_cursor_view(cid)
+
+        # chain block ends with the file frame
+        assert "<- src/m.py" in view
+
+    @patch("serena.cursor.LanguageServerSymbolRetriever")
+    def test_include_trail_renders_trail_after_move(self, mock_retriever_cls):
+        """include_trail=True surfaces the prior-hop block once a move has happened."""
+        manager = _make_manager()
+        sym_a = _make_symbol(name="A", rel_path="a.py", line=5)
+        sym_b = _make_symbol(name="B", rel_path="b.py", line=15)
+        mock_retriever_cls.return_value.find_unique.side_effect = [sym_a, sym_b]
+
+        cid, _ = manager.start_cursor("A")
+        manager.move_cursor(cid, "B")
+        manager.get_cursor(cid).include_trail = True
+        view = manager.format_cursor_view(cid)
+
+        # trail header + prior hop (A) + current marker
+        assert "trail" in view
+        assert "<- here" in view
+
+    @patch("serena.cursor.LanguageServerSymbolRetriever")
+    def test_include_siblings_renders_siblings(self, mock_retriever_cls):
+        """include_siblings=True surfaces peer names alongside the current symbol."""
+        manager = _make_manager()
+        # parent with two children; the cursor sits on the first
+        peer = _make_symbol(name="peer_method", line=20)
+        target = _make_symbol(name="self_method", line=10)
+        parent = MagicMock(spec=LanguageServerSymbol)
+        parent.iter_children.return_value = iter([target, peer])
+        target.get_parent.return_value = parent
+        mock_retriever_cls.return_value.find_unique.return_value = target
+
+        cid, _ = manager.start_cursor("self_method")
+        manager.get_cursor(cid).include_siblings = True
+        view = manager.format_cursor_view(cid)
+
+        assert "siblings" in view
+        assert "peer_method" in view
+
+    @patch("serena.cursor.LanguageServerSymbolRetriever")
+    def test_include_gist_renders_gist(self, mock_retriever_cls):
+        """include_gist=True surfaces a one-line extract of the symbol body."""
+        manager = _make_manager()
+        sym = _make_symbol(name="func", kind_name="Function", line=10, body="def func():\n    return 'something'")
+        mock_retriever_cls.return_value.find_unique.return_value = sym
+
+        cid, _ = manager.start_cursor("func")
+        manager.get_cursor(cid).include_gist = True
+        view = manager.format_cursor_view(cid)
+
+        assert "gist" in view
+
+    @patch("serena.cursor.LanguageServerSymbolRetriever")
+    def test_toggles_are_independent(self, mock_retriever_cls):
+        """Turning on one toggle does not implicitly turn on others."""
+        manager = _make_manager()
+        sym = _make_symbol(name="MyClass", kind_name="Class", rel_path="src/m.py", line=10, body="class MyClass: pass")
+        mock_retriever_cls.return_value.find_unique.return_value = sym
+
+        cid, _ = manager.start_cursor("MyClass")
+        # only chain on -- gist must stay off
+        manager.get_cursor(cid).include_chain = True
+        view = manager.format_cursor_view(cid)
+
+        assert "<- src/m.py" in view  # chain present
+        assert "gist" not in view  # gist absent
 
 # ── CursorManager: find_symbols / register_cursor_at_symbol / reanchor_cursor ──
 
