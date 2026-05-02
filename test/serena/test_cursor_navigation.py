@@ -262,7 +262,7 @@ class TestNeighborSymbol:
             column=0,
             edge_type=EdgeType.CONTAINS,
         )
-        assert n.location_str == "src/main.py:11"  # 0-indexed line → 1-indexed display
+        assert n.location_str == "src/main.py:10"
 
     def test_location_str_path_only(self) -> None:
         n = NeighborSymbol(
@@ -298,7 +298,7 @@ class TestNeighborSymbol:
         )
         formatted = n.format_compact()
         # new format glues kind and location: ``name :Kind@file:line:``
-        assert formatted == "foo :Function@src/main.py:11:  -- some detail"
+        assert formatted == "foo :Function@src/main.py:10:  -- some detail"
 
 
 # ===========================================================================

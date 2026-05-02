@@ -106,7 +106,7 @@ class TestEdgeType:
 class TestNeighborSymbol:
     def test_location_str_with_path_and_line(self):
         n = NeighborSymbol(name="foo", kind="Function", relative_path="src/a.py", line=9, column=4, edge_type=EdgeType.CONTAINS)
-        assert n.location_str == "src/a.py:10"  # 0-indexed line displayed as 1-indexed
+        assert n.location_str == "src/a.py:9"
 
     def test_location_str_with_path_no_line(self):
         n = NeighborSymbol(name="foo", kind="Module", relative_path="src/a.py", line=None, column=None, edge_type=EdgeType.CONTAINS)
@@ -119,18 +119,18 @@ class TestNeighborSymbol:
     def test_format_compact_basic(self):
         n = NeighborSymbol(name="bar", kind="Method", relative_path="x.py", line=5, column=0, edge_type=EdgeType.CALLS)
         formatted = n.format_compact()
-        assert formatted == "bar :Method@x.py:6:"
+        assert formatted == "bar :Method@x.py:5:"
 
     def test_format_compact_no_kind(self):
         n = NeighborSymbol(name="bar", kind="", relative_path="x.py", line=5, column=0, edge_type=EdgeType.REFERENCES)
         formatted = n.format_compact()
-        assert formatted == "bar @x.py:6:"
+        assert formatted == "bar @x.py:5:"
 
     def test_format_compact_with_detail(self):
         n = NeighborSymbol(
             name="bar", kind="Method", relative_path="x.py", line=5, column=0, edge_type=EdgeType.CALLS, detail="returns int"
         )
-        assert n.format_compact() == "bar :Method@x.py:6:  -- returns int"
+        assert n.format_compact() == "bar :Method@x.py:5:  -- returns int"
 
 
 # ── CursorState ──────────────────────────────────────────────────────────
@@ -564,7 +564,7 @@ class TestFormatting:
         view = manager.format_cursor_view(cid)
 
         # anchor combines name, kind, and location into a parseable handle
-        assert "@ MyClass :Class@src/m.py:11" in view  # 0-indexed line 10 -> displayed as 11
+        assert "@ MyClass :Class@src/m.py:10" in view
         # cursor metadata is no longer rendered into the view itself
         assert f"cursor: {cid}" not in view
         assert "trail: 0 steps" not in view
@@ -596,8 +596,8 @@ class TestFormatting:
 
         trail = manager.format_trail(cid)
         assert "1 steps" in trail
-        assert "a.py:6" in trail  # trail entry (0-indexed 5 → display 6)
-        assert "b.py:16" in trail  # current position
+        assert "a.py:5" in trail
+        assert "b.py:15" in trail  # current position
         assert "(current)" in trail
 
     @patch("serena.cursor.LanguageServerSymbolRetriever")

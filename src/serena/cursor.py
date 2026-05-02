@@ -94,7 +94,7 @@ class NeighborSymbol:
     @property
     def location_str(self) -> str:
         if self.relative_path and self.line is not None:
-            return f"{self.relative_path}:{self.line + 1}"
+            return f"{self.relative_path}:{self.line}"
         elif self.relative_path:
             return self.relative_path
         return "?"
@@ -360,11 +360,11 @@ def _format_loc_str(relative_path: str | None, line: int | None) -> str:
     """Format a ``file:line`` cite for the symbolic projection.
 
     Returns ``"?"`` when no location information is available, the bare
-    relative path when the line is unknown, and ``"path:line"`` (1-indexed
-    for human reading) when both are present.
+    relative path when the line is unknown, and ``"path:line"`` (0-indexed
+    to match the cursor edit API) when both are present.
     """
     if relative_path and line is not None:
-        return f"{relative_path}:{line + 1}"
+        return f"{relative_path}:{line}"
     if relative_path:
         return relative_path
     return "?"
@@ -1036,9 +1036,9 @@ class CursorManager:
         if rel is None or location.line is None:
             cite = _format_loc_str(rel, location.line)
             return f"@ {name_path} :{kind}@{cite}:"
-        start_line = location.line + 1
+        start_line = location.line
         end_pos = symbol.body_end_position
-        end_line = end_pos["line"] + 1 if end_pos else None
+        end_line = end_pos["line"] if end_pos else None
         if end_line is None or end_line == start_line:
             return f"@ {name_path} :{kind}@{rel}:{start_line}:"
         return f"@ {name_path} :{kind}@{rel}:{start_line}-{end_line}:"
