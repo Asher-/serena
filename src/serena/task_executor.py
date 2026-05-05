@@ -1,4 +1,5 @@
 import concurrent.futures
+import contextvars
 import threading
 import time
 from collections.abc import Callable
@@ -38,6 +39,16 @@ class TaskExecutor:
             self.logged = logged
             self.timeout = timeout
             self._function = function
+            # capture the caller's ContextVar context at task-issue time; the worker thread
+            # spawned by ``start`` does not inherit ContextVars by default, so without an
+            # explicit copy any per-session state set by the caller (e.g. ``_SESSION_KEY_VAR`` /
+            # ``_ACTIVE_PROJECT_VAR`` bindings established by ``Tool.apply_ex`` or by
+            # ``SerenaAgent.active_project_context``) would be invisible to the task body and
+            # every reader of the active project would silently fall through to the legacy
+            # single slot, breaking the per-session activation contract for any task that
+            # ultimately resolves the active project (the language-server-manager init task
+            # scheduled from ``_activate_project`` is the case that surfaces this).
+            self._context: contextvars.Context = contextvars.copy_context()
 
         def _tostring_includes(self) -> list[str]:
             return ["name"]
@@ -62,7 +73,9 @@ class TaskExecutor:
                         log.error(f"Error during execution of {self.name}: {e}", exc_info=e)
                         self.future.set_exception(e)
 
-            thread = Thread(target=run_task, name=self.name)
+            # run the task body inside the issuing context so per-session ContextVars and
+            # any other context bindings established by the caller are visible to the task
+            thread = Thread(target=lambda: self._context.run(run_task), name=self.name)
             thread.start()
 
         def is_done(self) -> bool:

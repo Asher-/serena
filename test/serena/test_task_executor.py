@@ -1,3 +1,4 @@
+import contextvars
 import time
 
 import pytest
@@ -95,6 +96,61 @@ def test_task_executor_cancel_future(executor):
         pass
     assert task1.did_run
     assert not task2.did_run
+
+
+def test_task_executor_propagates_contextvars_from_issuer(executor):
+    """
+    Regression: a task scheduled via :meth:`TaskExecutor.issue_task` must observe the
+    :mod:`contextvars` bindings that were active in the issuing thread at the time the task was
+    issued. ``threading.Thread`` does not inherit ContextVars, so without an explicit context
+    snapshot the task body would see the module-level defaults instead of the issuer's bindings.
+
+    The motivating case is :meth:`SerenaAgent._activate_project`: it runs inside a
+    ``Tool.apply_ex`` task closure that has bound ``_SESSION_KEY_VAR`` and ``_ACTIVE_PROJECT_VAR``
+    for the active MCP session, then schedules ``init_language_server_manager`` via
+    ``issue_task``. If the second task does not inherit those bindings, every reader of the active
+    project inside it falls through to the legacy single slot and ``get_active_project_or_raise``
+    raises ``No active project``, leaving the language-server manager unbuilt and every subsequent
+    tool call failing with "language server manager could not be constructed at all".
+    """
+    var: contextvars.ContextVar[str] = contextvars.ContextVar("test_propagation", default="default")
+    observed: list[str] = []
+
+    def task_body() -> str:
+        observed.append(var.get())
+        return var.get()
+
+    # bind the contextvar in the issuing thread, then schedule the task; the task body must see
+    # the bound value, not the default
+    var.set("issuer-bound")
+    future = executor.issue_task(task_body, name="ctxvar-propagation")
+
+    assert future.result(timeout=5) == "issuer-bound"
+    assert observed == ["issuer-bound"]
+
+
+def test_task_executor_isolates_contextvar_mutations_per_task(executor):
+    """
+    Two tasks issued under different ContextVar bindings must observe their own bindings, not each
+    other's. Each ``Task`` snapshots its issuing context at construction time and runs inside that
+    snapshot, so subsequent mutations in the issuing thread (or in sibling tasks) cannot bleed in.
+    """
+    var: contextvars.ContextVar[str] = contextvars.ContextVar("test_isolation", default="default")
+
+    def task_body() -> str:
+        return var.get()
+
+    # task A is issued under the binding "alpha"
+    var.set("alpha")
+    future_a = executor.issue_task(task_body, name="ctxvar-iso-a")
+    # mutate the caller's context; task B is issued under "beta"
+    var.set("beta")
+    future_b = executor.issue_task(task_body, name="ctxvar-iso-b")
+    # mutate again after both tasks are queued; neither task may observe this value
+    var.set("gamma")
+
+    assert future_a.result(timeout=5) == "alpha"
+    assert future_b.result(timeout=5) == "beta"
 
 
 def test_task_executor_cancellation_via_task_info(executor):
