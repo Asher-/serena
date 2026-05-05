@@ -57,6 +57,25 @@ if TYPE_CHECKING:
     from serena.cursor import CursorManager
     from serena.gui_log_viewer import GuiLogViewer
 
+import contextvars as _contextvars
+
+_UNSET: object = object()
+# Per-MCP-session active project, keyed by id(mcp_ctx.session). The MCP daemon
+# holds one SerenaAgent across every connected client; without per-session
+# isolation, sessions race on a single global active_project slot and resolve
+# paths against each other's projects (see Tool.apply_ex for where this is set).
+_SESSION_KEY_VAR: "_contextvars.ContextVar[int | None]" = _contextvars.ContextVar(
+    "serena_session_key", default=None
+)
+# In-flight resolved active project for the current call. Read by every
+# accessor (get_active_project, the _active_project property) so direct field
+# reads scattered across the agent see the per-session value, not the global
+# legacy slot.
+_ACTIVE_PROJECT_VAR: "_contextvars.ContextVar[object]" = _contextvars.ContextVar(
+    "serena_active_project", default=_UNSET
+)
+
+
 log = logging.getLogger(__name__)
 
 # maximum number of seconds get_project_activation_message waits for the backgrounded
@@ -275,7 +294,14 @@ class SerenaAgent:
         :param memory_log_handler: a MemoryLogHandler instance from which to read log messages; if None, a new one will be created
             if necessary.
         """
-        self._active_project: Project | None = None
+        # per-MCP-session active project map, keyed by id(mcp_ctx.session); populated when Tool.apply_ex
+        # routes a call from a session, so reads via the _active_project property return the project for
+        # the calling session rather than whichever session most recently activated.
+        self._active_projects_by_session: dict[int, Project] = {}
+        # fallback active project for non-MCP callers (CLI, dashboard, scripts, tests) that have no session
+        # in scope; the property setter writes here when _SESSION_KEY_VAR is unset.
+        self._legacy_active_project: Project | None = None
+        self._active_project = None  # routed through the _active_project property to the per-session map or legacy slot
         # startup activation error preserved here so the first tool call that requires
         # the project can surface the real cause instead of a generic "No active project".
         self._startup_activation_error: Exception | None = None
@@ -685,6 +711,51 @@ class SerenaAgent:
         """
         return list(self._exposed_tools.tools)
 
+    @property
+    def _active_project(self) -> "Project | None":
+        """
+        :return: the active project for the current call context (per MCP session if one is in scope,
+            otherwise the legacy single-slot fallback used by CLI/dashboard/test paths)
+        """
+        # in-flight override: takes precedence so active_project_context() and Tool.apply_ex() can pin
+        # a project for the duration of a call without mutating the per-session dict.
+        in_flight = _ACTIVE_PROJECT_VAR.get(_UNSET)
+        if in_flight is not _UNSET:
+            return in_flight  # type: ignore[return-value]
+
+        # per-session lookup: when an MCP session is in scope, route to its dedicated slot.
+        session_key = _SESSION_KEY_VAR.get(None)
+        if session_key is not None:
+            per_session = self._active_projects_by_session.get(session_key)
+            if per_session is not None:
+                return per_session
+
+        # legacy single-slot: used by callers outside any MCP session (CLI, dashboard, tests).
+        return self._legacy_active_project
+
+    @_active_project.setter
+    def _active_project(self, project: "Project | None") -> None:
+        """
+        Route assignments based on whether an MCP session is in scope.
+
+        Within a session-bound call (Tool.apply_ex sets _SESSION_KEY_VAR), the per-session dict is updated;
+        outside any session, the legacy fallback slot is updated. The in-flight ContextVar is also updated
+        so any reads within the current call observe the new project immediately.
+        """
+        session_key = _SESSION_KEY_VAR.get(None)
+        if session_key is not None:
+            if project is None:
+                self._active_projects_by_session.pop(session_key, None)
+            else:
+                self._active_projects_by_session[session_key] = project
+        else:
+            self._legacy_active_project = project
+        # update the in-flight var only if it has been set on this call's context; otherwise leave the
+        # default unset so callers without contextvar scoping (CLI/dashboard) keep falling through to
+        # the per-session / legacy lookup in the getter.
+        if _ACTIVE_PROJECT_VAR.get(_UNSET) is not _UNSET or session_key is not None:
+            _ACTIVE_PROJECT_VAR.set(project)
+
     def get_active_project(self) -> Project | None:
         """
         :return: the active project or None if no project is active
@@ -880,10 +951,12 @@ class SerenaAgent:
 
     def _activate_project(self, project: Project, update_active_modes: bool = True, update_active_tools: bool = True) -> bool:
         """
-        :return: True if the project was newly activated, False if it was already active
+        :return: True if the project was newly activated, False if it was already active for the calling context
         """
-        # check if the project is already active
-        if self._active_project is not None and self._active_project.project_root == project.project_root:
+        # check if the project is already active for the calling context (per session if one is in scope,
+        # otherwise the legacy slot — see the _active_project property)
+        current = self._active_project
+        if current is not None and current.project_root == project.project_root:
             return False
 
         log.info(f"Activating {project.project_name} at {project.project_root}")
@@ -898,11 +971,14 @@ class SerenaAgent:
                 f"(2) Configure one MCP server per backend in your client."
             )
 
-        # shut down the previously active project to release its language server processes
-        if self._active_project is not None:
-            log.info(f"Shutting down previously active project '{self._active_project.project_name}' before switching")
-            self._active_project.shutdown()
+        # Note: the previous "shut down the previously active project" step has been removed.
+        # In a multi-session MCP daemon, "switching" is per-session: other concurrent sessions may
+        # still hold the previous project as their active one, and tearing down its language servers
+        # here would break them (the same regression class addressed at process-exit-only teardown
+        # in SerenaMCPFactory; see mcp.py around create_mcp_server). Projects now live until
+        # process exit (on_shutdown) or an explicit configuration-changed reload.
 
+        # update via the property setter, which routes to the per-session slot (or the legacy fallback)
         self._active_project = project
         # a successful activation invalidates any preserved startup-activation failure
         self._startup_activation_error = None
@@ -1086,12 +1162,36 @@ class SerenaAgent:
     def on_shutdown(self, timeout: float = 2.0) -> None:
         """
         Shutdown handler of the agent, freeing resources and stopping background tasks.
+
+        Tears down every project held by any session (the per-session map plus the legacy single
+        slot), deduplicating in case multiple sessions share the same Project instance.
         """
         log.info("SerenaAgent is shutting down ...")
-        if self._active_project is not None:
-            log.info(f"Shutting down active project '{self._active_project.project_name}' ...")
-            self._active_project.shutdown(timeout=timeout)
-            self._active_project = None
+
+        # collect every project instance held in any slot, deduplicated by identity
+        projects: list[Project] = []
+        seen_roots: set[str] = set()
+
+        def add_project(project: Project | None) -> None:
+            if project is None:
+                return
+            root = project.project_root
+            if root in seen_roots:
+                return
+            seen_roots.add(root)
+            projects.append(project)
+
+        for project in self._active_projects_by_session.values():
+            add_project(project)
+        add_project(self._legacy_active_project)
+
+        for project in projects:
+            log.info(f"Shutting down active project '{project.project_name}' ...")
+            project.shutdown(timeout=timeout)
+
+        self._active_projects_by_session.clear()
+        self._legacy_active_project = None
+
         if self._gui_log_viewer:
             log.info("Stopping the GUI log window ...")
             self._gui_log_viewer.stop()
@@ -1135,13 +1235,16 @@ class SerenaAgent:
     @contextmanager
     def active_project_context(self, project: Project) -> Iterator[None]:
         """
-        Context manager for temporarily setting/overriding the active project
+        Context manager for temporarily setting/overriding the active project.
+
+        The override uses _ACTIVE_PROJECT_VAR (a ContextVar): the per-session map and the legacy
+        single-slot field are left untouched, so the override is observed by code reached from
+        the ``with`` block but does not bleed into the calling session's persistent state.
 
         :param project: the project to be active
         """
-        original_project = self._active_project
-        self._active_project = project
+        token = _ACTIVE_PROJECT_VAR.set(project)
         try:
             yield
         finally:
-            self._active_project = original_project
+            _ACTIVE_PROJECT_VAR.reset(token)

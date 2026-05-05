@@ -284,7 +284,16 @@ class Tool(Component):
         """
         Applies the tool with logging and exception handling, using the given keyword arguments
         """
+        # derive a per-session key from the MCP request context (id(session) is unique for the
+        # lifetime of an SSE connection); used to route active-project state per-session in
+        # SerenaAgent so concurrent sessions don't race on a single global slot.
+        session_key: int | None = None
         if mcp_ctx is not None:
+            try:
+                session_key = id(mcp_ctx.session)
+            except Exception as e:
+                log.info(f"Failed to derive MCP session key: {e}.")
+
             try:
                 client_params = mcp_ctx.session.client_params
                 if client_params is not None:
@@ -296,7 +305,24 @@ class Tool(Component):
             except BaseException as e:
                 log.info(f"Failed to get client info: {e}.")
 
+        # snapshot the persisted active project for this session BEFORE entering the worker thread,
+        # so we can pin the in-flight ContextVar inside the task closure (the executor spawns a fresh
+        # threading.Thread which does not inherit the caller's ContextVars).
+        from serena.agent import _ACTIVE_PROJECT_VAR, _SESSION_KEY_VAR
+
+        persisted_project = (
+            self.agent._active_projects_by_session.get(session_key) if session_key is not None else None
+        )
+
         def task() -> str:
+            # bind per-session state into this worker thread's ContextVar context so every reader
+            # of the active project (the _active_project property, get_active_project, etc.) sees
+            # the project for *this* session rather than whichever session most recently activated.
+            if session_key is not None:
+                _SESSION_KEY_VAR.set(session_key)
+            if persisted_project is not None:
+                _ACTIVE_PROJECT_VAR.set(persisted_project)
+
             apply_fn = self.get_apply_fn()
 
             try:
