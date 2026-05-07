@@ -24,7 +24,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from serena.agent import _ACTIVE_PROJECT_VAR, _SESSION_KEY_VAR, _UNSET, SerenaAgent
+from serena.agent import _ACTIVE_PROJECT_VAR, _MCP_CALL_IN_FLIGHT, _SESSION_KEY_VAR, _UNSET, SerenaAgent
 from serena.config.serena_config import SerenaConfig
 from serena.project import Project
 
@@ -206,7 +206,97 @@ class TestPerSessionActiveProject:
     def test_default_contextvar_values(self) -> None:
         """The module-level ContextVars must have the documented defaults."""
         assert _SESSION_KEY_VAR.get() is None
+        assert _SESSION_KEY_VAR.get() is None
         assert _ACTIVE_PROJECT_VAR.get() is _UNSET
+        assert _MCP_CALL_IN_FLIGHT.get() is False
+
+    def test_legacy_slot_unreachable_when_mcp_call_in_flight(self, agent: SerenaAgent) -> None:
+        """IRONCLAD zero-crossover: while an MCP call is in flight, a per-session-map miss must
+        return None and NEVER fall through to ``_legacy_active_project``. Returning the legacy
+        value would surface a sibling client's project to this caller — exactly the cross-project
+        confusion the design forbids.
+        """
+        sibling_project = _project_stub("sibling-client-project")
+        agent._legacy_active_project = sibling_project
+
+        ctx = contextvars.copy_context()
+
+        def scenario() -> Project | None:
+            # simulate Tool.apply_ex's worker-thread context for an MCP call whose per-session map
+            # is empty (e.g. transport churn evicted it before the next request arrived).
+            _MCP_CALL_IN_FLIGHT.set(True)
+            _SESSION_KEY_VAR.set(31415)
+            assert agent._active_projects_by_session.get(31415) is None  # confirm the miss
+            return agent.get_active_project()
+
+        observed = ctx.run(scenario)
+        assert observed is None, (
+            "MCP call must NOT see another client's project via the legacy slot. "
+            f"Got {observed!r} from _legacy_active_project={sibling_project!r}."
+        )
+        # the legacy slot is intact — we did not consult it, did not modify it
+        assert agent._legacy_active_project is sibling_project
+
+    def test_legacy_cursor_manager_unreachable_when_mcp_call_in_flight(self, agent: SerenaAgent) -> None:
+        """IRONCLAD zero-crossover: get_cursor_manager must refuse to read or write
+        _legacy_cursor_manager while an MCP call is in flight; if the per-session map miss happens
+        with no session_key set under MCP, that's a programming error and must raise rather than
+        silently fall through.
+        """
+        ctx = contextvars.copy_context()
+
+        def scenario() -> None:
+            _MCP_CALL_IN_FLIGHT.set(True)
+            # _SESSION_KEY_VAR deliberately unset to simulate a propagation bug — the guard must trip
+            with pytest.raises(RuntimeError, match="MCP call is in flight but _SESSION_KEY_VAR is unset"):
+                agent.get_cursor_manager()
+
+        ctx.run(scenario)
+
+    def test_two_concurrent_clients_never_cross(self, agent: SerenaAgent) -> None:
+        """End-to-end zero-crossover: two threads simulating two simultaneous MCP clients each
+        activate a different project and read it back many times in interleaved fashion. Each
+        client must see ONLY its own project across the entire interleaving — never the other's,
+        never None, never the legacy slot's value.
+        """
+        project_a = _project_stub("client-a-project")
+        project_b = _project_stub("client-b-project")
+        # set the legacy slot to a recognisable third value; if it ever leaks through, the test fails
+        sibling = _project_stub("legacy-sibling-leak")
+        agent._legacy_active_project = sibling
+
+        observations_a: list[Project | None] = []
+        observations_b: list[Project | None] = []
+
+        def client(session_key: int, project: Project, observations: list[Project | None]) -> None:
+            ctx = contextvars.copy_context()
+
+            def run() -> None:
+                _MCP_CALL_IN_FLIGHT.set(True)
+                _SESSION_KEY_VAR.set(session_key)
+                agent._active_project = project
+                for _ in range(100):
+                    observations.append(agent.get_active_project())
+
+            ctx.run(run)
+
+        thread_a = threading.Thread(target=client, args=(11, project_a, observations_a))
+        thread_b = threading.Thread(target=client, args=(22, project_b, observations_b))
+        thread_a.start()
+        thread_b.start()
+        thread_a.join(timeout=10)
+        thread_b.join(timeout=10)
+
+        assert all(p is project_a for p in observations_a), (
+            f"Client A saw something other than its own project: distinct values = "
+            f"{set(id(p) for p in observations_a)}"
+        )
+        assert all(p is project_b for p in observations_b), (
+            f"Client B saw something other than its own project: distinct values = "
+            f"{set(id(p) for p in observations_b)}"
+        )
+        # the sibling/legacy value never leaked to anyone
+        assert sibling not in observations_a and sibling not in observations_b
 
 
 class TestShutdownAcrossSessions:

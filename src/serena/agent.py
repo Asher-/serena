@@ -76,6 +76,16 @@ _SESSION_KEY_VAR: "_contextvars.ContextVar[int | None]" = _contextvars.ContextVa
 _ACTIVE_PROJECT_VAR: "_contextvars.ContextVar[object]" = _contextvars.ContextVar(
     "serena_active_project", default=_UNSET
 )
+# IRONCLAD zero-crossover guard. Set to True inside Tool.apply_ex's worker-thread
+# closure for every MCP call. While True, the per-session lookup miss path in
+# the _active_project getter and get_cursor_manager MUST NOT fall through to the
+# legacy single-slot fields (_legacy_active_project, _legacy_cursor_manager) --
+# those slots exist only for non-MCP callers (CLI, dashboard, tests) and serving
+# them inside an MCP call admits cross-project state confusion between
+# simultaneous clients. On a miss, raise/return-None instead.
+_MCP_CALL_IN_FLIGHT: "_contextvars.ContextVar[bool]" = _contextvars.ContextVar(
+    "serena_mcp_call_in_flight", default=False
+)
 
 
 log = logging.getLogger(__name__)
@@ -604,21 +614,36 @@ class SerenaAgent:
 
         Cursor managers are routed per MCP session, mirroring how ``_active_project`` is routed:
         when ``_SESSION_KEY_VAR`` is set (Tool.apply_ex bound it), the manager is looked up in
-        :attr:`_cursor_managers_by_session`; otherwise the legacy single slot is used (CLI, dashboard,
-        tests). The manager is rebuilt when absent or when its bound project no longer matches the
-        caller's active project — a per-session project switch invalidates only that session's manager.
+        :attr:`_cursor_managers_by_session`. While an MCP call is in flight
+        (``_MCP_CALL_IN_FLIGHT`` is True) the legacy single-slot field
+        :attr:`_legacy_cursor_manager` is unreachable — IRONCLAD zero-crossover guard, mirroring
+        the rule on :attr:`_active_project`. For non-MCP callers (CLI, dashboard, scripts, tests)
+        the legacy slot applies as before. The manager is rebuilt when absent or when its bound
+        project no longer matches the caller's active project — a per-session project switch
+        invalidates only that session's manager.
 
         :return: a manager whose ``project`` matches the caller's active project.
         """
         from serena.cursor import CursorManager
 
-        # determine the caller's slot — per-session if a session is in scope, otherwise the legacy slot
+        # determine the caller's slot — per-session if a session is in scope, otherwise the legacy slot.
+        # While an MCP call is in flight, the legacy slot is unreachable to prevent cross-project leakage.
         session_key = _SESSION_KEY_VAR.get(None)
+        mcp_in_flight = _MCP_CALL_IN_FLIGHT.get()
+        if mcp_in_flight and session_key is None:
+            raise RuntimeError(
+                "Internal error: MCP call is in flight but _SESSION_KEY_VAR is unset. "
+                "This indicates Tool.apply_ex did not propagate the session key into the worker "
+                "context; refusing to fall through to the legacy cursor-manager slot because "
+                "doing so would risk cross-project state confusion."
+            )
+
         project = self.get_active_project_or_raise()
         existing: CursorManager | None
         if session_key is not None:
             existing = self._cursor_managers_by_session.get(session_key)
         else:
+            # Non-MCP path (CLI/dashboard/tests). _MCP_CALL_IN_FLIGHT is False here by the guard above.
             existing = self._legacy_cursor_manager
 
         # rebuild when absent, or when bound to a stale project (the caller switched projects)
@@ -752,8 +777,13 @@ class SerenaAgent:
     @property
     def _active_project(self) -> "Project | None":
         """
-        :return: the active project for the current call context (per MCP session if one is in scope,
-            otherwise the legacy single-slot fallback used by CLI/dashboard/test paths)
+        :return: the active project for the current call context. While an MCP call is in flight
+            (``_MCP_CALL_IN_FLIGHT`` is True), the value MUST come from this session's own slot
+            (in-flight ContextVar override or the per-session map); the process-global
+            ``_legacy_active_project`` slot is unreachable from MCP code paths to make
+            cross-project state confusion between simultaneous clients impossible.
+            For non-MCP callers (CLI, dashboard, scripts, tests), the legacy single-slot
+            fallback applies as before.
         """
         # in-flight override: takes precedence so active_project_context() and Tool.apply_ex() can pin
         # a project for the duration of a call without mutating the per-session dict.
@@ -767,6 +797,13 @@ class SerenaAgent:
             per_session = self._active_projects_by_session.get(session_key)
             if per_session is not None:
                 return per_session
+
+        # IRONCLAD zero-crossover guard: while an MCP call is in flight, the legacy single-slot
+        # field is off-limits. Returning it would surface another simultaneous client's project
+        # to this caller -- exactly the cross-project confusion this design forbids. Return None
+        # so the caller's "no active project for this MCP session" error path fires loudly.
+        if _MCP_CALL_IN_FLIGHT.get():
+            return None
 
         # legacy single-slot: used by callers outside any MCP session (CLI, dashboard, tests).
         return self._legacy_active_project

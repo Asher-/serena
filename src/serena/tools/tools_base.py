@@ -313,7 +313,7 @@ class Tool(Component):
         # snapshot the persisted active project for this session BEFORE entering the worker thread,
         # so we can pin the in-flight ContextVar inside the task closure (the executor spawns a fresh
         # threading.Thread which does not inherit the caller's ContextVars).
-        from serena.agent import _ACTIVE_PROJECT_VAR, _SESSION_KEY_VAR
+        from serena.agent import _ACTIVE_PROJECT_VAR, _MCP_CALL_IN_FLIGHT, _SESSION_KEY_VAR
 
         persisted_project = (
             self.agent._active_projects_by_session.get(session_key) if session_key is not None else None
@@ -323,13 +323,16 @@ class Tool(Component):
             # bind per-session state into this worker thread's ContextVar context so every reader
             # of the active project (the _active_project property, get_active_project, etc.) sees
             # the project for *this* session rather than whichever session most recently activated.
+            # mark this call as MCP-bound so the IRONCLAD zero-crossover guard in the getter blocks
+            # any silent fallback to the legacy single-slot field while we are inside this call.
+            if mcp_ctx is not None:
+                _MCP_CALL_IN_FLIGHT.set(True)
             if session_key is not None:
                 _SESSION_KEY_VAR.set(session_key)
             if persisted_project is not None:
                 _ACTIVE_PROJECT_VAR.set(persisted_project)
 
             apply_fn = self.get_apply_fn()
-
             try:
                 if not self.is_active():
                     return f"Error: Tool '{self.get_name_from_cls()}' is not active. Active tools: {self.agent.get_active_tool_names()}"
