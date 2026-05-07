@@ -888,6 +888,34 @@ class SerenaAgent:
             self._session_finalizers.pop(session_key, None)
         log.debug(f"Evicted per-session state for session_key={session_key}")
 
+    def evict_pipe_session(self, session_id: str) -> None:
+        """T6: Drop per-session entries for the pipe-asserted ``session_id``.
+
+        Registered as a disconnect handler on the daemon's
+        :class:`~serena.daemon_pipe.PipeListener`; fires when a pipe forwarder
+        process exits (Unix-socket EOF, transport error, or listener stop).
+
+        The eviction is deliberately distinct from
+        :meth:`_evict_session_state`: that path is GC-driven and keyed on
+        ``id(mcp_ctx.session)`` (an int) for direct stdio / streamable-http
+        clients, while this method is disconnect-driven and keyed on the
+        pipe-asserted UUID4 hex string. Both ultimately drop entries from the
+        same per-session dicts, but the trigger and the key shape differ —
+        see ``convention://global/handoff/...`` and
+        ``plan://Serena:serena/serena-pipe-implementation`` for the design
+        rationale (eviction must NOT fire on per-request streamable-http task
+        end, only on pipe disconnect, so per-session state survives transport
+        churn within a single client's lifetime).
+
+        :param session_id: The pipe-asserted UUID4 hex string allocated by the
+            daemon at handshake time. An unknown ``session_id`` is a no-op so
+            defensive callers (e.g. listener stop() teardown after the pipe
+            already closed) cannot raise.
+        """
+        self._active_projects_by_session.pop(session_id, None)
+        self._cursor_managers_by_session.pop(session_id, None)
+        log.debug(f"Evicted pipe session state for session_id={session_id}")
+
     def get_active_project(self) -> Project | None:
         """
         :return: the active project or None if no project is active

@@ -1524,6 +1524,200 @@ class TestPipeCatalogEnd2End:
         assert handler_calls == 1, "FrameHandler must see only the ping, not tools/list"
 
 
+class TestPipeListenerDisconnectHandlers:
+    """T6: PipeListener.add_disconnect_handler — eviction-on-pipe-close hook.
+
+    The listener fires registered disconnect handlers after a pipe connection's
+    forwarder loop exits (whether by pipe-side EOF, transport error, or
+    listener.stop()), passing the connection's daemon-allocated ``session_id``.
+    The hook is the substrate for SerenaAgent.evict_pipe_session — when a pipe
+    forwarder process exits, the daemon must drop that session_id's per-session
+    state (active project, cursor manager) so the next connection on a fresh
+    pipe doesn't inherit stale entries.
+    """
+
+    def test_disconnect_handler_fires_on_pipe_close(self, socket_path: str) -> None:
+        async def scenario() -> tuple[str, list[str]]:
+            recorded: list[str] = []
+            listener = PipeListener()
+            listener.add_disconnect_handler(lambda sid: recorded.append(sid))
+            await listener.start(socket_path)
+            try:
+                session_id, reader, writer = await _client_handshake(socket_path)
+                await _drain_close(writer)
+                # the daemon-side handler runs on its own asyncio Task, so we
+                # poll briefly (mirrors TestPipeFrameForwarder.test_listener_loop_exits_on_pipe_close)
+                for _ in range(50):
+                    if recorded:
+                        break
+                    await asyncio.sleep(0.01)
+                return session_id, list(recorded)
+            finally:
+                await listener.stop()
+
+        session_id, recorded = asyncio.run(scenario())
+        assert recorded == [session_id], f"disconnect handler must fire with {session_id}; got {recorded}"
+
+    def test_multiple_disconnect_handlers_all_fire_in_order(self, socket_path: str) -> None:
+        async def scenario() -> list[tuple[int, str]]:
+            recorded: list[tuple[int, str]] = []
+            listener = PipeListener()
+            listener.add_disconnect_handler(lambda sid: recorded.append((1, sid)))
+            listener.add_disconnect_handler(lambda sid: recorded.append((2, sid)))
+            listener.add_disconnect_handler(lambda sid: recorded.append((3, sid)))
+            await listener.start(socket_path)
+            try:
+                _, _, writer = await _client_handshake(socket_path)
+                await _drain_close(writer)
+                for _ in range(50):
+                    if len(recorded) >= 3:
+                        break
+                    await asyncio.sleep(0.01)
+                return list(recorded)
+            finally:
+                await listener.stop()
+
+        recorded = asyncio.run(scenario())
+        assert len(recorded) == 3, f"all 3 handlers must fire; got {recorded}"
+        # registration order is preserved -- callers that register multiple
+        # eviction hooks (e.g. agent + telemetry) rely on deterministic ordering
+        assert [pos for pos, _ in recorded] == [1, 2, 3]
+        # all handlers must see the same session_id
+        sids = {sid for _, sid in recorded}
+        assert len(sids) == 1, f"all handlers must see the same session_id; got {sids}"
+
+    def test_async_disconnect_handler_supported(self, socket_path: str) -> None:
+        async def scenario() -> tuple[str, list[str]]:
+            recorded: list[str] = []
+
+            async def async_handler(sid: str) -> None:
+                # tiny await so the test exercises the awaitable branch, not
+                # just an async-def that immediately returns
+                await asyncio.sleep(0)
+                recorded.append(sid)
+
+            listener = PipeListener()
+            listener.add_disconnect_handler(async_handler)
+            await listener.start(socket_path)
+            try:
+                session_id, _, writer = await _client_handshake(socket_path)
+                await _drain_close(writer)
+                for _ in range(50):
+                    if recorded:
+                        break
+                    await asyncio.sleep(0.01)
+                return session_id, list(recorded)
+            finally:
+                await listener.stop()
+
+        session_id, recorded = asyncio.run(scenario())
+        assert recorded == [session_id]
+
+    def test_disconnect_handler_exception_does_not_block_other_handlers(self, socket_path: str) -> None:
+        async def scenario() -> list[str]:
+            recorded: list[str] = []
+
+            def bad_handler(sid: str) -> None:
+                raise RuntimeError("intentional disconnect-handler failure")
+
+            listener = PipeListener()
+            listener.add_disconnect_handler(bad_handler)
+            listener.add_disconnect_handler(lambda sid: recorded.append(sid))
+            await listener.start(socket_path)
+            try:
+                _, _, writer = await _client_handshake(socket_path)
+                await _drain_close(writer)
+                for _ in range(50):
+                    if recorded:
+                        break
+                    await asyncio.sleep(0.01)
+                return list(recorded)
+            finally:
+                await listener.stop()
+
+        recorded = asyncio.run(scenario())
+        assert len(recorded) == 1, "second handler must run despite first one raising"
+
+    def test_disconnect_handler_does_not_fire_on_handshake_failure(self, socket_path: str) -> None:
+        # if the first envelope is malformed (no handshake), no session_id is
+        # ever allocated; disconnect handlers MUST NOT fire because there is
+        # nothing for them to evict
+        async def scenario() -> list[str]:
+            recorded: list[str] = []
+            listener = PipeListener()
+            listener.add_disconnect_handler(lambda sid: recorded.append(sid))
+            await listener.start(socket_path)
+            try:
+                reader, writer = await asyncio.open_unix_connection(socket_path)
+                bogus = PipeEnvelope(meta={}, frame={"jsonrpc": "2.0", "method": "tools/call", "id": 1})
+                writer.write(bogus.to_bytes())
+                await writer.drain()
+                # listener will close the connection; consume the EOF so the
+                # daemon side completes its teardown before we assert
+                _ = await reader.read()
+                await _drain_close(writer)
+                # give the daemon a beat to fire any (incorrect) handlers
+                await asyncio.sleep(0.05)
+                return list(recorded)
+            finally:
+                await listener.stop()
+
+        recorded = asyncio.run(scenario())
+        assert recorded == [], "no disconnect handler should fire when handshake never completed"
+
+    def test_disconnect_handler_fires_on_listener_stop(self, socket_path: str) -> None:
+        # listener.stop() force-closes connections; the per-connection
+        # forwarder unwinds via its finally block, so disconnect handlers
+        # must fire for every connection that was active at stop() time
+        recorded: list[str] = []
+
+        async def scenario() -> list[str]:
+            listener = PipeListener()
+            listener.add_disconnect_handler(lambda sid: recorded.append(sid))
+            await listener.start(socket_path)
+            session_ids: list[str] = []
+            for _ in range(3):
+                sid, _, _ = await _client_handshake(socket_path)
+                session_ids.append(sid)
+            # stop() while connections are still open -- handlers fire during
+            # the stop() teardown
+            await listener.stop()
+            return session_ids
+
+        session_ids = asyncio.run(scenario())
+        # wait for any pending async work to settle before asserting
+        assert sorted(recorded) == sorted(session_ids)
+
+    def test_disconnect_handler_receives_correct_session_id_per_connection(self, socket_path: str) -> None:
+        # under concurrent traffic each disconnect handler invocation must
+        # carry the session_id of the connection that closed -- not, e.g.,
+        # the most-recently-registered connection's session_id
+        async def scenario() -> tuple[set[str], set[str]]:
+            recorded: list[str] = []
+            listener = PipeListener()
+            listener.add_disconnect_handler(lambda sid: recorded.append(sid))
+            await listener.start(socket_path)
+            try:
+
+                async def one_client() -> str:
+                    sid, _, writer = await _client_handshake(socket_path)
+                    await _drain_close(writer)
+                    return sid
+
+                expected = set(await asyncio.gather(*[one_client() for _ in range(10)]))
+                # poll for all evictions to land
+                for _ in range(100):
+                    if len(recorded) >= 10:
+                        break
+                    await asyncio.sleep(0.01)
+                return expected, set(recorded)
+            finally:
+                await listener.stop()
+
+        expected, observed = asyncio.run(scenario())
+        assert observed == expected, f"each handler invocation must match its connection's session_id; expected={expected} observed={observed}"
+
+
 async def _make_memory_stream_pair() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """Build an in-memory ``(reader, writer)`` pair for forwarder unit tests.
 

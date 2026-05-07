@@ -30,7 +30,7 @@ from serena.agent import (
 from serena.config.context_mode import SerenaAgentContext
 from serena.config.serena_config import LanguageBackend, ModeSelectionDefinition
 from serena.constants import DEFAULT_CONTEXT, SERENA_LOG_FORMAT
-from serena.daemon_pipe import CatalogProvider, FrameHandler
+from serena.daemon_pipe import CatalogProvider, FrameHandler, PipeListener
 from serena.tools import Tool
 from serena.util.exception import show_fatal_exception_safe
 from serena.util.logging import MemoryLogHandler
@@ -588,3 +588,45 @@ class SerenaPipeFrameHandler(FrameHandler):
             "id": frame_id,
             "error": {"code": code, "message": message},
         }
+
+
+def build_pipe_listener(agent: SerenaAgent, *, openai_tool_compatible: bool = False) -> PipeListener:
+    """T6: Construct the production :class:`PipeListener` wired into ``agent``.
+
+    Composes the daemon-side pipe transport against a real Serena agent:
+
+    * :class:`SerenaPipeFrameHandler` dispatches ``tools/call`` and friends
+      against ``agent.get_exposed_tool_instances()``.
+    * :class:`SerenaCatalogProvider` answers ``pipe/catalog/get`` from the
+      same exposed-tool list.
+    * :meth:`SerenaAgent.evict_pipe_session` is registered as a disconnect
+      handler so per-session state (active project, cursor manager) drops
+      automatically on pipe disconnect.
+
+    Returned listener is NOT started; the caller is responsible for calling
+    :meth:`PipeListener.start` (and matching :meth:`PipeListener.stop` on
+    teardown). Keeping start/stop out of this helper lets the daemon's
+    asyncio coordinator (e.g. the start-mcp-server CLI dispatch when
+    ``--pipe-socket-path`` is set) bind the lifecycle to the FastMCP server's
+    own run loop.
+
+    :param agent: The :class:`SerenaAgent` whose exposed tools and per-session
+        state the listener routes against.
+    :param openai_tool_compatible: Whether the catalog should emit the
+        OpenAI-compatible schema variant; mirrors
+        :meth:`SerenaMCPFactory._set_mcp_tools`'s switch and applies to the
+        ``chatgpt``, ``codex``, ``oaicompat-agent`` contexts. Default
+        ``False`` matches the standard MCP wire format.
+    :returns: A constructed-but-not-started :class:`PipeListener` ready for
+        :meth:`PipeListener.start` to bind its Unix socket.
+    """
+    listener = PipeListener(
+        frame_handler=SerenaPipeFrameHandler(agent),
+        catalog_provider=SerenaCatalogProvider(agent, openai_tool_compatible=openai_tool_compatible),
+    )
+    # T6 eviction wire: pipe disconnect -> agent drops both per-session dicts
+    # for the disconnecting session_id. Without this registration, per-session
+    # entries leak across forwarder restarts and a future client connecting on
+    # a fresh pipe could (in pathological collisions) inherit stale state.
+    listener.add_disconnect_handler(agent.evict_pipe_session)
+    return listener

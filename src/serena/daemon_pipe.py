@@ -15,14 +15,22 @@ session-key derivation (T5) are in place.
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import os
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Union
 
 from serena.pipe_protocol import PipeCatalog, PipeEnvelope, PipeHandshake, PipeProtocolError
+
+# T6: signature of a callback registered via :meth:`PipeListener.add_disconnect_handler`.
+# A handler may be a plain function (returns ``None``) or an async function (returns an
+# awaitable). The listener inspects the return value at call time and awaits it when
+# necessary, so callers can register either shape without coordinating with each other.
+DisconnectHandler = Callable[[str], Union[None, Awaitable[None]]]
 
 log = logging.getLogger(__name__)
 
@@ -189,6 +197,35 @@ class PipeListener:
         # the handler returns
         self._handler_tasks: set[asyncio.Task[None]] = set()
 
+        # T6: callbacks fired when a pipe connection's forwarder loop exits.
+        # Registration order is preserved (callers that compose multiple hooks
+        # rely on deterministic ordering); each handler receives the
+        # connection's daemon-allocated ``session_id``. Handlers are invoked
+        # AFTER the connection is removed from :attr:`_connections` so a
+        # handler that consults the listener's live state sees the post-
+        # disconnect view.
+        self._disconnect_handlers: list[DisconnectHandler] = []
+
+    def add_disconnect_handler(self, handler: DisconnectHandler) -> None:
+        """Register ``handler`` to fire when any pipe connection disconnects.
+
+        The handler is invoked exactly once per pipe connection, after the
+        forwarder loop exits and the connection is removed from
+        :attr:`connections`. It is called with the connection's
+        daemon-allocated ``session_id`` so eviction logic can drop per-session
+        state without holding a reference to the :class:`PipeConnection`.
+
+        Multiple handlers may be registered; they fire in registration order.
+        An exception in one handler does not prevent later handlers from
+        running -- the listener catches and logs each handler's exception.
+        Handlers may be plain or ``async`` functions; the listener awaits the
+        return value when it is awaitable.
+
+        :param handler: A callable taking the ``session_id`` (str) and
+            returning ``None`` or an awaitable.
+        """
+        self._disconnect_handlers.append(handler)
+
     @property
     def connections(self) -> dict[str, PipeConnection]:
         """Return a snapshot of the live (session_id -> PipeConnection) map.
@@ -310,16 +347,46 @@ class PipeListener:
                 await self._forward_frames(connection)
             finally:
                 # the forwarder exited; deregister the connection and close the
-                # writer cleanly so stop() doesn't double-close. Eviction of
-                # per-session state on disconnect is T6 territory; T3 only owns
-                # the transport-level teardown.
+                # writer cleanly so stop() doesn't double-close. T6: fire any
+                # registered disconnect handlers AFTER the connection is removed
+                # from _connections, so a handler that consults listener state
+                # sees the post-disconnect view (e.g. the agent's eviction
+                # callback should not have to special-case "this session is
+                # still in connections briefly").
                 self._connections.pop(session_id, None)
                 with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                     writer.close()
                     await writer.wait_closed()
+                await self._fire_disconnect_handlers(session_id)
         finally:
             if task is not None:
                 self._handler_tasks.discard(task)
+
+    async def _fire_disconnect_handlers(self, session_id: str) -> None:
+        """Invoke each registered disconnect handler with ``session_id``.
+
+        Handlers are called in registration order. Exceptions are caught and
+        logged so a misbehaving handler cannot starve later ones; the
+        ``session_id`` is included in the log so eviction failures are
+        diagnosable from the daemon logs alone.
+
+        Plain (non-async) handlers run inline; async handlers are awaited.
+        ``inspect.isawaitable`` distinguishes the two at call time so callers
+        can register either shape without the listener requiring a uniform
+        signature.
+        """
+        for handler in list(self._disconnect_handlers):
+            try:
+                result = handler(session_id)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                # never propagate: a single misbehaving handler must not
+                # affect the listener loop or sibling handlers
+                log.exception(
+                    "PipeListener: disconnect handler raised for session_id=%s; continuing",
+                    session_id,
+                )
 
     async def _forward_frames(self, connection: PipeConnection) -> None:
         """Pump envelopes between one pipe connection and the FrameHandler.

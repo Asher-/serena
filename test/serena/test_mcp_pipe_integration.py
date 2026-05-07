@@ -19,6 +19,7 @@ event loop and is invoked via :func:`asyncio.run`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import json
 from typing import Any, ClassVar
@@ -545,3 +546,268 @@ class TestSerenaPipeFrameHandler:
         # left no residue (the assertion is that 'after' is None or
         # "pre-existing"; either is fine because the outer ctx was the source).
         # We assert the outer-context restoration since that's the contract.
+
+
+def _project_sentinel() -> MagicMock:
+    """Return a sentinel that satisfies SerenaAgent.__del__'s shutdown path.
+
+    SerenaAgent.on_shutdown iterates the per-session dicts and reads
+    ``project.project_root`` (agent.py:1350). A bare ``object()`` triggers
+    AttributeError during fixture teardown, surfacing as a noisy
+    ``PytestUnraisableExceptionWarning`` even when the test itself passed.
+    A MagicMock with a string ``project_root`` attribute keeps the eviction
+    semantics intact (the test only cares about dict membership) without
+    polluting test output with shutdown-side AttributeErrors.
+    """
+    mock = MagicMock()
+    mock.project_root = "/tmp/test-project-sentinel"
+    return mock
+
+
+class TestEvictPipeSession:
+    """T6: SerenaAgent.evict_pipe_session — pipe-disconnect-keyed eviction.
+
+    The pipe transport assigns each connection a UUID4 ``session_id`` (string);
+    per-session state lives in :attr:`SerenaAgent._active_projects_by_session`
+    and :attr:`SerenaAgent._cursor_managers_by_session`, both keyed on that
+    string. When the pipe forwarder process exits, the daemon must drop those
+    entries -- otherwise the next forwarder on a fresh pipe inherits stale
+    state. This is the public eviction method the
+    :class:`PipeListener.add_disconnect_handler` hook calls with the session_id.
+    """
+
+    def test_evict_pipe_session_drops_active_project(self, agent: SerenaAgent) -> None:
+        # populate the per-session map directly; we don't need a real Project
+        # for the eviction contract, just a sentinel that proves the entry
+        # was present before evict and absent after
+        sentinel = _project_sentinel()
+        agent._active_projects_by_session["pipe-uuid-evict-1"] = sentinel  # type: ignore[assignment]
+
+        agent.evict_pipe_session("pipe-uuid-evict-1")
+
+        assert "pipe-uuid-evict-1" not in agent._active_projects_by_session
+
+    def test_evict_pipe_session_drops_cursor_manager(self, agent: SerenaAgent) -> None:
+        # mirror the active-project case for the cursor-manager dict; both
+        # are pipe-keyed and both must be cleared on disconnect
+        sentinel = _project_sentinel()
+        agent._cursor_managers_by_session["pipe-uuid-evict-2"] = sentinel  # type: ignore[assignment]
+
+        agent.evict_pipe_session("pipe-uuid-evict-2")
+
+        assert "pipe-uuid-evict-2" not in agent._cursor_managers_by_session
+
+    def test_evict_pipe_session_no_op_for_unknown_session(self, agent: SerenaAgent) -> None:
+        # an unknown session_id MUST NOT raise; the disconnect handler runs
+        # for every pipe close, and a defensive caller may invoke evict
+        # twice (e.g. on stop() teardown after the pipe already closed)
+        agent.evict_pipe_session("never-existed")
+
+        assert agent._active_projects_by_session == {}
+        assert agent._cursor_managers_by_session == {}
+
+    def test_evict_pipe_session_does_not_affect_legacy_state(self, agent: SerenaAgent) -> None:
+        # the legacy single-slot fields belong to non-MCP callers (CLI,
+        # dashboard, tests). Evicting a pipe session MUST NOT touch them;
+        # otherwise CLI workflows would lose state every time a pipe
+        # disconnects in another part of the daemon
+        legacy_proj = _project_sentinel()
+        legacy_cursor = _project_sentinel()
+        agent._legacy_active_project = legacy_proj  # type: ignore[assignment]
+        agent._legacy_cursor_manager = legacy_cursor  # type: ignore[assignment]
+
+        agent.evict_pipe_session("any-uuid")
+
+        assert agent._legacy_active_project is legacy_proj
+        assert agent._legacy_cursor_manager is legacy_cursor
+
+    def test_evict_pipe_session_does_not_affect_int_keyed_sessions(self, agent: SerenaAgent) -> None:
+        # int-keyed sessions belong to direct stdio / streamable-http clients
+        # whose session_key is id(mcp_ctx.session). They are evicted by the
+        # weakref-finalize path, NOT by evict_pipe_session. A pipe disconnect
+        # arriving with a session_id that happens to coincide with an int-keyed
+        # entry's str() form must not collide -- str and int are distinct keys
+        int_proj = _project_sentinel()
+        int_cursor = _project_sentinel()
+        agent._active_projects_by_session[12345] = int_proj  # type: ignore[assignment]
+        agent._cursor_managers_by_session[12345] = int_cursor  # type: ignore[assignment]
+
+        agent.evict_pipe_session("12345")
+
+        # int-keyed entries survive the str-keyed eviction
+        assert agent._active_projects_by_session[12345] is int_proj
+        assert agent._cursor_managers_by_session[12345] is int_cursor
+
+    def test_evict_pipe_session_drops_only_named_session(self, agent: SerenaAgent) -> None:
+        # multiple pipe sessions can coexist -- evicting one must leave the
+        # others untouched; otherwise a forwarder restart in client A would
+        # inadvertently wipe client B's active project
+        sentinel_a = _project_sentinel()
+        sentinel_b = _project_sentinel()
+        agent._active_projects_by_session["uuid-a"] = sentinel_a  # type: ignore[assignment]
+        agent._active_projects_by_session["uuid-b"] = sentinel_b  # type: ignore[assignment]
+
+        agent.evict_pipe_session("uuid-a")
+
+        assert "uuid-a" not in agent._active_projects_by_session
+        assert agent._active_projects_by_session["uuid-b"] is sentinel_b
+
+    def test_evict_pipe_session_drops_both_dicts_atomically(self, agent: SerenaAgent) -> None:
+        # active_project and cursor_manager belong to the same logical session
+        # state; evicting one without the other would leave a half-evicted
+        # session that surfaces as "no active project but the cursor still
+        # remembers it." The eviction must drop both for the same session_id
+        # in a single call
+        agent._active_projects_by_session["uuid-paired"] = _project_sentinel()  # type: ignore[assignment]
+        agent._cursor_managers_by_session["uuid-paired"] = _project_sentinel()  # type: ignore[assignment]
+
+        agent.evict_pipe_session("uuid-paired")
+
+        assert "uuid-paired" not in agent._active_projects_by_session
+        assert "uuid-paired" not in agent._cursor_managers_by_session
+
+
+class TestSerenaMCPFactoryPipeListener:
+    """T6: ``build_pipe_listener`` constructs the production wiring.
+
+    The wiring composes:
+
+    * :class:`PipeListener` as the Unix-socket entry point.
+    * :class:`SerenaPipeFrameHandler` to dispatch ``tools/call`` and friends
+      against the agent's exposed-tool list.
+    * :class:`SerenaCatalogProvider` to answer ``pipe/catalog/get``.
+    * :meth:`SerenaAgent.evict_pipe_session` registered as a disconnect handler
+      so per-session state is dropped when the pipe disconnects.
+
+    These tests pin the composition explicitly because the production daemon
+    relies on it -- a regression where the eviction handler is silently
+    dropped or where the wrong CatalogProvider is passed would surface as
+    state leakage between clients (the very bug the pipe exists to prevent).
+    """
+
+    def test_build_pipe_listener_returns_pipe_listener(self, agent: SerenaAgent) -> None:
+        from serena.mcp import build_pipe_listener
+        from serena.daemon_pipe import PipeListener
+
+        listener = build_pipe_listener(agent)
+        try:
+            assert isinstance(listener, PipeListener)
+        finally:
+            # nothing to stop here -- listener was never started
+            pass
+
+    def test_build_pipe_listener_uses_serena_pipe_frame_handler(self, agent: SerenaAgent) -> None:
+        from serena.mcp import build_pipe_listener
+
+        listener = build_pipe_listener(agent)
+        # the listener stores the handler at _frame_handler; the production
+        # type must be SerenaPipeFrameHandler so tools/call routes through
+        # apply_ex and not the null handler
+        assert isinstance(listener._frame_handler, SerenaPipeFrameHandler)
+
+    def test_build_pipe_listener_uses_serena_catalog_provider(self, agent: SerenaAgent) -> None:
+        from serena.mcp import build_pipe_listener
+
+        listener = build_pipe_listener(agent)
+        # the catalog provider must be the production type so pipe/catalog/get
+        # answers from the agent's exposed-tool list, not the empty null list
+        assert isinstance(listener._catalog_provider, SerenaCatalogProvider)
+
+    def test_build_pipe_listener_registers_evict_callback(self, agent: SerenaAgent) -> None:
+        from serena.mcp import build_pipe_listener
+
+        listener = build_pipe_listener(agent)
+        # exactly one disconnect handler should be registered, and it must be
+        # the agent's evict_pipe_session bound method -- not a wrapper, not a
+        # no-op. This is the load-bearing wire that fires eviction on pipe
+        # disconnect; an audit by inspecting listener._disconnect_handlers
+        # makes the wiring auditable from the test
+        assert agent.evict_pipe_session in listener._disconnect_handlers
+
+    def test_build_pipe_listener_propagates_openai_compat(self, agent: SerenaAgent) -> None:
+        from serena.mcp import build_pipe_listener
+
+        listener = build_pipe_listener(agent, openai_tool_compatible=True)
+        # the catalog provider must reflect the requested compatibility flag
+        # so chatgpt/codex/oaicompat-agent contexts get the sanitized schemas
+        assert listener._catalog_provider._openai_tool_compatible is True  # type: ignore[attr-defined]
+
+    def test_build_pipe_listener_default_openai_compat_is_false(self, agent: SerenaAgent) -> None:
+        from serena.mcp import build_pipe_listener
+
+        listener = build_pipe_listener(agent)
+        # default to standard MCP wire format; opt-in is explicit
+        assert listener._catalog_provider._openai_tool_compatible is False  # type: ignore[attr-defined]
+
+
+class TestEvictPipeSessionEndToEnd:
+    """T6 end-to-end: pipe disconnect drops the agent's per-session state.
+
+    Walks the full wire: build the listener via :func:`build_pipe_listener`,
+    accept a pipe handshake, populate per-session state on the agent, close
+    the pipe, then assert the state is gone. This is the integration assert
+    that ties together the listener-side disconnect-handler hook (T6 in
+    daemon_pipe.py), the agent-side eviction method (T6 in agent.py), and
+    the production wiring (T6 in mcp.py).
+    """
+
+    def test_pipe_disconnect_evicts_active_project_via_serena_agent(self, agent: SerenaAgent) -> None:
+        # /tmp short path -- AF_UNIX has a ~104-byte path limit on macOS, and
+        # pytest's tmp_path lives under /private/var/folders/... which can
+        # blow past the limit. Mirror the socket_path fixture pattern from
+        # test_pipe_transport.py for the same reason.
+        import os as _os
+        import uuid as _uuid
+
+        from serena.mcp import build_pipe_listener
+        from serena.pipe_protocol import PipeEnvelope, PipeHandshake
+
+        socket_path = f"/tmp/serena-pipe-evict-{_uuid.uuid4().hex[:8]}.sock"
+        try:
+            socket_cleanup = socket_path
+
+            async def _scenario_inner() -> tuple[bool, bool]:
+                listener = build_pipe_listener(agent)
+                await listener.start(socket_path)
+                try:
+                    reader, writer = await asyncio.open_unix_connection(socket_path)
+                    writer.write(PipeHandshake.request().to_bytes())
+                    await writer.drain()
+                    response_line = await reader.readuntil(b"\n")
+                    response = PipeEnvelope.from_bytes(response_line)
+                    session_id = PipeHandshake.session_id_from_response(response)
+
+                    agent._active_projects_by_session[session_id] = _project_sentinel()  # type: ignore[assignment]
+                    agent._cursor_managers_by_session[session_id] = _project_sentinel()  # type: ignore[assignment]
+                    pre_state = (
+                        session_id in agent._active_projects_by_session
+                        and session_id in agent._cursor_managers_by_session
+                    )
+
+                    writer.close()
+                    with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                        await writer.wait_closed()
+
+                    for _ in range(50):
+                        if (
+                            session_id not in agent._active_projects_by_session
+                            and session_id not in agent._cursor_managers_by_session
+                        ):
+                            break
+                        await asyncio.sleep(0.01)
+
+                    post_state = (
+                        session_id in agent._active_projects_by_session
+                        or session_id in agent._cursor_managers_by_session
+                    )
+                    return pre_state, post_state
+                finally:
+                    await listener.stop()
+
+            pre, post = asyncio.run(_scenario_inner())
+            assert pre is True, "pre-disconnect state must be populated for the test to be meaningful"
+            assert post is False, "agent must drop both per-session entries on pipe disconnect"
+            return
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                _os.unlink(socket_path)

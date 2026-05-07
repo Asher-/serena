@@ -239,6 +239,21 @@ class TopLevelCommands(AutoRegisteringGroup):
         help="URI of the Serena daemon's socket; consulted only when --transport pipe is selected.",
     )
     @click.option(
+        "--pipe-socket-path",
+        type=str,
+        default=None,
+        show_default=True,
+        help=(
+            "Filesystem path for the daemon-side pipe listener Unix socket. When set, the daemon "
+            "(any non-pipe transport) ALSO accepts pipe forwarder connections at this path; pipe "
+            "forwarders are spawned per-client by 'serena start-mcp-server --transport pipe' and "
+            "supply a stable session_id pinning per-session state to the pipe's lifetime. Default "
+            "None disables the pipe listener (legacy daemon behaviour). To activate the pipe "
+            "transport in production, set this to /tmp/serena-daemon.sock (matches the design plan "
+            "default and the pipe forwarder's default --daemon-url)."
+        ),
+    )
+    @click.option(
         "--host",
         type=str,
         default="127.0.0.1",
@@ -294,6 +309,7 @@ class TopLevelCommands(AutoRegisteringGroup):
         language_backend: str | None,
         transport: Literal["stdio", "sse", "streamable-http", "pipe"],
         daemon_url: str,
+        pipe_socket_path: str | None,
         host: str,
         port: int,
         enable_web_dashboard: bool | None,
@@ -362,7 +378,43 @@ class TopLevelCommands(AutoRegisteringGroup):
                 project_file,
             )
         log.info("Starting MCP server …")
-        server.run(transport=transport)
+
+        # T6 daemon-startup wiring: when --pipe-socket-path is set, the daemon
+        # also runs a PipeListener concurrently with the FastMCP server in the
+        # same asyncio event loop. The listener is built via mcp.build_pipe_listener
+        # so SerenaPipeFrameHandler + SerenaCatalogProvider + SerenaAgent.evict_pipe_session
+        # are all wired against factory.agent. Without --pipe-socket-path, the legacy
+        # behaviour (FastMCP server only) is preserved bit-for-bit so existing
+        # daemon plists continue to work unchanged.
+        if pipe_socket_path:
+            import asyncio as _asyncio
+
+            from serena.mcp import build_pipe_listener
+
+            assert factory.agent is not None, "create_mcp_server must populate factory.agent"
+            openai_compat = factory.context.name in {"chatgpt", "codex", "oaicompat-agent"}
+            listener = build_pipe_listener(factory.agent, openai_tool_compatible=openai_compat)
+
+            async def _run_with_pipe() -> None:
+                await listener.start(pipe_socket_path)
+                log.info("Pipe listener bound to %s", pipe_socket_path)
+                try:
+                    if transport == "stdio":
+                        await server.run_stdio_async()
+                    elif transport == "sse":
+                        await server.run_sse_async()
+                    elif transport == "streamable-http":
+                        await server.run_streamable_http_async()
+                    else:
+                        # 'pipe' was already handled above; any other value is a
+                        # logic error that should be caught loudly
+                        raise ValueError(f"Unsupported transport with --pipe-socket-path: {transport!r}")
+                finally:
+                    await listener.stop()
+
+            _asyncio.run(_run_with_pipe())
+        else:
+            server.run(transport=transport)
 
     @staticmethod
     @click.command(
