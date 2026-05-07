@@ -64,6 +64,17 @@ object, e.g.
 }
 ```
 
+### Advanced: Running Behind a Multiplexer
+
+Some deployments place a small multiplexer process in front of Serena, so a
+single client URL can aggregate Serena with other MCP servers and so backend
+restarts can be absorbed without ending client sessions. The wire protocol,
+session model, and tool surface are unchanged — Serena does not need to know
+the multiplexer is in the path. See
+[Running Serena Behind a Tool Multiplexer](../03-special-guides/multiplexer_architecture.md)
+for the network shape, the launchd port-binding change, and how to test
+Serena directly without the multiplexer in the loop.
+
 ## Copilot in JetBrains
 
 Open the settings of your JetBrains IDE and go to Tools / GitHub Copilot / Model Context Protocol (MCP). Then click
