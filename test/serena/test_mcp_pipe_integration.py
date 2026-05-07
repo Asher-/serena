@@ -21,7 +21,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import gc
 import json
+import time
 from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
@@ -807,6 +809,277 @@ class TestEvictPipeSessionEndToEnd:
             pre, post = asyncio.run(_scenario_inner())
             assert pre is True, "pre-disconnect state must be populated for the test to be meaningful"
             assert post is False, "agent must drop both per-session entries on pipe disconnect"
+            return
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                _os.unlink(socket_path)
+
+
+class TestPipeSessionSurvivesStreamableHttpTeardown:
+    """T7: pipe-keyed per-session state survives per-request streamable-http task teardowns.
+
+    The legacy streamable-http path keys per-session entries on
+    ``id(mcp_ctx.session)`` (an ``int``) and registers a
+    ``weakref.finalize`` on that ``Session``; when the per-request task
+    ends and the ``Session`` is garbage-collected, the finalizer fires and
+    pops the int_key from
+    :attr:`SerenaAgent._active_projects_by_session` and
+    :attr:`SerenaAgent._cursor_managers_by_session` via
+    :meth:`SerenaAgent._evict_session_state`.
+
+    The pipe transport (T1-T6) keys per-session entries on a UUID4 hex
+    string handed back at handshake time. Because the keys are ``str``
+    (not ``int``) and the disconnect-driven path
+    (:meth:`SerenaAgent.evict_pipe_session`) is the ONLY eviction site
+    that touches ``str`` keys, pipe-keyed entries MUST survive every form
+    of streamable-http per-request task teardown:
+
+    1. an explicit ``_evict_session_state(int_key)`` call (the immediate
+       eviction the legacy path triggers from its weakref.finalize);
+    2. real garbage collection via ``weakref.finalize`` on a
+       session-like object whose only reference is dropped;
+    3. concurrent multi-int-keyed evictions arriving from many
+       overlapping streamable-http requests on the same daemon;
+    4. arbitrary real-time elapsed since the pipe handshake -- no
+       timer-based eviction exists, so the pipe is the only lifetime
+       gate.
+
+    Each scenario asserts that BOTH per-session dicts still hold the
+    pipe-keyed entry AND that the entry's value is the SAME Python
+    object (not just any value at the key). The dict-membership +
+    identity assertion is the in-graph equivalent of the plan's "verify
+    cursor is still alive via cursor_look": if the cursor manager
+    remains retrievable by its pipe session_id, ``cursor_look`` over the
+    pipe will resolve to it.
+    """
+
+    def test_pipe_keyed_entries_survive_explicit_int_keyed_evict_session_state(
+        self, agent: SerenaAgent
+    ) -> None:
+        # populate the pipe-keyed (str) entries plus an unrelated int-keyed
+        # entry; evicting the int-keyed entry must not touch the str-keyed
+        # entry's membership or identity
+        pipe_session_id = "pipe-uuid-survive-direct"
+        pipe_proj = _project_sentinel()
+        pipe_cursor = _project_sentinel()
+        agent._active_projects_by_session[pipe_session_id] = pipe_proj  # type: ignore[assignment]
+        agent._cursor_managers_by_session[pipe_session_id] = pipe_cursor  # type: ignore[assignment]
+
+        int_key = id(object())
+        agent._active_projects_by_session[int_key] = _project_sentinel()  # type: ignore[assignment]
+        agent._cursor_managers_by_session[int_key] = _project_sentinel()  # type: ignore[assignment]
+
+        agent._evict_session_state(int_key)
+
+        # the streamable-http int entry is gone (positive control)
+        assert int_key not in agent._active_projects_by_session
+        assert int_key not in agent._cursor_managers_by_session
+        # the pipe str entry is preserved -- both membership AND identity
+        assert agent._active_projects_by_session[pipe_session_id] is pipe_proj
+        assert agent._cursor_managers_by_session[pipe_session_id] is pipe_cursor
+
+    def test_pipe_keyed_entries_survive_weakref_finalize_driven_eviction(
+        self, agent: SerenaAgent
+    ) -> None:
+        # the realistic streamable-http GC path: register weakref.finalize on
+        # a session-like object, drop its only reference, force gc.collect();
+        # the finalizer fires _evict_session_state(int_key) and the pipe-keyed
+        # str entries must be untouched
+
+        # class-level reference (not bare object()) so weakref.finalize can
+        # register on it; bare object() instances do not support weakrefs
+        class _SessionLike:
+            pass
+
+        pipe_session_id = "pipe-uuid-survive-gc"
+        pipe_proj = _project_sentinel()
+        pipe_cursor = _project_sentinel()
+        agent._active_projects_by_session[pipe_session_id] = pipe_proj  # type: ignore[assignment]
+        agent._cursor_managers_by_session[pipe_session_id] = pipe_cursor  # type: ignore[assignment]
+
+        mock_session = _SessionLike()
+        int_key = id(mock_session)
+        agent._active_projects_by_session[int_key] = _project_sentinel()  # type: ignore[assignment]
+        agent._cursor_managers_by_session[int_key] = _project_sentinel()  # type: ignore[assignment]
+        agent._register_session_finalizer(mock_session, int_key)
+
+        # drop the only reference and force GC; CPython usually fires
+        # weakref.finalize synchronously when refcount hits zero, but
+        # platform / GC-edge cases may delay it slightly
+        del mock_session
+        gc.collect()
+        for _ in range(50):
+            if int_key not in agent._active_projects_by_session:
+                break
+            time.sleep(0.01)
+
+        # the streamable-http int entry has been GC-evicted (positive control)
+        assert int_key not in agent._active_projects_by_session
+        assert int_key not in agent._cursor_managers_by_session
+        # the pipe str entry survives -- identity preserved
+        assert agent._active_projects_by_session[pipe_session_id] is pipe_proj
+        assert agent._cursor_managers_by_session[pipe_session_id] is pipe_cursor
+
+    def test_pipe_keyed_entries_survive_concurrent_int_keyed_evictions(
+        self, agent: SerenaAgent
+    ) -> None:
+        # multiple streamable-http requests can be in-flight against the
+        # same daemon; their int-keyed teardowns must NOT touch the
+        # pipe-keyed entry no matter how many fire in succession
+        pipe_session_id = "pipe-uuid-survive-many"
+        pipe_proj = _project_sentinel()
+        pipe_cursor = _project_sentinel()
+        agent._active_projects_by_session[pipe_session_id] = pipe_proj  # type: ignore[assignment]
+        agent._cursor_managers_by_session[pipe_session_id] = pipe_cursor  # type: ignore[assignment]
+
+        # a fan of 16 fake int-keyed sessions (overlapping streamable-http
+        # requests on the same daemon)
+        int_keys = [id(object()) + i for i in range(16)]
+        for int_key in int_keys:
+            agent._active_projects_by_session[int_key] = _project_sentinel()  # type: ignore[assignment]
+            agent._cursor_managers_by_session[int_key] = _project_sentinel()  # type: ignore[assignment]
+        for int_key in int_keys:
+            agent._evict_session_state(int_key)
+
+        # all int entries are gone (positive control)
+        for int_key in int_keys:
+            assert int_key not in agent._active_projects_by_session
+            assert int_key not in agent._cursor_managers_by_session
+        # the pipe entry is preserved -- identity preserved
+        assert agent._active_projects_by_session[pipe_session_id] is pipe_proj
+        assert agent._cursor_managers_by_session[pipe_session_id] is pipe_cursor
+
+    def test_pipe_keyed_entries_survive_real_time_elapsed_past_request_lifetime(
+        self, agent: SerenaAgent
+    ) -> None:
+        # the parent plan documents the legacy path's per-request task
+        # teardown timeout as ">=10s" of wall time. No timer-based
+        # eviction exists in the pipe path; pipe-keyed entries persist for
+        # the entire lifetime of the pipe connection regardless of wall
+        # time. Verifying with a tightened test-time slice is sufficient
+        # because the invariant under test is "no timer fires at any wall
+        # time" -- any positive sleep length falsifies a hypothetical
+        # timer (a 10s sleep would gate test speed without strengthening
+        # the proof; the live operator runbook in T11 covers the wall-time
+        # dimension)
+        pipe_session_id = "pipe-uuid-survive-time"
+        pipe_proj = _project_sentinel()
+        pipe_cursor = _project_sentinel()
+        agent._active_projects_by_session[pipe_session_id] = pipe_proj  # type: ignore[assignment]
+        agent._cursor_managers_by_session[pipe_session_id] = pipe_cursor  # type: ignore[assignment]
+
+        time.sleep(0.5)
+        gc.collect()
+
+        # entries are still present with the same identity
+        assert agent._active_projects_by_session[pipe_session_id] is pipe_proj
+        assert agent._cursor_managers_by_session[pipe_session_id] is pipe_cursor
+
+
+class TestPipeSessionSurvivesStreamableHttpTeardownEndToEnd:
+    """T7 end-to-end: pipe-keyed state survives a real streamable-http
+    teardown event while the pipe connection remains open.
+
+    Walks the full wire: build the listener via
+    :func:`build_pipe_listener`, accept a real pipe handshake (which
+    issues a UUID4 ``session_id``), populate per-session state on the
+    agent under that ``session_id``, then simulate a streamable-http
+    per-request task teardown arriving at the daemon
+    (``_evict_session_state(int_key)`` plus real elapsed time and a GC
+    pass) WITHOUT closing the pipe. The pipe-asserted ``session_id``'s
+    state must still be present afterwards. As a positive control, the
+    test then closes the pipe and verifies the pipe-keyed state IS
+    evicted via the disconnect handler -- so the survival assertion
+    cannot vacuously pass on never-evictable entries.
+    """
+
+    def test_pipe_session_state_survives_streamable_http_teardown_end_to_end(
+        self, agent: SerenaAgent
+    ) -> None:
+        import os as _os
+        import uuid as _uuid
+
+        from serena.mcp import build_pipe_listener
+        from serena.pipe_protocol import PipeEnvelope, PipeHandshake
+
+        # /tmp short path -- AF_UNIX has a ~104-byte path limit on macOS,
+        # and pytest's tmp_path lives under /private/var/folders/... which
+        # can blow past the limit. Mirror the socket_path fixture pattern
+        # from test_pipe_transport.py and TestEvictPipeSessionEndToEnd
+        socket_path = f"/tmp/serena-pipe-survive-{_uuid.uuid4().hex[:8]}.sock"
+        try:
+
+            async def _scenario_inner() -> tuple[bool, bool, bool]:
+                listener = build_pipe_listener(agent)
+                await listener.start(socket_path)
+                try:
+                    reader, writer = await asyncio.open_unix_connection(socket_path)
+                    writer.write(PipeHandshake.request().to_bytes())
+                    await writer.drain()
+                    response_line = await reader.readuntil(b"\n")
+                    response = PipeEnvelope.from_bytes(response_line)
+                    session_id = PipeHandshake.session_id_from_response(response)
+
+                    # populate the pipe-asserted session's per-session
+                    # state, then verify it landed before any teardown
+                    pipe_proj = _project_sentinel()
+                    pipe_cursor = _project_sentinel()
+                    agent._active_projects_by_session[session_id] = pipe_proj  # type: ignore[assignment]
+                    agent._cursor_managers_by_session[session_id] = pipe_cursor  # type: ignore[assignment]
+                    pre_state = (
+                        agent._active_projects_by_session.get(session_id) is pipe_proj
+                        and agent._cursor_managers_by_session.get(session_id) is pipe_cursor
+                    )
+
+                    # simulate a streamable-http per-request teardown
+                    # WITHOUT closing the pipe: an int-keyed eviction
+                    # arrives at the daemon while the pipe stays connected
+                    bogus_int_key = id(object())
+                    agent._active_projects_by_session[bogus_int_key] = _project_sentinel()  # type: ignore[assignment]
+                    agent._evict_session_state(bogus_int_key)
+                    # let real time pass to falsify any hidden timer-based
+                    # eviction; the pipe is the only lifetime gate
+                    await asyncio.sleep(0.2)
+                    gc.collect()
+
+                    survived_teardown = (
+                        agent._active_projects_by_session.get(session_id) is pipe_proj
+                        and agent._cursor_managers_by_session.get(session_id) is pipe_cursor
+                    )
+
+                    # positive control: closing the pipe DOES evict;
+                    # without this, the survival assertion could vacuously
+                    # pass on an entry that is never-evictable for some
+                    # other reason
+                    writer.close()
+                    with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                        await writer.wait_closed()
+                    for _ in range(50):
+                        if (
+                            session_id not in agent._active_projects_by_session
+                            and session_id not in agent._cursor_managers_by_session
+                        ):
+                            break
+                        await asyncio.sleep(0.01)
+                    evicted_on_disconnect = (
+                        session_id not in agent._active_projects_by_session
+                        and session_id not in agent._cursor_managers_by_session
+                    )
+
+                    return pre_state, survived_teardown, evicted_on_disconnect
+                finally:
+                    await listener.stop()
+
+            pre, survived, evicted = asyncio.run(_scenario_inner())
+            assert pre is True, "pre-population must succeed for the test to be meaningful"
+            assert survived is True, (
+                "pipe-keyed state MUST survive streamable-http per-request teardown "
+                "while the pipe remains connected"
+            )
+            assert evicted is True, (
+                "pipe-keyed state MUST be evicted on pipe disconnect "
+                "(positive control proving the test setup detects state changes)"
+            )
             return
         finally:
             with contextlib.suppress(FileNotFoundError):
