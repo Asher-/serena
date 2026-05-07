@@ -302,6 +302,13 @@ class SerenaAgent:
         # in scope; the property setter writes here when _SESSION_KEY_VAR is unset.
         self._legacy_active_project: Project | None = None
         self._active_project = None  # routed through the _active_project property to the per-session map or legacy slot
+        # per-session cursor managers, keyed by id(mcp_ctx.session) under _SESSION_KEY_VAR. Each entry is bound to
+        # that session's active project at the moment the manager was constructed; a per-session project switch
+        # invalidates only that session's entry (see _activate_project) so concurrent sessions' cursors survive.
+        self._cursor_managers_by_session: dict[int, "CursorManager"] = {}
+        # fallback cursor manager for non-MCP callers (CLI, dashboard, scripts, tests) with no session in scope;
+        # get_cursor_manager writes here when _SESSION_KEY_VAR is unset.
+        self._legacy_cursor_manager: "CursorManager | None" = None
         # startup activation error preserved here so the first tool call that requires
         # the project can surface the real cause instead of a generic "No active project".
         self._startup_activation_error: Exception | None = None
@@ -583,16 +590,38 @@ class SerenaAgent:
         return active_project.get_language_server_manager_or_raise()
 
     def get_cursor_manager(self) -> "CursorManager":
-        """Get or create the CursorManager for cursor-based code navigation."""
+        """
+        Get or create the :class:`CursorManager` for cursor-based code navigation.
+
+        Cursor managers are routed per MCP session, mirroring how ``_active_project`` is routed:
+        when ``_SESSION_KEY_VAR`` is set (Tool.apply_ex bound it), the manager is looked up in
+        :attr:`_cursor_managers_by_session`; otherwise the legacy single slot is used (CLI, dashboard,
+        tests). The manager is rebuilt when absent or when its bound project no longer matches the
+        caller's active project — a per-session project switch invalidates only that session's manager.
+
+        :return: a manager whose ``project`` matches the caller's active project.
+        """
         from serena.cursor import CursorManager
 
-        cursor_mgr: CursorManager | None = getattr(self, "_cursor_manager", None)
-        if cursor_mgr is None:
-            project = self.get_active_project_or_raise()
+        # determine the caller's slot — per-session if a session is in scope, otherwise the legacy slot
+        session_key = _SESSION_KEY_VAR.get(None)
+        project = self.get_active_project_or_raise()
+        existing: CursorManager | None
+        if session_key is not None:
+            existing = self._cursor_managers_by_session.get(session_key)
+        else:
+            existing = self._legacy_cursor_manager
+
+        # rebuild when absent, or when bound to a stale project (the caller switched projects)
+        if existing is None or existing.project.project_root != project.project_root:
             project.get_language_server_manager_or_raise()  # validate LSP is available
-            cursor_mgr = CursorManager(project)
-            self._cursor_manager = cursor_mgr  # type: ignore[assignment]
-        return cursor_mgr
+            new_mgr = CursorManager(project)
+            if session_key is not None:
+                self._cursor_managers_by_session[session_key] = new_mgr
+            else:
+                self._legacy_cursor_manager = new_mgr
+            return new_mgr
+        return existing
 
     def get_log_inspection_instructions(self) -> str:
         if self.serena_config.web_dashboard:
@@ -983,7 +1012,14 @@ class SerenaAgent:
         # a successful activation invalidates any preserved startup-activation failure
         self._startup_activation_error = None
         self._startup_activation_target = None
-        self._cursor_manager = None  # type: ignore[assignment]  # reset cursor manager on project switch
+        # invalidate the cursor manager for *this* calling context only — per-session if a session is in scope,
+        # otherwise the legacy slot. A previous implementation cleared a single agent-wide attribute here, which
+        # under multi-session use wiped concurrent sessions' cursors whenever any session switched projects.
+        session_key = _SESSION_KEY_VAR.get(None)
+        if session_key is not None:
+            self._cursor_managers_by_session.pop(session_key, None)
+        else:
+            self._legacy_cursor_manager = None
         project.set_agent(self)
 
         if update_active_modes:
@@ -1191,6 +1227,9 @@ class SerenaAgent:
 
         self._active_projects_by_session.clear()
         self._legacy_active_project = None
+        # the cursor managers reference the projects we just shut down; drop them so they cannot be re-used
+        self._cursor_managers_by_session.clear()
+        self._legacy_cursor_manager = None
 
         if self._gui_log_viewer:
             log.info("Stopping the GUI log window ...")

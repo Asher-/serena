@@ -438,6 +438,11 @@ class CursorManager:
         self._structural_nodes_cache: dict[str, _StructuralNodeCacheEntry] = {}
 
     @property
+    def project(self) -> Project:
+        """:return: the project this manager is bound to (read-only)."""
+        return self._project
+
+    @property
     def _retriever(self) -> LanguageServerSymbolRetriever:
         return LanguageServerSymbolRetriever(self._project)
 
