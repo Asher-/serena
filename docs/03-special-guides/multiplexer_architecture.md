@@ -164,16 +164,43 @@ Repeat for any other backend the multiplexer fronts. If a call fails the
 session instead of holding, file the failure mode against the multiplexer —
 do not paper over it with a Serena-side workaround.
 
+
 ## Per-session state and the multiplexer
 
 Serena's per-session state (`_active_projects_by_session`,
-`_cursor_managers_by_session`) is keyed off the MCP session object. The
-multiplexer forwards bytes, so the session object Serena sees is still tied
-1-to-1 with a real client session. The per-session GC eviction added in
-commit `187015b5` continues to fire when a client session is closed, whether
-the multiplexer is in the path or not.
+`_cursor_managers_by_session`) is keyed off the in-process MCP `Session`
+object Serena receives, via `id(mcp_ctx.session)`. The MCP SDK's
+streamable-HTTP transport, in stateful mode, normally keeps one `Session`
+alive per `Mcp-Session-Id` for the lifetime of that ID, so within a single
+client session every tool call would land in the same per-session slot.
 
-If you observe per-session state lingering longer than expected, check
-`~/Library/Logs/serena/serena.log` for the `Evicted per-session state` debug
-lines. Their absence is a signal that the multiplexer is holding sessions
-open beyond their client lifetime.
+In practice that 1-to-1 mapping is **not** preserved when Serena sits behind
+the current `brain-mcp-multiplexer`. The multiplexer treats Serena as an
+upstream backend and does not consistently propagate the client's
+`Mcp-Session-Id` header into its outbound requests; calls in the same client
+batch arrive at Serena under different (or absent) `Mcp-Session-Id` values
+and therefore land in distinct `Session` objects, with different
+`id(mcp_ctx.session)` keys. Each fresh `Session` is GC'd once its
+short-lived task ends, the per-session finalizer fires, and the next call
+finds an empty slot and falls through to `_legacy_active_project` — which
+is whichever project the most recent activator (potentially a sibling
+client) wrote. This is the proximate cause of the "globally-active project
+rotated between sibling workers" failure mode reported when running
+parallel sub-agents through Serena.
+
+The eviction path itself (`_evict_session_state`, registered by
+`_register_session_finalizer` in `agent.py`) is correct; the missing piece
+is a **stable per-client identifier** that survives transport churn and
+multiplexer fan-out. The intended fix is to introduce a per-client `pipe`
+layer (see the design plan tracked under
+`plan://Serena:serena/serena-mcp-pipe-redesign`) whose handshake gives
+Serena one stable session id for the entire client lifetime.
+
+Until that lands, when you observe per-session state lingering longer than
+expected — or rotating between sibling clients — check
+`~/Library/Logs/serena/serena.log` for the `Evicted per-session state`
+debug lines and the frequency of session-key churn. Their absence is a
+signal that the multiplexer is holding sessions open beyond their client
+lifetime; an unexpectedly high rate is a signal that the multiplexer is
+fragmenting one client into many Serena sessions, which is the bug the
+pipe layer addresses.
