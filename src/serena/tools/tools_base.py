@@ -284,11 +284,25 @@ class Tool(Component):
         """
         Applies the tool with logging and exception handling, using the given keyword arguments
         """
-        # derive a per-session key from the MCP request context (id(session) is unique for the
-        # lifetime of an SSE connection); used to route active-project state per-session in
-        # SerenaAgent so concurrent sessions don't race on a single global slot.
-        session_key: int | None = None
-        if mcp_ctx is not None:
+        # derive a per-session key. The pipe transport (src/serena/pipe.py) supplies a stable
+        # handshake-asserted UUID4 via _PIPE_SESSION_ID_VAR; when set, that id is the session_key
+        # and the per-pipe-connection finalizer (T6) -- not the mcp_ctx GC finalizer -- drives
+        # eviction. For direct-stdio / streamable-http / sse clients (no pipe) we fall back to
+        # id(mcp_ctx.session), which is unique for the lifetime of a session but unstable across
+        # streamable-http per-request task churn (a documented limitation that the pipe addresses).
+        from serena.agent import _ACTIVE_PROJECT_VAR, _MCP_CALL_IN_FLIGHT, _PIPE_SESSION_ID_VAR, _SESSION_KEY_VAR
+
+        pipe_session_id = _PIPE_SESSION_ID_VAR.get()
+
+        session_key: str | int | None = None
+        if pipe_session_id is not None:
+            # pipe transport: the daemon-allocated session_id is the stable per-client key.
+            # Eviction is driven by pipe-socket disconnect (T6 of plan://Serena:serena/serena-pipe-implementation),
+            # so we deliberately skip the mcp_ctx GC finalizer registration below -- it would tie
+            # the cleanup to the SDK's transport-layer Session lifetime, which is exactly the
+            # transport-churn instability the pipe redesign exists to eliminate.
+            session_key = pipe_session_id
+        elif mcp_ctx is not None:
             try:
                 session_key = id(mcp_ctx.session)
                 # register a GC finalizer (idempotent per session) that drops the per-session
@@ -299,6 +313,7 @@ class Tool(Component):
             except Exception as e:
                 log.info(f"Failed to derive MCP session key: {e}.")
 
+        if mcp_ctx is not None:
             try:
                 client_params = mcp_ctx.session.client_params
                 if client_params is not None:
@@ -313,8 +328,6 @@ class Tool(Component):
         # snapshot the persisted active project for this session BEFORE entering the worker thread,
         # so we can pin the in-flight ContextVar inside the task closure (the executor spawns a fresh
         # threading.Thread which does not inherit the caller's ContextVars).
-        from serena.agent import _ACTIVE_PROJECT_VAR, _MCP_CALL_IN_FLIGHT, _SESSION_KEY_VAR
-
         persisted_project = (
             self.agent._active_projects_by_session.get(session_key) if session_key is not None else None
         )
@@ -325,10 +338,16 @@ class Tool(Component):
             # the project for *this* session rather than whichever session most recently activated.
             # mark this call as MCP-bound so the IRONCLAD zero-crossover guard in the getter blocks
             # any silent fallback to the legacy single-slot field while we are inside this call.
-            if mcp_ctx is not None:
+            if mcp_ctx is not None or pipe_session_id is not None:
                 _MCP_CALL_IN_FLIGHT.set(True)
             if session_key is not None:
                 _SESSION_KEY_VAR.set(session_key)
+            if pipe_session_id is not None:
+                # propagate into the worker thread so any nested apply_ex re-derives the same
+                # session_key from this var rather than from id(mcp_ctx.session) (which would be
+                # absent or stale here, since nested calls inherit the closure-captured locals
+                # only through the outer call's bookkeeping).
+                _PIPE_SESSION_ID_VAR.set(pipe_session_id)
             if persisted_project is not None:
                 _ACTIVE_PROJECT_VAR.set(persisted_project)
 

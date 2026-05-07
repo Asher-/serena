@@ -2,22 +2,27 @@
 The Serena Model Context Protocol (MCP) Server
 """
 
+import asyncio
 import atexit
+import contextvars
 import sys
 from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Literal, cast
 
 import docstring_parser
 from mcp.server.fastmcp import server
 from mcp.server.fastmcp.server import FastMCP, Settings
 from mcp.server.fastmcp.tools.base import Tool as MCPTool
+from mcp.types import Tool as WireTool
 from mcp.types import ToolAnnotations
 from pydantic_settings import SettingsConfigDict
 from sensai.util import logging
 
+from serena import serena_version
 from serena.agent import (
     SerenaAgent,
     SerenaConfig,
@@ -25,6 +30,7 @@ from serena.agent import (
 from serena.config.context_mode import SerenaAgentContext
 from serena.config.serena_config import LanguageBackend, ModeSelectionDefinition
 from serena.constants import DEFAULT_CONTEXT, SERENA_LOG_FORMAT
+from serena.daemon_pipe import CatalogProvider, FrameHandler
 from serena.tools import Tool
 from serena.util.exception import show_fatal_exception_safe
 from serena.util.logging import MemoryLogHandler
@@ -377,3 +383,208 @@ class SerenaMCPFactory:
     def _get_initial_instructions(self) -> str:
         assert self.agent is not None
         return self.agent.create_system_prompt()
+
+
+class SerenaCatalogProvider(CatalogProvider):
+    """Production :class:`CatalogProvider` that emits Serena's tool catalog as wire-format dicts.
+
+    Iterates the agent's exposed tools (the same set returned by
+    :meth:`SerenaMCPFactory._iter_tools`) and converts each Serena ``Tool`` to a
+    wire-format ``mcp.types.Tool`` dict via :meth:`SerenaMCPFactory.make_mcp_tool`.
+    The resulting list is returned verbatim from every ``pipe/catalog/get`` request;
+    the catalog is session-agnostic in this iteration since Serena's exposed tool
+    set is fixed at server creation. Per-session shaping (e.g. project-conditional
+    tool availability) would re-use the ``session_id`` parameter in a future revision.
+    """
+
+    def __init__(self, agent: SerenaAgent, openai_tool_compatible: bool = False) -> None:
+        """
+        :param agent: The :class:`SerenaAgent` whose exposed tools form the catalog.
+        :param openai_tool_compatible: Whether to apply the OpenAI-compatible schema sanitization
+            (mirrors :meth:`SerenaMCPFactory._set_mcp_tools`'s switch). Default ``False`` matches
+            the standard MCP wire format; OpenAI-compatible clients (``chatgpt``, ``codex``,
+            ``oaicompat-agent`` contexts) opt in by setting this ``True``.
+        """
+        self._agent = agent
+        self._openai_tool_compatible = openai_tool_compatible
+
+    async def get_catalog(self, session_id: str) -> list[dict[str, Any]]:
+        """Return the JSON-serializable tool definitions for the requesting pipe connection.
+
+        :param session_id: The daemon-allocated session_id; ignored in this iteration since
+            Serena's catalog does not vary per session, but accepted to satisfy the
+            :class:`CatalogProvider` contract and leave room for session-scoped catalogs.
+        :returns: A list of dicts, each shaped as a wire-format ``mcp.types.Tool`` JSON
+            object (``name``, ``description``, ``inputSchema``, optional ``annotations``,
+            optional ``title``). Empty when the agent exposes no tools.
+        """
+        catalog: list[dict[str, Any]] = []
+        for tool in self._agent.get_exposed_tool_instances():
+            mcp_tool = SerenaMCPFactory.make_mcp_tool(tool, openai_tool_compatible=self._openai_tool_compatible)
+            wire_tool = WireTool(
+                name=mcp_tool.name,
+                description=mcp_tool.description,
+                inputSchema=mcp_tool.parameters,
+                annotations=mcp_tool.annotations,
+                title=mcp_tool.title,
+            )
+            catalog.append(wire_tool.model_dump(by_alias=True, exclude_none=True))
+        return catalog
+
+
+class SerenaPipeFrameHandler(FrameHandler):
+    """Production :class:`FrameHandler` that dispatches JSON-RPC frames to Serena tools directly.
+
+    The daemon-side dispatch is a thin JSON-RPC method router that handles the small set of
+    methods a host issues after handshake (``initialize``, ``notifications/initialized``,
+    ``tools/call``, ``prompts/list``, ``resources/list``, ``ping``). For every dispatch
+    ``_PIPE_SESSION_ID_VAR`` is set to the pipe-asserted session_id BEFORE any handler runs,
+    so :meth:`Tool.apply_ex`'s session keying picks it up via the ContextVar; the per-session
+    ``_active_projects_by_session`` and ``_cursor_managers_by_session`` maps then route
+    correctly without needing the SDK's transport-layer Session machinery.
+
+    ``tools/list`` requests never reach this handler -- the pipe forwarder
+    (:func:`serena.pipe._run_forwarder`) answers them locally from the catalog fetched at
+    handshake time, and the listener intercepts ``pipe/catalog/get`` envelopes before
+    FrameHandler dispatch. The handler therefore deliberately omits a ``tools/list`` branch.
+
+    The dispatch is direct rather than a wrapping of the SDK's lowlevel ``Server.run``
+    coroutine. The wrapped form is per-connection long-lived and keeps a separate
+    anyio-stream pump per session; the per-frame form here is simpler, has fewer moving
+    parts, and exercises the same :meth:`Tool.apply_ex` invocation path the SDK would have
+    routed to. The ``_PIPE_SESSION_ID_VAR`` keying is the only hard requirement -- whichever
+    integration shape we choose, that ContextVar must be set before any tool dispatch.
+    """
+
+    def __init__(self, agent: SerenaAgent) -> None:
+        """
+        :param agent: The :class:`SerenaAgent` whose exposed tools handle ``tools/call`` requests.
+        """
+        self._agent = agent
+
+    async def handle(self, session_id: str, frame: dict[str, Any]) -> dict[str, Any] | None:
+        """Set ``_PIPE_SESSION_ID_VAR`` and dispatch one JSON-RPC frame.
+
+        :param session_id: The daemon-allocated session_id for the originating pipe connection.
+            Set into ``_PIPE_SESSION_ID_VAR`` for the duration of this dispatch so any tool
+            invoked during the call sees it via the ContextVar.
+        :param frame: The JSON-RPC frame as a parsed dict (already JSON-decoded by
+            :class:`PipeEnvelope`).
+        :returns: The JSON-RPC response frame to ferry back over the pipe, or ``None`` for
+            JSON-RPC notifications (frames without an ``id``) and any other request that
+            does not produce a response.
+        """
+        from serena.agent import _PIPE_SESSION_ID_VAR
+
+        # set on this Task's ContextVar context so concurrent connections (each running in its
+        # own _forward_frames Task with its own context copy) cannot race on the var; the
+        # finally-reset preserves the caller's prior value if there ever is one (there will not
+        # be in production, but tests sometimes pre-set the var to assert handler behaviour)
+        token = _PIPE_SESSION_ID_VAR.set(session_id)
+        try:
+            return await self._dispatch(frame)
+        finally:
+            _PIPE_SESSION_ID_VAR.reset(token)
+
+    async def _dispatch(self, frame: dict[str, Any]) -> dict[str, Any] | None:
+        """Route ``frame`` to the matching method handler and produce the response shape.
+
+        :param frame: The JSON-RPC frame as a parsed dict.
+        :returns: The JSON-RPC response frame, or ``None`` for notifications.
+        """
+        method = frame.get("method")
+        frame_id = frame.get("id")
+
+        if frame_id is None:
+            # JSON-RPC notification: no response is sent. We deliberately do not
+            # raise on unknown notifications -- the host can send transport-level
+            # signals (notifications/initialized, notifications/cancelled, ...) that
+            # the daemon side has no explicit handler for and yet must not error on.
+            log.debug("SerenaPipeFrameHandler: notification %r dropped", method)
+            return None
+
+        try:
+            if method == "initialize":
+                result = self._handle_initialize(frame.get("params") or {})
+            elif method == "tools/call":
+                # tools/call delegates to Tool.apply_ex, which is synchronous and blocks on its
+                # own internal task_executor. Calling that directly inside the asyncio Task would
+                # pin the event loop until the tool finishes -- starving every other live pipe
+                # connection. Run it via the loop's default executor with the current Task's
+                # context (so _PIPE_SESSION_ID_VAR stays set inside apply_ex's worker too).
+                ctx = contextvars.copy_context()
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(
+                    None, partial(ctx.run, self._handle_tools_call, frame.get("params") or {})
+                )
+            elif method == "prompts/list":
+                result = {"prompts": []}
+            elif method == "resources/list":
+                result = {"resources": []}
+            elif method == "ping":
+                result = {}
+            else:
+                return self._error_response(frame_id, -32601, f"Method not found: {method!r}")
+            return {"jsonrpc": "2.0", "id": frame_id, "result": result}
+        except Exception as exc:
+            log.exception("SerenaPipeFrameHandler: dispatch failed for method=%r", method)
+            return self._error_response(frame_id, -32603, f"Internal error: {exc}")
+
+    def _handle_initialize(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Build the ``initialize`` response from the host's request parameters.
+
+        Echoes the host's ``protocolVersion`` if supplied (so a host that pins to a specific
+        revision sees that revision back), advertises Serena's tools/prompts/resources
+        capabilities, and stamps ``serverInfo`` with the running version so the host's
+        diagnostic output reflects the daemon it actually connected to.
+        """
+        return {
+            "protocolVersion": params.get("protocolVersion", "2024-11-05"),
+            "capabilities": {
+                "tools": {},
+                "prompts": {},
+                "resources": {},
+            },
+            "serverInfo": {
+                "name": "Serena",
+                "version": serena_version(),
+            },
+        }
+
+    def _handle_tools_call(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Look up the named Serena tool and invoke ``apply_ex`` with the request arguments.
+
+        ``mcp_ctx=None`` is passed deliberately: the pipe transport supplies the session
+        identity via ``_PIPE_SESSION_ID_VAR`` (set by :meth:`handle`), and the SDK's
+        transport-layer Session is not present in the daemon-side dispatch path. Tool errors
+        are caught by :meth:`Tool.apply_ex` itself (with ``catch_exceptions=True``); the
+        method returns the tool's stringified output, which we wrap in the standard MCP
+        text-content shape.
+        """
+        name = params.get("name")
+        if not isinstance(name, str):
+            raise ValueError("tools/call params.name must be a string")
+        arguments = params.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            raise ValueError("tools/call params.arguments must be an object")
+
+        # exposed-tools lookup -- the catalog (advertised at handshake) is keyed off the
+        # same list, so any name the host can issue must resolve here. An unknown name is
+        # a contract violation by the host (or an indication the daemon catalog drifted
+        # from the pipe's cached catalog) and surfaces as a tools-call-level error rather
+        # than a JSON-RPC method-not-found, which is reserved for unknown JSON-RPC methods.
+        tool = next((t for t in self._agent.get_exposed_tool_instances() if t.get_name() == name), None)
+        if tool is None:
+            raise ValueError(f"Unknown tool: {name!r}")
+
+        result = tool.apply_ex(log_call=True, catch_exceptions=True, mcp_ctx=None, **arguments)
+        return {"content": [{"type": "text", "text": result}]}
+
+    @staticmethod
+    def _error_response(frame_id: Any, code: int, message: str) -> dict[str, Any]:
+        """Build a JSON-RPC error response with the given code and message."""
+        return {
+            "jsonrpc": "2.0",
+            "id": frame_id,
+            "error": {"code": code, "message": message},
+        }

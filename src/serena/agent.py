@@ -86,6 +86,18 @@ _ACTIVE_PROJECT_VAR: "_contextvars.ContextVar[object]" = _contextvars.ContextVar
 _MCP_CALL_IN_FLIGHT: "_contextvars.ContextVar[bool]" = _contextvars.ContextVar(
     "serena_mcp_call_in_flight", default=False
 )
+# Pipe-asserted stable session_id for clients connecting via the per-client stdio
+# pipe (src/serena/pipe.py + src/serena/daemon_pipe.py). The daemon's pipe
+# FrameHandler sets this ContextVar to PipeConnection.session_id BEFORE invoking
+# any per-frame dispatch; Tool.apply_ex reads it to derive the session_key,
+# routing per-session state under the pipe-asserted UUID rather than
+# id(mcp_ctx.session). Stable across the pipe's lifetime, so per-session state
+# survives MCP-transport churn (streamable-http reuses the connection but creates
+# a fresh mcp_ctx.session per request, which would otherwise rotate the
+# id()-derived key on every call).
+_PIPE_SESSION_ID_VAR: "_contextvars.ContextVar[str | None]" = _contextvars.ContextVar(
+    "serena_pipe_session_id", default=None
+)
 
 
 log = logging.getLogger(__name__)
@@ -306,18 +318,21 @@ class SerenaAgent:
         :param memory_log_handler: a MemoryLogHandler instance from which to read log messages; if None, a new one will be created
             if necessary.
         """
-        # per-MCP-session active project map, keyed by id(mcp_ctx.session); populated when Tool.apply_ex
-        # routes a call from a session, so reads via the _active_project property return the project for
-        # the calling session rather than whichever session most recently activated.
-        self._active_projects_by_session: dict[int, Project] = {}
+        # per-MCP-session active project map, populated when Tool.apply_ex routes a call from a session,
+        # so reads via the _active_project property return the project for the calling session rather than
+        # whichever session most recently activated. Keys are either id(mcp_ctx.session) (int, for direct
+        # stdio / streamable-http / sse transports) or the pipe-asserted UUID4 hex string (for clients
+        # connecting via the per-client stdio pipe; see _PIPE_SESSION_ID_VAR).
+        self._active_projects_by_session: dict[str | int, Project] = {}
         # fallback active project for non-MCP callers (CLI, dashboard, scripts, tests) that have no session
         # in scope; the property setter writes here when _SESSION_KEY_VAR is unset.
         self._legacy_active_project: Project | None = None
         self._active_project = None  # routed through the _active_project property to the per-session map or legacy slot
-        # per-session cursor managers, keyed by id(mcp_ctx.session) under _SESSION_KEY_VAR. Each entry is bound to
-        # that session's active project at the moment the manager was constructed; a per-session project switch
-        # invalidates only that session's entry (see _activate_project) so concurrent sessions' cursors survive.
-        self._cursor_managers_by_session: dict[int, "CursorManager"] = {}
+        # per-session cursor managers, keyed identically to _active_projects_by_session. Each entry is
+        # bound to that session's active project at the moment the manager was constructed; a per-session
+        # project switch invalidates only that session's entry (see _activate_project) so concurrent
+        # sessions' cursors survive.
+        self._cursor_managers_by_session: dict[str | int, "CursorManager"] = {}
         # fallback cursor manager for non-MCP callers (CLI, dashboard, scripts, tests) with no session in scope;
         # get_cursor_manager writes here when _SESSION_KEY_VAR is unset.
         self._legacy_cursor_manager: "CursorManager | None" = None
