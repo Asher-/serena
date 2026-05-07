@@ -343,7 +343,11 @@ class Tool(Component):
                 if not isinstance(self, ToolMarkerDoesNotRequireActiveProject):
                     if self.agent.get_active_project() is None:
                         return (
-                            "Error: No active project. Ask the user to provide the project path or to select a project from this list of known projects: "
+                            "Error: No active project for this MCP session. To resume work, call "
+                            "`activate_project` with the absolute path of the project root (it will be "
+                            "auto-registered if Serena does not yet know it). Per-session state (active "
+                            "project, cursor positions) does not survive Serena daemon restarts; clients "
+                            "must re-activate on each fresh session. Known registered projects: "
                             + f"{self.agent.serena_config.project_names}"
                         )
 

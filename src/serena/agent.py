@@ -855,7 +855,12 @@ class SerenaAgent:
             if startup_error is not None:
                 target = self._startup_activation_target or "the project specified at startup"
                 raise ValueError(f"Project '{target}' specified at startup failed to activate: {startup_error}") from startup_error
-            raise ValueError("No active project. Please activate a project first.")
+            raise ValueError(
+                "No active project for this MCP session. Call `activate_project` with the absolute "
+                "path of the project root (it will be auto-registered if Serena does not yet know it). "
+                "Per-session state does not survive daemon restarts; clients must re-activate on each "
+                "fresh session."
+            )
         return project
 
     def set_modes(self, mode_names: list[str]) -> None:

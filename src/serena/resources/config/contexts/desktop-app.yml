@@ -8,6 +8,12 @@ prompt: |
   To view the code edits you make, the user will have switch to a separate application.
   To illustrate complex relationships, consider creating diagrams in addition to your text-based communication
   (depending on the options for text, html, mermaid diagrams, etc. that you are provided with in your initial instructions).
+
+  At the start of every session — including after a daemon restart that forced a re-initialize —
+  if no project is yet active for your session, call `activate_project` with the absolute path of
+  the project root (it will be auto-registered if Serena does not yet know it). Per-session state
+  (active project, cursor positions, language-server caches keyed to a session) does not persist
+  across daemon restarts; clients are expected to re-activate on each fresh session.
 excluded_tools: []
 included_optional_tools: []
 
