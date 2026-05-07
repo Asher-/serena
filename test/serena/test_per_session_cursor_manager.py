@@ -29,6 +29,7 @@ and assert that each session reads back its own manager bound to its own project
 from __future__ import annotations
 
 import contextvars as _contextvars
+import threading
 from contextlib import contextmanager
 from typing import Iterator
 from unittest.mock import MagicMock, patch
@@ -51,6 +52,8 @@ def agent() -> SerenaAgent:
     a._legacy_active_project = None
     a._cursor_managers_by_session = {}
     a._legacy_cursor_manager = None
+    a._session_finalizers = {}
+    a._session_finalizers_lock = threading.Lock()
     return a
 
 

@@ -9,6 +9,8 @@ import platform
 import signal
 import subprocess
 import sys
+import threading
+import weakref
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from logging import Logger
@@ -309,6 +311,13 @@ class SerenaAgent:
         # fallback cursor manager for non-MCP callers (CLI, dashboard, scripts, tests) with no session in scope;
         # get_cursor_manager writes here when _SESSION_KEY_VAR is unset.
         self._legacy_cursor_manager: "CursorManager | None" = None
+        # weakref-based finalizers for evicting per-session entries when the MCP session object is GC'd.
+        # Without this, _active_projects_by_session and _cursor_managers_by_session accumulate entries for
+        # every session that ever connected (leak), and id() reuse can let a future session inherit stale
+        # state at the same memory address. Registration happens lazily on the first tool call from a
+        # given session in Tool.apply_ex; the finalizer drops both per-session dict entries on GC.
+        self._session_finalizers: dict[int, weakref.finalize] = {}
+        self._session_finalizers_lock = threading.Lock()
         # startup activation error preserved here so the first tool call that requires
         # the project can surface the real cause instead of a generic "No active project".
         self._startup_activation_error: Exception | None = None
@@ -785,6 +794,48 @@ class SerenaAgent:
         if _ACTIVE_PROJECT_VAR.get(_UNSET) is not _UNSET or session_key is not None:
             _ACTIVE_PROJECT_VAR.set(project)
 
+    def _register_session_finalizer(self, mcp_session: object, session_key: int) -> None:
+        """Lazily register a GC finalizer that drops this session's per-session entries.
+
+        Called from ``Tool.apply_ex`` on every tool dispatch; the guard dict makes registration
+        exactly-once per session. When the MCP session object is garbage-collected (its
+        ``streamable-http`` task ends and the transport drops its references), the finalizer fires
+        and pops ``session_key`` from :attr:`_active_projects_by_session` and
+        :attr:`_cursor_managers_by_session`.
+
+        Without this, per-session entries accumulate for every session that ever connected, and
+        ``id()`` reuse lets a future session land on a dead session's key and inherit its state.
+
+        :param mcp_session: the ``mcp_ctx.session`` object whose lifetime gates eviction.
+        :param session_key: the per-session dict key (``id(mcp_session)``).
+        """
+        with self._session_finalizers_lock:
+            if session_key in self._session_finalizers:
+                return
+            try:
+                finalizer = weakref.finalize(mcp_session, self._evict_session_state, session_key)
+            except TypeError as e:
+                # weakref.finalize requires the target to support weak references; mock sessions
+                # using plain ``object()`` don't. Skip silently — eviction will not fire, but
+                # without a real session lifecycle there is nothing to evict against either.
+                log.debug(f"Could not register session finalizer for key {session_key}: {e}")
+                return
+            self._session_finalizers[session_key] = finalizer
+
+    def _evict_session_state(self, session_key: int) -> None:
+        """Drop per-session entries for ``session_key``; invoked by the GC finalizer.
+
+        Mirrors the dict pops performed by the ``_active_project`` setter and ``_activate_project``
+        when the same session re-activates a project — does not shut down the project itself, since
+        other concurrent sessions or the legacy slot may still reference it (project teardown is
+        owned by :meth:`on_shutdown`).
+        """
+        self._active_projects_by_session.pop(session_key, None)
+        self._cursor_managers_by_session.pop(session_key, None)
+        with self._session_finalizers_lock:
+            self._session_finalizers.pop(session_key, None)
+        log.debug(f"Evicted per-session state for session_key={session_key}")
+
     def get_active_project(self) -> Project | None:
         """
         :return: the active project or None if no project is active
@@ -1230,6 +1281,12 @@ class SerenaAgent:
         # the cursor managers reference the projects we just shut down; drop them so they cannot be re-used
         self._cursor_managers_by_session.clear()
         self._legacy_cursor_manager = None
+        # detach any live GC finalizers so they don't fire later as no-ops once the agent has been
+        # torn down. ``finalize.detach()`` cancels the registration; ``clear()`` then drops the dict.
+        with self._session_finalizers_lock:
+            for finalizer in self._session_finalizers.values():
+                finalizer.detach()
+            self._session_finalizers.clear()
 
         if self._gui_log_viewer:
             log.info("Stopping the GUI log window ...")

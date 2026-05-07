@@ -291,6 +291,11 @@ class Tool(Component):
         if mcp_ctx is not None:
             try:
                 session_key = id(mcp_ctx.session)
+                # register a GC finalizer (idempotent per session) that drops the per-session
+                # entries from ``_active_projects_by_session`` / ``_cursor_managers_by_session``
+                # when the session is collected. Without this, entries leak forever and a
+                # future session whose ``id()`` is reused inherits stale state.
+                self.agent._register_session_finalizer(mcp_ctx.session, session_key)
             except Exception as e:
                 log.info(f"Failed to derive MCP session key: {e}.")
 
