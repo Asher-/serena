@@ -18,7 +18,9 @@ import contextlib
 import logging
 import os
 import uuid
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
 from serena.pipe_protocol import PipeEnvelope, PipeHandshake, PipeProtocolError
 
@@ -42,6 +44,55 @@ class PipeConnection:
     writer: asyncio.StreamWriter
 
 
+class FrameHandler(ABC):
+    """Strategy for processing one forwarded JSON-RPC frame on the daemon side.
+
+    The pipe forwards every JSON-RPC frame upstream sends to the daemon as a
+    :class:`PipeEnvelope`; the listener strips the envelope and calls
+    :meth:`handle` with the frame and the connection's daemon-allocated
+    ``session_id``. Concrete strategies wrap the frame in whatever response
+    machinery the daemon needs (e.g. FastMCP dispatch, a test echo); T3 wires
+    the transport, T5 supplies the production strategy that integrates with
+    :class:`SerenaMCPFactory`.
+    """
+
+    @abstractmethod
+    async def handle(self, session_id: str, frame: dict[str, Any]) -> dict[str, Any] | None:
+        """Process one forwarded JSON-RPC frame and optionally produce a response.
+
+        :param session_id: The daemon-allocated session_id for the originating
+            pipe connection. Strategies that need to bind per-session state
+            (e.g. ``_PIPE_SESSION_ID_VAR`` in T5) read this value.
+        :param frame: The JSON-RPC frame as a parsed dict (already JSON-decoded
+            by :class:`PipeEnvelope`). Strategies treat this as opaque input.
+        :returns: A response frame to ferry back over the pipe, or ``None`` for
+            JSON-RPC notifications and any other request that does not produce
+            a response.
+        """
+
+
+class _NullFrameHandler(FrameHandler):
+    """Default :class:`FrameHandler` that drops every frame without responding.
+
+    Used when :class:`PipeListener` is constructed without an explicit handler
+    -- the existing T1/T2 tests connect, complete the handshake, and close
+    without ever forwarding a frame, so the null behaviour preserves their
+    semantics. Production callers always inject a real handler.
+    """
+
+    async def handle(self, session_id: str, frame: dict[str, Any]) -> dict[str, Any] | None:
+        # log loudly so a misconfigured daemon (handler-less, but actually
+        # forwarding traffic) is easy to spot in operator output rather than
+        # silently swallowing JSON-RPC requests
+        log.warning(
+            "PipeListener: no FrameHandler configured; dropping frame for session_id=%s frame_id=%r method=%r",
+            session_id,
+            frame.get("id"),
+            frame.get("method"),
+        )
+        return None
+
+
 class PipeListener:
     """Daemon-side Unix-socket listener that runs the pipe handshake on connect.
 
@@ -61,13 +112,24 @@ class PipeListener:
     will replace the handler's tail with a bidirectional forwarder loop.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, frame_handler: FrameHandler | None = None) -> None:
         # ``_connections`` is keyed by session_id so the eviction finalizer in
         # T6 can locate the right PipeConnection from a session_id alone; the
         # mapping is populated by the per-connection handler after the
         # handshake completes
         self._connections: dict[str, PipeConnection] = {}
         self._server: asyncio.Server | None = None
+
+        # the strategy that processes forwarded JSON-RPC frames; None falls
+        # back to a null handler so T1/T2 tests (which never forward a frame
+        # past the handshake) continue to pass unchanged
+        self._frame_handler: FrameHandler = frame_handler if frame_handler is not None else _NullFrameHandler()
+
+        # track the per-connection handler tasks so stop() can deterministically
+        # await them and avoid leaking a forwarder loop past the listener's
+        # lifetime; entries are added in _handle_connection and discarded when
+        # the handler returns
+        self._handler_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def connections(self) -> dict[str, PipeConnection]:
@@ -110,57 +172,158 @@ class PipeListener:
         self._server = None
 
         # close every tracked pipe-connection writer; the per-connection
-        # handler (once T3 lands its forwarder loop) detects the closed
-        # transport on its next read and exits cleanly
-        for connection in self._connections.values():
+        # forwarder detects the closed transport on its next read and exits
+        # via its finally block, which deregisters the connection
+        for connection in list(self._connections.values()):
             connection.writer.close()
             with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                 await connection.writer.wait_closed()
+
+        # await every per-connection handler task so the loop's teardown does
+        # not race with a still-running forwarder; cancelling first guarantees
+        # we unwind even if a handler is blocked in readuntil for some reason
+        pending = list(self._handler_tasks)
+        for task in pending:
+            if not task.done():
+                task.cancel()
+        for task in pending:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
         self._connections.clear()
+        self._handler_tasks.clear()
 
     async def _handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        """Handshake-then-park handler for one accepted pipe connection.
+        """Handshake-then-forward handler for one accepted pipe connection.
 
         :param reader: Stream reader for inbound envelopes from the pipe.
         :param writer: Stream writer for outbound envelopes to the pipe.
         """
-        # read the first envelope; the pipe MUST send mcp/session/open before
-        # any forwarded frame, so this read is the handshake by construction
+        # register this handler task so stop() can deterministically await its
+        # exit; without tracking, a still-running forwarder loop can race
+        # asyncio.run's teardown and trigger I/O-on-closed-stream warnings
+        task = asyncio.current_task()
+        if task is not None:
+            self._handler_tasks.add(task)
+
         try:
-            envelope = await self._receive_envelope(reader)
-        except (PipeProtocolError, asyncio.IncompleteReadError, ConnectionError) as exc:
-            log.warning("PipeListener: malformed first envelope; closing connection: %s", exc)
-            writer.close()
-            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
-                await writer.wait_closed()
-            return
+            # read the first envelope; the pipe MUST send mcp/session/open before
+            # any forwarded frame, so this read is the handshake by construction
+            try:
+                envelope = await self._receive_envelope(reader)
+            except (PipeProtocolError, asyncio.IncompleteReadError, ConnectionError) as exc:
+                log.warning("PipeListener: malformed first envelope; closing connection: %s", exc)
+                writer.close()
+                with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                    await writer.wait_closed()
+                return
 
-        if not PipeHandshake.is_request(envelope):
-            log.warning("PipeListener: first envelope is not mcp/session/open; closing: %r", envelope)
-            writer.close()
-            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
-                await writer.wait_closed()
-            return
+            if not PipeHandshake.is_request(envelope):
+                log.warning("PipeListener: first envelope is not mcp/session/open; closing: %r", envelope)
+                writer.close()
+                with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                    await writer.wait_closed()
+                return
 
-        # allocate a fresh UUID4 session_id; per the design plan the daemon
-        # is the sole authority for session_id assignment, so no client-
-        # asserted id is ever trusted
-        session_id = uuid.uuid4().hex
-        connection = PipeConnection(session_id=session_id, reader=reader, writer=writer)
-        self._connections[session_id] = connection
+            # allocate a fresh UUID4 session_id; per the design plan the daemon
+            # is the sole authority for session_id assignment, so no client-
+            # asserted id is ever trusted
+            session_id = uuid.uuid4().hex
+            connection = PipeConnection(session_id=session_id, reader=reader, writer=writer)
+            self._connections[session_id] = connection
 
-        # deliver the handshake response so the pipe can stamp future frames
-        # with this session_id; the response also doubles as the readiness
-        # signal for T3 frame forwarding to begin once that task lands
-        try:
-            await self._send_envelope(writer, PipeHandshake.response(session_id))
-        except (BrokenPipeError, ConnectionResetError) as exc:
-            log.warning("PipeListener: response delivery failed for session_id=%s: %s", session_id, exc)
-            self._connections.pop(session_id, None)
-            writer.close()
-            return
+            # deliver the handshake response so the pipe can stamp future frames
+            # with this session_id; the response also doubles as the readiness
+            # signal for T3 frame forwarding to begin
+            try:
+                await self._send_envelope(writer, PipeHandshake.response(session_id))
+            except (BrokenPipeError, ConnectionResetError) as exc:
+                log.warning("PipeListener: response delivery failed for session_id=%s: %s", session_id, exc)
+                self._connections.pop(session_id, None)
+                writer.close()
+                return
 
-        log.info("PipeListener: handshake complete; session_id=%s", session_id)
+            log.info("PipeListener: handshake complete; session_id=%s", session_id)
+
+            # T3: enter the long-lived bidirectional forwarder loop; the loop
+            # pumps envelopes between the pipe and the configured FrameHandler
+            # until the pipe disconnects or the listener is stopped
+            try:
+                await self._forward_frames(connection)
+            finally:
+                # the forwarder exited; deregister the connection and close the
+                # writer cleanly so stop() doesn't double-close. Eviction of
+                # per-session state on disconnect is T6 territory; T3 only owns
+                # the transport-level teardown.
+                self._connections.pop(session_id, None)
+                with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                    writer.close()
+                    await writer.wait_closed()
+        finally:
+            if task is not None:
+                self._handler_tasks.discard(task)
+
+    async def _forward_frames(self, connection: PipeConnection) -> None:
+        """Pump envelopes between one pipe connection and the FrameHandler.
+
+        Reads envelopes from ``connection.reader`` one at a time, validates the
+        ``meta.session_id`` matches the connection's allocated id, dispatches
+        the frame to :attr:`_frame_handler`, and writes any response back as a
+        new envelope on ``connection.writer``. The loop runs until EOF, a
+        transport error, or a malformed envelope ends it; no exception
+        propagates out so the caller's ``finally`` always runs.
+
+        :param connection: The handshake-completed pipe connection. Its
+            ``session_id`` is the value the daemon allocated in
+            :meth:`_handle_connection`.
+        """
+        reader, writer, session_id = connection.reader, connection.writer, connection.session_id
+
+        while True:
+            # read one envelope or break on EOF/disconnect; the pipe peer
+            # closing its writer surfaces here as IncompleteReadError so the
+            # forwarder unwinds cleanly without a per-call timeout
+            try:
+                envelope = await self._receive_envelope(reader)
+            except (asyncio.IncompleteReadError, ConnectionError):
+                log.info("PipeListener: pipe closed; session_id=%s", session_id)
+                return
+            except PipeProtocolError as exc:
+                log.warning("PipeListener: malformed envelope from session_id=%s; closing: %s", session_id, exc)
+                return
+
+            # validate meta.session_id matches the connection's allocated id;
+            # the daemon owns session_id assignment so any mismatch is a
+            # contract violation by the pipe and the frame is dropped without
+            # invoking the handler
+            envelope_session_id = envelope.meta.get("session_id")
+            if envelope_session_id != session_id:
+                log.warning(
+                    "PipeListener: dropping envelope with wrong session_id=%r (expected %s)",
+                    envelope_session_id,
+                    session_id,
+                )
+                continue
+
+            # dispatch the frame; the handler may return None for notifications
+            # or any other request that does not produce a response
+            try:
+                response_frame = await self._frame_handler.handle(session_id, envelope.frame)
+            except Exception as exc:
+                log.exception("PipeListener: FrameHandler raised for session_id=%s: %s", session_id, exc)
+                continue
+
+            # ferry the response back as an envelope stamped with the same
+            # session_id so the pipe can correlate (and T5 can rely on the
+            # pairing for any future per-session response routing)
+            if response_frame is None:
+                continue
+            response_envelope = PipeEnvelope(meta={"session_id": session_id}, frame=response_frame)
+            try:
+                await self._send_envelope(writer, response_envelope)
+            except (BrokenPipeError, ConnectionResetError) as exc:
+                log.warning("PipeListener: response delivery failed for session_id=%s: %s", session_id, exc)
+                return
         # T2 leaves the connection registered but idle; T3 will replace this
         # tail with the bidirectional forwarder loop. We do NOT close the
         # writer here: closing would make T3's frame forwarding impossible
