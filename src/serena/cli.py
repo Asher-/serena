@@ -226,10 +226,17 @@ class TopLevelCommands(AutoRegisteringGroup):
     )
     @click.option(
         "--transport",
-        type=click.Choice(["stdio", "sse", "streamable-http"]),
+        type=click.Choice(["stdio", "sse", "streamable-http", "pipe"]),
         default="stdio",
         show_default=True,
-        help="Transport protocol.",
+        help="Transport protocol. Use 'pipe' to run as a per-client forwarder that talks to a Serena daemon over --daemon-url.",
+    )
+    @click.option(
+        "--daemon-url",
+        type=str,
+        default="unix:///tmp/serena-daemon.sock",
+        show_default=True,
+        help="URI of the Serena daemon's socket; consulted only when --transport pipe is selected.",
     )
     @click.option(
         "--host",
@@ -285,7 +292,8 @@ class TopLevelCommands(AutoRegisteringGroup):
         context: str,
         modes: Sequence[str],
         language_backend: str | None,
-        transport: Literal["stdio", "sse", "streamable-http"],
+        transport: Literal["stdio", "sse", "streamable-http", "pipe"],
+        daemon_url: str,
         host: str,
         port: int,
         enable_web_dashboard: bool | None,
@@ -314,6 +322,15 @@ class TopLevelCommands(AutoRegisteringGroup):
 
         log.info("Initializing Serena MCP server")
         log.info("Storing logs in %s", log_path)
+
+        # dispatch to the per-client pipe forwarder when 'pipe' transport is selected;
+        # the pipe is NOT a daemon and must not instantiate SerenaMCPFactory
+        if transport == "pipe":
+            from serena.pipe import run_pipe_client
+
+            log.info("Starting Serena pipe forwarder; daemon_url=%s", daemon_url)
+            run_pipe_client(daemon_url=daemon_url)
+            return
 
         # Handle --project-from-cwd flag
         if project_from_cwd:
