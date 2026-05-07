@@ -22,7 +22,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
-from serena.pipe_protocol import PipeEnvelope, PipeHandshake, PipeProtocolError
+from serena.pipe_protocol import PipeCatalog, PipeEnvelope, PipeHandshake, PipeProtocolError
 
 log = logging.getLogger(__name__)
 
@@ -93,6 +93,53 @@ class _NullFrameHandler(FrameHandler):
         return None
 
 
+class CatalogProvider(ABC):
+    """Strategy for producing the daemon's authoritative tool catalog on demand.
+
+    The pipe issues a single :class:`~serena.pipe_protocol.PipeCatalog` request
+    immediately after the handshake; the listener intercepts that request
+    BEFORE the FrameHandler dispatch path and asks the configured
+    :class:`CatalogProvider` to produce the tool list. The result is the
+    canonical list of MCP tool definitions (``name``, ``description``,
+    ``inputSchema``, etc.) the pipe will use to answer every upstream
+    ``tools/list`` locally for the rest of the connection's lifetime.
+
+    The strategy is parameterised on ``session_id`` so a future implementation
+    can return a session-scoped catalog (e.g. tools that depend on the
+    activated project). T4's :class:`_NullCatalogProvider` and the test
+    catalog provider are session-agnostic; T5's FastMCP-backed provider is
+    where per-session shaping (if any) would live.
+    """
+
+    @abstractmethod
+    async def get_catalog(self, session_id: str) -> list[dict[str, Any]]:
+        """Return the JSON-serializable tool definitions for ``session_id``.
+
+        :param session_id: The daemon-allocated session_id for the connection
+            requesting the catalog. Implementations that emit a session-
+            agnostic catalog ignore this parameter.
+        :returns: A list of dicts, each shaped as an MCP tool definition. May
+            be empty when no tools are exposed (e.g. the null provider).
+        """
+
+
+class _NullCatalogProvider(CatalogProvider):
+    """Default :class:`CatalogProvider` that returns an empty tool list.
+
+    Used when :class:`PipeListener` is constructed without an explicit catalog
+    provider -- the existing T1/T2/T3 tests never issue a catalog fetch, so
+    the null behaviour preserves their semantics. Production callers always
+    inject a real provider (T5 will supply one backed by
+    :class:`SerenaMCPFactory`).
+    """
+
+    async def get_catalog(self, session_id: str) -> list[dict[str, Any]]:
+        # an empty list is a well-formed catalog response; the pipe will simply
+        # answer every tools/list with no tools, which is the correct behaviour
+        # when no provider has been wired
+        return []
+
+
 class PipeListener:
     """Daemon-side Unix-socket listener that runs the pipe handshake on connect.
 
@@ -112,7 +159,11 @@ class PipeListener:
     will replace the handler's tail with a bidirectional forwarder loop.
     """
 
-    def __init__(self, frame_handler: FrameHandler | None = None) -> None:
+    def __init__(
+        self,
+        frame_handler: FrameHandler | None = None,
+        catalog_provider: CatalogProvider | None = None,
+    ) -> None:
         # ``_connections`` is keyed by session_id so the eviction finalizer in
         # T6 can locate the right PipeConnection from a session_id alone; the
         # mapping is populated by the per-connection handler after the
@@ -124,6 +175,13 @@ class PipeListener:
         # back to a null handler so T1/T2 tests (which never forward a frame
         # past the handshake) continue to pass unchanged
         self._frame_handler: FrameHandler = frame_handler if frame_handler is not None else _NullFrameHandler()
+
+        # the strategy that supplies the authoritative tool catalog when a pipe
+        # issues pipe/catalog/get; None falls back to a null provider so T1-T3
+        # tests (which never issue a catalog fetch) continue to pass unchanged
+        self._catalog_provider: CatalogProvider = (
+            catalog_provider if catalog_provider is not None else _NullCatalogProvider()
+        )
 
         # track the per-connection handler tasks so stop() can deterministically
         # await them and avoid leaking a forwarder loop past the listener's
@@ -303,6 +361,24 @@ class PipeListener:
                     envelope_session_id,
                     session_id,
                 )
+                continue
+
+            # intercept pipe/catalog/get BEFORE the FrameHandler; the catalog
+            # exchange is internal pipe-protocol traffic that FastMCP must
+            # never see, so we answer it locally from the configured
+            # CatalogProvider and skip the handler dispatch entirely
+            if PipeCatalog.is_request(envelope):
+                try:
+                    tools = await self._catalog_provider.get_catalog(session_id)
+                except Exception as exc:
+                    log.exception("PipeListener: CatalogProvider raised for session_id=%s: %s", session_id, exc)
+                    continue
+                response_envelope = PipeCatalog.response(session_id, tools)
+                try:
+                    await self._send_envelope(writer, response_envelope)
+                except (BrokenPipeError, ConnectionResetError) as exc:
+                    log.warning("PipeListener: catalog response delivery failed for session_id=%s: %s", session_id, exc)
+                    return
                 continue
 
             # dispatch the frame; the handler may return None for notifications

@@ -21,9 +21,10 @@ import contextlib
 import json
 import logging
 import sys
+from typing import Any
 from urllib.parse import urlparse
 
-from serena.pipe_protocol import PipeEnvelope, PipeHandshake, PipeProtocolError
+from serena.pipe_protocol import PipeCatalog, PipeEnvelope, PipeHandshake, PipeProtocolError
 
 log = logging.getLogger(__name__)
 
@@ -124,6 +125,56 @@ async def _handshake_on(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     return PipeHandshake.session_id_from_response(envelope)
 
 
+async def _fetch_catalog_on(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    session_id: str,
+) -> list[dict[str, Any]]:
+    """Fetch the daemon's authoritative tool catalog over an already-open connection.
+
+    The pipe issues this exchange exactly once per connection, immediately
+    after :func:`_handshake_on` succeeds. The daemon answers from its
+    :class:`~serena.daemon_pipe.CatalogProvider`; FastMCP never sees the
+    request. The returned list is cached for the connection's lifetime and
+    used by :func:`_run_forwarder` to answer every upstream ``tools/list``
+    locally without round-tripping to the daemon.
+
+    :param reader: Async reader connected to the daemon's listener.
+    :param writer: Async writer connected to the daemon's listener.
+    :param session_id: The handshake-asserted session_id; stamped on the
+        outbound envelope's ``meta`` channel since post-handshake envelopes
+        always carry it. Also used to validate the response's ``meta``.
+    :returns: The list of tool definitions the daemon advertised.
+    :raises PipeProtocolError: if the daemon's response is malformed, has the
+        wrong shape, or stamps a different ``session_id`` on its ``meta``.
+    """
+    # build the catalog request and stamp it with the now-known session_id;
+    # PipeCatalog.request() leaves meta empty on purpose so the same encoder
+    # works whether or not the caller has a session_id yet
+    request = PipeCatalog.request()
+    envelope = PipeEnvelope(meta={"session_id": session_id}, frame=request.frame)
+    writer.write(envelope.to_bytes())
+    await writer.drain()
+
+    # receive exactly one envelope; the daemon answers a catalog request
+    # synchronously so this readuntil is bounded by the daemon's catalog
+    # production time
+    line = await reader.readuntil(b"\n")
+    response = PipeEnvelope.from_bytes(line)
+
+    # verify the response stamps the same session_id we sent; a mismatch is
+    # either a daemon bug or evidence that envelopes are being routed across
+    # connections, both of which we surface as a PipeProtocolError rather than
+    # silently trusting the catalog
+    response_session_id = response.meta.get("session_id")
+    if response_session_id != session_id:
+        raise PipeProtocolError(
+            f"catalog response session_id mismatch; sent {session_id!r}, got {response_session_id!r}"
+        )
+
+    return PipeCatalog.tools_from_response(response)
+
+
 async def _attach_stdio() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """Wrap the running process's stdin/stdout in async StreamReader/StreamWriter.
 
@@ -166,6 +217,13 @@ async def _run_pipe_main(socket_path: str) -> None:
         session_id = await _handshake_on(daemon_reader, daemon_writer)
         log.info("serena-pipe handshake complete; daemon-asserted session_id=%s", session_id)
 
+        # fetch the daemon's authoritative tool catalog before any upstream
+        # tools/list arrives; the forwarder caches this list for the
+        # connection's lifetime and answers tools/list locally so the catalog
+        # stays stable across daemon-side churn within this connection
+        catalog = await _fetch_catalog_on(daemon_reader, daemon_writer, session_id)
+        log.info("serena-pipe catalog fetched; %d tools advertised", len(catalog))
+
         # bind the upstream stdio (Claude Code <-> pipe) to async streams; the
         # forwarder pumps frames between these streams and the daemon socket
         stdin_reader, stdout_writer = await _attach_stdio()
@@ -173,7 +231,7 @@ async def _run_pipe_main(socket_path: str) -> None:
         # run the bidirectional forwarder until either side disconnects; this
         # is the long-lived loop that keeps the pipe process alive for the
         # client's session
-        await _run_forwarder(session_id, stdin_reader, stdout_writer, daemon_reader, daemon_writer)
+        await _run_forwarder(session_id, stdin_reader, stdout_writer, daemon_reader, daemon_writer, catalog)
     finally:
         # always close the daemon-side writer cleanly so the daemon's
         # forwarder loop sees EOF and unwinds without warnings
@@ -188,6 +246,7 @@ async def _run_forwarder(
     stdout_writer: asyncio.StreamWriter,
     daemon_reader: asyncio.StreamReader,
     daemon_writer: asyncio.StreamWriter,
+    catalog: list[dict[str, Any]] | None = None,
 ) -> None:
     """Pump newline-delimited JSON-RPC frames between upstream stdio and the daemon.
 
@@ -198,13 +257,27 @@ async def _run_forwarder(
     writes the inner frame line-by-line back to stdout. The first pump to
     terminate cancels the other so neither hangs after one direction closes.
 
+    Upstream ``tools/list`` requests are answered locally from ``catalog``
+    instead of being forwarded -- the daemon already advertised its
+    authoritative catalog at handshake time and the forwarder caches that
+    list for the connection's lifetime. Notifications (``tools/list``
+    without an ``id``) are still forwarded so the daemon's notification
+    bookkeeping stays consistent.
+
     :param session_id: The handshake-asserted session_id stamped on every
         outbound envelope.
     :param stdin_reader: Async reader for upstream JSON-RPC frames.
     :param stdout_writer: Async writer for downstream JSON-RPC frames.
     :param daemon_reader: Async reader for envelopes from the daemon.
     :param daemon_writer: Async writer for envelopes to the daemon.
+    :param catalog: Tool definitions returned by the daemon at handshake
+        time. ``None`` is treated as an empty catalog so callers from T1-T3
+        tests that predate T4 continue to work without modification.
     """
+    # treat None as empty so legacy callers (and any test that drives the
+    # forwarder without a catalog argument) get tools/list answered with no
+    # tools rather than a TypeError on None subscripting
+    cached_catalog: list[dict[str, Any]] = catalog if catalog is not None else []
 
     async def upstream_to_daemon() -> None:
         # read JSON-RPC lines from stdin, wrap in envelopes, send to daemon
@@ -232,6 +305,24 @@ async def _run_forwarder(
                 continue
             if not isinstance(frame, dict):
                 log.error("serena-pipe: upstream frame is not a JSON object; dropping: %r", frame)
+                continue
+
+            # answer tools/list requests locally from the cached catalog;
+            # only requests (those carrying an ``id``) get a synthetic
+            # response, notifications fall through to the daemon so any
+            # bookkeeping that depends on seeing them stays consistent
+            if frame.get("method") == "tools/list" and "id" in frame:
+                response_frame = {
+                    "jsonrpc": "2.0",
+                    "id": frame["id"],
+                    "result": {"tools": cached_catalog},
+                }
+                response_bytes = (json.dumps(response_frame) + "\n").encode("utf-8")
+                try:
+                    stdout_writer.write(response_bytes)
+                    await stdout_writer.drain()
+                except (BrokenPipeError, ConnectionResetError):
+                    return
                 continue
 
             # wrap and forward; broken-pipe errors here mean the daemon side

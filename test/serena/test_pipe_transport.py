@@ -23,9 +23,9 @@ import pytest
 from click.testing import CliRunner
 
 from serena.cli import TopLevelCommands
-from serena.daemon_pipe import FrameHandler, PipeListener
-from serena.pipe import _handshake, _handshake_on, _parse_unix_url, _run_forwarder, run_pipe_client
-from serena.pipe_protocol import PipeEnvelope, PipeHandshake, PipeProtocolError
+from serena.daemon_pipe import CatalogProvider, FrameHandler, PipeListener
+from serena.pipe import _fetch_catalog_on, _handshake, _handshake_on, _parse_unix_url, _run_forwarder, run_pipe_client
+from serena.pipe_protocol import PipeCatalog, PipeEnvelope, PipeHandshake, PipeProtocolError
 
 
 @pytest.fixture
@@ -359,6 +359,38 @@ class _RaisingFrameHandler(FrameHandler):
     async def handle(self, session_id: str, frame: dict[str, Any]) -> dict[str, Any] | None:
         self.calls.append((session_id, dict(frame)))
         raise RuntimeError("intentional handler failure")
+
+
+class _RecordingCatalogProvider(CatalogProvider):
+    """Test :class:`CatalogProvider` that returns a canned tool list and records each call.
+
+    Lets catalog tests assert (a) the provider was invoked, (b) it was invoked
+    with the expected ``session_id``, and (c) the listener stamped the
+    response with the provider's output. Mirrors :class:`_EchoFrameHandler`
+    in shape so test scaffolding stays consistent across the two strategy
+    families.
+    """
+
+    def __init__(self, tools: list[dict[str, Any]]) -> None:
+        self._tools = list(tools)
+        self.calls: list[str] = []
+
+    async def get_catalog(self, session_id: str) -> list[dict[str, Any]]:
+        self.calls.append(session_id)
+        # return a fresh copy so any caller-side mutation does not affect the
+        # canned baseline used to compare across multiple invocations
+        return [dict(tool) for tool in self._tools]
+
+
+class _RaisingCatalogProvider(CatalogProvider):
+    """Test :class:`CatalogProvider` that always raises -- used to verify the listener does not propagate provider errors."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def get_catalog(self, session_id: str) -> list[dict[str, Any]]:
+        self.calls.append(session_id)
+        raise RuntimeError("intentional catalog provider failure")
 
 
 async def _client_handshake(socket_path: str) -> tuple[str, asyncio.StreamReader, asyncio.StreamWriter]:
@@ -813,6 +845,683 @@ class TestPipeForwarderEnd2End:
         response = asyncio.run(scenario())
         assert response["id"] == 13
         assert response["result"]["echoed"] == {"jsonrpc": "2.0", "id": 13, "method": "echo", "params": {"x": 1}}
+
+
+class TestPipeCatalogProtocol:
+    """Verify pipe-protocol :class:`PipeCatalog` request/response encoding contracts."""
+
+    def test_request_uses_documented_method_and_id(self) -> None:
+        request = PipeCatalog.request()
+        assert request.frame["method"] == "pipe/catalog/get"
+        assert request.frame["jsonrpc"] == "2.0"
+        assert request.frame["id"] == 2
+        assert request.meta == {}, "request must not pre-assert a session_id"
+
+    def test_request_id_is_distinct_from_handshake(self) -> None:
+        # the catalog id MUST differ from the handshake id so they cannot
+        # collide if a future revision ever interleaves them on the wire
+        assert PipeCatalog.REQUEST_ID != PipeHandshake.REQUEST_ID
+
+    def test_response_carries_session_id_in_meta_and_tools_in_frame(self) -> None:
+        tools = [{"name": "noop", "description": "x", "inputSchema": {"type": "object"}}]
+        response = PipeCatalog.response("uuid-from-daemon", tools)
+        assert response.meta == {"session_id": "uuid-from-daemon"}
+        assert response.frame["jsonrpc"] == "2.0"
+        assert response.frame["id"] == 2
+        assert response.frame["result"] == {"tools": tools}
+
+    def test_is_request_recognises_documented_method(self) -> None:
+        envelope = PipeCatalog.request()
+        assert PipeCatalog.is_request(envelope) is True
+
+    def test_is_request_rejects_handshake(self) -> None:
+        # the handshake's method is mcp/session/open, NOT pipe/catalog/get
+        # so is_request must reject it even though the envelope shape matches
+        assert PipeCatalog.is_request(PipeHandshake.request()) is False
+
+    def test_is_request_rejects_other_jsonrpc_method(self) -> None:
+        bogus = PipeEnvelope(meta={}, frame={"jsonrpc": "2.0", "method": "tools/call", "id": 5})
+        assert PipeCatalog.is_request(bogus) is False
+
+    def test_tools_from_response_returns_the_list(self) -> None:
+        tools = [{"name": "alpha"}, {"name": "beta"}]
+        response = PipeCatalog.response("sid", tools)
+        assert PipeCatalog.tools_from_response(response) == tools
+
+    def test_tools_from_response_returns_empty_list_when_daemon_advertises_none(self) -> None:
+        # an empty list is a well-formed catalog; the helper must round-trip
+        # it instead of treating empty as malformed
+        response = PipeCatalog.response("sid", [])
+        assert PipeCatalog.tools_from_response(response) == []
+
+    def test_tools_from_response_rejects_missing_result(self) -> None:
+        bare = PipeEnvelope(meta={"session_id": "sid"}, frame={"jsonrpc": "2.0", "id": 2})
+        with pytest.raises(PipeProtocolError, match="result"):
+            PipeCatalog.tools_from_response(bare)
+
+    def test_tools_from_response_rejects_non_object_result(self) -> None:
+        bogus = PipeEnvelope(meta={"session_id": "sid"}, frame={"jsonrpc": "2.0", "id": 2, "result": "nope"})
+        with pytest.raises(PipeProtocolError, match="result"):
+            PipeCatalog.tools_from_response(bogus)
+
+    def test_tools_from_response_rejects_missing_tools(self) -> None:
+        bogus = PipeEnvelope(meta={"session_id": "sid"}, frame={"jsonrpc": "2.0", "id": 2, "result": {}})
+        with pytest.raises(PipeProtocolError, match="tools"):
+            PipeCatalog.tools_from_response(bogus)
+
+    def test_tools_from_response_rejects_non_list_tools(self) -> None:
+        bogus = PipeEnvelope(meta={"session_id": "sid"}, frame={"jsonrpc": "2.0", "id": 2, "result": {"tools": {}}})
+        with pytest.raises(PipeProtocolError, match="tools"):
+            PipeCatalog.tools_from_response(bogus)
+
+
+class TestPipeCatalogListener:
+    """Verify the daemon-side :class:`PipeListener` intercepts :class:`PipeCatalog` requests."""
+
+    def test_listener_dispatches_catalog_request_to_provider(self, socket_path: str) -> None:
+        async def scenario() -> tuple[list[str], list[dict[str, Any]]]:
+            tools = [{"name": "alpha", "description": "a"}, {"name": "beta", "description": "b"}]
+            provider = _RecordingCatalogProvider(tools)
+            # use an _EchoFrameHandler so any leak of the catalog request to
+            # the FrameHandler dispatch path becomes a visible echo response
+            # rather than a silent passthrough
+            listener = PipeListener(frame_handler=_EchoFrameHandler(), catalog_provider=provider)
+            await listener.start(socket_path)
+            try:
+                session_id, reader, writer = await _client_handshake(socket_path)
+
+                # send the catalog request stamped with the connection's session_id
+                writer.write(
+                    PipeEnvelope(meta={"session_id": session_id}, frame=PipeCatalog.request().frame).to_bytes()
+                )
+                await writer.drain()
+
+                response_line = await reader.readuntil(b"\n")
+                response = PipeEnvelope.from_bytes(response_line)
+                await _drain_close(writer)
+                returned_tools = PipeCatalog.tools_from_response(response)
+                return list(provider.calls), returned_tools
+            finally:
+                await listener.stop()
+
+        provider_calls, returned_tools = asyncio.run(scenario())
+        assert len(provider_calls) == 1, f"provider must be invoked exactly once, got {provider_calls!r}"
+        assert returned_tools == [{"name": "alpha", "description": "a"}, {"name": "beta", "description": "b"}]
+
+    def test_listener_invokes_provider_with_connection_session_id(self, socket_path: str) -> None:
+        async def scenario() -> tuple[str, list[str]]:
+            provider = _RecordingCatalogProvider([])
+            listener = PipeListener(catalog_provider=provider)
+            await listener.start(socket_path)
+            try:
+                session_id, reader, writer = await _client_handshake(socket_path)
+                writer.write(
+                    PipeEnvelope(meta={"session_id": session_id}, frame=PipeCatalog.request().frame).to_bytes()
+                )
+                await writer.drain()
+                # consume the response so the writer isn't torn down before
+                # the daemon flushes; the response value isn't asserted here
+                await reader.readuntil(b"\n")
+                await _drain_close(writer)
+                return session_id, list(provider.calls)
+            finally:
+                await listener.stop()
+
+        session_id, calls = asyncio.run(scenario())
+        assert calls == [session_id]
+
+    def test_listener_stamps_catalog_response_with_connection_session_id(self, socket_path: str) -> None:
+        async def scenario() -> tuple[str, dict[str, Any]]:
+            provider = _RecordingCatalogProvider([{"name": "noop"}])
+            listener = PipeListener(catalog_provider=provider)
+            await listener.start(socket_path)
+            try:
+                session_id, reader, writer = await _client_handshake(socket_path)
+                writer.write(
+                    PipeEnvelope(meta={"session_id": session_id}, frame=PipeCatalog.request().frame).to_bytes()
+                )
+                await writer.drain()
+                response_line = await reader.readuntil(b"\n")
+                response = PipeEnvelope.from_bytes(response_line)
+                await _drain_close(writer)
+                return session_id, dict(response.meta)
+            finally:
+                await listener.stop()
+
+        session_id, response_meta = asyncio.run(scenario())
+        assert response_meta == {"session_id": session_id}
+
+    def test_listener_does_not_invoke_frame_handler_for_catalog_request(self, socket_path: str) -> None:
+        async def scenario() -> int:
+            handler = _EchoFrameHandler()
+            provider = _RecordingCatalogProvider([{"name": "alpha"}])
+            listener = PipeListener(frame_handler=handler, catalog_provider=provider)
+            await listener.start(socket_path)
+            try:
+                session_id, reader, writer = await _client_handshake(socket_path)
+
+                # send catalog request first; the handler must NOT see it
+                writer.write(
+                    PipeEnvelope(meta={"session_id": session_id}, frame=PipeCatalog.request().frame).to_bytes()
+                )
+                await writer.drain()
+                await reader.readuntil(b"\n")  # drain the catalog response
+
+                # send a normal frame so we can confirm the handler still
+                # works for non-catalog traffic; the handler must see exactly
+                # this one frame, not two
+                writer.write(
+                    PipeEnvelope(
+                        meta={"session_id": session_id},
+                        frame={"jsonrpc": "2.0", "id": 99, "method": "ping"},
+                    ).to_bytes()
+                )
+                await writer.drain()
+                await reader.readuntil(b"\n")  # drain the echo response
+
+                await _drain_close(writer)
+                return len(handler.calls)
+            finally:
+                await listener.stop()
+
+        handler_calls = asyncio.run(scenario())
+        assert handler_calls == 1, "FrameHandler must not see catalog requests"
+
+    def test_listener_drops_catalog_envelope_with_wrong_session_id(self, socket_path: str) -> None:
+        async def scenario() -> tuple[int, dict[str, Any]]:
+            provider = _RecordingCatalogProvider([{"name": "alpha"}])
+            listener = PipeListener(catalog_provider=provider)
+            await listener.start(socket_path)
+            try:
+                session_id, reader, writer = await _client_handshake(socket_path)
+
+                # impostor catalog request stamped with a wrong session_id;
+                # the listener's pre-existing session_id check rejects this
+                # envelope BEFORE the catalog intercept runs, so the
+                # provider must not be invoked for the impostor at all
+                writer.write(
+                    PipeEnvelope(
+                        meta={"session_id": "00000000000000000000000000000000"},
+                        frame=PipeCatalog.request().frame,
+                    ).to_bytes()
+                )
+                # follow with a real catalog request so we can read a single
+                # response and confirm it's the legitimate one
+                writer.write(
+                    PipeEnvelope(meta={"session_id": session_id}, frame=PipeCatalog.request().frame).to_bytes()
+                )
+                await writer.drain()
+
+                response_line = await reader.readuntil(b"\n")
+                response = PipeEnvelope.from_bytes(response_line)
+                await _drain_close(writer)
+                return len(provider.calls), dict(response.meta)
+            finally:
+                await listener.stop()
+
+        provider_calls, response_meta = asyncio.run(scenario())
+        assert provider_calls == 1, "provider must NOT be invoked for impostor session_id"
+        assert "session_id" in response_meta and response_meta["session_id"] != "00000000000000000000000000000000"
+
+    def test_listener_default_catalog_provider_returns_empty(self, socket_path: str) -> None:
+        async def scenario() -> list[dict[str, Any]]:
+            # no catalog_provider supplied -- the null provider must answer
+            # with an empty list rather than blocking the request
+            listener = PipeListener()
+            await listener.start(socket_path)
+            try:
+                session_id, reader, writer = await _client_handshake(socket_path)
+                writer.write(
+                    PipeEnvelope(meta={"session_id": session_id}, frame=PipeCatalog.request().frame).to_bytes()
+                )
+                await writer.drain()
+                response_line = await reader.readuntil(b"\n")
+                response = PipeEnvelope.from_bytes(response_line)
+                await _drain_close(writer)
+                return PipeCatalog.tools_from_response(response)
+            finally:
+                await listener.stop()
+
+        tools = asyncio.run(scenario())
+        assert tools == []
+
+    def test_listener_concurrent_catalog_requests_get_correct_session_ids(self, socket_path: str) -> None:
+        async def scenario() -> list[tuple[str, dict[str, Any]]]:
+            # the provider tags each tool with the calling session_id so we
+            # can verify the listener routes each response to the correct
+            # connection even under concurrent traffic
+            class _SessionEchoCatalog(CatalogProvider):
+                async def get_catalog(self, session_id: str) -> list[dict[str, Any]]:
+                    return [{"name": session_id}]
+
+            listener = PipeListener(catalog_provider=_SessionEchoCatalog())
+            await listener.start(socket_path)
+            try:
+
+                async def one_client() -> tuple[str, dict[str, Any]]:
+                    session_id, reader, writer = await _client_handshake(socket_path)
+                    writer.write(
+                        PipeEnvelope(meta={"session_id": session_id}, frame=PipeCatalog.request().frame).to_bytes()
+                    )
+                    await writer.drain()
+                    response_line = await reader.readuntil(b"\n")
+                    response = PipeEnvelope.from_bytes(response_line)
+                    await _drain_close(writer)
+                    return session_id, dict(response.meta)
+
+                return list(await asyncio.gather(*[one_client() for _ in range(8)]))
+            finally:
+                await listener.stop()
+
+        results = asyncio.run(scenario())
+        assert len({r[0] for r in results}) == 8, f"collided session_ids: {results}"
+        for session_id, response_meta in results:
+            assert response_meta == {"session_id": session_id}, f"crossover: handshake={session_id} response={response_meta}"
+
+    def test_listener_continues_after_catalog_provider_raises(self, socket_path: str) -> None:
+        async def scenario() -> tuple[int, dict[str, Any]]:
+            # use a raising catalog provider; the first catalog request
+            # produces no response, but the listener loop must keep running
+            # so subsequent FrameHandler traffic still works
+            provider = _RaisingCatalogProvider()
+            handler = _EchoFrameHandler()
+            listener = PipeListener(frame_handler=handler, catalog_provider=provider)
+            await listener.start(socket_path)
+            try:
+                session_id, reader, writer = await _client_handshake(socket_path)
+
+                # send the doomed catalog request
+                writer.write(
+                    PipeEnvelope(meta={"session_id": session_id}, frame=PipeCatalog.request().frame).to_bytes()
+                )
+                await writer.drain()
+                # provider raised -> no response was sent; we cannot read on
+                # the catalog side. instead send a regular frame and confirm
+                # the listener still answers it (handler-routed)
+                writer.write(
+                    PipeEnvelope(
+                        meta={"session_id": session_id},
+                        frame={"jsonrpc": "2.0", "id": 7, "method": "ping"},
+                    ).to_bytes()
+                )
+                await writer.drain()
+                response_line = await reader.readuntil(b"\n")
+                response = PipeEnvelope.from_bytes(response_line)
+                await _drain_close(writer)
+                return len(provider.calls), dict(response.frame)
+            finally:
+                await listener.stop()
+
+        provider_calls, response_frame = asyncio.run(scenario())
+        assert provider_calls == 1
+        assert response_frame["id"] == 7, "listener loop must survive a raising catalog provider"
+
+
+class TestPipeCatalogClient:
+    """Verify the pipe-side :func:`_fetch_catalog_on` against a real listener."""
+
+    def test_fetch_catalog_returns_provider_list(self, socket_path: str) -> None:
+        async def scenario() -> list[dict[str, Any]]:
+            tools = [{"name": "alpha", "description": "a"}, {"name": "beta", "description": "b"}]
+            listener = PipeListener(catalog_provider=_RecordingCatalogProvider(tools))
+            await listener.start(socket_path)
+            try:
+                # open the daemon connection, complete the handshake, then
+                # fetch the catalog over the same connection -- this mirrors
+                # what _run_pipe_main does in production
+                reader, writer = await asyncio.open_unix_connection(socket_path)
+                try:
+                    session_id = await _handshake_on(reader, writer)
+                    return await _fetch_catalog_on(reader, writer, session_id)
+                finally:
+                    await _drain_close(writer)
+            finally:
+                await listener.stop()
+
+        fetched = asyncio.run(scenario())
+        assert fetched == [{"name": "alpha", "description": "a"}, {"name": "beta", "description": "b"}]
+
+    def test_fetch_catalog_returns_empty_when_provider_is_default(self, socket_path: str) -> None:
+        async def scenario() -> list[dict[str, Any]]:
+            listener = PipeListener()
+            await listener.start(socket_path)
+            try:
+                reader, writer = await asyncio.open_unix_connection(socket_path)
+                try:
+                    session_id = await _handshake_on(reader, writer)
+                    return await _fetch_catalog_on(reader, writer, session_id)
+                finally:
+                    await _drain_close(writer)
+            finally:
+                await listener.stop()
+
+        assert asyncio.run(scenario()) == []
+
+    def test_fetch_catalog_raises_on_session_id_mismatch(self) -> None:
+        # drive _fetch_catalog_on against an in-memory pair so we can inject
+        # a response whose meta.session_id differs from what the helper sent.
+        # we cannot exercise this against a real listener because the
+        # listener's pre-existing meta.session_id validation drops impostor
+        # envelopes BEFORE the catalog intercept fires, so no response would
+        # ever come back.
+        async def scenario() -> None:
+            client_reader, client_writer = await _make_memory_stream_pair()
+            server_reader, server_writer = await _make_memory_stream_pair()
+
+            sent_session_id = "1111111111111111111111111111111"
+            stamped_session_id = "2222222222222222222222222222222"
+            fetch_task = asyncio.create_task(
+                _fetch_catalog_on(server_reader, client_writer, sent_session_id)
+            )
+            # consume the request the fetch sent
+            try:
+                _ = await client_reader.readuntil(b"\n")
+            except (asyncio.IncompleteReadError, ConnectionError):
+                pass
+            # respond with the WRONG session_id stamped on meta
+            response = PipeCatalog.response(stamped_session_id, [])
+            server_writer.write(response.to_bytes())
+            await server_writer.drain()
+            try:
+                await fetch_task
+            finally:
+                client_writer.close()
+                server_writer.close()
+
+        with pytest.raises(PipeProtocolError, match="mismatch"):
+            asyncio.run(scenario())
+
+    def test_fetch_catalog_raises_on_malformed_response(self) -> None:
+        # drive _fetch_catalog_on against an in-memory pair so we can inject
+        # a malformed response without spinning up a real listener; the
+        # helper must surface the protocol error rather than coercing it
+        async def scenario() -> None:
+            client_reader, client_writer = await _make_memory_stream_pair()
+            server_reader, server_writer = await _make_memory_stream_pair()
+
+            session_id = "deadbeefdeadbeefdeadbeefdeadbeef"
+            # spawn the fetch as a task so we can write the malformed
+            # response after it has sent its request
+            fetch_task = asyncio.create_task(
+                _fetch_catalog_on(server_reader, client_writer, session_id)
+            )
+            # consume the catalog request the fetch sent
+            try:
+                _ = await client_reader.readuntil(b"\n")
+            except (asyncio.IncompleteReadError, ConnectionError):
+                pass
+            # respond with a malformed envelope: result is missing tools
+            malformed = PipeEnvelope(
+                meta={"session_id": session_id},
+                frame={"jsonrpc": "2.0", "id": PipeCatalog.REQUEST_ID, "result": {}},
+            )
+            server_writer.write(malformed.to_bytes())
+            await server_writer.drain()
+            try:
+                await fetch_task
+            finally:
+                client_writer.close()
+                server_writer.close()
+
+        with pytest.raises(PipeProtocolError):
+            asyncio.run(scenario())
+
+
+class TestPipeForwarderToolsListIntercept:
+    """Verify :func:`_run_forwarder` answers ``tools/list`` locally from its catalog argument."""
+
+    def test_forwarder_answers_tools_list_locally_without_daemon_round_trip(self) -> None:
+        async def scenario() -> tuple[dict[str, Any], int]:
+            stdin_reader, stdin_writer = await _make_memory_stream_pair()
+            stdout_reader, stdout_writer = await _make_memory_stream_pair()
+            daemon_reader, daemon_writer = await _make_memory_stream_pair()
+            daemon_in_reader, daemon_in_writer = await _make_memory_stream_pair()
+
+            session_id = "deadbeefdeadbeefdeadbeefdeadbeef"
+            catalog = [{"name": "alpha", "description": "a"}, {"name": "beta", "description": "b"}]
+
+            forwarder = asyncio.create_task(
+                _run_forwarder(
+                    session_id, stdin_reader, stdout_writer, daemon_in_reader, daemon_writer, catalog
+                )
+            )
+            try:
+                # write a tools/list request with an id; the forwarder must
+                # answer it on stdout WITHOUT writing any envelope to the
+                # daemon socket
+                request_frame = {"jsonrpc": "2.0", "id": 5, "method": "tools/list"}
+                stdin_writer.write((json.dumps(request_frame) + "\n").encode("utf-8"))
+                await stdin_writer.drain()
+
+                response_line = await stdout_reader.readuntil(b"\n")
+                response = json.loads(response_line.decode("utf-8").rstrip("\n"))
+
+                # confirm nothing reached the daemon side; we set a short
+                # deadline because if the forwarder mistakenly forwarded the
+                # request we'd see an envelope here within milliseconds
+                daemon_envelope_count = 0
+                try:
+                    await asyncio.wait_for(daemon_reader.readuntil(b"\n"), timeout=0.1)
+                    daemon_envelope_count = 1
+                except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError):
+                    daemon_envelope_count = 0
+
+                stdin_writer.close()
+                daemon_in_writer.close()
+                with contextlib.suppress(asyncio.CancelledError, ConnectionError):
+                    await asyncio.wait_for(forwarder, timeout=2.0)
+                return response, daemon_envelope_count
+            finally:
+                if not forwarder.done():
+                    forwarder.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await forwarder
+
+        response, daemon_envelope_count = asyncio.run(scenario())
+        assert response == {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "result": {"tools": [{"name": "alpha", "description": "a"}, {"name": "beta", "description": "b"}]},
+        }
+        assert daemon_envelope_count == 0, "tools/list must NOT be round-tripped to the daemon"
+
+    def test_forwarder_intercepts_tools_list_even_when_catalog_is_empty(self) -> None:
+        async def scenario() -> dict[str, Any]:
+            stdin_reader, stdin_writer = await _make_memory_stream_pair()
+            stdout_reader, stdout_writer = await _make_memory_stream_pair()
+            daemon_reader, daemon_writer = await _make_memory_stream_pair()
+            daemon_in_reader, daemon_in_writer = await _make_memory_stream_pair()
+
+            forwarder = asyncio.create_task(
+                _run_forwarder("sid", stdin_reader, stdout_writer, daemon_in_reader, daemon_writer, [])
+            )
+            try:
+                stdin_writer.write((json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n").encode("utf-8"))
+                await stdin_writer.drain()
+                response_line = await stdout_reader.readuntil(b"\n")
+                stdin_writer.close()
+                daemon_in_writer.close()
+                with contextlib.suppress(asyncio.CancelledError, ConnectionError):
+                    await asyncio.wait_for(forwarder, timeout=2.0)
+                return json.loads(response_line.decode("utf-8").rstrip("\n"))
+            finally:
+                if not forwarder.done():
+                    forwarder.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await forwarder
+
+        response = asyncio.run(scenario())
+        assert response == {"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}
+
+    def test_forwarder_passes_through_non_tools_list_methods_unchanged(self) -> None:
+        async def scenario() -> dict[str, Any]:
+            stdin_reader, stdin_writer = await _make_memory_stream_pair()
+            stdout_reader, stdout_writer = await _make_memory_stream_pair()
+            daemon_reader, daemon_writer = await _make_memory_stream_pair()
+            daemon_in_reader, daemon_in_writer = await _make_memory_stream_pair()
+
+            session_id = "abcdef0123456789abcdef0123456789"
+            catalog = [{"name": "alpha"}]
+            forwarder = asyncio.create_task(
+                _run_forwarder(session_id, stdin_reader, stdout_writer, daemon_in_reader, daemon_writer, catalog)
+            )
+            try:
+                # tools/call must still be forwarded; only tools/list is
+                # answered locally
+                stdin_writer.write(
+                    (json.dumps({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {}}) + "\n").encode("utf-8")
+                )
+                await stdin_writer.drain()
+                envelope_line = await daemon_reader.readuntil(b"\n")
+                envelope = PipeEnvelope.from_bytes(envelope_line)
+                stdin_writer.close()
+                daemon_in_writer.close()
+                with contextlib.suppress(asyncio.CancelledError, ConnectionError):
+                    await asyncio.wait_for(forwarder, timeout=2.0)
+                return dict(envelope.frame)
+            finally:
+                if not forwarder.done():
+                    forwarder.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await forwarder
+
+        forwarded = asyncio.run(scenario())
+        assert forwarded == {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {}}
+
+    def test_forwarder_forwards_tools_list_notifications_to_daemon(self) -> None:
+        # tools/list notifications (no ``id`` field) must NOT be answered
+        # locally; per JSON-RPC notifications expect no response and the
+        # daemon may still need to see them for bookkeeping
+        async def scenario() -> dict[str, Any]:
+            stdin_reader, stdin_writer = await _make_memory_stream_pair()
+            stdout_reader, stdout_writer = await _make_memory_stream_pair()
+            daemon_reader, daemon_writer = await _make_memory_stream_pair()
+            daemon_in_reader, daemon_in_writer = await _make_memory_stream_pair()
+
+            session_id = "fedcba9876543210fedcba9876543210"
+            catalog = [{"name": "alpha"}]
+            forwarder = asyncio.create_task(
+                _run_forwarder(session_id, stdin_reader, stdout_writer, daemon_in_reader, daemon_writer, catalog)
+            )
+            try:
+                # no "id" key -> JSON-RPC notification
+                stdin_writer.write((json.dumps({"jsonrpc": "2.0", "method": "tools/list"}) + "\n").encode("utf-8"))
+                await stdin_writer.drain()
+                envelope_line = await daemon_reader.readuntil(b"\n")
+                envelope = PipeEnvelope.from_bytes(envelope_line)
+                stdin_writer.close()
+                daemon_in_writer.close()
+                with contextlib.suppress(asyncio.CancelledError, ConnectionError):
+                    await asyncio.wait_for(forwarder, timeout=2.0)
+                return dict(envelope.frame)
+            finally:
+                if not forwarder.done():
+                    forwarder.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await forwarder
+
+        forwarded = asyncio.run(scenario())
+        assert forwarded == {"jsonrpc": "2.0", "method": "tools/list"}, "notifications must reach the daemon"
+
+    def test_forwarder_legacy_signature_without_catalog_falls_back_to_empty_list(self) -> None:
+        # tests written before T4 (T3-era) call _run_forwarder without the
+        # catalog argument; the new signature defaults to None which the
+        # forwarder treats as an empty catalog so existing test scaffolding
+        # keeps compiling
+        async def scenario() -> dict[str, Any]:
+            stdin_reader, stdin_writer = await _make_memory_stream_pair()
+            stdout_reader, stdout_writer = await _make_memory_stream_pair()
+            daemon_reader, daemon_writer = await _make_memory_stream_pair()
+            daemon_in_reader, daemon_in_writer = await _make_memory_stream_pair()
+
+            forwarder = asyncio.create_task(
+                _run_forwarder("sid", stdin_reader, stdout_writer, daemon_in_reader, daemon_writer)
+            )
+            try:
+                stdin_writer.write((json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n").encode("utf-8"))
+                await stdin_writer.drain()
+                response_line = await stdout_reader.readuntil(b"\n")
+                stdin_writer.close()
+                daemon_in_writer.close()
+                with contextlib.suppress(asyncio.CancelledError, ConnectionError):
+                    await asyncio.wait_for(forwarder, timeout=2.0)
+                return json.loads(response_line.decode("utf-8").rstrip("\n"))
+            finally:
+                if not forwarder.done():
+                    forwarder.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await forwarder
+
+        response = asyncio.run(scenario())
+        assert response == {"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}
+
+
+class TestPipeCatalogEnd2End:
+    """Full-stack T4: daemon listener with a real CatalogProvider + pipe forwarder answering tools/list locally."""
+
+    def test_pipe_handshake_then_catalog_then_local_tools_list(self, socket_path: str) -> None:
+        async def scenario() -> tuple[list[dict[str, Any]], dict[str, Any], int]:
+            # the daemon advertises a known catalog through the provider
+            tools = [{"name": "foo", "description": "f"}, {"name": "bar", "description": "b"}]
+            handler = _EchoFrameHandler()
+            listener = PipeListener(frame_handler=handler, catalog_provider=_RecordingCatalogProvider(tools))
+            await listener.start(socket_path)
+            try:
+                # pipe-side: open the daemon connection, run handshake +
+                # catalog fetch, then drive _run_forwarder against it
+                stdin_reader, stdin_writer = await _make_memory_stream_pair()
+                stdout_reader, stdout_writer = await _make_memory_stream_pair()
+                daemon_reader, daemon_writer = await asyncio.open_unix_connection(socket_path)
+                session_id = await _handshake_on(daemon_reader, daemon_writer)
+                fetched = await _fetch_catalog_on(daemon_reader, daemon_writer, session_id)
+
+                forwarder = asyncio.create_task(
+                    _run_forwarder(session_id, stdin_reader, stdout_writer, daemon_reader, daemon_writer, fetched)
+                )
+                try:
+                    # upstream issues tools/list -- the forwarder must
+                    # answer locally from the catalog WITHOUT touching the
+                    # daemon (the FrameHandler must not see it)
+                    stdin_writer.write((json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n").encode("utf-8"))
+                    await stdin_writer.drain()
+                    response_line = await stdout_reader.readuntil(b"\n")
+                    response = json.loads(response_line.decode("utf-8").rstrip("\n"))
+
+                    # also send a ping that DOES round-trip; this proves the
+                    # forwarder still forwards non-tools/list traffic
+                    stdin_writer.write((json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}) + "\n").encode("utf-8"))
+                    await stdin_writer.drain()
+                    ping_response_line = await stdout_reader.readuntil(b"\n")
+                    ping_response = json.loads(ping_response_line.decode("utf-8").rstrip("\n"))
+
+                    # let any in-flight echo land before we count handler calls
+                    for _ in range(10):
+                        if any(call[1].get("method") == "ping" for call in handler.calls):
+                            break
+                        await asyncio.sleep(0.01)
+                    return fetched, response, len(handler.calls)
+                finally:
+                    stdin_writer.close()
+                    daemon_writer.close()
+                    with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                        await daemon_writer.wait_closed()
+                    if not forwarder.done():
+                        forwarder.cancel()
+                        with contextlib.suppress(asyncio.CancelledError, Exception):
+                            await forwarder
+            finally:
+                await listener.stop()
+
+        fetched, response, handler_calls = asyncio.run(scenario())
+        assert fetched == [{"name": "foo", "description": "f"}, {"name": "bar", "description": "b"}]
+        assert response == {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"tools": [{"name": "foo", "description": "f"}, {"name": "bar", "description": "b"}]},
+        }
+        # exactly one handler call -- the ping. tools/list MUST not have
+        # reached the handler.
+        assert handler_calls == 1, "FrameHandler must see only the ping, not tools/list"
 
 
 async def _make_memory_stream_pair() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
