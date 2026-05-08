@@ -312,9 +312,12 @@ invocation is documented in
 §Advanced: Pipe transport.
 
 The operator plist lives at `~/Library/LaunchAgents/ai.strong.serena.plist`
-(or the matching launchd-loaded variant for your installation). Edit the
-plist's `<array>` of `ProgramArguments` to append the new flag, then reload
-the daemon:
+(or the matching launchd-loaded variant for your installation). Append
+`--pipe-socket-path /tmp/serena-daemon.sock` to the daemon's
+`start-mcp-server` invocation: if the plist invokes `serena` directly, edit
+the plist's `<array>` of `ProgramArguments`; if the plist invokes a wrapper
+script that exec's `serena start-mcp-server` (a common EADDRINUSE-prevention
+pattern), edit the script's exec line instead. Then reload the daemon:
 
 ```bash
 launchctl bootout gui/$UID/ai.strong.serena
