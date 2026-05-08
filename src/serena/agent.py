@@ -1326,9 +1326,14 @@ class SerenaAgent:
 
     def reset_language_server_manager(self) -> None:
         """
-        Starts/resets the language server manager for the current project
+        Tears down the active project's language server manager and rebuilds it from scratch.
+
+        This is the explicit reset path -- callers (e.g. :class:`RestartLanguageServerTool`,
+        :meth:`add_language`, :meth:`remove_language`) want a fresh manager regardless of
+        whether one already exists. Use :meth:`Project.create_language_server_manager` (without
+        ``force_recreate``) when you only need to ensure a manager is present.
         """
-        self.get_active_project_or_raise().create_language_server_manager()
+        self.get_active_project_or_raise().create_language_server_manager(force_recreate=True)
 
     def add_language(self, language: Language) -> None:
         """

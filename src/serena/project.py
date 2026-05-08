@@ -648,45 +648,85 @@ class Project(ToStringMixin):
             source_file_path=relative_file_path,
         )
 
-    def create_language_server_manager(self) -> LanguageServerManager:
+    def create_language_server_manager(self, force_recreate: bool = False) -> LanguageServerManager:
         """
-        Creates the language server manager for the project, starting one language server per configured programming language.
+        Returns the project's language server manager, creating it lazily on first call.
 
-        :return: the language server manager, which is also stored in the project instance
+        By default this is idempotent: if a manager has already been built for this project,
+        that manager is returned without disruption. Multiple MCP sessions in the same daemon
+        may concurrently activate the same project, and a destructive stop+recreate cycle in
+        one session would otherwise surface to other sessions as "language server manager
+        could not be constructed" during the brief window in which
+        ``self.language_server_manager`` is ``None``.
+
+        The destructive recreate semantic is preserved for explicit reset paths
+        (:meth:`SerenaAgent.reset_language_server_manager`, :meth:`SerenaAgent.add_language`,
+        :meth:`SerenaAgent.remove_language`, :class:`RestartLanguageServerTool`) via
+        ``force_recreate=True``. Even on the forced path, the new manager is built first and
+        the previous one is torn down only after the swap, so concurrent readers always
+        observe a healthy manager (either the previous one or the new one), never ``None``.
+
+        :param force_recreate: when True, replace any existing manager with a freshly built
+            one. Default False (idempotent get-or-create).
+        :return: the language server manager, also stored in ``self.language_server_manager``.
         """
-        try:
-            # determine timeout to use for LS calls
-            tool_timeout = self.serena_config.tool_timeout
-            if tool_timeout is None or tool_timeout < 0:
-                ls_timeout = None
-            else:
-                if tool_timeout < 10:
-                    raise ValueError(f"Tool timeout must be at least 10 seconds, but is {tool_timeout} seconds")
-                ls_timeout = tool_timeout - 5  # the LS timeout is for a single call, it should be smaller than the tool timeout
+        import threading
 
-            # if there is an existing instance, stop its language servers first
-            if self.language_server_manager is not None:
-                log.info("Stopping existing language server manager ...")
-                self.language_server_manager.stop_all()
-                self.language_server_manager = None
+        # serialise concurrent calls on this Project so two activations cannot race through
+        # the create path and leak managers; the lock is created lazily because Project's
+        # existing initialiser does not own a dedicated slot for it
+        lock = self.__dict__.setdefault("_lsm_lock", threading.RLock())
 
-            log.info(f"Creating language server manager for {self.project_root}")
-            self._language_server_manager_init_error = None
-            ls_specific_settings = {**self.serena_config.ls_specific_settings, **self.project_config.ls_specific_settings}
-            factory = LanguageServerFactory(
-                project_root=self.project_root,
-                project_data_path=self._serena_data_folder,
-                encoding=self.project_config.encoding,
-                ignored_patterns=self._ignored_patterns,
-                ls_timeout=ls_timeout,
-                ls_specific_settings=ls_specific_settings,
-                trace_lsp_communication=self.serena_config.trace_lsp_communication,
-            )
-            self.language_server_manager = LanguageServerManager.from_languages(self.project_config.languages, factory)
-            return self.language_server_manager
-        except Exception as e:
-            self._language_server_manager_init_error = e
-            raise
+        with lock:
+            # idempotent get-or-create: a non-None manager satisfies the same contract as
+            # :meth:`get_language_server_manager_or_raise` (the read path), so return early
+            if self.language_server_manager is not None and not force_recreate:
+                return self.language_server_manager
+
+            try:
+                # determine timeout to use for LS calls
+                tool_timeout = self.serena_config.tool_timeout
+                if tool_timeout is None or tool_timeout < 0:
+                    ls_timeout = None
+                else:
+                    if tool_timeout < 10:
+                        raise ValueError(f"Tool timeout must be at least 10 seconds, but is {tool_timeout} seconds")
+                    ls_timeout = tool_timeout - 5  # the LS timeout is for a single call, it should be smaller than the tool timeout
+
+                # build the new manager BEFORE touching the existing one so concurrent readers
+                # continue to observe the previous (healthy) manager throughout the construction
+                # window; this is what eliminates the cross-session "could not be constructed"
+                # race that motivated this method's redesign
+                log.info(f"Creating language server manager for {self.project_root}")
+                self._language_server_manager_init_error = None
+                ls_specific_settings = {**self.serena_config.ls_specific_settings, **self.project_config.ls_specific_settings}
+                factory = LanguageServerFactory(
+                    project_root=self.project_root,
+                    project_data_path=self._serena_data_folder,
+                    encoding=self.project_config.encoding,
+                    ignored_patterns=self._ignored_patterns,
+                    ls_timeout=ls_timeout,
+                    ls_specific_settings=ls_specific_settings,
+                    trace_lsp_communication=self.serena_config.trace_lsp_communication,
+                )
+                new_manager = LanguageServerManager.from_languages(self.project_config.languages, factory)
+
+                # atomic swap then post-swap teardown of the previous manager (if any), so the
+                # ``self.language_server_manager`` slot transitions directly from old to new
+                # without ever being ``None``
+                previous_manager = self.language_server_manager
+                self.language_server_manager = new_manager
+                if previous_manager is not None:
+                    log.info("Stopping previous language server manager (post-swap) ...")
+                    try:
+                        previous_manager.stop_all()
+                    except Exception as stop_exc:
+                        log.warning(f"Error stopping previous language server manager: {stop_exc}", exc_info=stop_exc)
+
+                return new_manager
+            except Exception as e:
+                self._language_server_manager_init_error = e
+                raise
 
     def get_language_server_manager_or_raise(self) -> LanguageServerManager:
         # this error path fires only when the entire manager could not be constructed, which is distinct from
