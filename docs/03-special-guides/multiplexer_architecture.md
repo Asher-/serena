@@ -291,3 +291,55 @@ Code in parallel-Task mode. A deployment can use either, neither, or both:
 the daemon binds its Unix socket only when started with
 `--pipe-socket-path`, and continues to accept streamable-HTTP traffic on
 its public port whether or not the pipe is enabled.
+
+### Enabling the pipe transport on the daemon
+
+Activating the pipe layer is a one-time launchd plist change to the Serena
+daemon's ProgramArguments. The current `start-mcp-server` invocation in
+your daemon plist (whatever transport it already uses — `stdio`,
+`streamable-http`, or otherwise) needs the additional argument:
+
+```text
+--pipe-socket-path /tmp/serena-daemon.sock
+```
+
+With that flag the daemon binds the Unix socket at startup and runs the
+pipe listener concurrently with whatever transport it was already serving.
+Clients that go through the pipe forwarder use the same socket path via
+`--daemon-url unix:///tmp/serena-daemon.sock`; the matching client-side
+invocation is documented in
+[Connecting Your MCP Client](../02-usage/030_clients.md)
+§Advanced: Pipe transport.
+
+The operator plist lives at `~/Library/LaunchAgents/ai.strong.serena.plist`
+(or the matching launchd-loaded variant for your installation). Edit the
+plist's `<array>` of `ProgramArguments` to append the new flag, then reload
+the daemon:
+
+```bash
+launchctl bootout gui/$UID/ai.strong.serena
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.strong.serena.plist
+launchctl print gui/$UID/ai.strong.serena | head
+ls -l /tmp/serena-daemon.sock
+```
+
+The last command should show the socket file owned by the daemon's user.
+
+This single restart cycle activates two changes at once:
+
+1. **The pipe transport.** The daemon now accepts forwarder connections at
+   `/tmp/serena-daemon.sock`. Clients started with `--transport pipe
+   --daemon-url unix:///tmp/serena-daemon.sock` get a stable handshake-asserted
+   session id and the per-session-state guarantees described above.
+2. **The IRONCLAD fail-closed guard committed as `cea6bdf5`.** The daemon's
+   `_active_project` and `get_cursor_manager` resolution now raises a clear
+   "No active project for this MCP session" error inside MCP calls instead
+   of silently falling through to `_legacy_active_project`. After the
+   restart, parallel-batch dispatch becomes architecturally safe — the pipe
+   ensures the per-session lookup never misses for transport-churn reasons,
+   and the IRONCLAD guard catches any remaining real misuse loudly.
+
+Because the restart kicks every active client (the daemon owns all live MCP
+sessions), schedule it during a quiet window: confirm with each connected
+client's operator before bootout, and have clients reconnect after the
+bootstrap completes.
