@@ -204,3 +204,90 @@ signal that the multiplexer is holding sessions open beyond their client
 lifetime; an unexpectedly high rate is a signal that the multiplexer is
 fragmenting one client into many Serena sessions, which is the bug the
 pipe layer addresses.
+
+
+## Pipe transport
+
+The pipe transport is the resolution of the failure mode the previous section
+diagnoses. In pipe mode each client speaks stdio to a small *per-client
+forwarder process*; the forwarder dials a single shared Serena daemon over a
+Unix-domain socket and tags every forwarded JSON-RPC frame with a stable
+session id the daemon issued at connect time. The daemon pins all per-session
+state to that id, so it survives streamable-HTTP request-task teardown,
+multiplexer fan-out, and any other transport churn between client and daemon.
+
+The plan that drove this work is tracked under
+`plan://Serena:serena/serena-mcp-pipe-redesign` (design) and
+`plan://Serena:serena/serena-pipe-implementation` (implementation).
+
+### Process shape
+
+```
+Claude Code, Cursor, …  ── stdio ──>  serena-pipe forwarder  ── Unix socket ──>  serena daemon
+        (one client)                      (one per client)                          (one per machine)
+```
+
+Each client owns its own forwarder process. The forwarder is started by
+`serena start-mcp-server --transport pipe`; it does not host an MCP server,
+it forwards bytes. The daemon is the only process that holds tool state,
+language servers, and per-session slots — there is one daemon per machine
+regardless of how many clients are connected.
+
+### Handshake-asserted session id
+
+When a forwarder connects to the daemon's Unix socket, it sends a handshake
+frame; the daemon allocates a fresh UUID4 hex string as the session id and
+returns it on the same handshake. The forwarder holds that id for its
+lifetime; every subsequent JSON-RPC frame it forwards carries the id in the
+pipe protocol's metadata channel (not the upstream `Mcp-Session-Id` header,
+which does not reach handlers). The daemon's pipe listener sets the ContextVar
+`_PIPE_SESSION_ID_VAR` before invoking the FastMCP tool handler, so the
+handler resolves per-session state under the pinned id.
+
+The id is opaque to the client and survives transport churn at every layer
+the previous section diagnoses: the same id is used across thousands of
+streamable-HTTP request-tasks within the daemon, across multiplexer-side
+session fragmentation if a multiplexer also sits in the path, and across
+daemon catalog refreshes the forwarder may issue.
+
+### Eviction on pipe disconnect
+
+When the forwarder process exits — clean shutdown, SIGKILL, broken socket —
+the daemon's `PipeListener` notices the socket EOF and runs every registered
+disconnect handler. The wired-in handler is
+`SerenaAgent.evict_pipe_session`, which pops the session id out of every
+per-session dict (today `_active_projects_by_session` and
+`_cursor_managers_by_session`) and logs the eviction at debug level. Any
+subsequent forwarder connection gets a fresh UUID4 session id with a clean
+slate; the daemon never reuses a session id across forwarder lifetimes.
+
+This is the load-bearing distinction from the previous section's diagnosis:
+eviction is keyed on **pipe-connection close**, not on the per-request
+streamable-HTTP task end. A client that issues ten thousand tool calls over
+one pipe session triggers eviction exactly once — when the client
+disconnects — not ten thousand times.
+
+### Why this fixes the failure mode
+
+The previous section's failure mode reduces to: the per-session slot is
+keyed on something that does not survive the client's lifetime. The pipe
+session id IS that lifetime — it is allocated once at connect, held for
+the forwarder's whole life, and evicted exactly once on disconnect. Inside
+an MCP call the daemon's getters (`_active_project`, `get_cursor_manager`,
+…) resolve under the pinned id; they cannot fall through to a sibling
+client's slot because the per-session lookup either returns the value this
+session itself wrote or fails closed (the IRONCLAD guard from the parent
+design plan, Phase 5a). The pipe makes that fail-closed branch a non-event
+under normal operation, because the per-session lookup never misses for
+transport-churn reasons.
+
+### Coexistence with the multiplexer
+
+The multiplexer continues to provide catalog stability and backend-restart
+absorption for clients that go through it. The pipe transport addresses a
+disjoint problem (per-client session pinning) and is the recommended path
+for clients that run multiple sub-agents in parallel — most notably Claude
+Code in parallel-Task mode. A deployment can use either, neither, or both:
+the daemon binds its Unix socket only when started with
+`--pipe-socket-path`, and continues to accept streamable-HTTP traffic on
+its public port whether or not the pipe is enabled.

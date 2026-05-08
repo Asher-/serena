@@ -75,6 +75,47 @@ the multiplexer is in the path. See
 for the network shape, the launchd port-binding change, and how to test
 Serena directly without the multiplexer in the loop.
 
+### Advanced: Pipe transport (one-daemon-per-machine, parallel-safe)
+
+When you run several Serena clients side-by-side — most commonly parallel
+sub-agents in Claude Code, or one editor session per project — the **pipe
+transport** keeps each client's per-session state strictly partitioned from
+every other client's, by construction. The wire protocol and tool surface
+are unchanged; the difference is that the client talks stdio to a small
+*per-client forwarder process*, which dials a single shared Serena daemon
+over a Unix-domain socket. The daemon issues each forwarder a stable session
+id at connect time and pins all per-session state to that id, so sibling
+clients can never see each other's active project, cursor, or other
+per-session state. See
+[Running Serena Behind a Tool Multiplexer](../03-special-guides/multiplexer_architecture.md)
+§Pipe transport for the architecture and the failure mode it addresses.
+
+To start a client in pipe mode, use the new `pipe` transport value and point
+the forwarder at the daemon's Unix socket:
+
+```shell
+serena start-mcp-server --transport pipe --daemon-url unix:///tmp/serena-daemon.sock
+```
+
+This invocation is the **forwarder**, not a daemon: it expects a Serena
+daemon to already be running and listening on the given Unix socket. The
+daemon process (which serves all forwarders on the machine) needs
+`--pipe-socket-path /tmp/serena-daemon.sock` in its launch arguments so the
+pipe listener binds at startup; the same daemon process can simultaneously
+serve streamable-HTTP and pipe traffic.
+
+For Claude Code specifically, replace the args list of your existing
+`serena` MCP server entry with the pipe form, e.g.:
+
+```shell
+claude mcp add --scope user serena -- serena start-mcp-server --context claude-code --project-from-cwd --transport pipe --daemon-url unix:///tmp/serena-daemon.sock
+```
+
+Pipe mode supersedes the multiplexer for parallel sub-agent and multi-client
+setups; the multiplexer continues to provide catalog stability and
+backend-restart absorption for clients that go through it, and the two are
+not exclusive — a deployment can run either, neither, or both.
+
 ## Copilot in JetBrains
 
 Open the settings of your JetBrains IDE and go to Tools / GitHub Copilot / Model Context Protocol (MCP). Then click
