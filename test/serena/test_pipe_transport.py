@@ -11,21 +11,26 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import os
+import threading
 import uuid
 from collections.abc import Iterator
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import click
 import pytest
 from click.testing import CliRunner
 
+from serena.agent import _MCP_CALL_IN_FLIGHT, _PIPE_SESSION_ID_VAR, _SESSION_KEY_VAR, SerenaAgent
 from serena.cli import TopLevelCommands
+from serena.config.serena_config import SerenaConfig
 from serena.daemon_pipe import CatalogProvider, FrameHandler, PipeListener
 from serena.pipe import _fetch_catalog_on, _handshake, _handshake_on, _parse_unix_url, _run_forwarder, run_pipe_client
 from serena.pipe_protocol import PipeCatalog, PipeEnvelope, PipeHandshake, PipeProtocolError
+from serena.project import Project
 
 
 @pytest.fixture
@@ -1743,3 +1748,283 @@ async def _make_memory_stream_pair() -> tuple[asyncio.StreamReader, asyncio.Stre
     )
     writer = asyncio.StreamWriter(writer_transport, writer_protocol, None, loop)
     return reader, writer
+
+
+@pytest.fixture
+def isolation_agent() -> SerenaAgent:
+    """Build a minimal :class:`SerenaAgent` with no active project, used for isolation tests that
+    simulate parallel pipe siblings sharing a single daemon agent."""
+    config = SerenaConfig(gui_log_window=False, web_dashboard=False)
+    return SerenaAgent(serena_config=config)
+
+
+def _pipe_project_stub(name: str) -> Project:
+    """Return a :class:`Project`-typed mock that the daemon's per-session routing layer can store
+    and retrieve by ``project_root`` / ``project_name`` identity."""
+    project = MagicMock(spec=Project)
+    project.project_name = name
+    project.project_root = f"/tmp/{name}"
+    return project
+
+
+class TestParallelSiblingWorkerIsolation:
+    """T8: parallel-sibling-worker isolation across N pipe sessions sharing one daemon.
+
+    Each pipe instance is identified by a stable handshake-asserted UUID held in
+    ``_PIPE_SESSION_ID_VAR``. With N pipes running cursor-style tools concurrently,
+    every pipe MUST see only its own active project across many iterations -- never
+    a sibling's, never the legacy slot's. The legacy single-slot
+    ``_legacy_active_project`` is seeded with a recognisable sentinel BEFORE the
+    threads start; if it ever leaks into any pipe sibling's view the test fails,
+    which is the IRONCLAD zero-crossover constraint inherited from
+    ``plan://Serena:serena/serena-mcp-pipe-redesign``.
+
+    Mirrors :meth:`TestPerSessionActiveProject.test_two_concurrent_clients_never_cross`
+    in :mod:`test.serena.test_per_session_active_project` but uses ``str`` UUID keys
+    (the pipe-asserted form, also stamped into ``_PIPE_SESSION_ID_VAR`` for parity
+    with :meth:`Tool.apply_ex`'s pipe path) in place of ``int`` ``id()``-derived keys
+    (the direct-stdio form). Both flavours land in the same
+    ``_active_projects_by_session`` dict (typed ``dict[str | int, Project]``), so the
+    isolation property must hold indistinguishably across keying flavours.
+    """
+
+    def test_two_pipe_siblings_each_see_only_own_project_across_100_iterations(
+        self, isolation_agent: SerenaAgent
+    ) -> None:
+        """Two pipe siblings (str UUID keys) reading interleaved must each see exactly
+        their own project; the legacy slot's sentinel must never leak."""
+        # set up two sibling pipe sessions, each with its own project
+        project_a = _pipe_project_stub("pipe-client-a-project")
+        project_b = _pipe_project_stub("pipe-client-b-project")
+        # seed the legacy slot with a recognisable sentinel; if it ever leaks the test fails
+        sentinel = _pipe_project_stub("legacy-sentinel-must-never-leak")
+        isolation_agent._legacy_active_project = sentinel
+
+        observations_a: list[Project | None] = []
+        observations_b: list[Project | None] = []
+
+        session_id_a = uuid.uuid4().hex
+        session_id_b = uuid.uuid4().hex
+
+        def pipe_client(
+            pipe_session_id: str, project: Project, observations: list[Project | None]
+        ) -> None:
+            ctx = contextvars.copy_context()
+
+            def run() -> None:
+                # mirror Tool.apply_ex's pipe-session ContextVar binding (both vars set on pipe path)
+                _MCP_CALL_IN_FLIGHT.set(True)
+                _PIPE_SESSION_ID_VAR.set(pipe_session_id)
+                _SESSION_KEY_VAR.set(pipe_session_id)
+                isolation_agent._active_project = project
+                for _ in range(100):
+                    observations.append(isolation_agent.get_active_project())
+
+            ctx.run(run)
+
+        # interleave two pipe sessions concurrently
+        thread_a = threading.Thread(
+            target=pipe_client, args=(session_id_a, project_a, observations_a)
+        )
+        thread_b = threading.Thread(
+            target=pipe_client, args=(session_id_b, project_b, observations_b)
+        )
+        thread_a.start()
+        thread_b.start()
+        thread_a.join(timeout=10)
+        thread_b.join(timeout=10)
+
+        # each sibling sees only its own project across every iteration
+        assert all(p is project_a for p in observations_a), (
+            f"Pipe sibling A observed something other than its own project: distinct ids = "
+            f"{set(id(p) for p in observations_a)}"
+        )
+        assert all(p is project_b for p in observations_b), (
+            f"Pipe sibling B observed something other than its own project: distinct ids = "
+            f"{set(id(p) for p in observations_b)}"
+        )
+        # the legacy slot's sentinel never leaked into either sibling's view
+        assert sentinel not in observations_a and sentinel not in observations_b, (
+            "Legacy slot sentinel leaked into a pipe sibling's view (IRONCLAD violation)"
+        )
+
+    def test_eight_pipe_siblings_each_see_only_own_project_across_100_iterations(
+        self, isolation_agent: SerenaAgent
+    ) -> None:
+        """Stress: eight concurrent pipe siblings each see only their own project; sentinel never leaks."""
+        sentinel = _pipe_project_stub("legacy-sentinel-must-never-leak")
+        isolation_agent._legacy_active_project = sentinel
+
+        # build N=8 sibling pipe sessions with distinct UUIDs and distinct projects
+        n = 8
+        siblings: list[tuple[str, Project, list[Project | None]]] = [
+            (uuid.uuid4().hex, _pipe_project_stub(f"pipe-client-{i}-project"), []) for i in range(n)
+        ]
+
+        def pipe_client(
+            pipe_session_id: str, project: Project, observations: list[Project | None]
+        ) -> None:
+            ctx = contextvars.copy_context()
+
+            def run() -> None:
+                _MCP_CALL_IN_FLIGHT.set(True)
+                _PIPE_SESSION_ID_VAR.set(pipe_session_id)
+                _SESSION_KEY_VAR.set(pipe_session_id)
+                isolation_agent._active_project = project
+                for _ in range(100):
+                    observations.append(isolation_agent.get_active_project())
+
+            ctx.run(run)
+
+        threads = [threading.Thread(target=pipe_client, args=args) for args in siblings]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        # each sibling saw only its own project; nobody saw the sentinel; nobody saw a peer's project
+        all_projects = {project for _, project, _ in siblings}
+        for session_id, project, observations in siblings:
+            assert all(p is project for p in observations), (
+                f"Pipe sibling {session_id[:8]} observed something other than its own project: "
+                f"distinct ids = {set(id(p) for p in observations)}"
+            )
+            assert sentinel not in observations, (
+                f"Legacy slot sentinel leaked into pipe sibling {session_id[:8]}'s view"
+            )
+            for other in all_projects - {project}:
+                assert other not in observations, (
+                    f"A peer's project leaked into pipe sibling {session_id[:8]}'s view"
+                )
+
+    def test_legacy_sentinel_never_leaks_through_concurrent_pipe_reads(
+        self, isolation_agent: SerenaAgent
+    ) -> None:
+        """Sustain read pressure on the IRONCLAD guard: 4 siblings x 250 reads each, with the legacy
+        slot rewritten to a fresh sentinel mid-run. Neither sentinel value ever leaks."""
+        sentinel_v1 = _pipe_project_stub("legacy-sentinel-v1")
+        sentinel_v2 = _pipe_project_stub("legacy-sentinel-v2")
+        isolation_agent._legacy_active_project = sentinel_v1
+
+        n = 4
+        siblings: list[tuple[str, Project, list[Project | None]]] = [
+            (uuid.uuid4().hex, _pipe_project_stub(f"pipe-client-{i}-project"), []) for i in range(n)
+        ]
+
+        # gate so all sibling threads start their read loops at roughly the same time
+        ready = threading.Barrier(n + 1)
+
+        def pipe_client(
+            pipe_session_id: str, project: Project, observations: list[Project | None]
+        ) -> None:
+            ctx = contextvars.copy_context()
+
+            def run() -> None:
+                _MCP_CALL_IN_FLIGHT.set(True)
+                _PIPE_SESSION_ID_VAR.set(pipe_session_id)
+                _SESSION_KEY_VAR.set(pipe_session_id)
+                isolation_agent._active_project = project
+                ready.wait()
+                for _ in range(250):
+                    observations.append(isolation_agent.get_active_project())
+
+            ctx.run(run)
+
+        threads = [threading.Thread(target=pipe_client, args=args) for args in siblings]
+        for t in threads:
+            t.start()
+        ready.wait()
+        # rewrite the legacy slot mid-flight; the IRONCLAD guard MUST keep this out of pipe siblings
+        isolation_agent._legacy_active_project = sentinel_v2
+        for t in threads:
+            t.join(timeout=15)
+
+        for session_id, project, observations in siblings:
+            assert all(p is project for p in observations), (
+                f"Pipe sibling {session_id[:8]} drifted from its own project under read pressure"
+            )
+            assert sentinel_v1 not in observations and sentinel_v2 not in observations, (
+                f"A legacy slot sentinel (v1 or v2) leaked into pipe sibling {session_id[:8]}'s view"
+            )
+
+    def test_pipe_sibling_writes_isolate_in_per_session_dict(
+        self, isolation_agent: SerenaAgent
+    ) -> None:
+        """The per-session dict accumulates one entry per pipe session, each keyed by its UUID.
+        Direct dict-state assertion, complementing the read-side assertions above."""
+        n = 5
+        siblings: list[tuple[str, Project]] = [
+            (uuid.uuid4().hex, _pipe_project_stub(f"pipe-client-{i}-project")) for i in range(n)
+        ]
+
+        def pipe_writer(pipe_session_id: str, project: Project) -> None:
+            ctx = contextvars.copy_context()
+
+            def run() -> None:
+                _MCP_CALL_IN_FLIGHT.set(True)
+                _PIPE_SESSION_ID_VAR.set(pipe_session_id)
+                _SESSION_KEY_VAR.set(pipe_session_id)
+                isolation_agent._active_project = project
+
+            ctx.run(run)
+
+        threads = [threading.Thread(target=pipe_writer, args=args) for args in siblings]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        # every sibling's UUID is now a key in the per-session dict mapping to its own project,
+        # and no UUID's slot was clobbered by another sibling's write
+        for pipe_session_id, project in siblings:
+            assert pipe_session_id in isolation_agent._active_projects_by_session, (
+                f"Pipe sibling {pipe_session_id[:8]} did not land its project in the per-session dict"
+            )
+            assert isolation_agent._active_projects_by_session[pipe_session_id] is project, (
+                f"Pipe sibling {pipe_session_id[:8]}'s slot was clobbered by another sibling's write"
+            )
+
+    def test_concurrent_pipe_writes_do_not_clobber_each_other(
+        self, isolation_agent: SerenaAgent
+    ) -> None:
+        """Sustained write contention modelling concurrent cursor_replace_range calls: each sibling
+        rewrites its slot 50 times, reading back after each write. Final per-sibling sequence equals
+        each sibling's own write sequence -- no cross-pollution from peers."""
+        n = 6
+        siblings: list[tuple[str, list[Project], list[Project | None]]] = []
+        for i in range(n):
+            session_id = uuid.uuid4().hex
+            project_seq = [_pipe_project_stub(f"pipe-{i}-rev-{r}") for r in range(50)]
+            observations: list[Project | None] = []
+            siblings.append((session_id, project_seq, observations))
+
+        def pipe_churn(
+            pipe_session_id: str,
+            project_seq: list[Project],
+            observations: list[Project | None],
+        ) -> None:
+            ctx = contextvars.copy_context()
+
+            def run() -> None:
+                _MCP_CALL_IN_FLIGHT.set(True)
+                _PIPE_SESSION_ID_VAR.set(pipe_session_id)
+                _SESSION_KEY_VAR.set(pipe_session_id)
+                for project in project_seq:
+                    isolation_agent._active_project = project
+                    observations.append(isolation_agent.get_active_project())
+
+            ctx.run(run)
+
+        threads = [threading.Thread(target=pipe_churn, args=args) for args in siblings]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=15)
+
+        # every sibling's observed sequence equals its written sequence in order (no cross-pollution
+        # from peers' writes -- each sibling's own _SESSION_KEY_VAR steers writes to its own slot)
+        for session_id, project_seq, observations in siblings:
+            assert observations == project_seq, (
+                f"Pipe sibling {session_id[:8]} observed values that diverged from its own write "
+                f"sequence (possible cross-pollination from a sibling's write)"
+            )
