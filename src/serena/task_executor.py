@@ -20,6 +20,11 @@ class TaskExecutor:
     def __init__(self, name: str):
         self._task_executor_lock = threading.Lock()
         self._task_executor_queue: list[TaskExecutor.Task] = []
+        # signals the dispatcher loop should exit; set by :meth:`shutdown`. Without this
+        # flag the daemon thread idles in ``time.sleep(0.1)`` for the entire process
+        # lifetime even after the executor's owning session has been evicted, which
+        # accumulates idle threads at one per ever-connected session.
+        self._shutdown_requested = threading.Event()
         self._task_executor_thread = Thread(target=self._process_task_queue, name=name, daemon=True)
         self._task_executor_thread.start()
         self._task_executor_task_index = 1
@@ -119,7 +124,7 @@ class TaskExecutor:
                 pass
 
     def _process_task_queue(self) -> None:
-        while True:
+        while not self._shutdown_requested.is_set():
             # obtain task from the queue
             task: TaskExecutor.Task | None = None
             with self._task_executor_lock:
@@ -229,3 +234,23 @@ class TaskExecutor:
         """
         with self._task_executor_lock:
             return self._task_executor_last_executed_task_info
+
+    def shutdown(self) -> None:
+        """
+        Signal the dispatcher loop to exit and cancel any tasks still queued.
+
+        Idempotent. The currently running task is allowed to finish; pending tasks have
+        their futures cancelled so callers blocked on :meth:`Task.result` raise
+        :class:`concurrent.futures.CancelledError` instead of hanging.
+
+        Per-session :class:`TaskExecutor` instances are shut down explicitly when their
+        owning session is evicted (so the daemon thread does not idle in
+        ``time.sleep(0.1)`` for the rest of the process lifetime). The daemon-wide
+        executor on :class:`SerenaAgent` does not normally need to be shut down — its
+        worker is a daemon thread and dies on process exit.
+        """
+        self._shutdown_requested.set()
+        with self._task_executor_lock:
+            for task in self._task_executor_queue:
+                task.cancel()
+            self._task_executor_queue.clear()

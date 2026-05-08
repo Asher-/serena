@@ -441,9 +441,16 @@ class SerenaAgent:
         else:
             log.info(f"Using language backend from global configuration: {self._language_backend.name}")
 
-        # create executor for starting the language server and running tools in another thread
-        # This executor is used to achieve linear task execution
+        # daemon-wide executor — reserved for non-MCP callers (CLI, dashboard, scripts, tests)
+        # with no session in scope. MCP code paths route through the per-session executors below
+        # so concurrent sessions do not serialize through one queue.
         self._task_executor = TaskExecutor("SerenaAgentTaskExecutor")
+        # per-session task executors, keyed identically to _active_projects_by_session and
+        # _cursor_managers_by_session. Each session gets its own queue and worker thread so
+        # cross-session tool calls run in parallel; within a session, tasks remain serial
+        # (the session's executor has a single worker thread). Torn down on session eviction.
+        self._task_executors_by_session: dict[str | int, TaskExecutor] = {}
+        self._task_executors_by_session_lock = threading.Lock()
 
         # Initialize the prompt factory
         self.prompt_factory = SerenaPromptFactory()
@@ -875,45 +882,45 @@ class SerenaAgent:
             self._session_finalizers[session_key] = finalizer
 
     def _evict_session_state(self, session_key: int) -> None:
-        """Drop per-session entries for ``session_key``; invoked by the GC finalizer.
+        """
+        Pop ``session_key`` out of every per-session map so its entries cannot leak.
 
-        Mirrors the dict pops performed by the ``_active_project`` setter and ``_activate_project``
-        when the same session re-activates a project — does not shut down the project itself, since
-        other concurrent sessions or the legacy slot may still reference it (project teardown is
-        owned by :meth:`on_shutdown`).
+        Called by the per-session weakref finalizer registered in
+        :meth:`_register_session_finalizer` (so direct-stdio / streamable-http transports get
+        eviction when the MCP session object is GC'd) and by any explicit eviction path that
+        hands us a session key directly. Idempotent. Does not shut down language servers or
+        projects (those are agent-wide resources owned by :meth:`on_shutdown`).
         """
         self._active_projects_by_session.pop(session_key, None)
         self._cursor_managers_by_session.pop(session_key, None)
         with self._session_finalizers_lock:
             self._session_finalizers.pop(session_key, None)
-        log.debug(f"Evicted per-session state for session_key={session_key}")
+        # tear down the session's per-session executor so its worker thread does not idle in
+        # ``time.sleep(0.1)`` for the rest of the daemon's lifetime; pending tasks have their
+        # futures cancelled so any blocked caller raises CancelledError instead of hanging.
+        with self._task_executors_by_session_lock:
+            executor = self._task_executors_by_session.pop(session_key, None)
+        if executor is not None:
+            executor.shutdown()
 
     def evict_pipe_session(self, session_id: str) -> None:
-        """T6: Drop per-session entries for the pipe-asserted ``session_id``.
+        """
+        Pop ``session_id`` out of every per-session map when its pipe disconnects.
 
-        Registered as a disconnect handler on the daemon's
-        :class:`~serena.daemon_pipe.PipeListener`; fires when a pipe forwarder
-        process exits (Unix-socket EOF, transport error, or listener stop).
-
-        The eviction is deliberately distinct from
-        :meth:`_evict_session_state`: that path is GC-driven and keyed on
-        ``id(mcp_ctx.session)`` (an int) for direct stdio / streamable-http
-        clients, while this method is disconnect-driven and keyed on the
-        pipe-asserted UUID4 hex string. Both ultimately drop entries from the
-        same per-session dicts, but the trigger and the key shape differ —
-        see ``convention://global/handoff/...`` and
-        ``plan://Serena:serena/serena-pipe-implementation`` for the design
-        rationale (eviction must NOT fire on per-request streamable-http task
-        end, only on pipe disconnect, so per-session state survives transport
-        churn within a single client's lifetime).
-
-        :param session_id: The pipe-asserted UUID4 hex string allocated by the
-            daemon at handshake time. An unknown ``session_id`` is a no-op so
-            defensive callers (e.g. listener stop() teardown after the pipe
-            already closed) cannot raise.
+        Wired into :class:`PipeListener` as the disconnect handler in :meth:`mcp.py`'s
+        daemon-startup path. The pipe layer owns the session id's lifetime: it is allocated
+        once at handshake and held for the forwarder process's life, so eviction fires
+        exactly once per pipe session. Idempotent (mass eviction or repeated handler firing
+        — e.g. if the socket is half-closed — cannot raise).
         """
         self._active_projects_by_session.pop(session_id, None)
         self._cursor_managers_by_session.pop(session_id, None)
+        # tear down the pipe session's per-session executor so its worker thread does not idle
+        # past the forwarder's life; pending tasks have their futures cancelled.
+        with self._task_executors_by_session_lock:
+            executor = self._task_executors_by_session.pop(session_id, None)
+        if executor is not None:
+            executor.shutdown()
         log.debug(f"Evicted pipe session state for session_id={session_id}")
 
     def get_active_project(self) -> Project | None:
@@ -1085,7 +1092,14 @@ class SerenaAgent:
     ) -> TaskExecutor.Task[T]:
         """
         Issue a task to the executor for asynchronous execution.
-        It is ensured that tasks are executed in the order they are issued, one after another.
+
+        Within a single MCP session, tasks remain serialised in issue order: each session has its
+        own :class:`TaskExecutor` whose single worker thread pulls one task at a time, preserving
+        the activate_project → init_language_server_manager → tool-call ordering that the daemon
+        used to enforce globally. Across sessions, tasks run in parallel: each session has its own
+        queue, so a slow task in session A no longer blocks a fast task in session B. Non-MCP
+        callers (CLI, dashboard, scripts, tests) with no session in scope route through the
+        daemon-wide executor.
 
         :param task: the task to execute
         :param name: the name of the task for logging purposes; if None, use the task function's name
@@ -1093,7 +1107,20 @@ class SerenaAgent:
         :param timeout: the maximum time to wait for task completion in seconds, or None to wait indefinitely
         :return: the task object, through which the task's future result can be accessed
         """
-        return self._task_executor.issue_task(task, name=name, logged=logged, timeout=timeout)
+        # route to the per-session executor when a session is in scope; fall back to the daemon-wide
+        # executor for non-MCP callers. Per-session executors are created lazily on first use and
+        # torn down on session eviction (see :meth:`_evict_session_state` / :meth:`evict_pipe_session`).
+        session_key = _SESSION_KEY_VAR.get(None)
+        if session_key is None:
+            executor = self._task_executor
+        else:
+            with self._task_executors_by_session_lock:
+                executor = self._task_executors_by_session.get(session_key)
+                if executor is None:
+                    # short label keeps logs readable; raw uuid hex / id() values are noisy
+                    executor = TaskExecutor(f"SerenaAgentTaskExecutor[{str(session_key)[:8]}]")
+                    self._task_executors_by_session[session_key] = executor
+        return executor.issue_task(task, name=name, logged=logged, timeout=timeout)
 
     def execute_task(self, task: Callable[[], T], name: str | None = None, logged: bool = True, timeout: float | None = None) -> T:
         """
