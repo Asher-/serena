@@ -2028,3 +2028,348 @@ class TestParallelSiblingWorkerIsolation:
                 f"Pipe sibling {session_id[:8]} observed values that diverged from its own write "
                 f"sequence (possible cross-pollination from a sibling's write)"
             )
+
+
+class TestConsistentResultsInParallelBatch:
+    """T9: consistent-results invariant across N parallel tool calls within ONE pipe client.
+
+    Distinct from :class:`TestParallelSiblingWorkerIsolation`: T8 asserts isolation across N
+    siblings (N pipe sessions, each with its own ``_PIPE_SESSION_ID_VAR``). T9 asserts
+    consistency *within* ONE client's parallel fan-out (one ``_PIPE_SESSION_ID_VAR`` shared
+    across N parallel tool calls).
+
+    The pipe path's invariant is documented in :meth:`Tool.apply_ex`: when N parallel tool
+    calls fan out from one pipe client, each call inherits the same
+    ``(_PIPE_SESSION_ID_VAR, _SESSION_KEY_VAR)`` from the dispatch context, so the
+    per-session dict resolves to one project across all N calls. There must be no churn
+    between calls in one client's batch -- every call in the batch reflects the same active
+    project, even when sibling sessions are concurrently writing to *their own* slots and
+    even when the legacy slot is being rewritten in flight.
+
+    Each thread copies its own ContextVar context (mirroring how :meth:`Tool.apply_ex`
+    builds a fresh per-call context) but seeds the *same* ``pipe_session_id`` -- so the
+    shared ``_active_projects_by_session`` dict is the convergence point across the
+    parallel calls.
+    """
+
+    def test_two_parallel_calls_in_one_pipe_session_see_same_project_across_100_iterations(
+        self, isolation_agent: SerenaAgent
+    ) -> None:
+        """Two parallel reads under one pipe ``session_id`` must both see exactly the
+        project the pipe client activated; the legacy slot's sentinel must never leak."""
+        # ONE pipe client, ONE handshake-asserted session_id shared across the parallel batch
+        pipe_session_id = uuid.uuid4().hex
+        client_project = _pipe_project_stub("one-pipe-client-project")
+        sentinel = _pipe_project_stub("legacy-sentinel-must-never-leak")
+        isolation_agent._legacy_active_project = sentinel
+
+        # write-once: activate the project under the pipe session key (mirrors a single
+        # ``activate_project`` call landing the project in ``_active_projects_by_session``
+        # before the parallel-batch fan-out begins)
+        write_ctx = contextvars.copy_context()
+
+        def write_once() -> None:
+            _MCP_CALL_IN_FLIGHT.set(True)
+            _PIPE_SESSION_ID_VAR.set(pipe_session_id)
+            _SESSION_KEY_VAR.set(pipe_session_id)
+            isolation_agent._active_project = client_project
+
+        write_ctx.run(write_once)
+
+        observations_a: list[Project | None] = []
+        observations_b: list[Project | None] = []
+
+        def parallel_read(observations: list[Project | None]) -> None:
+            ctx = contextvars.copy_context()
+
+            def run() -> None:
+                # each parallel tool call binds the SAME pipe_session_id (T9's defining
+                # invariant) but uses its own freshly-copied ContextVar context (mirroring
+                # ``Tool.apply_ex``'s per-call context)
+                _MCP_CALL_IN_FLIGHT.set(True)
+                _PIPE_SESSION_ID_VAR.set(pipe_session_id)
+                _SESSION_KEY_VAR.set(pipe_session_id)
+                for _ in range(100):
+                    observations.append(isolation_agent.get_active_project())
+
+            ctx.run(run)
+
+        thread_a = threading.Thread(target=parallel_read, args=(observations_a,))
+        thread_b = threading.Thread(target=parallel_read, args=(observations_b,))
+        thread_a.start()
+        thread_b.start()
+        thread_a.join(timeout=10)
+        thread_b.join(timeout=10)
+
+        # both parallel readers within the same pipe session see the same project across every iteration
+        assert all(p is client_project for p in observations_a), (
+            f"Parallel reader A within one pipe session drifted: distinct ids = "
+            f"{set(id(p) for p in observations_a)}"
+        )
+        assert all(p is client_project for p in observations_b), (
+            f"Parallel reader B within one pipe session drifted: distinct ids = "
+            f"{set(id(p) for p in observations_b)}"
+        )
+        assert sentinel not in observations_a and sentinel not in observations_b, (
+            "Legacy slot sentinel leaked into a parallel batch within one pipe session "
+            "(IRONCLAD violation)"
+        )
+
+    def test_eight_parallel_calls_in_one_pipe_session_see_same_project_across_100_iterations(
+        self, isolation_agent: SerenaAgent
+    ) -> None:
+        """Stress: eight parallel reads within one pipe session each see exactly the
+        client's project; sentinel never leaks."""
+        sentinel = _pipe_project_stub("legacy-sentinel-must-never-leak")
+        isolation_agent._legacy_active_project = sentinel
+
+        pipe_session_id = uuid.uuid4().hex
+        client_project = _pipe_project_stub("one-pipe-client-project")
+
+        # write-once under the pipe session key
+        write_ctx = contextvars.copy_context()
+
+        def write_once() -> None:
+            _MCP_CALL_IN_FLIGHT.set(True)
+            _PIPE_SESSION_ID_VAR.set(pipe_session_id)
+            _SESSION_KEY_VAR.set(pipe_session_id)
+            isolation_agent._active_project = client_project
+
+        write_ctx.run(write_once)
+
+        n = 8
+        observations_per_call: list[list[Project | None]] = [[] for _ in range(n)]
+
+        def parallel_read(observations: list[Project | None]) -> None:
+            ctx = contextvars.copy_context()
+
+            def run() -> None:
+                _MCP_CALL_IN_FLIGHT.set(True)
+                _PIPE_SESSION_ID_VAR.set(pipe_session_id)
+                _SESSION_KEY_VAR.set(pipe_session_id)
+                for _ in range(100):
+                    observations.append(isolation_agent.get_active_project())
+
+            ctx.run(run)
+
+        threads = [
+            threading.Thread(target=parallel_read, args=(observations_per_call[i],))
+            for i in range(n)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        # every call in the batch saw the client's project; nobody saw the sentinel
+        for i, observations in enumerate(observations_per_call):
+            assert all(p is client_project for p in observations), (
+                f"Parallel call {i} within one pipe session drifted: "
+                f"distinct ids = {set(id(p) for p in observations)}"
+            )
+            assert sentinel not in observations, (
+                f"Legacy slot sentinel leaked into parallel call {i} within one pipe session"
+            )
+
+    def test_one_pipe_session_view_unaffected_by_concurrent_sibling_session_writes(
+        self, isolation_agent: SerenaAgent
+    ) -> None:
+        """The most-T9-specific invariant: while one pipe client is fanning out a parallel
+        read-batch, SIBLING pipe sessions are concurrently activating their own (different)
+        projects on their own slots. The first client's batch must reflect the same
+        project across every call, with no rotation onto a peer's project mid-flight."""
+        # the pipe client of interest: one session_id with a fan-out of 4 parallel reads
+        client_pipe_session_id = uuid.uuid4().hex
+        client_project = _pipe_project_stub("client-of-interest-project")
+
+        write_ctx = contextvars.copy_context()
+
+        def write_client_project_once() -> None:
+            _MCP_CALL_IN_FLIGHT.set(True)
+            _PIPE_SESSION_ID_VAR.set(client_pipe_session_id)
+            _SESSION_KEY_VAR.set(client_pipe_session_id)
+            isolation_agent._active_project = client_project
+
+        write_ctx.run(write_client_project_once)
+
+        # 4 sibling pipe sessions, each with its own session_id and its own project sequence,
+        # each firing 50 activate-style writes in parallel
+        n_siblings = 4
+        siblings: list[tuple[str, list[Project]]] = [
+            (uuid.uuid4().hex, [_pipe_project_stub(f"sibling-{i}-rev-{r}") for r in range(50)])
+            for i in range(n_siblings)
+        ]
+
+        # gate: client readers AND sibling writers all start their loops together so the
+        # client's reads happen WHILE sibling writes are landing
+        n_client_readers = 4
+        ready = threading.Barrier(n_siblings + n_client_readers + 1)
+
+        observations_per_call: list[list[Project | None]] = [
+            [] for _ in range(n_client_readers)
+        ]
+
+        def client_parallel_read(observations: list[Project | None]) -> None:
+            ctx = contextvars.copy_context()
+
+            def run() -> None:
+                _MCP_CALL_IN_FLIGHT.set(True)
+                _PIPE_SESSION_ID_VAR.set(client_pipe_session_id)
+                _SESSION_KEY_VAR.set(client_pipe_session_id)
+                ready.wait()
+                for _ in range(250):
+                    observations.append(isolation_agent.get_active_project())
+
+            ctx.run(run)
+
+        def sibling_writer(pipe_session_id: str, project_seq: list[Project]) -> None:
+            ctx = contextvars.copy_context()
+
+            def run() -> None:
+                _MCP_CALL_IN_FLIGHT.set(True)
+                _PIPE_SESSION_ID_VAR.set(pipe_session_id)
+                _SESSION_KEY_VAR.set(pipe_session_id)
+                ready.wait()
+                for project in project_seq:
+                    isolation_agent._active_project = project
+
+            ctx.run(run)
+
+        client_threads = [
+            threading.Thread(target=client_parallel_read, args=(observations_per_call[i],))
+            for i in range(n_client_readers)
+        ]
+        sibling_threads = [
+            threading.Thread(target=sibling_writer, args=args) for args in siblings
+        ]
+        for t in client_threads + sibling_threads:
+            t.start()
+        ready.wait()
+        for t in client_threads + sibling_threads:
+            t.join(timeout=15)
+
+        # every observation across the 4 client parallel reads stayed pinned to the client's
+        # project; no sibling project rotated in mid-flight
+        all_sibling_projects: set[Project] = set()
+        for _, project_seq in siblings:
+            all_sibling_projects.update(project_seq)
+        for i, observations in enumerate(observations_per_call):
+            assert all(p is client_project for p in observations), (
+                f"Client parallel reader {i} drifted onto a non-client project mid-batch: "
+                f"distinct ids = {set(id(p) for p in observations)}"
+            )
+            for sibling in all_sibling_projects:
+                assert sibling not in observations, (
+                    f"A sibling session's project leaked into the client's parallel batch "
+                    f"(reader {i})"
+                )
+
+    def test_parallel_writes_within_one_pipe_session_share_one_dict_slot(
+        self, isolation_agent: SerenaAgent
+    ) -> None:
+        """N parallel writes within one pipe session all key into the same per-session
+        dict slot: the dict ends up with exactly ONE entry under the shared session_id,
+        holding one of the N candidate projects (whichever happens to write last by Python
+        dict overwrite semantics)."""
+        # shared session_id across N parallel writers (the parallel-batch counterpart of
+        # ``test_pipe_sibling_writes_isolate_in_per_session_dict``)
+        pipe_session_id = uuid.uuid4().hex
+        n = 6
+        candidate_projects = [_pipe_project_stub(f"candidate-{i}-project") for i in range(n)]
+
+        def parallel_writer(project: Project) -> None:
+            ctx = contextvars.copy_context()
+
+            def run() -> None:
+                _MCP_CALL_IN_FLIGHT.set(True)
+                _PIPE_SESSION_ID_VAR.set(pipe_session_id)
+                _SESSION_KEY_VAR.set(pipe_session_id)
+                isolation_agent._active_project = project
+
+            ctx.run(run)
+
+        threads = [
+            threading.Thread(target=parallel_writer, args=(p,)) for p in candidate_projects
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        # exactly ONE dict entry under the shared pipe session_id; no fanned-out write
+        # leaked into a different session's slot
+        assert pipe_session_id in isolation_agent._active_projects_by_session, (
+            "Parallel writes within one pipe session did not land in the per-session dict"
+        )
+        assert isolation_agent._active_projects_by_session[pipe_session_id] in candidate_projects, (
+            "Parallel writes within one pipe session landed something other than one of "
+            "the N candidate projects (suggests a peer-key leak)"
+        )
+        # no SIDE-EFFECT entries materialised under a peer key (we never bound a sibling
+        # session_id, so the dict must hold only this one entry)
+        assert len(isolation_agent._active_projects_by_session) == 1, (
+            f"Parallel writes within one pipe session created multiple dict entries; "
+            f"expected 1, got {len(isolation_agent._active_projects_by_session)}"
+        )
+
+    def test_no_legacy_leak_during_one_pipe_session_parallel_reads_with_sentinel_rewrites(
+        self, isolation_agent: SerenaAgent
+    ) -> None:
+        """Sustain pressure on the IRONCLAD guard *within* one pipe session: 4 parallel
+        readers under one session_id reading 250x each, with the legacy slot rewritten
+        between sentinel values mid-flight. Neither sentinel ever surfaces in the batch."""
+        sentinel_v1 = _pipe_project_stub("legacy-sentinel-v1")
+        sentinel_v2 = _pipe_project_stub("legacy-sentinel-v2")
+        isolation_agent._legacy_active_project = sentinel_v1
+
+        pipe_session_id = uuid.uuid4().hex
+        client_project = _pipe_project_stub("one-pipe-client-project")
+
+        write_ctx = contextvars.copy_context()
+
+        def write_client_project_once() -> None:
+            _MCP_CALL_IN_FLIGHT.set(True)
+            _PIPE_SESSION_ID_VAR.set(pipe_session_id)
+            _SESSION_KEY_VAR.set(pipe_session_id)
+            isolation_agent._active_project = client_project
+
+        write_ctx.run(write_client_project_once)
+
+        n_readers = 4
+        observations_per_call: list[list[Project | None]] = [[] for _ in range(n_readers)]
+        ready = threading.Barrier(n_readers + 1)
+
+        def parallel_read(observations: list[Project | None]) -> None:
+            ctx = contextvars.copy_context()
+
+            def run() -> None:
+                _MCP_CALL_IN_FLIGHT.set(True)
+                _PIPE_SESSION_ID_VAR.set(pipe_session_id)
+                _SESSION_KEY_VAR.set(pipe_session_id)
+                ready.wait()
+                for _ in range(250):
+                    observations.append(isolation_agent.get_active_project())
+
+            ctx.run(run)
+
+        threads = [
+            threading.Thread(target=parallel_read, args=(observations_per_call[i],))
+            for i in range(n_readers)
+        ]
+        for t in threads:
+            t.start()
+        ready.wait()
+        # rotate the legacy slot mid-flight; the IRONCLAD guard MUST keep both sentinels
+        # out of the parallel-batch's view
+        isolation_agent._legacy_active_project = sentinel_v2
+        for t in threads:
+            t.join(timeout=15)
+
+        for i, observations in enumerate(observations_per_call):
+            assert all(p is client_project for p in observations), (
+                f"Parallel reader {i} within one pipe session drifted under read pressure"
+            )
+            assert sentinel_v1 not in observations and sentinel_v2 not in observations, (
+                f"A legacy slot sentinel (v1 or v2) leaked into parallel reader {i}'s view "
+                f"within one pipe session"
+            )
