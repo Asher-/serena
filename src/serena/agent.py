@@ -1111,6 +1111,18 @@ class SerenaAgent:
         # executor for non-MCP callers. Per-session executors are created lazily on first use and
         # torn down on session eviction (see :meth:`_evict_session_state` / :meth:`evict_pipe_session`).
         session_key = _SESSION_KEY_VAR.get(None)
+        # IRONCLAD: while an MCP call is in flight, the daemon-wide executor is unreachable. Tool.apply_ex
+        # always binds _SESSION_KEY_VAR before calling issue_task, so this is defense-in-depth: if the
+        # binding ever leaks, the daemon-wide queue would let other sessions observe each other's active
+        # project. Mirrors get_cursor_manager and _active_project.
+        mcp_in_flight = _MCP_CALL_IN_FLIGHT.get()
+        if mcp_in_flight and session_key is None:
+            raise RuntimeError(
+                "Internal error: MCP call is in flight but _SESSION_KEY_VAR is unset. "
+                "This indicates Tool.apply_ex did not propagate the session key into the worker "
+                "context; refusing to fall through to the daemon-wide task executor because "
+                "doing so would risk cross-project state confusion."
+            )
         if session_key is None:
             executor = self._task_executor
         else:
@@ -1194,7 +1206,7 @@ class SerenaAgent:
         def init_language_server_manager() -> None:
             # start the language server
             with LogTime("Language server initialization", logger=log):
-                self.reset_language_server_manager()
+                project.create_language_server_manager()
 
         # initialize the language server in the background (if in language server mode);
         # the task handle is captured so the activation-message path can wait on it with
