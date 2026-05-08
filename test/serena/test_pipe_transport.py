@@ -2373,3 +2373,303 @@ class TestConsistentResultsInParallelBatch:
                 f"A legacy slot sentinel (v1 or v2) leaked into parallel reader {i}'s view "
                 f"within one pipe session"
             )
+
+
+
+class TestPipeRestartResilience:
+    """T10: pipe-restart resilience -- daemon evicts state on pipe disconnect.
+
+    When a pipe forwarder process exits (SIGKILL, graceful close, transport error,
+    or daemon listener stop), the daemon's :class:`PipeListener` fires every
+    registered disconnect handler -- including
+    :meth:`SerenaAgent.evict_pipe_session` -- which drops that ``session_id``'s
+    per-session entries from ``_active_projects_by_session`` and
+    ``_cursor_managers_by_session``. A new pipe connecting after a kill receives
+    a brand-new UUID4 ``session_id``, its own per-session state, and never sees
+    residue from any prior pipe's session.
+
+    Distinct from T6 (the disconnect-handler hook itself fires) and T7 (cursor
+    survives streamable-http task teardown): T10 is the agent-level
+    cleanup-after-kill resilience dual -- confirms the daemon's per-session
+    dicts are actually drained when the pipe peer dies and that the next pipe
+    gets a clean slate. Each test simulates SIGKILL via ``_drain_close(writer)``
+    on the pipe-side stream; from the daemon's perspective the resulting socket
+    EOF is indistinguishable from a real ``kill -9`` on the forwarder process
+    (both manifest as the per-connection forwarder loop exiting), so the same
+    disconnect path is exercised either way.
+    """
+
+    def test_pipe_kill_evicts_agent_session_state_via_disconnect_handler(
+        self, isolation_agent: SerenaAgent, socket_path: str
+    ) -> None:
+        """A pipe disconnect must drive ``evict_pipe_session``, dropping the killed pipe's
+        active-project AND cursor-manager entries from the daemon's per-session dicts."""
+
+        async def scenario() -> tuple[str, dict, dict]:
+            listener = PipeListener()
+            listener.add_disconnect_handler(isolation_agent.evict_pipe_session)
+            await listener.start(socket_path)
+            try:
+                # pipe handshake registers a fresh UUID4 session_id with the daemon
+                session_id, _, writer = await _client_handshake(socket_path)
+
+                # seed both per-session dicts under the daemon-allocated session_id;
+                # mirrors the state Tool.apply_ex would leave behind once a real
+                # activate-project tool ran on the pipe
+                isolation_agent._active_projects_by_session[session_id] = _pipe_project_stub(
+                    "project-before-kill"
+                )
+                isolation_agent._cursor_managers_by_session[session_id] = MagicMock(
+                    name="cursor-manager-before-kill"
+                )
+
+                # simulate SIGKILL: the pipe writer closes, the daemon sees socket EOF,
+                # the disconnect handler fires, agent.evict_pipe_session(session_id) drops
+                # the entries from both per-session dicts
+                await _drain_close(writer)
+
+                # disconnect handlers fire on a daemon-side asyncio task -- poll briefly
+                # (mirrors T6's TestPipeListenerDisconnectHandlers polling pattern)
+                for _ in range(50):
+                    if session_id not in isolation_agent._active_projects_by_session:
+                        break
+                    await asyncio.sleep(0.01)
+                return (
+                    session_id,
+                    dict(isolation_agent._active_projects_by_session),
+                    dict(isolation_agent._cursor_managers_by_session),
+                )
+            finally:
+                await listener.stop()
+
+        session_id, active_projects, cursor_managers = asyncio.run(scenario())
+
+        assert session_id not in active_projects, (
+            f"active-project dict retained killed pipe's entry: keys={list(active_projects)}"
+        )
+        assert session_id not in cursor_managers, (
+            f"cursor-manager dict retained killed pipe's entry: keys={list(cursor_managers)}"
+        )
+
+    def test_new_pipe_after_kill_receives_distinct_session_id(
+        self, isolation_agent: SerenaAgent, socket_path: str
+    ) -> None:
+        """A fresh pipe connecting after a kill must receive its own UUID4 ``session_id``
+        distinct from the killed pipe's id; the daemon never reuses the prior id."""
+
+        async def scenario() -> tuple[str, str]:
+            listener = PipeListener()
+            listener.add_disconnect_handler(isolation_agent.evict_pipe_session)
+            await listener.start(socket_path)
+            try:
+                # first pipe connects, then is killed
+                sid_a, _, writer_a = await _client_handshake(socket_path)
+                await _drain_close(writer_a)
+
+                # let A's eviction land before opening B so any interaction between
+                # A's teardown and B's handshake surfaces in the assertion
+                for _ in range(50):
+                    if sid_a not in isolation_agent._active_projects_by_session:
+                        break
+                    await asyncio.sleep(0.01)
+
+                # second pipe connects after the kill and receives a fresh session_id
+                sid_b, _, writer_b = await _client_handshake(socket_path)
+                await _drain_close(writer_b)
+                return sid_a, sid_b
+            finally:
+                await listener.stop()
+
+        sid_a, sid_b = asyncio.run(scenario())
+
+        # the daemon must allocate a brand-new UUID4 for pipe B; never reuse A's id
+        assert sid_a != sid_b, f"new pipe reused killed pipe's session_id: {sid_a}"
+
+    def test_new_pipe_view_unaffected_by_killed_pipe_prior_project(
+        self, isolation_agent: SerenaAgent, socket_path: str
+    ) -> None:
+        """After pipe A is killed and evicted, pipe B's view under its ``session_id``
+        ContextVar binding returns project_b -- pipe A's project must not leak into pipe B's
+        view, the legacy slot's sentinel must not leak in either, and the per-session dict
+        observed during B's read contains only B's entry."""
+
+        # seed the legacy slot with a recognisable sentinel; if it ever leaks the test fails
+        # (mirrors T8's sentinel-seeding pattern in TestParallelSiblingWorkerIsolation)
+        sentinel = _pipe_project_stub("legacy-sentinel-must-never-leak")
+        isolation_agent._legacy_active_project = sentinel
+
+        project_a = _pipe_project_stub("killed-pipe-project")
+        project_b = _pipe_project_stub("post-kill-pipe-project")
+
+        captured: dict[str, object] = {}
+
+        async def scenario() -> tuple[str, str, dict]:
+            listener = PipeListener()
+            listener.add_disconnect_handler(isolation_agent.evict_pipe_session)
+            await listener.start(socket_path)
+            try:
+                # pipe A connects, seeds project_a under its session_id, then is killed
+                sid_a, _, writer_a = await _client_handshake(socket_path)
+                isolation_agent._active_projects_by_session[sid_a] = project_a
+                await _drain_close(writer_a)
+                for _ in range(50):
+                    if sid_a not in isolation_agent._active_projects_by_session:
+                        break
+                    await asyncio.sleep(0.01)
+
+                # pipe B connects after A's eviction and reads under its own ContextVar binding
+                sid_b, _, writer_b = await _client_handshake(socket_path)
+
+                def under_b_session() -> None:
+                    # pipe-session ContextVar binding -- same as Tool.apply_ex sets on the
+                    # pipe path (both _PIPE_SESSION_ID_VAR and _SESSION_KEY_VAR set together)
+                    _MCP_CALL_IN_FLIGHT.set(True)
+                    _PIPE_SESSION_ID_VAR.set(sid_b)
+                    _SESSION_KEY_VAR.set(sid_b)
+                    isolation_agent._active_project = project_b
+                    captured["read_under_b"] = isolation_agent.get_active_project()
+
+                contextvars.copy_context().run(under_b_session)
+                snapshot_during_b = dict(isolation_agent._active_projects_by_session)
+                await _drain_close(writer_b)
+                return sid_a, sid_b, snapshot_during_b
+            finally:
+                await listener.stop()
+
+        sid_a, sid_b, snapshot_during_b = asyncio.run(scenario())
+
+        # B's view returns project_b -- A's project never leaks into B's session
+        assert captured["read_under_b"] is project_b, (
+            f"under sid_b binding agent must return project_b; got {captured['read_under_b']!r}"
+        )
+        # neither A's project nor the legacy sentinel ever surfaces in B's view
+        assert captured["read_under_b"] is not project_a, "killed pipe A's project leaked into pipe B"
+        assert captured["read_under_b"] is not sentinel, (
+            "legacy slot sentinel leaked into pipe B's view (IRONCLAD violation)"
+        )
+        # A's session_id is gone from the dict before B reads
+        assert sid_a not in snapshot_during_b, (
+            f"killed pipe A's session_id still present during B's read: keys={list(snapshot_during_b)}"
+        )
+        # only B's entry inhabits the dict during B's read
+        assert snapshot_during_b == {sid_b: project_b}, (
+            f"unexpected per-session dict during B's read: {snapshot_during_b}"
+        )
+
+    def test_repeated_kill_restart_cycles_leave_no_state_residue(
+        self, isolation_agent: SerenaAgent, socket_path: str
+    ) -> None:
+        """5 kill/restart cycles must drain each pipe's per-session entries; after all cycles
+        the daemon's per-session dicts contain no entries from any cycle."""
+        cycles = 5
+
+        async def scenario() -> tuple[list[str], dict, dict]:
+            listener = PipeListener()
+            listener.add_disconnect_handler(isolation_agent.evict_pipe_session)
+            await listener.start(socket_path)
+            try:
+                session_ids: list[str] = []
+                for cycle in range(cycles):
+                    # each cycle: open pipe, seed both per-session dicts, kill pipe, wait for eviction
+                    sid, _, writer = await _client_handshake(socket_path)
+                    isolation_agent._active_projects_by_session[sid] = _pipe_project_stub(
+                        f"cycle-{cycle}-project"
+                    )
+                    isolation_agent._cursor_managers_by_session[sid] = MagicMock(
+                        name=f"cycle-{cycle}-cursor-manager"
+                    )
+                    session_ids.append(sid)
+                    await _drain_close(writer)
+                    for _ in range(50):
+                        if sid not in isolation_agent._active_projects_by_session:
+                            break
+                        await asyncio.sleep(0.01)
+                return (
+                    session_ids,
+                    dict(isolation_agent._active_projects_by_session),
+                    dict(isolation_agent._cursor_managers_by_session),
+                )
+            finally:
+                await listener.stop()
+
+        session_ids, final_active, final_cursors = asyncio.run(scenario())
+
+        # all cycles received distinct UUID4 session_ids -- no reuse across the kill boundary
+        assert len(set(session_ids)) == cycles, (
+            f"daemon reused session_ids across cycles: {session_ids}"
+        )
+        # zero residue in either per-session dict after all cycles
+        for sid in session_ids:
+            assert sid not in final_active, (
+                f"cycle's session_id {sid} retained in active-project dict: keys={list(final_active)}"
+            )
+            assert sid not in final_cursors, (
+                f"cycle's session_id {sid} retained in cursor-manager dict: keys={list(final_cursors)}"
+            )
+        # the dicts should be entirely empty -- nothing else seeded them in this test
+        assert final_active == {}, f"unexpected leftover in active-project dict: {final_active}"
+        assert final_cursors == {}, f"unexpected leftover in cursor-manager dict: {final_cursors}"
+
+    def test_concurrent_kill_of_multiple_pipes_evicts_all_their_sessions(
+        self, isolation_agent: SerenaAgent, socket_path: str
+    ) -> None:
+        """N parallel pipes connect, each seeds its own per-session entries, all kill in
+        parallel; the daemon must drive eviction for every session_id and leave both
+        per-session dicts empty."""
+        n_pipes = 8
+
+        async def scenario() -> tuple[list[str], dict, dict]:
+            listener = PipeListener()
+            listener.add_disconnect_handler(isolation_agent.evict_pipe_session)
+            await listener.start(socket_path)
+            try:
+
+                async def open_seed_close(idx: int) -> str:
+                    sid, _, writer = await _client_handshake(socket_path)
+                    isolation_agent._active_projects_by_session[sid] = _pipe_project_stub(
+                        f"parallel-pipe-{idx}-project"
+                    )
+                    isolation_agent._cursor_managers_by_session[sid] = MagicMock(
+                        name=f"parallel-pipe-{idx}-cursor-manager"
+                    )
+                    await _drain_close(writer)
+                    return sid
+
+                session_ids = list(
+                    await asyncio.gather(*[open_seed_close(i) for i in range(n_pipes)])
+                )
+
+                # poll until every parallel session is evicted; concurrent fan-out gets a
+                # longer bound than the single-pipe tests (range(100) instead of range(50))
+                for _ in range(100):
+                    pending = [
+                        sid for sid in session_ids
+                        if sid in isolation_agent._active_projects_by_session
+                    ]
+                    if not pending:
+                        break
+                    await asyncio.sleep(0.01)
+
+                return (
+                    session_ids,
+                    dict(isolation_agent._active_projects_by_session),
+                    dict(isolation_agent._cursor_managers_by_session),
+                )
+            finally:
+                await listener.stop()
+
+        session_ids, final_active, final_cursors = asyncio.run(scenario())
+
+        # every parallel pipe received a distinct UUID4 session_id
+        assert len(set(session_ids)) == n_pipes, (
+            f"daemon issued duplicate session_ids across parallel pipes: {session_ids}"
+        )
+        # every session must be evicted from both per-session dicts
+        leftover_active = [sid for sid in session_ids if sid in final_active]
+        leftover_cursors = [sid for sid in session_ids if sid in final_cursors]
+        assert leftover_active == [], (
+            f"sessions not evicted from active-project dict: {leftover_active}"
+        )
+        assert leftover_cursors == [], (
+            f"sessions not evicted from cursor-manager dict: {leftover_cursors}"
+        )
