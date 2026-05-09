@@ -89,15 +89,11 @@ class SourceKitLSP(SolidLanguageServer):
 
         # sourcekit-lsp needs --scratch-path for background indexing and cross-file references.
         # Without it, textDocument/references returns empty because there's no index store.
-        # The scratch dir lives outside the repo so it does not pollute the project tree
-        # (which would violate the build-location-variables convention) and so a single
-        # cache survives `git clean`. Override root via SERENA_SOURCEKIT_SCRATCH_ROOT.
-        scratch_root = os.environ.get("SERENA_SOURCEKIT_SCRATCH_ROOT") or os.path.join(
-            os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
-            "serena", "sourcekit-scratch",
-        )
+        # Per build-location-variables convention: ALL build artifacts live under
+        # /Users/asher/Projects/DerivedData/<ProjectName>/. The scratch dir is keyed
+        # by repo basename so each project gets its own subtree.
         project_basename = os.path.basename(os.path.normpath(repository_root_path)) or "_root_"
-        scratch_path = os.path.join(scratch_root, project_basename, "sourcekit-lsp")
+        scratch_path = os.path.join("/Users/asher/Projects/DerivedData", project_basename, "sourcekit-lsp")
         os.makedirs(scratch_path, exist_ok=True)
         cmd = [sourcekit_path, "--scratch-path", scratch_path]
         log.info(f"sourcekit-lsp path: {sourcekit_path}, scratch path: {scratch_path}")
