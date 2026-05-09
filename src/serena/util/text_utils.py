@@ -32,6 +32,7 @@ class TextLine:
     """Represents a line of text with information on how it relates to the match."""
 
     line_number: int
+    """the 0-based index of the line in the source text."""
     line_content: str
     match_type: LineType
     """Represents the type of line (match, prefix, postfix)"""
@@ -150,6 +151,11 @@ def search_text(
     """
     Search for a pattern in text content. Supports both regex and glob-like patterns.
 
+    Every emitted :class:`TextLine` carries a ``line_number`` that is the 0-based
+    index of the line in ``content``, matching the convention used by
+    :meth:`MatchedConsecutiveLines.from_file_contents`, the LSP layer, and every
+    other line-oriented surface in the codebase.
+
     :param pattern: Pattern to search for (regex or glob-like pattern)
     :param content: The text content to search. May be None if source_file_path is provided.
     :param source_file_path: Optional path to the source file. If content is None,
@@ -168,6 +174,7 @@ def search_text(
     :raises: ValueError if the pattern is not valid
 
     """
+    # read the file when only the path was supplied
     if source_file_path and content is None:
         with open(source_file_path, encoding=encoding) as f:
             content = f.read()
@@ -183,51 +190,47 @@ def search_text(
     if is_glob:
         pattern = glob_to_regex(pattern)
     if allow_multiline_match:
-        # For multiline matches, we need to use the DOTALL flag to make '.' match newlines
+        # multiline scan: DOTALL lets '.' span newlines so a single match can cross lines
         compiled_pattern = re.compile(pattern, re.DOTALL)
-        # Search across the entire content as a single string
         for match in compiled_pattern.finditer(content):
             start_pos = match.start()
             end_pos = match.end()
 
-            # Find the line numbers for the start and end positions
-            start_line_num = content[:start_pos].count("\n") + 1
-            end_line_num = content[:end_pos].count("\n") + 1
+            # find the 0-based line indices that bound the match span
+            start_line_num = content[:start_pos].count("\n")
+            end_line_num = content[:end_pos].count("\n")
 
-            # Calculate the range of lines to include in the context
-            context_start = max(1, start_line_num - context_lines_before)
-            context_end = min(total_lines, end_line_num + context_lines_after)
+            # clamp the requested context window to the file's 0-based line range
+            context_start = max(0, start_line_num - context_lines_before)
+            context_end = min(total_lines - 1, end_line_num + context_lines_after)
 
-            # Create TextLine objects for the context
+            # tag each line in the window as BEFORE / MATCH / AFTER and emit it
             context_lines = []
-            for i in range(context_start - 1, context_end):
-                line_num = i + 1
-                if context_start <= line_num < start_line_num:
+            for i in range(context_start, context_end + 1):
+                if i < start_line_num:
                     match_type = LineType.BEFORE_MATCH
-                elif end_line_num < line_num <= context_end:
+                elif i > end_line_num:
                     match_type = LineType.AFTER_MATCH
                 else:
                     match_type = LineType.MATCH
 
-                context_lines.append(TextLine(line_number=line_num, line_content=lines[i], match_type=match_type))
+                context_lines.append(TextLine(line_number=i, line_content=lines[i], match_type=match_type))
 
             matches.append(MatchedConsecutiveLines(lines=context_lines, source_file_path=source_file_path))
     else:
         # TODO: extremely inefficient! Since we currently don't use this option in SerenaAgent or LanguageServer,
         #   it is not urgent to fix, but should be either improved or the option should be removed.
-        # Search line by line, normal compile without DOTALL
+        # line-by-line scan: each line tested against the regex independently
         compiled_pattern = re.compile(pattern)
         for i, line in enumerate(lines):
-            line_num = i + 1
             if compiled_pattern.search(line):
-                # Calculate the range of lines to include in the context
+                # clamp the requested context window to the file's 0-based line range
                 context_start = max(0, i - context_lines_before)
                 context_end = min(total_lines - 1, i + context_lines_after)
 
-                # Create TextLine objects for the context
+                # tag each line in the window as BEFORE / MATCH / AFTER and emit it
                 context_lines = []
                 for j in range(context_start, context_end + 1):
-                    context_line_num = j + 1
                     if j < i:
                         match_type = LineType.BEFORE_MATCH
                     elif j > i:
@@ -235,7 +238,7 @@ def search_text(
                     else:
                         match_type = LineType.MATCH
 
-                    context_lines.append(TextLine(line_number=context_line_num, line_content=lines[j], match_type=match_type))
+                    context_lines.append(TextLine(line_number=j, line_content=lines[j], match_type=match_type))
 
                 matches.append(MatchedConsecutiveLines(lines=context_lines, source_file_path=source_file_path))
 

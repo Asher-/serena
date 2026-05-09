@@ -1477,10 +1477,10 @@ class CursorManager:
         for match in matches:
             assert match.source_file_path is not None
             rel_path = match.source_file_path
-            # MatchedConsecutiveLines.line_number is 1-indexed; the LSP
-            # request expects 0-indexed line numbers
+            # MatchedConsecutiveLines.line_number is already 0-indexed --
+            # same convention as the LSP query, so no conversion is needed
             matched_line = match.matched_lines[0]
-            line_0idx = matched_line.line_number - 1
+            line_0idx = matched_line.line_number
             # query at the first non-whitespace column so the LSP's
             # innermost-container lookup lands on actual code -- column 0
             # of an indented line falls in the leading-whitespace gutter
