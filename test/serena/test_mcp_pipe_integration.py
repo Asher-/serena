@@ -715,16 +715,32 @@ class TestSerenaMCPFactoryPipeListener:
         # answers from the agent's exposed-tool list, not the empty null list
         assert isinstance(listener._catalog_provider, SerenaCatalogProvider)
 
-    def test_build_pipe_listener_registers_evict_callback(self, agent: SerenaAgent) -> None:
+    def test_build_pipe_listener_does_not_register_evict_callback(self, agent: SerenaAgent) -> None:
+        """Per the project-root-as-session-id contract, build_pipe_listener MUST NOT
+        wire ``SerenaAgent.evict_pipe_session`` as a socket-disconnect handler.
+
+        Daemon-side per-session state must survive socket-level churn so a
+        respawned pipe-client into the same project_root re-attaches to the
+        existing entry. This test guards against the regression of re-introducing
+        the disconnect handler that previously evicted state on every disconnect
+        (the bug captured in
+        ``plan://Serena:serena/serena-pipe-session-id-is-the-session-id``).
+        """
         from serena.mcp import build_pipe_listener
 
         listener = build_pipe_listener(agent)
-        # exactly one disconnect handler should be registered, and it must be
-        # the agent's evict_pipe_session bound method -- not a wrapper, not a
-        # no-op. This is the load-bearing wire that fires eviction on pipe
-        # disconnect; an audit by inspecting listener._disconnect_handlers
-        # makes the wiring auditable from the test
-        assert agent.evict_pipe_session in listener._disconnect_handlers
+        # the production listener must have no disconnect handlers wired -- the
+        # disconnect-handler mechanism on the listener itself remains as an
+        # extension point, but production wiring deliberately leaves it empty
+        # so socket disconnect cannot evict per-session state
+        assert agent.evict_pipe_session not in listener._disconnect_handlers, (
+            "build_pipe_listener wired evict_pipe_session as a disconnect handler -- "
+            "this regresses the project-root-as-session-id contract; per-session state "
+            "must survive socket disconnect"
+        )
+        assert listener._disconnect_handlers == [], (
+            f"build_pipe_listener registered unexpected disconnect handlers: {listener._disconnect_handlers}"
+        )
 
     def test_build_pipe_listener_propagates_openai_compat(self, agent: SerenaAgent) -> None:
         from serena.mcp import build_pipe_listener
@@ -753,7 +769,13 @@ class TestEvictPipeSessionEndToEnd:
     the production wiring (T6 in mcp.py).
     """
 
-    def test_pipe_disconnect_evicts_active_project_via_serena_agent(self, agent: SerenaAgent) -> None:
+    def test_pipe_disconnect_does_not_evict_active_project_via_serena_agent(self, agent: SerenaAgent) -> None:
+        """Under the project-root-as-session-id contract, socket disconnect MUST NOT
+        cause :meth:`SerenaAgent.evict_pipe_session` to fire. ``build_pipe_listener``
+        no longer wires the disconnect handler, and per-session state must survive
+        socket churn so a respawned pipe-client into the same project_root re-attaches
+        to the existing entry.
+        """
         # /tmp short path -- AF_UNIX has a ~104-byte path limit on macOS, and
         # pytest's tmp_path lives under /private/var/folders/... which can
         # blow past the limit. Mirror the socket_path fixture pattern from
@@ -766,14 +788,13 @@ class TestEvictPipeSessionEndToEnd:
 
         socket_path = f"/tmp/serena-pipe-evict-{_uuid.uuid4().hex[:8]}.sock"
         try:
-            socket_cleanup = socket_path
 
             async def _scenario_inner() -> tuple[bool, bool]:
                 listener = build_pipe_listener(agent)
                 await listener.start(socket_path)
                 try:
                     reader, writer = await asyncio.open_unix_connection(socket_path)
-                    writer.write(PipeHandshake.request().to_bytes())
+                    writer.write(PipeHandshake.request("/tmp/test-evict-end2end").to_bytes())
                     await writer.drain()
                     response_line = await reader.readuntil(b"\n")
                     response = PipeEnvelope.from_bytes(response_line)
@@ -790,17 +811,14 @@ class TestEvictPipeSessionEndToEnd:
                     with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                         await writer.wait_closed()
 
+                    # poll briefly to give any (mis)wired disconnect handler time to fire;
+                    # the test passes only if NO eviction has happened
                     for _ in range(50):
-                        if (
-                            session_id not in agent._active_projects_by_session
-                            and session_id not in agent._cursor_managers_by_session
-                        ):
-                            break
                         await asyncio.sleep(0.01)
 
                     post_state = (
                         session_id in agent._active_projects_by_session
-                        or session_id in agent._cursor_managers_by_session
+                        and session_id in agent._cursor_managers_by_session
                     )
                     return pre_state, post_state
                 finally:
@@ -808,7 +826,12 @@ class TestEvictPipeSessionEndToEnd:
 
             pre, post = asyncio.run(_scenario_inner())
             assert pre is True, "pre-disconnect state must be populated for the test to be meaningful"
-            assert post is False, "agent must drop both per-session entries on pipe disconnect"
+            assert post is True, (
+                "agent dropped a per-session entry on pipe disconnect; "
+                "this regresses the project-root-as-session-id contract -- per-session "
+                "state must survive socket disconnect so a respawned pipe-client into "
+                "the same project re-attaches to the existing entry"
+            )
             return
         finally:
             with contextlib.suppress(FileNotFoundError):
@@ -996,6 +1019,12 @@ class TestPipeSessionSurvivesStreamableHttpTeardownEndToEnd:
     def test_pipe_session_state_survives_streamable_http_teardown_end_to_end(
         self, agent: SerenaAgent
     ) -> None:
+        """Under the project-root-as-session-id contract, pipe-keyed per-session state
+        survives BOTH (a) streamable-http per-request teardown (an int-keyed eviction
+        targeting a different session arrives at the daemon while the pipe stays
+        connected) AND (b) the pipe-client's own socket disconnect. The pipe lifetime
+        is no longer the eviction gate; the project_root key is.
+        """
         import os as _os
         import uuid as _uuid
 
@@ -1014,7 +1043,7 @@ class TestPipeSessionSurvivesStreamableHttpTeardownEndToEnd:
                 await listener.start(socket_path)
                 try:
                     reader, writer = await asyncio.open_unix_connection(socket_path)
-                    writer.write(PipeHandshake.request().to_bytes())
+                    writer.write(PipeHandshake.request("/tmp/test-survives-streamable-http").to_bytes())
                     await writer.drain()
                     response_line = await reader.readuntil(b"\n")
                     response = PipeEnvelope.from_bytes(response_line)
@@ -1047,38 +1076,34 @@ class TestPipeSessionSurvivesStreamableHttpTeardownEndToEnd:
                         and agent._cursor_managers_by_session.get(session_id) is pipe_cursor
                     )
 
-                    # positive control: closing the pipe DOES evict;
-                    # without this, the survival assertion could vacuously
-                    # pass on an entry that is never-evictable for some
-                    # other reason
+                    # under the project-root-as-session-id contract, closing the
+                    # pipe MUST NOT evict either: a respawned pipe-client into the
+                    # same project finds activation preserved
                     writer.close()
                     with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                         await writer.wait_closed()
+                    # poll briefly so any (mis)wired disconnect handler has time to fire
                     for _ in range(50):
-                        if (
-                            session_id not in agent._active_projects_by_session
-                            and session_id not in agent._cursor_managers_by_session
-                        ):
-                            break
                         await asyncio.sleep(0.01)
-                    evicted_on_disconnect = (
-                        session_id not in agent._active_projects_by_session
-                        and session_id not in agent._cursor_managers_by_session
+                    survived_disconnect = (
+                        agent._active_projects_by_session.get(session_id) is pipe_proj
+                        and agent._cursor_managers_by_session.get(session_id) is pipe_cursor
                     )
 
-                    return pre_state, survived_teardown, evicted_on_disconnect
+                    return pre_state, survived_teardown, survived_disconnect
                 finally:
                     await listener.stop()
 
-            pre, survived, evicted = asyncio.run(_scenario_inner())
+            pre, survived_teardown, survived_disconnect = asyncio.run(_scenario_inner())
             assert pre is True, "pre-population must succeed for the test to be meaningful"
-            assert survived is True, (
+            assert survived_teardown is True, (
                 "pipe-keyed state MUST survive streamable-http per-request teardown "
                 "while the pipe remains connected"
             )
-            assert evicted is True, (
-                "pipe-keyed state MUST be evicted on pipe disconnect "
-                "(positive control proving the test setup detects state changes)"
+            assert survived_disconnect is True, (
+                "pipe-keyed state MUST also survive pipe disconnect under the "
+                "project-root-as-session-id contract -- a respawned pipe-client into "
+                "the same project finds activation preserved"
             )
             return
         finally:

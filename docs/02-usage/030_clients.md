@@ -74,7 +74,6 @@ the multiplexer is in the path. See
 [Running Serena Behind a Tool Multiplexer](../03-special-guides/multiplexer_architecture.md)
 for the network shape, the launchd port-binding change, and how to test
 Serena directly without the multiplexer in the loop.
-
 ### Advanced: Pipe transport (one-daemon-per-machine, parallel-safe)
 
 When you run several Serena clients side-by-side — most commonly parallel
@@ -83,29 +82,48 @@ transport** keeps each client's per-session state strictly partitioned from
 every other client's, by construction. The wire protocol and tool surface
 are unchanged; the difference is that the client talks stdio to a small
 *per-client forwarder process*, which dials a single shared Serena daemon
-over a Unix-domain socket. The daemon issues each forwarder a stable session
-id at connect time and pins all per-session state to that id, so sibling
-clients can never see each other's active project, cursor, or other
-per-session state. See
+over a Unix-domain socket. The forwarder asserts the absolute path of its
+**project root** as the session id at handshake; the daemon trusts that
+assertion and pins all per-session state to that path. Two forwarders on
+the same project root are the same logical session by design; forwarders
+on different project roots are fully isolated. See
 [Running Serena Behind a Tool Multiplexer](../03-special-guides/multiplexer_architecture.md)
-§Pipe transport for the architecture and the failure mode it addresses.
+§Project-root-as-session-id handshake for the architecture and the failure
+mode it addresses.
 
-To start a client in pipe mode, use the new `pipe` transport value and point
-the forwarder at the daemon's Unix socket:
+The forwarder requires a resolvable project root at startup. Pass exactly
+one of:
+
+* ``--project <path>`` (or the deprecated positional project argument) to
+  pin the forwarder to an explicit project directory, or
+* ``--project-from-cwd`` to auto-detect the project root from the
+  forwarder's current working directory (searches for
+  ``.serena/project.yml`` or ``.git``, falling back to CWD).
+
+Without one of those flags ``serena start-mcp-server --transport pipe``
+exits non-zero with a clear operator-facing error rather than fall back to
+anonymous mode.
+
+To start a forwarder in pipe mode, point it at the daemon's Unix socket
+and supply the project root:
 
 ```shell
-serena start-mcp-server --transport pipe --daemon-url unix:///tmp/serena-daemon.sock
+serena start-mcp-server --transport pipe --project-from-cwd --daemon-url unix:///tmp/serena-daemon.sock
 ```
 
 This invocation is the **forwarder**, not a daemon: it expects a Serena
 daemon to already be running and listening on the given Unix socket. The
 daemon process (which serves all forwarders on the machine) needs
-`--pipe-socket-path /tmp/serena-daemon.sock` in its launch arguments so the
-pipe listener binds at startup; the same daemon process can simultaneously
-serve streamable-HTTP and pipe traffic.
+``--pipe-socket-path /tmp/serena-daemon.sock`` in its launch arguments so
+the pipe listener binds at startup; the same daemon process can
+simultaneously serve streamable-HTTP and pipe traffic. If the daemon
+socket is briefly unreachable when the forwarder first runs (daemon
+restarting, socket file racing into existence), the forwarder retries the
+initial connection with bounded backoff (override the default 5 attempts
+via ``SERENA_PIPE_RECONNECT_ATTEMPTS``).
 
 For Claude Code specifically, replace the args list of your existing
-`serena` MCP server entry with the pipe form, e.g.:
+``serena`` MCP server entry with the pipe form, e.g.:
 
 ```shell
 claude mcp add --scope user serena -- serena start-mcp-server --context claude-code --project-from-cwd --transport pipe --daemon-url unix:///tmp/serena-daemon.sock

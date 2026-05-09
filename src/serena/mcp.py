@@ -591,7 +591,7 @@ class SerenaPipeFrameHandler(FrameHandler):
 
 
 def build_pipe_listener(agent: SerenaAgent, *, openai_tool_compatible: bool = False) -> PipeListener:
-    """T6: Construct the production :class:`PipeListener` wired into ``agent``.
+    """Construct the production :class:`PipeListener` wired into ``agent``.
 
     Composes the daemon-side pipe transport against a real Serena agent:
 
@@ -599,9 +599,16 @@ def build_pipe_listener(agent: SerenaAgent, *, openai_tool_compatible: bool = Fa
       against ``agent.get_exposed_tool_instances()``.
     * :class:`SerenaCatalogProvider` answers ``pipe/catalog/get`` from the
       same exposed-tool list.
-    * :meth:`SerenaAgent.evict_pipe_session` is registered as a disconnect
-      handler so per-session state (active project, cursor manager) drops
-      automatically on pipe disconnect.
+
+    Per the project-root-as-session-id contract
+    (``plan://Serena:serena/serena-pipe-session-id-is-the-session-id``)
+    the listener is intentionally constructed WITHOUT any socket-disconnect
+    handler. Daemon-side per-session state (active project, cursor manager,
+    task executor) MUST survive socket disconnect so that a pipe-client
+    process which exits and respawns into the same project_root re-attaches
+    to the daemon's existing per-session entry and finds activation preserved.
+    :meth:`SerenaAgent.evict_pipe_session` remains available for explicit
+    operator-driven cleanup but is deliberately NOT wired to socket lifecycle.
 
     Returned listener is NOT started; the caller is responsible for calling
     :meth:`PipeListener.start` (and matching :meth:`PipeListener.stop` on
@@ -620,15 +627,9 @@ def build_pipe_listener(agent: SerenaAgent, *, openai_tool_compatible: bool = Fa
     :returns: A constructed-but-not-started :class:`PipeListener` ready for
         :meth:`PipeListener.start` to bind its Unix socket.
     """
-    listener = PipeListener(
+    # compose the listener with frame and catalog providers; no disconnect
+    # handler is wired so daemon-side per-session state survives socket churn
+    return PipeListener(
         frame_handler=SerenaPipeFrameHandler(agent),
         catalog_provider=SerenaCatalogProvider(agent, openai_tool_compatible=openai_tool_compatible),
     )
-    # NO disconnect handler is registered: per the project-root-as-session-id
-    # design (plan://Serena:serena/serena-pipe-session-id-is-the-session-id),
-    # daemon-side per-session state MUST survive socket disconnect so a
-    # respawned pipe-client into the same project finds activation preserved.
-    # agent.evict_pipe_session remains available for explicit operator-driven
-    # cleanup but is intentionally NOT wired to socket lifecycle here.
-    listener.add_disconnect_handler(agent.evict_pipe_session)
-    return listener

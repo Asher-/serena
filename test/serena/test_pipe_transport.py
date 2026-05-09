@@ -17,6 +17,7 @@ import os
 import threading
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -64,29 +65,52 @@ class TestPipeCLI:
         assert daemon_url_param is not None, "--daemon-url is missing from start-mcp-server"
         assert daemon_url_param.default == "unix:///tmp/serena-daemon.sock"
 
-    def test_pipe_transport_dispatches_to_pipe_entry_point(self, cli_runner: CliRunner) -> None:
-        # transport=pipe MUST NOT instantiate SerenaMCPFactory; it MUST call run_pipe_client
+    def test_pipe_transport_dispatches_to_pipe_entry_point(self, cli_runner: CliRunner, tmp_path: Path) -> None:
+        # transport=pipe MUST NOT instantiate SerenaMCPFactory; it MUST call run_pipe_client.
+        # Under the project-root-as-session-id contract, --transport pipe also requires
+        # a resolvable project root, so we pass --project pointing at a real tmp directory
+        # which the CLI's path-validation accepts.
+        project_dir = tmp_path / "test-project"
+        project_dir.mkdir()
         with (
             patch("serena.pipe.run_pipe_client") as run_pipe,
             patch("serena.cli.SerenaMCPFactory") as factory,
         ):
             result = cli_runner.invoke(
                 TopLevelCommands.start_mcp_server,
-                ["--transport", "pipe", "--daemon-url", "unix:///tmp/test.sock"],
+                [
+                    "--transport", "pipe",
+                    "--daemon-url", "unix:///tmp/test.sock",
+                    "--project", str(project_dir),
+                ],
             )
         assert result.exit_code == 0, result.output
-        run_pipe.assert_called_once_with(daemon_url="unix:///tmp/test.sock")
+        run_pipe.assert_called_once_with(
+            daemon_url="unix:///tmp/test.sock",
+            project_root=str(project_dir.resolve()),
+        )
         factory.assert_not_called()
 
-    def test_pipe_transport_uses_default_daemon_url_when_unspecified(self, cli_runner: CliRunner) -> None:
-        # omitting --daemon-url with --transport pipe must fall through to the design-plan default
+    def test_pipe_transport_uses_default_daemon_url_when_unspecified(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        # omitting --daemon-url with --transport pipe must fall through to the design-plan default;
+        # we still need to supply --project to satisfy the project-root-as-session-id contract
+        project_dir = tmp_path / "test-project-default-url"
+        project_dir.mkdir()
         with (
             patch("serena.pipe.run_pipe_client") as run_pipe,
             patch("serena.cli.SerenaMCPFactory") as factory,
         ):
-            result = cli_runner.invoke(TopLevelCommands.start_mcp_server, ["--transport", "pipe"])
+            result = cli_runner.invoke(
+                TopLevelCommands.start_mcp_server,
+                ["--transport", "pipe", "--project", str(project_dir)],
+            )
         assert result.exit_code == 0, result.output
-        run_pipe.assert_called_once_with(daemon_url="unix:///tmp/serena-daemon.sock")
+        run_pipe.assert_called_once_with(
+            daemon_url="unix:///tmp/serena-daemon.sock",
+            project_root=str(project_dir.resolve()),
+        )
         factory.assert_not_called()
 
     def test_stdio_transport_does_not_dispatch_to_pipe_entry_point(self, cli_runner: CliRunner) -> None:
@@ -146,11 +170,13 @@ class TestPipeProtocol:
             PipeEnvelope.from_bytes(b'{"meta": "hi", "frame": {}}\n')
 
     def test_handshake_request_uses_documented_method_and_id(self) -> None:
-        request = PipeHandshake.request()
+        request = PipeHandshake.request("/tmp/some-project")
         assert request.frame["method"] == "mcp/session/open"
         assert request.frame["jsonrpc"] == "2.0"
         assert request.frame["id"] == 1
-        assert request.meta == {}, "request must not pre-assert a session_id"
+        assert request.meta == {"session_id": "/tmp/some-project"}, (
+            "request must stamp meta.session_id from the project_root the pipe-client asserts"
+        )
 
     def test_handshake_response_carries_session_id_only_in_meta(self) -> None:
         response = PipeHandshake.response("uuid-from-daemon")
@@ -175,25 +201,52 @@ class TestPipeProtocol:
 class TestPipeListener:
     """Verify the daemon-side handshake handler against real Unix sockets."""
 
-    def test_handshake_assigns_uuid_session_id(self, socket_path: str) -> None:
-        async def scenario() -> str:
+    def test_handshake_echoes_client_asserted_session_id(self, socket_path: str) -> None:
+        """Daemon trusts the client-asserted session_id and echoes it back verbatim.
+
+        The pipe-client asserts the absolute path of the project it is operating on
+        as the session_id; the daemon does NOT mint UUIDs and MUST NOT substitute
+        any other identifier. This test asserts both directions of that contract:
+        the response carries the same string the request sent, and the listener
+        registers the connection under that same string.
+        """
+        asserted = "/tmp/serena-test-handshake-echo"
+
+        async def scenario() -> tuple[str, list[str]]:
             listener = PipeListener()
             await listener.start(socket_path)
             try:
                 reader, writer = await asyncio.open_unix_connection(socket_path)
-                writer.write(PipeHandshake.request().to_bytes())
+                writer.write(PipeHandshake.request(asserted).to_bytes())
                 await writer.drain()
                 response_bytes = await reader.readuntil(b"\n")
                 response = PipeEnvelope.from_bytes(response_bytes)
+                returned = PipeHandshake.session_id_from_response(response)
+                registered = list(listener.connections.keys())
                 writer.close()
                 with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                     await writer.wait_closed()
-                return PipeHandshake.session_id_from_response(response)
+                return returned, registered
             finally:
                 await listener.stop()
 
-        session_id = asyncio.run(scenario())
-        uuid.UUID(hex=session_id)
+        returned_session_id, registered_session_ids = asyncio.run(scenario())
+        assert returned_session_id == asserted, (
+            f"daemon must echo the asserted session_id verbatim; got {returned_session_id!r}"
+        )
+        assert asserted in registered_session_ids, (
+            f"listener must key the connection on the asserted session_id; registered={registered_session_ids}"
+        )
+        # under no circumstances may the daemon mint a UUID4 in place of the asserted id
+        try:
+            uuid.UUID(hex=returned_session_id)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                f"returned session_id {returned_session_id!r} parses as a UUID4 -- "
+                "the daemon appears to have minted an identifier instead of trusting the client's assertion"
+            )
 
     def test_listener_registers_connection_after_handshake(self, socket_path: str) -> None:
         async def scenario() -> tuple[str, dict[str, str]]:
@@ -201,7 +254,7 @@ class TestPipeListener:
             await listener.start(socket_path)
             try:
                 reader, writer = await asyncio.open_unix_connection(socket_path)
-                writer.write(PipeHandshake.request().to_bytes())
+                writer.write(PipeHandshake.request("/tmp/test-register-after-handshake").to_bytes())
                 await writer.drain()
                 response_bytes = await reader.readuntil(b"\n")
                 response = PipeEnvelope.from_bytes(response_bytes)
@@ -218,24 +271,36 @@ class TestPipeListener:
         assert session_id in snapshot
         assert snapshot[session_id] == session_id
 
-    def test_listener_assigns_distinct_ids_to_concurrent_clients(self, socket_path: str) -> None:
+    def test_listener_isolates_distinct_project_roots(self, socket_path: str) -> None:
+        """Ten clients asserting ten distinct project_roots all get distinct session_ids
+        echoed back. Under the project-root-as-session-id contract the daemon does not
+        mint identifiers; isolation between concurrent clients comes from the clients
+        themselves asserting different project_roots, not from per-connection UUIDs.
+        """
+
         async def scenario() -> list[str]:
             listener = PipeListener()
             await listener.start(socket_path)
             try:
 
-                async def one_client() -> str:
+                async def one_client(idx: int) -> str:
+                    asserted = f"/tmp/serena-test-distinct-roots/client-{idx}"
                     reader, writer = await asyncio.open_unix_connection(socket_path)
-                    writer.write(PipeHandshake.request().to_bytes())
+                    writer.write(PipeHandshake.request(asserted).to_bytes())
                     await writer.drain()
                     response_bytes = await reader.readuntil(b"\n")
                     response = PipeEnvelope.from_bytes(response_bytes)
                     writer.close()
                     with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                         await writer.wait_closed()
-                    return PipeHandshake.session_id_from_response(response)
+                    returned = PipeHandshake.session_id_from_response(response)
+                    assert returned == asserted, (
+                        f"daemon failed to echo asserted session_id for client {idx}: "
+                        f"asserted={asserted!r}, returned={returned!r}"
+                    )
+                    return returned
 
-                return list(await asyncio.gather(*[one_client() for _ in range(10)]))
+                return list(await asyncio.gather(*[one_client(i) for i in range(10)]))
             finally:
                 await listener.stop()
 
@@ -302,8 +367,8 @@ class TestPipeClient:
             _parse_unix_url("unix://")
 
     def test_run_pipe_client_validates_url_before_connect(self) -> None:
-        with pytest.raises(ValueError, match="unix"):
-            run_pipe_client(daemon_url="http://example.com")
+        with pytest.raises(ValueError):
+            run_pipe_client(daemon_url="http://example.com", project_root="/tmp/test-validate-url")
 
     
 
@@ -312,16 +377,25 @@ class TestPipeHandshakeIntegration:
     """End-to-end handshake against a real listener via the pipe-side helper."""
 
     def test_handshake_helper_completes_against_real_listener(self, socket_path: str) -> None:
+        # Under the project-root-as-session-id contract, the daemon echoes the
+        # client-asserted session_id verbatim; the helper returns whatever the
+        # daemon stamped on the response. We assert exact equality with the
+        # asserted value rather than parsing as a UUID4 (which the new contract
+        # explicitly forbids the daemon from minting).
+        asserted = "/tmp/test-handshake-helper-completes"
+
         async def scenario() -> str:
             listener = PipeListener()
             await listener.start(socket_path)
             try:
-                return await _handshake(socket_path)
+                return await _handshake(socket_path, asserted)
             finally:
                 await listener.stop()
 
         session_id = asyncio.run(scenario())
-        uuid.UUID(hex=session_id)
+        assert session_id == asserted, (
+            f"daemon must echo the asserted session_id verbatim; got {session_id!r}"
+        )
 
 
 
@@ -398,14 +472,23 @@ class _RaisingCatalogProvider(CatalogProvider):
         raise RuntimeError("intentional catalog provider failure")
 
 
-async def _client_handshake(socket_path: str) -> tuple[str, asyncio.StreamReader, asyncio.StreamWriter]:
+async def _client_handshake(
+    socket_path: str, project_root: str | None = None
+) -> tuple[str, asyncio.StreamReader, asyncio.StreamWriter]:
     """Connect to ``socket_path`` and complete the handshake; return the open streams.
 
+    :param socket_path: Filesystem path of the listener's Unix socket.
+    :param project_root: Optional client-asserted ``session_id`` value sent in
+        the handshake meta. When ``None``, a unique ``/tmp/test-pipe-<uuid>``
+        path is generated so each handshake lands in its own daemon-side
+        per-session entry (preserving isolation for tests that don't care
+        about the identity itself).
     :returns: ``(session_id, reader, writer)`` -- the streams stay open so
         callers can drive frame forwarding on top of the same connection.
     """
+    asserted_session_id = project_root if project_root is not None else f"/tmp/test-pipe-{uuid.uuid4().hex}"
     reader, writer = await asyncio.open_unix_connection(socket_path)
-    writer.write(PipeHandshake.request().to_bytes())
+    writer.write(PipeHandshake.request(asserted_session_id).to_bytes())
     await writer.drain()
     response_line = await reader.readuntil(b"\n")
     response = PipeEnvelope.from_bytes(response_line)
@@ -820,8 +903,7 @@ class TestPipeForwarderEnd2End:
                 # streams to _run_forwarder; this mirrors what _run_pipe_main
                 # does without binding to actual stdio
                 daemon_reader, daemon_writer = await asyncio.open_unix_connection(socket_path)
-                session_id = await _handshake_on(daemon_reader, daemon_writer)
-
+                session_id = await _handshake_on(daemon_reader, daemon_writer, "/tmp/test-round-trips-frame")
                 forwarder = asyncio.create_task(
                     _run_forwarder(session_id, stdin_reader, stdout_writer, daemon_reader, daemon_writer)
                 )
@@ -882,7 +964,7 @@ class TestPipeCatalogProtocol:
     def test_is_request_rejects_handshake(self) -> None:
         # the handshake's method is mcp/session/open, NOT pipe/catalog/get
         # so is_request must reject it even though the envelope shape matches
-        assert PipeCatalog.is_request(PipeHandshake.request()) is False
+        assert PipeCatalog.is_request(PipeHandshake.request("/tmp/test-catalog-rejects")) is False
 
     def test_is_request_rejects_other_jsonrpc_method(self) -> None:
         bogus = PipeEnvelope(meta={}, frame={"jsonrpc": "2.0", "method": "tools/call", "id": 5})
@@ -1176,7 +1258,7 @@ class TestPipeCatalogClient:
                 # what _run_pipe_main does in production
                 reader, writer = await asyncio.open_unix_connection(socket_path)
                 try:
-                    session_id = await _handshake_on(reader, writer)
+                    session_id = await _handshake_on(reader, writer, "/tmp/test-fetch-catalog-provider")
                     return await _fetch_catalog_on(reader, writer, session_id)
                 finally:
                     await _drain_close(writer)
@@ -1193,7 +1275,7 @@ class TestPipeCatalogClient:
             try:
                 reader, writer = await asyncio.open_unix_connection(socket_path)
                 try:
-                    session_id = await _handshake_on(reader, writer)
+                    session_id = await _handshake_on(reader, writer, "/tmp/test-fetch-catalog-empty")
                     return await _fetch_catalog_on(reader, writer, session_id)
                 finally:
                     await _drain_close(writer)
@@ -1477,7 +1559,7 @@ class TestPipeCatalogEnd2End:
                 stdin_reader, stdin_writer = await _make_memory_stream_pair()
                 stdout_reader, stdout_writer = await _make_memory_stream_pair()
                 daemon_reader, daemon_writer = await asyncio.open_unix_connection(socket_path)
-                session_id = await _handshake_on(daemon_reader, daemon_writer)
+                session_id = await _handshake_on(daemon_reader, daemon_writer, "/tmp/test-pipe-then-catalog")
                 fetched = await _fetch_catalog_on(daemon_reader, daemon_writer, session_id)
 
                 forwarder = asyncio.create_task(
@@ -2672,4 +2754,253 @@ class TestPipeRestartResilience:
         )
         assert leftover_cursors == [], (
             f"sessions not evicted from cursor-manager dict: {leftover_cursors}"
+        )
+
+
+class TestProjectRootAsSessionId:
+    """T7 — verify the project-root-as-session-id contract end-to-end.
+
+    These tests pin the architectural correction captured in
+    ``plan://Serena:serena/serena-pipe-session-id-is-the-session-id``:
+    the pipe-client asserts the absolute path of the project it is operating
+    on as the ``session_id`` at handshake; the daemon trusts that assertion
+    verbatim (no UUID minting); socket disconnect does NOT evict per-session
+    state (a respawned client into the same project re-attaches to the
+    existing entry); and clients on different project roots are isolated.
+    """
+
+    def test_pipe_client_refuses_without_project(self, cli_runner: CliRunner) -> None:
+        """``serena start-mcp-server --transport pipe`` MUST exit non-zero with a
+        clear error when the operator supplies neither ``--project`` nor a
+        positional project argument nor ``--project-from-cwd``. There is no
+        anonymous-mode fallback because the project_root IS the session id."""
+        from serena.cli import top_level
+
+        result = cli_runner.invoke(
+            top_level,
+            ["start-mcp-server", "--transport", "pipe"],
+        )
+        # the CLI must reject the invocation; click.UsageError exits 2
+        assert result.exit_code != 0, (
+            f"start-mcp-server --transport pipe (no project) was accepted; output={result.output!r}"
+        )
+        assert "--project" in result.output or "project" in result.output.lower(), (
+            f"error message did not mention --project; got: {result.output!r}"
+        )
+
+    def test_handshake_carries_project_root(self) -> None:
+        """``PipeHandshake.request(project_root)`` stamps the absolute project
+        path into ``meta.session_id`` so the daemon can trust the client-asserted
+        identifier verbatim. The frame body itself stays standard JSON-RPC."""
+        envelope = PipeHandshake.request("/Users/test/Projects/example")
+        assert envelope.meta == {"session_id": "/Users/test/Projects/example"}, (
+            f"meta channel did not carry the project_root verbatim; got {envelope.meta!r}"
+        )
+        assert envelope.frame["method"] == "mcp/session/open"
+        assert envelope.frame["jsonrpc"] == "2.0"
+        assert envelope.frame["id"] == 1
+
+    def test_daemon_does_not_mint_uuid(self, socket_path: str) -> None:
+        """Daemon ``PipeListener._handle_connection`` MUST NOT generate any
+        identifier of its own. Whatever ``meta.session_id`` the client asserts
+        is what the daemon registers and echoes back — verbatim, with no
+        substitution, no rewriting, no UUID4 fallback."""
+        # use a deliberately non-UUID-shaped path so any silent UUID minting
+        # would change the bytes in an unmistakable way
+        asserted = "/Users/test/Projects/non-uuid-shaped-path-with-dashes-and-words"
+
+        async def scenario() -> str:
+            listener = PipeListener()
+            await listener.start(socket_path)
+            try:
+                _, _, writer = await _client_handshake(socket_path, asserted)
+                returned_id = next(iter(listener.connections.keys()))
+                await _drain_close(writer)
+                return returned_id
+            finally:
+                await listener.stop()
+
+        registered = asyncio.run(scenario())
+        assert registered == asserted, (
+            f"daemon registered a different session_id than the client asserted; "
+            f"asserted={asserted!r}, registered={registered!r}"
+        )
+
+    def test_socket_disconnect_does_not_evict_state(
+        self, isolation_agent: SerenaAgent, socket_path: str
+    ) -> None:
+        """Socket disconnect MUST NOT remove the per-session entry from
+        ``_active_projects_by_session`` / ``_cursor_managers_by_session``.
+        Eviction is now scoped to daemon shutdown or explicit
+        ``activate_project`` to a different project; transport-level events
+        (SIGKILL, broken socket, clean writer-close) are no longer eviction
+        triggers."""
+        from serena.mcp import build_pipe_listener
+
+        project_root = "/tmp/serena-test-disconnect-preserves-state"
+
+        async def scenario() -> dict:
+            # build_pipe_listener wires NO disconnect handler under the new contract;
+            # using it (rather than constructing PipeListener directly) is the
+            # production-fidelity test of that wiring
+            listener = build_pipe_listener(isolation_agent)
+            await listener.start(socket_path)
+            try:
+                # connect, handshake under project_root, seed per-session state
+                session_id, _, writer = await _client_handshake(socket_path, project_root)
+                assert session_id == project_root
+                isolation_agent._active_projects_by_session[session_id] = _pipe_project_stub(
+                    "project-survives-disconnect"
+                )
+                isolation_agent._cursor_managers_by_session[session_id] = MagicMock(
+                    name="cursor-manager-survives-disconnect"
+                )
+
+                # simulate SIGKILL on the pipe-client; daemon sees socket EOF
+                await _drain_close(writer)
+
+                # poll briefly to give any (mis)wired disconnect handler a chance
+                # to fire; the test passes only if no eviction has happened
+                for _ in range(50):
+                    await asyncio.sleep(0.01)
+                return dict(isolation_agent._active_projects_by_session)
+            finally:
+                await listener.stop()
+
+        active_projects_after_disconnect = asyncio.run(scenario())
+
+        assert project_root in active_projects_after_disconnect, (
+            f"per-session state was evicted on socket disconnect; remaining keys: "
+            f"{list(active_projects_after_disconnect)}. Under the project-root-as-session-id "
+            "contract socket disconnect must NOT trigger eviction."
+        )
+
+    def test_pipe_respawn_with_same_project_finds_activation_preserved(
+        self, isolation_agent: SerenaAgent, socket_path: str
+    ) -> None:
+        """A pipe-client that exits and respawns into the same project_root
+        re-attaches to the same daemon-side per-session entry. Activation set
+        by the first instance is observed verbatim by the second instance —
+        this is the load-bearing user-visible behaviour the rewrite delivers."""
+        from serena.mcp import build_pipe_listener
+
+        project_root = "/tmp/serena-test-respawn-finds-activation"
+        first_project_stub = _pipe_project_stub("activation-set-by-first-pipe")
+
+        async def scenario() -> tuple[Project | None, Project | None]:
+            listener = build_pipe_listener(isolation_agent)
+            await listener.start(socket_path)
+            try:
+                # first pipe-client: handshake, set activation, exit
+                session_id_a, _, writer_a = await _client_handshake(socket_path, project_root)
+                isolation_agent._active_projects_by_session[session_id_a] = first_project_stub
+                await _drain_close(writer_a)
+
+                # respawned pipe-client: same project_root → same session_id
+                session_id_b, _, writer_b = await _client_handshake(socket_path, project_root)
+                assert session_id_b == session_id_a == project_root
+
+                # observe activation as the second pipe-client would
+                observed_by_second = isolation_agent._active_projects_by_session.get(session_id_b)
+                await _drain_close(writer_b)
+
+                # snapshot the entry one more time after disconnect
+                snapshot_after_second_disconnect = isolation_agent._active_projects_by_session.get(
+                    project_root
+                )
+                return observed_by_second, snapshot_after_second_disconnect
+            finally:
+                await listener.stop()
+
+        observed, after_disconnect = asyncio.run(scenario())
+        assert observed is first_project_stub, (
+            f"respawned pipe-client did not observe the activation set by the prior pipe-client; "
+            f"observed={observed!r}, expected={first_project_stub!r}"
+        )
+        assert after_disconnect is first_project_stub, (
+            "activation was lost after the second pipe-client's disconnect; respawn-cycle "
+            "preservation is the contract being violated"
+        )
+
+    def test_two_clients_same_project_share_state(
+        self, isolation_agent: SerenaAgent, socket_path: str
+    ) -> None:
+        """Two pipe-clients on the same project_root are the same logical session
+        by construction — they share daemon-side per-session state via the same
+        registry key. This is intended behaviour, not collision."""
+        from serena.mcp import build_pipe_listener
+
+        project_root = "/tmp/serena-test-shared-project-state"
+        shared_stub = _pipe_project_stub("shared-by-two-pipes")
+
+        async def scenario() -> tuple[str, str, Project | None, Project | None]:
+            listener = build_pipe_listener(isolation_agent)
+            await listener.start(socket_path)
+            try:
+                session_id_a, _, writer_a = await _client_handshake(socket_path, project_root)
+                isolation_agent._active_projects_by_session[session_id_a] = shared_stub
+
+                session_id_b, _, writer_b = await _client_handshake(socket_path, project_root)
+                # both clients see the same entry through the same key
+                seen_by_a = isolation_agent._active_projects_by_session.get(session_id_a)
+                seen_by_b = isolation_agent._active_projects_by_session.get(session_id_b)
+
+                await _drain_close(writer_a)
+                await _drain_close(writer_b)
+                return session_id_a, session_id_b, seen_by_a, seen_by_b
+            finally:
+                await listener.stop()
+
+        sid_a, sid_b, seen_a, seen_b = asyncio.run(scenario())
+        assert sid_a == sid_b == project_root, (
+            f"two pipes on the same project_root produced different session_ids; "
+            f"sid_a={sid_a!r}, sid_b={sid_b!r}, project_root={project_root!r}"
+        )
+        assert seen_a is shared_stub and seen_b is shared_stub, (
+            f"shared-project-state contract violated; seen_by_a={seen_a!r}, seen_by_b={seen_b!r}"
+        )
+
+    def test_two_clients_different_projects_isolated(
+        self, isolation_agent: SerenaAgent, socket_path: str
+    ) -> None:
+        """Two pipe-clients on different project_roots have fully isolated
+        daemon-side per-session entries. State written under one project_root
+        MUST NOT be visible under the other, and vice versa."""
+        from serena.mcp import build_pipe_listener
+
+        project_root_a = "/tmp/serena-test-isolated-project-a"
+        project_root_b = "/tmp/serena-test-isolated-project-b"
+        stub_a = _pipe_project_stub("project-a-only")
+        stub_b = _pipe_project_stub("project-b-only")
+
+        async def scenario() -> tuple[Project | None, Project | None]:
+            listener = build_pipe_listener(isolation_agent)
+            await listener.start(socket_path)
+            try:
+                session_id_a, _, writer_a = await _client_handshake(socket_path, project_root_a)
+                session_id_b, _, writer_b = await _client_handshake(socket_path, project_root_b)
+                assert session_id_a == project_root_a
+                assert session_id_b == project_root_b
+                assert session_id_a != session_id_b
+
+                isolation_agent._active_projects_by_session[session_id_a] = stub_a
+                isolation_agent._active_projects_by_session[session_id_b] = stub_b
+
+                # cross-check: each client's view of its OWN session is unaffected
+                # by the other client's writes
+                seen_by_a = isolation_agent._active_projects_by_session.get(session_id_a)
+                seen_by_b = isolation_agent._active_projects_by_session.get(session_id_b)
+
+                await _drain_close(writer_a)
+                await _drain_close(writer_b)
+                return seen_by_a, seen_by_b
+            finally:
+                await listener.stop()
+
+        seen_a, seen_b = asyncio.run(scenario())
+        assert seen_a is stub_a, (
+            f"project-A pipe observed the wrong stub; got={seen_a!r}, expected={stub_a!r}"
+        )
+        assert seen_b is stub_b, (
+            f"project-B pipe observed the wrong stub; got={seen_b!r}, expected={stub_b!r}"
         )

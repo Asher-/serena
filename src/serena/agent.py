@@ -321,8 +321,10 @@ class SerenaAgent:
         # per-MCP-session active project map, populated when Tool.apply_ex routes a call from a session,
         # so reads via the _active_project property return the project for the calling session rather than
         # whichever session most recently activated. Keys are either id(mcp_ctx.session) (int, for direct
-        # stdio / streamable-http / sse transports) or the pipe-asserted UUID4 hex string (for clients
-        # connecting via the per-client stdio pipe; see _PIPE_SESSION_ID_VAR).
+        # stdio / streamable-http / sse transports) or the absolute project_root path the pipe-client
+        # asserts at handshake (for clients connecting via the per-client stdio pipe; see
+        # _PIPE_SESSION_ID_VAR and the project-root-as-session-id contract in
+        # plan://Serena:serena/serena-pipe-session-id-is-the-session-id).
         self._active_projects_by_session: dict[str | int, Project] = {}
         # fallback active project for non-MCP callers (CLI, dashboard, scripts, tests) that have no session
         # in scope; the property setter writes here when _SESSION_KEY_VAR is unset.
@@ -904,14 +906,20 @@ class SerenaAgent:
             executor.shutdown()
 
     def evict_pipe_session(self, session_id: str) -> None:
-        """
-        Pop ``session_id`` out of every per-session map when its pipe disconnects.
+        """Drop ``session_id`` from every per-session map.
 
-        Wired into :class:`PipeListener` as the disconnect handler in :meth:`mcp.py`'s
-        daemon-startup path. The pipe layer owns the session id's lifetime: it is allocated
-        once at handshake and held for the forwarder process's life, so eviction fires
-        exactly once per pipe session. Idempotent (mass eviction or repeated handler firing
-        — e.g. if the socket is half-closed — cannot raise).
+        :param session_id: The pipe-asserted session_id (an absolute project_root
+            path under the project-root-as-session-id contract) to evict.
+
+        Under the project-root-as-session-id contract, this method is NOT wired
+        to socket-disconnect events: per-session state must survive socket churn
+        so a respawned pipe-client into the same project_root re-attaches to the
+        existing entry. ``build_pipe_listener`` therefore registers no disconnect
+        handler. This method remains available as the implementation of explicit
+        operator-driven eviction (daemon shutdown, an ``activate_project`` to a
+        different project from a session that previously held this entry, or
+        future operator-issued unregister flows). It is idempotent: calling it
+        for an unknown ``session_id`` is a no-op.
         """
         self._active_projects_by_session.pop(session_id, None)
         self._cursor_managers_by_session.pop(session_id, None)

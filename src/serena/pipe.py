@@ -20,6 +20,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import sys
 from typing import Any
 from urllib.parse import urlparse
@@ -40,7 +41,11 @@ def run_pipe_client(daemon_url: str, project_root: str) -> None:
     ``mcp/session/open`` handshake (asserting ``project_root`` as the
     session_id), then enters a long-lived bidirectional forwarder that pumps
     newline-delimited JSON-RPC frames between the upstream stdio (e.g. Claude
-    Code) and the daemon.
+    Code) and the daemon. The initial daemon connection is retried with
+    bounded backoff on transient socket failure (see
+    :data:`_RECONNECT_ATTEMPTS_ENV`); on exhausted retries the function
+    raises :exc:`SystemExit(1)` so Claude Code surfaces the failure to the
+    operator rather than silently hanging.
 
     :param daemon_url: URI of the Serena daemon's listening socket. Only the
         ``unix://`` scheme is currently accepted; TCP and other schemes are
@@ -53,14 +58,25 @@ def run_pipe_client(daemon_url: str, project_root: str) -> None:
     :raises ValueError: if ``daemon_url`` is not a ``unix://`` URL or has an
         empty path component.
     :raises PipeProtocolError: if the daemon's handshake response is malformed.
+    :raises SystemExit: on exhausted reconnect attempts so the parent process
+        sees a non-zero exit code instead of an opaque traceback.
     """
     # parse the unix:// URL to extract the socket path; reject anything else
     # so the operator gets a clear error rather than an obscure socket failure
     socket_path = _parse_unix_url(daemon_url)
 
-    # delegate to the asyncio main; the function is sync-callable so it plugs
-    # straight into the click handler in cli.py without further wiring
-    asyncio.run(_run_pipe_main(socket_path, project_root))
+    # delegate to the asyncio main; on exhausted-retry failure we translate the
+    # socket error into SystemExit(1) so Claude Code's MCP startup surfaces a
+    # clear non-zero exit instead of a noisy traceback
+    try:
+        asyncio.run(_run_pipe_main(socket_path, project_root))
+    except (FileNotFoundError, ConnectionRefusedError, OSError) as exc:
+        log.error(
+            "serena-pipe: failed to connect to daemon at %s after retries: %s",
+            socket_path,
+            exc,
+        )
+        raise SystemExit(1) from exc
 
 
 def _parse_unix_url(daemon_url: str) -> str:
@@ -212,17 +228,126 @@ async def _attach_stdio() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     return stdin_reader, stdout_writer
 
 
+_RECONNECT_ATTEMPTS_ENV: str = "SERENA_PIPE_RECONNECT_ATTEMPTS"
+"""Environment variable controlling how many times the pipe-client retries
+the initial daemon socket connection before giving up. Default ``5``."""
+
+_RECONNECT_ATTEMPTS_DEFAULT: int = 5
+"""Default number of connection attempts when ``SERENA_PIPE_RECONNECT_ATTEMPTS``
+is unset, empty, or unparsable."""
+
+_RECONNECT_BACKOFFS: tuple[float, ...] = (0.5, 1.0, 2.0, 4.0, 8.0)
+"""Backoff schedule (seconds) between successive reconnect attempts. The last
+entry is reused if the configured attempt count exceeds the schedule length."""
+
+
+def _resolve_max_reconnect_attempts() -> int:
+    """Read :data:`_RECONNECT_ATTEMPTS_ENV` from the environment.
+
+    :returns: Configured attempt count clamped to a positive integer; on
+        unset, empty, unparsable, or sub-1 values, falls back to
+        :data:`_RECONNECT_ATTEMPTS_DEFAULT`.
+    """
+    # consult the environment; treat unset / empty as "use the default"
+    raw = os.environ.get(_RECONNECT_ATTEMPTS_ENV)
+    if raw is None or raw.strip() == "":
+        return _RECONNECT_ATTEMPTS_DEFAULT
+
+    # parse to int; non-integer values fall back with a warning so operators
+    # see the misconfiguration rather than getting silent default behaviour
+    try:
+        n = int(raw.strip())
+    except ValueError:
+        log.warning(
+            "serena-pipe: %s=%r is not a valid integer; using default %d",
+            _RECONNECT_ATTEMPTS_ENV,
+            raw,
+            _RECONNECT_ATTEMPTS_DEFAULT,
+        )
+        return _RECONNECT_ATTEMPTS_DEFAULT
+
+    # require at least one attempt; zero or negative would mean "never connect"
+    if n < 1:
+        log.warning(
+            "serena-pipe: %s=%d is below the minimum of 1; using default %d",
+            _RECONNECT_ATTEMPTS_ENV,
+            n,
+            _RECONNECT_ATTEMPTS_DEFAULT,
+        )
+        return _RECONNECT_ATTEMPTS_DEFAULT
+
+    return n
+
+
+async def _open_daemon_socket_with_retry(socket_path: str) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """Open the daemon Unix socket with bounded retry on transient failure.
+
+    The daemon may briefly be unavailable when the pipe-client first runs
+    (daemon restarting, socket file racing into existence under the
+    operator's launchd reload, transient permission flicker, etc.). Per the
+    project-root-as-session-id design, the pipe-client may retry the
+    handshake with the same ``project_root`` because daemon-side per-session
+    state is no longer evicted on socket disconnect: a successful late
+    handshake re-attaches to the daemon's existing per-session entry.
+
+    :param socket_path: Filesystem path of the daemon's Unix socket.
+    :returns: ``(reader, writer)`` for the established connection.
+    :raises OSError: After the configured attempt count is exhausted, the
+        last connection error is re-raised so the caller can exit non-zero.
+    """
+    # determine the retry budget; honour SERENA_PIPE_RECONNECT_ATTEMPTS or fall back
+    max_attempts = _resolve_max_reconnect_attempts()
+    last_exc: BaseException | None = None
+
+    # attempt the connection up to max_attempts times with the configured backoff
+    for attempt in range(max_attempts):
+        try:
+            return await asyncio.open_unix_connection(socket_path)
+        except (FileNotFoundError, ConnectionRefusedError, OSError) as exc:
+            last_exc = exc
+            # final attempt failed; let the caller decide what to do
+            if attempt + 1 == max_attempts:
+                break
+            # reuse the last backoff entry for any attempts beyond the schedule length
+            backoff = _RECONNECT_BACKOFFS[min(attempt, len(_RECONNECT_BACKOFFS) - 1)]
+            log.warning(
+                "serena-pipe: daemon socket %s unreachable (attempt %d/%d): %s — retrying in %.1fs",
+                socket_path,
+                attempt + 1,
+                max_attempts,
+                exc,
+                backoff,
+            )
+            await asyncio.sleep(backoff)
+
+    # exhausted: surface a single ERROR-level summary so operators see one log line
+    log.error(
+        "serena-pipe: daemon socket %s unreachable after %d attempts; last error: %s",
+        socket_path,
+        max_attempts,
+        last_exc,
+    )
+    assert last_exc is not None
+    raise last_exc
+
+
 async def _run_pipe_main(socket_path: str, project_root: str) -> None:
     """Open the daemon socket, complete the handshake, then run the forwarder.
 
     :param socket_path: Filesystem path of the daemon's Unix socket.
     :param project_root: Absolute path of the project this pipe-client operates
         on; supplied as the session_id at handshake.
+    :raises OSError: If the daemon socket cannot be reached after the
+        configured number of retry attempts (see
+        :data:`_RECONNECT_ATTEMPTS_ENV`). The caller (:func:`run_pipe_client`)
+        translates this into a non-zero exit so Claude Code surfaces the
+        failure to the operator.
     """
-    # establish the long-lived bidirectional stream; if the daemon isn't
-    # running this fails immediately with FileNotFoundError or
-    # ConnectionRefusedError, both of which produce a clear operator message
-    daemon_reader, daemon_writer = await asyncio.open_unix_connection(socket_path)
+    # establish the long-lived bidirectional stream with bounded retry; transient
+    # daemon unavailability (restart, socket racing into existence) is recoverable
+    # because daemon-side per-session state survives socket-level churn under the
+    # project-root-as-session-id contract
+    daemon_reader, daemon_writer = await _open_daemon_socket_with_retry(socket_path)
     try:
         # complete the handshake on the same connection we will keep open for
         # forwarding; we assert project_root as the session_id and the daemon

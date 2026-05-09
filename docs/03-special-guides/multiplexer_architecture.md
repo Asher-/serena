@@ -232,54 +232,77 @@ Each client owns its own forwarder process. The forwarder is started by
 it forwards bytes. The daemon is the only process that holds tool state,
 language servers, and per-session slots — there is one daemon per machine
 regardless of how many clients are connected.
-
-### Handshake-asserted session id
+### Project-root-as-session-id handshake
 
 When a forwarder connects to the daemon's Unix socket, it sends a handshake
-frame; the daemon allocates a fresh UUID4 hex string as the session id and
-returns it on the same handshake. The forwarder holds that id for its
-lifetime; every subsequent JSON-RPC frame it forwards carries the id in the
-pipe protocol's metadata channel (not the upstream `Mcp-Session-Id` header,
-which does not reach handlers). The daemon's pipe listener sets the ContextVar
-`_PIPE_SESSION_ID_VAR` before invoking the FastMCP tool handler, so the
-handler resolves per-session state under the pinned id.
+frame whose meta channel carries the **absolute path of the project the
+forwarder is operating on** in the ``session_id`` field. The forwarder
+already knows this path at startup from ``--project``, the positional
+project argument, or ``--project-from-cwd``; the same resolved path is
+asserted at handshake. The daemon does NOT mint a UUID4 or any other
+identifier — it trusts the client-asserted ``session_id`` verbatim and
+echoes it back in the handshake response.
 
-The id is opaque to the client and survives transport churn at every layer
-the previous section diagnoses: the same id is used across thousands of
-streamable-HTTP request-tasks within the daemon, across multiplexer-side
-session fragmentation if a multiplexer also sits in the path, and across
-daemon catalog refreshes the forwarder may issue.
+This means the project root IS the session identity. Two forwarders on the
+same project root are the same logical session by construction (which is
+exactly what you want — they are working on the same project and should
+share activation, language servers, and per-session state). A forwarder
+that exits and respawns into the same cwd lands on the same ``session_id``,
+re-attaches to the same daemon-side per-session entry, and finds activation
+preserved across pipe-process restarts. A forwarder switching to a new
+project effectively becomes a new session under that project's path; the
+old session's per-session entry remains in the registry and any other
+forwarder still operating on the old path continues to see it.
 
-### Eviction on pipe disconnect
+The forwarder will refuse to start without a resolvable project root: if
+neither ``--project`` nor a positional project argument nor
+``--project-from-cwd`` produces a directory, ``serena start-mcp-server
+--transport pipe`` exits non-zero with a clear operator-facing error rather
+than fall back to anonymous mode.
 
-When the forwarder process exits — clean shutdown, SIGKILL, broken socket —
-the daemon's `PipeListener` notices the socket EOF and runs every registered
-disconnect handler. The wired-in handler is
-`SerenaAgent.evict_pipe_session`, which pops the session id out of every
-per-session dict (today `_active_projects_by_session` and
-`_cursor_managers_by_session`) and logs the eviction at debug level. Any
-subsequent forwarder connection gets a fresh UUID4 session id with a clean
-slate; the daemon never reuses a session id across forwarder lifetimes.
+### Per-session state survives socket disconnect
 
-This is the load-bearing distinction from the previous section's diagnosis:
-eviction is keyed on **pipe-connection close**, not on the per-request
-streamable-HTTP task end. A client that issues ten thousand tool calls over
-one pipe session triggers eviction exactly once — when the client
-disconnects — not ten thousand times.
+Per the project-root-as-session-id contract, the daemon's per-session
+maps (``_active_projects_by_session``, ``_cursor_managers_by_session``,
+``_task_executors_by_session``) are NOT evicted when a forwarder's socket
+disconnects. Eviction is now scoped to two events only:
+
+* daemon shutdown, and
+* explicit ``activate_project`` from a session that previously held a
+  per-session entry to a *different* project (the entry for the OLD
+  ``project_root`` is preserved if any other session still references it).
+
+The disconnect handler that previously called
+``SerenaAgent.evict_pipe_session`` is no longer wired into
+``build_pipe_listener``. ``evict_pipe_session`` itself remains available
+for explicit operator-driven cleanup, but socket-level churn never causes
+silent state loss. A forwarder that is killed and respawned (Claude Code
+restarting an MCP server, a network blip on a remote socket, an operator
+``launchctl bootout/bootstrap`` cycle, etc.) re-asserts the same
+``project_root`` at the next handshake and lands back on the same
+per-session entry the old forwarder was using.
+
+If the daemon socket is briefly unreachable when the forwarder first
+runs, the forwarder retries the initial connection with bounded backoff
+(``SERENA_PIPE_RECONNECT_ATTEMPTS``, default 5; backoffs 0.5s, 1s, 2s, 4s,
+8s) before exiting non-zero. Because daemon-side state survives the
+socket-level retry window, late-handshake success behaves identically to
+on-time handshake.
 
 ### Why this fixes the failure mode
 
-The previous section's failure mode reduces to: the per-session slot is
-keyed on something that does not survive the client's lifetime. The pipe
-session id IS that lifetime — it is allocated once at connect, held for
-the forwarder's whole life, and evicted exactly once on disconnect. Inside
-an MCP call the daemon's getters (`_active_project`, `get_cursor_manager`,
+The failure mode the previous section diagnoses reduces to: the per-session
+slot is keyed on something that does not survive the client's lifetime. The
+project-root-as-session-id contract makes that lifetime equal to the
+project itself: the forwarder asserts ``project_root`` at every handshake,
+the daemon never re-keys it, and disconnect does not remove it. Inside an
+MCP call the daemon's getters (``_active_project``, ``get_cursor_manager``,
 …) resolve under the pinned id; they cannot fall through to a sibling
 client's slot because the per-session lookup either returns the value this
 session itself wrote or fails closed (the IRONCLAD guard from the parent
-design plan, Phase 5a). The pipe makes that fail-closed branch a non-event
-under normal operation, because the per-session lookup never misses for
-transport-churn reasons.
+design plan, Phase 5a). A respawned forwarder into the same cwd resumes
+where the previous instance left off; sibling forwarders on different
+projects see fully isolated per-session entries.
 
 ### Coexistence with the multiplexer
 
