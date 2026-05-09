@@ -300,3 +300,7 @@ news/news.json
 /src/solidlsp/structural/backends/csharp_bridge/bin
 /src/solidlsp/structural/backends/csharp_bridge/obj
 /src/solidlsp/structural/backends/csharp_bridge/.build.lock
+
+# Cursor-vs-RA evaluation scratch — findings.md backup snapshots and one-off test files
+docs/cursor-vs-ra/runs/*/findings.md.*
+docs/cursor-vs-ra/runs/*/findings.test-newfile.md
