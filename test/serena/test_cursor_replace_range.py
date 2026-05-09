@@ -205,19 +205,33 @@ class TestReplaceLinesUnit:
 
         assert editor.get("x") == "keep-0\nkeep-3\n"
 
-    def test_body_without_trailing_newline_joins_following_line(self) -> None:
+    def test_body_without_trailing_newline_is_normalized(self) -> None:
         """
-        The primitive inserts ``body`` verbatim; if the caller omits a
-        trailing newline the next line will be concatenated. This test locks
-        the documented behaviour in so a future refactor does not silently
-        introduce auto-newline injection.
+        The primitive is line-oriented: when ``content`` does not already end
+        with a newline, the file's existing terminator (``\\n`` here) is
+        appended automatically so the line that previously followed
+        ``end_line`` cannot be fused onto ``content``'s final line. This is
+        the regression guard for the ``src/app.ts`` failure mode where an
+        edit above a ``export default app`` line silently consumed it.
         """
         text = "a\nb\nc\n"
         editor = _InMemoryCodeEditor({"x": text})
 
         editor.replace_lines("x", start_line=0, end_line=0, content="A-no-newline")
 
-        assert editor.get("x") == "A-no-newlineb\nc\n"
+        assert editor.get("x") == "A-no-newline\nb\nc\n"
+
+    def test_crlf_body_without_trailing_newline_gets_crlf_terminator(self) -> None:
+        """
+        When the file uses CRLF line endings, the auto-appended terminator
+        is ``\\r\\n`` so the file's line-ending convention is preserved.
+        """
+        crlf = "alpha\r\nbeta\r\ngamma\r\n"
+        editor = _InMemoryCodeEditor({"x.txt": crlf})
+
+        editor.replace_lines("x.txt", start_line=1, end_line=1, content="BETA")
+
+        assert editor.get("x.txt") == "alpha\r\nBETA\r\ngamma\r\n"
 
     def test_crlf_line_endings_are_preserved_across_the_edit(self) -> None:
         """

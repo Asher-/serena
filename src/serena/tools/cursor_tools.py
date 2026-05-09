@@ -979,9 +979,11 @@ class CursorReplaceRangeTool(Tool, ToolMarkerSymbolicEdit):
         :param end_line: the 0-based index of the last line to replace (inclusive).
             Must satisfy ``start_line <= end_line``. To replace a single line, pass
             ``start_line == end_line``.
-        :param body: the replacement text. Inserted verbatim; the caller should supply
-            a trailing newline to keep the file line-oriented. Pass an empty string to
-            delete the range with no replacement.
+        :param body: the replacement text. The edit is line-oriented: when ``body``
+            does not already end with a newline, the file's existing line terminator
+            (``\\r\\n`` for CRLF files, ``\\n`` otherwise) is appended automatically
+            so the next file line is never fused onto the body's final line. Pass
+            an empty string to delete the range with no replacement.
         :return: a success confirmation and the diff summary.
         """
         # validate input before any filesystem work so callers see a clean error message
@@ -1048,9 +1050,11 @@ class CursorReplaceRangeVerifiedTool(Tool, ToolMarkerSymbolicEdit):
             ignored and CRLF/LF line endings are treated as equivalent. On
             mismatch a ``ValueError`` with a unified diff is raised and the file
             is left unmodified.
-        :param body: the replacement text. Inserted verbatim; the caller should
-            supply a trailing newline to keep the file line-oriented. Pass an
-            empty string to delete the range with no replacement.
+        :param body: the replacement text. The edit is line-oriented: when ``body``
+            does not already end with a newline, the file's existing line terminator
+            (``\\r\\n`` for CRLF files, ``\\n`` otherwise) is appended automatically
+            so the next file line is never fused onto the body's final line. Pass
+            an empty string to delete the range with no replacement.
         :return: a success confirmation and the diff summary.
         """
         # validate input before any filesystem work so callers see a clean error message
@@ -1172,8 +1176,11 @@ class CursorReplaceBetweenTool(Tool, ToolMarkerSymbolicEdit):
         :param after_symbol: LSP name path of the anchor that follows the
             interstitial region. Must resolve to a symbol that starts strictly
             after ``before_symbol`` ends.
-        :param body: the replacement text. Inserted verbatim; the caller should
-            supply a trailing newline to keep the file line-oriented.
+        :param body: the replacement text. The edit is line-oriented: when ``body``
+            does not already end with a newline, the file's existing line terminator
+            (``\\r\\n`` for CRLF files, ``\\n`` otherwise) is appended automatically
+            so ``after_symbol``'s opening line is never fused onto the body's final
+            line.
         :param expected_content: optional text the caller expects at the
             interstitial range, enabling a drift check identical to
             ``cursor_replace_range_verified``'s. Line-by-line comparison via

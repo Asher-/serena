@@ -256,10 +256,22 @@ class CodeEditor(Generic[TSymbol], ABC):
         """
         Inserts content at the given line in the given file.
 
+        The operation is line-oriented: when ``content`` does not already end with a
+        newline, the file's existing line terminator (``\\r\\n`` for CRLF files,
+        ``\\n`` otherwise) is appended automatically so the line at ``line`` cannot be
+        fused onto ``content``'s final line.
+
         :param relative_path: the relative path of the file in which to insert content
         :param line: the 0-based index of the line to insert content at
         :param content: the content to insert
         """
+        # normalise the body to line-oriented form so the line at ``line`` cannot be
+        # fused onto ``content``'s final line; preserve the file's dominant terminator
+        if content and not content.endswith("\n"):
+            pre_content = self.read_file(relative_path)
+            terminator = "\r\n" if "\r\n" in pre_content else "\n"
+            content = content + terminator
+
         with self.edited_file_context(relative_path) as edited_file:
             edited_file.insert_text_at_position(PositionInFile(line, 0), content)
 
@@ -285,23 +297,33 @@ class CodeEditor(Generic[TSymbol], ABC):
 
         The operation deletes lines ``[start_line, end_line]`` (inclusive, 0-based) and
         inserts ``content`` at the position where those lines began. This is the file-level
-        counterpart to :py:meth:`replace_body` — it does not consult the language server
+        counterpart to :py:meth:`replace_body` -- it does not consult the language server
         and can therefore mutate regions outside any LSP symbol extent (e.g. free-floating
         comment blocks, blank-line gaps between imports, or regions before the first
         declaration in a file).
 
-        The body is inserted verbatim. If the caller intends the replacement to remain
-        line-oriented, ``content`` should end with a newline; otherwise the line that
-        previously followed ``end_line`` will be joined onto the final line of ``content``.
+        The operation is line-oriented: when ``content`` does not already end with a
+        newline, the file's existing line terminator (``\\r\\n`` for CRLF files, ``\\n``
+        otherwise) is appended automatically so the line that previously followed
+        ``end_line`` cannot be fused onto ``content``'s final line.
 
         :param relative_path: the relative path of the file to edit
         :param start_line: the 0-based index of the first line to replace (inclusive)
         :param end_line: the 0-based index of the last line to replace (inclusive)
-        :param content: the text to insert in place of the deleted range
+        :param content: the text to insert in place of the deleted range. An empty
+            string deletes the range with no replacement.
         """
         # validate the range; start > end is a programmer error
         if start_line < 0 or end_line < start_line:
             raise ValueError(f"Invalid replace_lines range [{start_line}, {end_line}] for {relative_path!r}")
+
+        # normalise the body to line-oriented form so the line that previously
+        # followed ``end_line`` cannot be fused onto ``content``'s final line --
+        # the dominant terminator in the existing file is preserved
+        if content and not content.endswith("\n"):
+            pre_content = self.read_file(relative_path)
+            terminator = "\r\n" if "\r\n" in pre_content else "\n"
+            content = content + terminator
 
         # perform the delete-then-insert pair inside a single edited_file_context so the
         # file is saved exactly once; the delete spans [start_line, end_line+1) line-starts
