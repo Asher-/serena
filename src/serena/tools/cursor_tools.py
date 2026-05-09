@@ -1356,7 +1356,7 @@ class CursorOverviewTool(Tool, ToolMarkerSymbolicRead):
         lines: list[str] = [f"why: {because}", "", f"Top-level symbols in {relative_path}:"]
         for sym in top_level:
             line = sym.line
-            loc = f"{relative_path}:{line + 1}" if line is not None else relative_path
+            loc = f"{relative_path}:{line}" if line is not None else relative_path
             kind = sym.symbol_kind_name
             if kind:
                 lines.append(f"  {sym.name} :{kind}@{loc}:")

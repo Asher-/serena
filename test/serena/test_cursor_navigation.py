@@ -510,6 +510,30 @@ class TestCursorFindAndOverview:
         assert "UserService" in result
         assert "ItemService" in result
 
+    def test_cursor_overview_emits_zero_based_line_numbers(self, python_serena_agent: SerenaAgent) -> None:
+        """cursor_overview emits 0-based line numbers, matching cursor_find / search_for_pattern /
+        the edit primitive cursor_replace_range. Regression guard against a prior ``line + 1``
+        formatter that rendered cursor_overview entries 1-based and caused agents to off-by-one
+        when they fed those numbers into cursor_replace_range_verified.
+
+        UserService is declared at 0-based line 9 of test_repo/services.py (verified empirically:
+        cursor_replace_range_verified at start_line=9 reads ``class UserService:``).
+        """
+        overview_tool = python_serena_agent.get_tool(CursorOverviewTool)
+        result = overview_tool.apply(
+            because="regression test: pin the 0-based line-number convention for cursor_overview",
+            relative_path=os.path.join("test_repo", "services.py"),
+        )
+        # entry shape: ``  UserService :Class@<path>:<line>:``
+        user_service_lines = [line for line in result.splitlines() if "UserService :" in line]
+        assert len(user_service_lines) == 1, f"expected exactly one UserService entry, got {user_service_lines!r}"
+        entry = user_service_lines[0]
+        line_field = entry.rsplit(":", 2)[-2]
+        assert line_field == "9", (
+            f"cursor_overview reported UserService at line {line_field}, expected 9 (0-based); "
+            f"got entry {entry!r}. If this fails with line='10', the +1 line-base bug has regressed."
+        )
+
     def test_cursor_overview_missing_file(self, python_serena_agent: SerenaAgent) -> None:
         """cursor_overview raises FileNotFoundError for a missing file."""
         overview_tool = python_serena_agent.get_tool(CursorOverviewTool)
