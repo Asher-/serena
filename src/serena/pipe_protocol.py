@@ -99,10 +99,17 @@ class PipeHandshake:
     """Fixed JSON-RPC id for the handshake request; the pipe sends exactly one."""
 
     @classmethod
-    def request(cls) -> PipeEnvelope:
-        """Build the pipe-side handshake envelope to send on connect."""
+    def request(cls, project_root: str) -> PipeEnvelope:
+        """Build the pipe-side handshake envelope to send on connect.
+
+        :param project_root: Absolute path of the project the pipe-client is
+            operating on. Stamped into ``meta.session_id`` so the daemon keys
+            per-session state on it. The project root IS the session identity:
+            two pipe-clients on the same project root are one logical session
+            by design and share daemon-side per-session state.
+        """
         return PipeEnvelope(
-            meta={},
+            meta={"session_id": project_root},
             frame={"jsonrpc": "2.0", "method": cls.METHOD, "id": cls.REQUEST_ID},
         )
 

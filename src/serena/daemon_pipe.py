@@ -17,7 +17,6 @@ import asyncio
 import contextlib
 import inspect
 import logging
-import os
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
@@ -291,6 +290,14 @@ class PipeListener:
     async def _handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """Handshake-then-forward handler for one accepted pipe connection.
 
+        The session_id is taken from the handshake request envelope's ``meta``
+        field; the daemon does NOT mint one. The pipe-client typically asserts
+        its project_root as the session_id, so two pipe-clients on the same
+        project ARE the same logical session by design and share daemon-side
+        per-session state. Per the project-root-as-session-id contract this
+        handler also does NOT trigger eviction on socket disconnect: a respawned
+        pipe-client into the same project finds activation preserved.
+
         :param reader: Stream reader for inbound envelopes from the pipe.
         :param writer: Stream writer for outbound envelopes to the pipe.
         """
@@ -320,10 +327,22 @@ class PipeListener:
                     await writer.wait_closed()
                 return
 
-            # allocate a fresh UUID4 session_id; per the design plan the daemon
-            # is the sole authority for session_id assignment, so no client-
-            # asserted id is ever trusted
-            session_id = uuid.uuid4().hex
+            # the pipe-client supplies session_id in the handshake meta channel;
+            # the daemon does NOT mint one. Trust what the client asserts: when
+            # two pipe-clients send the same session_id (e.g. same project root)
+            # they ARE the same logical session and share per-session state by
+            # design, not by collision.
+            session_id = envelope.meta.get("session_id")
+            if not isinstance(session_id, str) or not session_id:
+                log.warning(
+                    "PipeListener: handshake meta missing session_id; closing: meta=%r",
+                    envelope.meta,
+                )
+                writer.close()
+                with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                    await writer.wait_closed()
+                return
+
             connection = PipeConnection(session_id=session_id, reader=reader, writer=writer)
             self._connections[session_id] = connection
 
@@ -347,12 +366,13 @@ class PipeListener:
                 await self._forward_frames(connection)
             finally:
                 # the forwarder exited; deregister the connection and close the
-                # writer cleanly so stop() doesn't double-close. T6: fire any
-                # registered disconnect handlers AFTER the connection is removed
-                # from _connections, so a handler that consults listener state
-                # sees the post-disconnect view (e.g. the agent's eviction
-                # callback should not have to special-case "this session is
-                # still in connections briefly").
+                # writer cleanly so stop() doesn't double-close. Per the
+                # project-root-as-session-id design, daemon-side per-session
+                # state in SerenaAgent survives this disconnect so a respawned
+                # pipe-client into the same project finds activation preserved.
+                # Disconnect handlers (if any are registered) still fire as a
+                # listener extension point, but the production wiring no longer
+                # registers agent.evict_pipe_session on this list.
                 self._connections.pop(session_id, None)
                 with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                     writer.close()

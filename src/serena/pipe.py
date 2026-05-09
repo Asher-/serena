@@ -33,17 +33,23 @@ class PipeNotImplementedError(NotImplementedError):
     """Raised when pipe-transport functionality is invoked before its task lands."""
 
 
-def run_pipe_client(daemon_url: str) -> None:
+def run_pipe_client(daemon_url: str, project_root: str) -> None:
     """Run the per-client pipe forwarder until the upstream stdio is closed.
 
     Connects to the Serena daemon over a Unix socket, completes the
-    ``mcp/session/open`` handshake, then enters a long-lived bidirectional
-    forwarder that pumps newline-delimited JSON-RPC frames between the
-    upstream stdio (e.g. Claude Code) and the daemon.
+    ``mcp/session/open`` handshake (asserting ``project_root`` as the
+    session_id), then enters a long-lived bidirectional forwarder that pumps
+    newline-delimited JSON-RPC frames between the upstream stdio (e.g. Claude
+    Code) and the daemon.
 
     :param daemon_url: URI of the Serena daemon's listening socket. Only the
         ``unix://`` scheme is currently accepted; TCP and other schemes are
         reserved for future tasks.
+    :param project_root: Absolute path of the project this pipe-client operates
+        on. Asserted as the session_id at handshake; the daemon keys per-session
+        state on it. Project root IS the session identity, so a respawned
+        pipe-client into the same cwd re-attaches to the same daemon-side state
+        and activation is preserved across pipe-process restarts.
     :raises ValueError: if ``daemon_url`` is not a ``unix://`` URL or has an
         empty path component.
     :raises PipeProtocolError: if the daemon's handshake response is malformed.
@@ -54,7 +60,7 @@ def run_pipe_client(daemon_url: str) -> None:
 
     # delegate to the asyncio main; the function is sync-callable so it plugs
     # straight into the click handler in cli.py without further wiring
-    asyncio.run(_run_pipe_main(socket_path))
+    asyncio.run(_run_pipe_main(socket_path, project_root))
 
 
 def _parse_unix_url(daemon_url: str) -> str:
@@ -72,21 +78,24 @@ def _parse_unix_url(daemon_url: str) -> str:
     return parsed.path
 
 
-async def _handshake(socket_path: str) -> str:
+async def _handshake(socket_path: str, project_root: str) -> str:
     """Connect to ``socket_path`` and run the ``mcp/session/open`` exchange.
 
     :param socket_path: Filesystem path of the daemon's listening Unix socket.
-    :returns: The daemon-asserted UUID4 ``session_id`` extracted from the
-        response's ``meta`` channel.
+    :param project_root: Absolute path of the project this pipe-client operates
+        on. Sent in the handshake meta as the session_id; the daemon trusts it
+        verbatim (no daemon-side UUID minting).
+    :returns: The session_id echoed back by the daemon (== ``project_root``).
     """
     # establish the bidirectional stream; if the daemon isn't running this
     # fails immediately with FileNotFoundError or ConnectionRefusedError,
     # both of which produce a clear operator-facing message
     reader, writer = await asyncio.open_unix_connection(socket_path)
     try:
-        # send mcp/session/open and await the response; the daemon answers
-        # with a single envelope whose meta channel carries the session_id
-        writer.write(PipeHandshake.request().to_bytes())
+        # send mcp/session/open carrying project_root as session_id and await
+        # the response; the daemon answers with a single envelope echoing the
+        # session_id back in its meta channel
+        writer.write(PipeHandshake.request(project_root).to_bytes())
         await writer.drain()
         line = await reader.readuntil(b"\n")
         envelope = PipeEnvelope.from_bytes(line)
@@ -102,7 +111,7 @@ async def _handshake(socket_path: str) -> str:
             pass
 
 
-async def _handshake_on(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> str:
+async def _handshake_on(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, project_root: str) -> str:
     """Run the ``mcp/session/open`` exchange on an already-open connection.
 
     Unlike :func:`_handshake`, this helper does not open or close the
@@ -112,13 +121,15 @@ async def _handshake_on(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
     :param reader: Async reader connected to the daemon's listener.
     :param writer: Async writer connected to the daemon's listener.
-    :returns: The daemon-asserted UUID4 ``session_id`` extracted from the
-        response's ``meta`` channel.
+    :param project_root: Absolute path of the project this pipe-client operates
+        on. Sent in the handshake meta as the session_id; the daemon trusts it
+        verbatim (no daemon-side UUID minting).
+    :returns: The session_id echoed back by the daemon (== ``project_root``).
     :raises PipeProtocolError: if the daemon's response is malformed or omits
         ``meta.session_id``.
     """
-    # send mcp/session/open and await the response on the same connection
-    writer.write(PipeHandshake.request().to_bytes())
+    # send mcp/session/open carrying project_root as session_id and await the response
+    writer.write(PipeHandshake.request(project_root).to_bytes())
     await writer.drain()
     line = await reader.readuntil(b"\n")
     envelope = PipeEnvelope.from_bytes(line)
@@ -201,10 +212,12 @@ async def _attach_stdio() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     return stdin_reader, stdout_writer
 
 
-async def _run_pipe_main(socket_path: str) -> None:
+async def _run_pipe_main(socket_path: str, project_root: str) -> None:
     """Open the daemon socket, complete the handshake, then run the forwarder.
 
     :param socket_path: Filesystem path of the daemon's Unix socket.
+    :param project_root: Absolute path of the project this pipe-client operates
+        on; supplied as the session_id at handshake.
     """
     # establish the long-lived bidirectional stream; if the daemon isn't
     # running this fails immediately with FileNotFoundError or
@@ -212,10 +225,11 @@ async def _run_pipe_main(socket_path: str) -> None:
     daemon_reader, daemon_writer = await asyncio.open_unix_connection(socket_path)
     try:
         # complete the handshake on the same connection we will keep open for
-        # forwarding; the daemon-asserted session_id stamps every outbound
-        # envelope's meta channel for the rest of the connection's lifetime
-        session_id = await _handshake_on(daemon_reader, daemon_writer)
-        log.info("serena-pipe handshake complete; daemon-asserted session_id=%s", session_id)
+        # forwarding; we assert project_root as the session_id and the daemon
+        # echoes it back so the rest of this connection's frames are tagged
+        # with the same project_root in their meta channel
+        session_id = await _handshake_on(daemon_reader, daemon_writer, project_root)
+        log.info("serena-pipe handshake complete; session_id=%s", session_id)
 
         # fetch the daemon's authoritative tool catalog before any upstream
         # tools/list arrives; the forwarder caches this list for the

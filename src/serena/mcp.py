@@ -624,9 +624,11 @@ def build_pipe_listener(agent: SerenaAgent, *, openai_tool_compatible: bool = Fa
         frame_handler=SerenaPipeFrameHandler(agent),
         catalog_provider=SerenaCatalogProvider(agent, openai_tool_compatible=openai_tool_compatible),
     )
-    # T6 eviction wire: pipe disconnect -> agent drops both per-session dicts
-    # for the disconnecting session_id. Without this registration, per-session
-    # entries leak across forwarder restarts and a future client connecting on
-    # a fresh pipe could (in pathological collisions) inherit stale state.
+    # NO disconnect handler is registered: per the project-root-as-session-id
+    # design (plan://Serena:serena/serena-pipe-session-id-is-the-session-id),
+    # daemon-side per-session state MUST survive socket disconnect so a
+    # respawned pipe-client into the same project finds activation preserved.
+    # agent.evict_pipe_session remains available for explicit operator-driven
+    # cleanup but is intentionally NOT wired to socket lifecycle here.
     listener.add_disconnect_handler(agent.evict_pipe_session)
     return listener

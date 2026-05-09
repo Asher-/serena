@@ -340,15 +340,9 @@ class TopLevelCommands(AutoRegisteringGroup):
         log.info("Storing logs in %s", log_path)
 
         # dispatch to the per-client pipe forwarder when 'pipe' transport is selected;
-        # the pipe is NOT a daemon and must not instantiate SerenaMCPFactory
-        if transport == "pipe":
-            from serena.pipe import run_pipe_client
-
-            log.info("Starting Serena pipe forwarder; daemon_url=%s", daemon_url)
-            run_pipe_client(daemon_url=daemon_url)
-            return
-
-        # Handle --project-from-cwd flag
+        # Handle --project-from-cwd flag (runs BEFORE any transport-specific
+        # dispatch so the pipe branch sees the resolved project_root and can
+        # assert it as the session_id at handshake)
         if project_from_cwd:
             if project is not None or project_file_arg is not None:
                 raise click.UsageError("--project-from-cwd cannot be used with --project or positional project argument")
@@ -358,6 +352,35 @@ class TopLevelCommands(AutoRegisteringGroup):
             else:
                 log.warning("No project root found from %s; not activating any project", os.getcwd())
 
+        project_file = project_file_arg or project
+
+        # dispatch to the per-client pipe forwarder when 'pipe' transport is selected;
+        # the pipe is NOT a daemon and must not instantiate SerenaMCPFactory. The pipe
+        # asserts the resolved project_root as the session_id at handshake; the daemon
+        # keys per-session state on it. Project root IS the session identity, so a
+        # respawned pipe-client into the same cwd re-attaches to the same daemon-side
+        # state and activation is preserved across pipe-client restarts.
+        if transport == "pipe":
+            from serena.pipe import run_pipe_client
+
+            if not project_file:
+                raise click.UsageError(
+                    "--transport pipe requires --project, a positional project argument, "
+                    "or --project-from-cwd: the resolved project root is asserted as the "
+                    "session_id at handshake so the daemon can preserve per-session state "
+                    "across pipe-client restarts."
+                )
+            project_path = Path(project_file).expanduser()
+            if not project_path.is_dir():
+                raise click.UsageError(
+                    f"--transport pipe requires a valid project directory; got {project_file!r} "
+                    "(not a directory). Use --project <absolute_path> or --project-from-cwd "
+                    "in a project tree."
+                )
+            project_root = str(project_path.resolve())
+            log.info("Starting Serena pipe forwarder; daemon_url=%s, project_root=%s", daemon_url, project_root)
+            run_pipe_client(daemon_url=daemon_url, project_root=project_root)
+            return
         project_file = project_file_arg or project
         factory = SerenaMCPFactory(context=context, project=project_file, memory_log_handler=memory_log_handler)
         server = factory.create_mcp_server(
