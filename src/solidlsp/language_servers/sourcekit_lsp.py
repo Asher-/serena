@@ -89,7 +89,15 @@ class SourceKitLSP(SolidLanguageServer):
 
         # sourcekit-lsp needs --scratch-path for background indexing and cross-file references.
         # Without it, textDocument/references returns empty because there's no index store.
-        scratch_path = os.path.join(repository_root_path, ".build", "sourcekit-lsp")
+        # The scratch dir lives outside the repo so it does not pollute the project tree
+        # (which would violate the build-location-variables convention) and so a single
+        # cache survives `git clean`. Override root via SERENA_SOURCEKIT_SCRATCH_ROOT.
+        scratch_root = os.environ.get("SERENA_SOURCEKIT_SCRATCH_ROOT") or os.path.join(
+            os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
+            "serena", "sourcekit-scratch",
+        )
+        project_basename = os.path.basename(os.path.normpath(repository_root_path)) or "_root_"
+        scratch_path = os.path.join(scratch_root, project_basename, "sourcekit-lsp")
         os.makedirs(scratch_path, exist_ok=True)
         cmd = [sourcekit_path, "--scratch-path", scratch_path]
         log.info(f"sourcekit-lsp path: {sourcekit_path}, scratch path: {scratch_path}")
@@ -338,8 +346,11 @@ class SourceKitLSP(SolidLanguageServer):
             },
             "clientInfo": {"name": "Visual Studio Code", "version": "1.102.2"},
             "initializationOptions": {
-                "backgroundIndexing": True,
-                "backgroundPreparationMode": "enabled",
+                # backgroundIndexing walks the entire workspace, type-checks every module,
+                # and holds ASTs resident with no eviction — RSS grows to tens of GB on
+                # large Swift workspaces. Default OFF; opt back in via SERENA_SOURCEKIT_BACKGROUND_INDEXING=1.
+                "backgroundIndexing": os.environ.get("SERENA_SOURCEKIT_BACKGROUND_INDEXING", "").lower() in ("1", "true", "yes"),
+                "backgroundPreparationMode": "enabled" if os.environ.get("SERENA_SOURCEKIT_BACKGROUND_INDEXING", "").lower() in ("1", "true", "yes") else "noPreparation",
                 "textDocument/codeLens": {"supportedCommands": {"swift.debug": "swift.debug", "swift.run": "swift.run"}},
                 "window/didChangeActiveDocument": True,
                 "workspace/getReferenceDocument": True,
