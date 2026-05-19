@@ -46,6 +46,7 @@ from serena.tools import (
     GetLanguageServerStatusTool,
     OpenDashboardTool,
     ReadMemoryTool,
+    RestartLanguageServerTool,
     Tool,
     ToolMarker,
     ToolRegistry,
@@ -544,12 +545,16 @@ class SerenaAgent:
                 NamedToolInclusionDefinition(name="OpenDashboard", included_optional_tools=[OpenDashboardTool.get_name_from_cls()])
             )
 
-        # expose GetLanguageServerStatusTool by default so agents can query per-language LSP state
-        # without reactivating the project; contexts that want to hide it can still exclude it by name
+        # expose GetLanguageServerStatusTool and RestartLanguageServerTool by default so agents
+        # can query per-language LSP state and recover a hung language server without reactivating
+        # the project; contexts that want to hide either can still exclude it by name
         tool_inclusion_definitions.append(
             NamedToolInclusionDefinition(
-                name="OptionalLspStatus",
-                included_optional_tools=[GetLanguageServerStatusTool.get_name_from_cls()],
+                name="OptionalLspTools",
+                included_optional_tools=[
+                    GetLanguageServerStatusTool.get_name_from_cls(),
+                    RestartLanguageServerTool.get_name_from_cls(),
+                ],
             )
         )
 
