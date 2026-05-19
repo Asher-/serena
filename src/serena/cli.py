@@ -1,13 +1,16 @@
 import collections
+import faulthandler
 import glob
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
 from collections.abc import Iterator, Sequence
 from logging import Logger
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Literal
 
@@ -331,10 +334,45 @@ class TopLevelCommands(AutoRegisteringGroup):
         stderr_handler = logging.StreamHandler(stream=sys.stderr)
         stderr_handler.formatter = formatter
         Logger.root.addHandler(stderr_handler)
-        log_path = SerenaPaths().get_next_log_file_path("mcp")
-        file_handler = logging.FileHandler(log_path, mode="w")
+        # operator-facing rotating log at ~/Library/Logs/serena/serena.log replaces the
+        # legacy per-start FileHandler so the daemon's long-running log file has a bounded
+        # ceiling. The single file is ALSO launchd's StandardOutPath / StandardErrorPath
+        # capture target; with no rotation it has grown to hundreds of MB. The rotating
+        # handler caps it at 6 x 100 MB. Known wart: after a Python rotation, launchd's
+        # held fd still points at the renamed inode, so any process-crash output captured
+        # by launchd lands in the rotated file rather than the fresh serena.log -- the
+        # leak is bounded per-daemon-lifetime because launchd reopens serena.log when the
+        # daemon process restarts.
+        operator_log_dir = Path.home() / "Library" / "Logs" / "serena"
+        operator_log_dir.mkdir(parents=True, exist_ok=True)
+        operator_log_path = operator_log_dir / "serena.log"
+        log_path = str(operator_log_path)
+        _OPERATOR_LOG_MAX_BYTES = 100 * 1024 * 1024
+        # one-time idempotent legacy rename so the rotating handler does not inherit a
+        # pre-rotation file that already exceeds the ceiling. Subsequent starts skip the
+        # rename because the .legacy sentinel is present.
+        legacy_log_path = operator_log_dir / "serena.log.legacy"
+        if (
+            operator_log_path.exists()
+            and not legacy_log_path.exists()
+            and operator_log_path.stat().st_size > _OPERATOR_LOG_MAX_BYTES
+        ):
+            operator_log_path.rename(legacy_log_path)
+        file_handler = RotatingFileHandler(log_path, maxBytes=_OPERATOR_LOG_MAX_BYTES, backupCount=5)
         file_handler.formatter = formatter
         Logger.root.addHandler(file_handler)
+        # preserve the contract that ``SerenaPaths().last_returned_log_file_path`` points
+        # to the active log file so ``SerenaAgent.get_log_inspection_instructions`` can
+        # report a real path; without this the dashboard-off branch returns a generic
+        # "logs not available" message.
+        SerenaPaths().last_returned_log_file_path = log_path
+
+        # SIGUSR1 produces an all-thread traceback on stderr (captured by launchd into
+        # serena.log). The launchd healthcheck extension probes this on every iteration
+        # to detect daemons whose main thread is responsive only to the MCP initialize
+        # handler. Registered after logging init so the dump is visible in the operator
+        # log.
+        faulthandler.register(signal.SIGUSR1, file=sys.stderr, all_threads=True, chain=False)
 
         log.info("Initializing Serena MCP server")
         log.info("Storing logs in %s", log_path)
@@ -381,6 +419,15 @@ class TopLevelCommands(AutoRegisteringGroup):
             log.info("Starting Serena pipe forwarder; daemon_url=%s, project_root=%s", daemon_url, project_root)
             run_pipe_client(daemon_url=daemon_url, project_root=project_root)
             return
+        # spin the CPU watchdog only on the daemon path. The pipe forwarder is
+        # short-lived (one process per Claude Code session) and does not host a
+        # language server, so the watchdog has nothing useful to observe there;
+        # gating on the post-pipe-return point keeps the per-forwarder overhead
+        # at zero.
+        from serena.util.watchdog import start_wedge_watchdog
+
+        start_wedge_watchdog()
+
         project_file = project_file_arg or project
         factory = SerenaMCPFactory(context=context, project=project_file, memory_log_handler=memory_log_handler)
         server = factory.create_mcp_server(
