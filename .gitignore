@@ -202,6 +202,11 @@ pylint.html
 /agent-ui
 /test/**/.serena
 
+# Serena's own per-project config drifts on every run; ignore at all levels
+# (tracked globally in ~/.gitignore_global, repeated here so the local rule
+# survives anyone overriding core.excludesfile)
+.serena/
+
 # clojure-lsp temporary files
 .calva/
 .clj-kondo/
