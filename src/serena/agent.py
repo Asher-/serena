@@ -1049,17 +1049,25 @@ class SerenaAgent:
             # serena config, or None for an indefinite wait. The event lives on Project (not on
             # SerenaAgent's per-call task field, which a concurrent activation in another session
             # would overwrite), so multi-session daemons get a stable per-project signal regardless
-            # of activation interleaving. The "still initializing" branch below is only reachable
+            # of activation interleaving. The "had not finished starting" branch below is only reachable
             # when ``tool_timeout`` is exceeded — at which point the MCP transport will surface a
             # timeout to the caller and the fallback message is informational rather than load-bearing.
             ls_manager = self.get_language_server_manager()
+            wait_timeout: float | None = None
             if ls_manager is None:
                 tool_timeout = proj.serena_config.tool_timeout
                 wait_timeout = None if (tool_timeout is None or tool_timeout < 0) else tool_timeout
                 proj._lsm_ready_event.wait(timeout=wait_timeout)
                 ls_manager = self.get_language_server_manager()
             if ls_manager is None:
-                msg += "\nLanguage servers are still initializing; check logs or query get_current_config for the latest status."
+                languages_str = ", ".join(lang.value for lang in proj.project_config.languages)
+                waited = f"{wait_timeout:g}s" if wait_timeout is not None else "the unbounded activation budget"
+                msg += (
+                    f"\nLanguage servers ({languages_str}) had not finished starting within {waited} "
+                    "(the activation wait budget, not the observed duration; cold starts normally complete "
+                    "in seconds). The next tool call will block on the readiness event and proceed once a "
+                    "server is up; query get_current_config or check logs for the latest status."
+                )
             else:
                 active_languages = ls_manager.get_active_languages()
                 unavailable = ls_manager.get_unavailable_languages()

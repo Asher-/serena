@@ -233,11 +233,11 @@ class TestActivationMessageWaitsForLsInit:
         finally:
             agent.on_shutdown(timeout=5)
 
-    def test_activation_message_falls_back_to_still_initializing_on_timeout(self) -> None:
+    def test_activation_message_falls_back_to_not_finished_on_timeout(self) -> None:
         # shrink the project's tool_timeout so the test does not have to sleep the default
         # 240 seconds to observe the fallback path; the scripted factory blocks on a gate
         # that is never released within the patched timeout, guaranteeing the readiness
-        # wait expires and the activation message falls through to 'still initializing'.
+        # wait expires and the activation message falls through to the 'had not finished starting' branch.
         init_gate = threading.Event()
 
         def create_manager(project: Project) -> LanguageServerManager:
@@ -264,7 +264,7 @@ class TestActivationMessageWaitsForLsInit:
             agent._activate_project(project)
             msg = agent.get_project_activation_message()
 
-            assert "Language servers are still initializing" in msg
+            assert "had not finished starting" in msg
         finally:
             # release the gate so the executor thread can finish before on_shutdown
             init_gate.set()
