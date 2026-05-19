@@ -326,6 +326,14 @@ class Project(ToStringMixin):
 
         self.language_server_manager: LanguageServerManager | None = None
         self._language_server_manager_init_error: Exception | None = None
+        # readiness signal for the language server manager: set inside
+        # :meth:`create_language_server_manager`'s ``finally`` once construction has been
+        # attempted at least once (success or failure). Read-path callers
+        # (:meth:`get_language_server_manager_or_raise`) block on this rather than racing
+        # the in-flight construction and observing a transient ``None`` slot. The signal
+        # lives on Project (not SerenaAgent) so multi-session daemons share one event
+        # per project across all activating sessions.
+        self._lsm_ready_event = threading.Event()
         self.is_newly_created = is_newly_created
         self._agent: Optional["SerenaAgent"] = None
 
@@ -666,6 +674,10 @@ class Project(ToStringMixin):
         the previous one is torn down only after the swap, so concurrent readers always
         observe a healthy manager (either the previous one or the new one), never ``None``.
 
+        On every exit from the construction body — success or failure — this method sets
+        :attr:`_lsm_ready_event` so read-path callers blocked in
+        :meth:`get_language_server_manager_or_raise` wake up and re-check the manager slot.
+
         :param force_recreate: when True, replace any existing manager with a freshly built
             one. Default False (idempotent get-or-create).
         :return: the language server manager, also stored in ``self.language_server_manager``.
@@ -727,8 +739,26 @@ class Project(ToStringMixin):
             except Exception as e:
                 self._language_server_manager_init_error = e
                 raise
+            finally:
+                # wake any read-path waiters whether construction succeeded or failed; the
+                # event is idempotent so re-entry under ``force_recreate=True`` is safe (the
+                # atomic swap above guarantees readers always observe a non-None manager
+                # during the recreate window)
+                self._lsm_ready_event.set()
 
     def get_language_server_manager_or_raise(self) -> LanguageServerManager:
+        # block on the in-flight construction signalled by :meth:`create_language_server_manager`.
+        # The ready event is set in that method's ``finally`` so we wake regardless of success
+        # or failure; the post-wait check below then either returns the now-ready manager or
+        # raises with the captured init error. Bounding the wait by ``tool_timeout`` ensures a
+        # genuinely stuck construction surfaces as the caller's normal tool timeout rather than
+        # an indefinite block; a ``None`` / negative ``tool_timeout`` means "wait indefinitely",
+        # matching the same convention used inside :meth:`create_language_server_manager`.
+        if self.language_server_manager is None:
+            tool_timeout = self.serena_config.tool_timeout
+            wait_timeout = None if (tool_timeout is None or tool_timeout < 0) else tool_timeout
+            self._lsm_ready_event.wait(timeout=wait_timeout)
+
         # this error path fires only when the entire manager could not be constructed, which is distinct from
         # the (now expected) case where the manager came up with partial coverage. Per-language startup failures
         # no longer surface here: the manager is still constructed with the healthy languages, and calls into

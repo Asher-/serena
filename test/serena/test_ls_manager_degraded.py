@@ -8,6 +8,7 @@ an unavailable language receive a typed :class:`LanguageUnavailableError`.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
@@ -30,8 +31,6 @@ from serena.ls_manager import LanguageServerFactory, LanguageServerManager, Lang
 from serena.project import Project
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import Language
-
-
 class _ScriptedLanguageServerFactory(LanguageServerFactory):
     def __init__(self, failures: dict[Language, Exception] | None = None) -> None:
         # stored as instance state only; the base constructor is deliberately not invoked because
@@ -214,6 +213,10 @@ class TestActivationMessageWaitsForLsInit:
             }
             fake_manager.stop_all.return_value = None
             project.language_server_manager = fake_manager
+            # mirror the new contract: create_language_server_manager sets the readiness
+            # event in its finally — the monkey-patched replacement must do the same so
+            # the activation message wait in get_project_activation_message unblocks
+            project._lsm_ready_event.set()
             return fake_manager
 
         # _activate_project is called directly rather than going through
@@ -247,6 +250,10 @@ class TestActivationMessageWaitsForLsInit:
             fake_manager.get_unavailable_languages.return_value = {}
             fake_manager.stop_all.return_value = None
             project.language_server_manager = fake_manager
+            # mirror the new contract: create_language_server_manager sets the readiness
+            # event in its finally — the monkey-patched replacement must do the same so
+            # read-path waiters in Project.get_language_server_manager_or_raise unblock
+            project._lsm_ready_event.set()
             return fake_manager
 
         # _activate_project is called directly for the same reason as the companion
@@ -261,3 +268,125 @@ class TestActivationMessageWaitsForLsInit:
             # release the gate so the executor thread can finish before on_shutdown
             init_gate.set()
             agent.on_shutdown(timeout=5)
+
+
+class TestGetLanguageServerManagerOrRaiseBlocksOnReadiness:
+    """
+    Covers the race between a tool call's read path (:meth:`Project.get_language_server_manager_or_raise`)
+    and the backgrounded language-server-manager construction. The read path must block on
+    the project's readiness event so an in-flight construction is not surfaced as the
+    misleading "could not be constructed at all" exception.
+    """
+
+    _PYTHON_REPO = str(Path(__file__).parent.parent / "resources" / "repos" / "python" / "test_repo")
+
+    def _build_project(
+        self,
+        create_manager: Callable[[Project], LanguageServerManager],
+        tool_timeout: float = 30.0,
+    ) -> Project:
+        # construct a project whose LS manager creation we can script from the test;
+        # tool_timeout drives the read-path wait budget (see Project.get_language_server_manager_or_raise)
+        config = SerenaConfig(
+            gui_log_window=False,
+            web_dashboard=False,
+            log_level=logging.ERROR,
+            language_backend=LanguageBackend.LSP,
+            tool_timeout=tool_timeout,
+        )
+        project = Project(
+            project_root=self._PYTHON_REPO,
+            project_config=ProjectConfig(
+                project_name="readiness_test",
+                languages=[Language.PYTHON],
+                language_backend=LanguageBackend.LSP,
+            ),
+            serena_config=config,
+        )
+        project.create_language_server_manager = types.MethodType(  # type: ignore[method-assign]
+            create_manager, project
+        )
+        return project
+
+    def test_read_path_blocks_until_in_flight_construction_completes(self) -> None:
+        # scripted construction installs the fake manager only after a short sleep; a
+        # read-path call issued while construction is still in flight must wait for the
+        # readiness event rather than raising the scary "could not be constructed at all"
+        # message
+        def create_manager(project: Project) -> LanguageServerManager:
+            time.sleep(0.3)
+            fake_manager = MagicMock(spec=LanguageServerManager)
+            project.language_server_manager = fake_manager
+            project._lsm_ready_event.set()
+            return fake_manager
+
+        project = self._build_project(create_manager)
+
+        # kick construction in a background thread so the read path on the main thread can
+        # observe the transient None slot before the readiness event sets
+        bg = threading.Thread(target=project.create_language_server_manager, daemon=True)
+        bg.start()
+        time.sleep(0.05)  # ensure read path enters wait while construction is still running
+
+        manager = project.get_language_server_manager_or_raise()
+        bg.join(timeout=5.0)
+        assert manager is project.language_server_manager
+        assert manager is not None
+
+    def test_read_path_surfaces_init_error_after_construction_fails(self) -> None:
+        # scripted construction raises after a brief delay; the read path must wait for
+        # the readiness signal then surface the captured init error in the raised message
+        # rather than the bare "construction not attempted" text
+        synthetic_error_text = "synthetic config failure"
+
+        def create_manager(project: Project) -> LanguageServerManager:
+            time.sleep(0.2)
+            err = RuntimeError(synthetic_error_text)
+            project._language_server_manager_init_error = err
+            project._lsm_ready_event.set()
+            raise err
+
+        project = self._build_project(create_manager)
+
+        def call_construction() -> None:
+            # swallow the synthetic failure so the executor thread does not log a noisy
+            # uncaught exception; the captured error remains on the project for the
+            # read-path assertion below
+            with contextlib.suppress(RuntimeError):
+                project.create_language_server_manager()
+
+        bg = threading.Thread(target=call_construction, daemon=True)
+        bg.start()
+        time.sleep(0.05)
+
+        with pytest.raises(Exception) as exc_info:
+            project.get_language_server_manager_or_raise()
+        bg.join(timeout=5.0)
+        assert synthetic_error_text in str(exc_info.value)
+        assert "could not be constructed at all" in str(exc_info.value)
+
+    def test_read_path_times_out_when_construction_never_completes(self) -> None:
+        # construction blocks on a gate that the test only releases at cleanup, so the
+        # read path's bounded wait must expire and the original scary error must be raised.
+        # tool_timeout is set just above the wait's resolution so the test does not hang
+        init_gate = threading.Event()
+
+        def create_manager(project: Project) -> LanguageServerManager:
+            init_gate.wait(timeout=5.0)
+            return MagicMock(spec=LanguageServerManager)
+
+        # set the wait budget directly on the SerenaConfig instance (the
+        # tool_timeout >= 10 validation in create_language_server_manager does not run
+        # here because create_manager is monkey-patched)
+        project = self._build_project(create_manager)
+        project.serena_config.tool_timeout = 0.1
+
+        bg = threading.Thread(target=create_manager, args=(project,), daemon=True)
+        bg.start()
+        try:
+            with pytest.raises(Exception) as exc_info:
+                project.get_language_server_manager_or_raise()
+            assert "could not be constructed at all" in str(exc_info.value)
+        finally:
+            init_gate.set()
+            bg.join(timeout=5.0)

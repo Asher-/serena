@@ -353,10 +353,6 @@ class SerenaAgent:
         # the project can surface the real cause instead of a generic "No active project".
         self._startup_activation_error: Exception | None = None
         self._startup_activation_target: str | None = None
-        # task handle for the backgrounded language-server-manager initialization of the
-        # currently-activating project; the activation message path waits on this handle so
-        # per-language LSP startup failures can be surfaced synchronously to the caller
-        self._ls_manager_init_task: TaskExecutor.Task[None] | None = None
         self._gui_log_viewer: Optional["GuiLogViewer"] = None
         self._dashboard_viewer_process: multiprocessing.Process | None = None
 
@@ -1054,14 +1050,16 @@ class SerenaAgent:
             msg += f"\nProgramming languages: {languages_str}."
 
             # report per-language LSP health at activation time: the language server manager is initialized
-            # asynchronously, so if we arrive here before startup has completed, wait on the init task with
-            # a bounded timeout and then re-check; this closes the race between activate_project returning
-            # and the backgrounded init task completing, so per-language failures (e.g. Metals crashing for
-            # Scala) are surfaced in the activation message itself rather than only from logs or the next
-            # tool call
+            # asynchronously, so if we arrive here before startup has completed, wait on the project's
+            # readiness event with a bounded timeout and then re-check. The event lives on Project (not
+            # on SerenaAgent's per-call task field, which a concurrent activation in another session would
+            # overwrite), so multi-session daemons get a stable per-project signal regardless of activation
+            # interleaving. Bounded by LS_MANAGER_INIT_WAIT_SECONDS so the activation response itself does
+            # not hang on a slow cold-start; any tool call that follows will block longer via
+            # :meth:`Project.get_language_server_manager_or_raise`.
             ls_manager = self.get_language_server_manager()
-            if ls_manager is None and self._ls_manager_init_task is not None:
-                self._ls_manager_init_task.wait_until_done(timeout=LS_MANAGER_INIT_WAIT_SECONDS)
+            if ls_manager is None:
+                proj._lsm_ready_event.wait(timeout=LS_MANAGER_INIT_WAIT_SECONDS)
                 ls_manager = self.get_language_server_manager()
             if ls_manager is None:
                 msg += "\nLanguage servers are still initializing; check logs or query get_current_config for the latest status."
@@ -1252,11 +1250,13 @@ class SerenaAgent:
                 project.create_language_server_manager()
 
         # initialize the language server in the background (if in language server mode);
-        # the task handle is captured so the activation-message path can wait on it with
-        # a bounded timeout before reporting on per-language LSP health
-        self._ls_manager_init_task = None
+        # readiness is signalled on the project's :attr:`Project._lsm_ready_event`, which both
+        # the activation-message path and downstream tool-call read paths
+        # (:meth:`Project.get_language_server_manager_or_raise`) wait on. The signal lives on
+        # the project rather than on a per-agent task handle so concurrent activations in
+        # other sessions cannot overwrite it.
         if self.get_language_backend().is_lsp():
-            self._ls_manager_init_task = self.issue_task(init_language_server_manager)
+            self.issue_task(init_language_server_manager)
 
         if self._project_activation_callback is not None:
             self._project_activation_callback()
