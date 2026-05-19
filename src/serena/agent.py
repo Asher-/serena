@@ -103,12 +103,6 @@ _PIPE_SESSION_ID_VAR: "_contextvars.ContextVar[str | None]" = _contextvars.Conte
 
 log = logging.getLogger(__name__)
 
-# maximum number of seconds get_project_activation_message waits for the backgrounded
-# language-server-manager init task to complete before reporting 'still initializing';
-# larger than a typical LSP startup (a few seconds for Pyright, longer for Metals), but
-# bounded so a hung init cannot stall the activation response indefinitely
-LS_MANAGER_INIT_WAIT_SECONDS = 10.0
-
 TTool = TypeVar("TTool", bound="Tool")
 T = TypeVar("T")
 SUCCESS_RESULT = "OK"
@@ -1049,17 +1043,20 @@ class SerenaAgent:
             languages_str = ", ".join([lang.value for lang in proj.project_config.languages])
             msg += f"\nProgramming languages: {languages_str}."
 
-            # report per-language LSP health at activation time: the language server manager is initialized
-            # asynchronously, so if we arrive here before startup has completed, wait on the project's
-            # readiness event with a bounded timeout and then re-check. The event lives on Project (not
-            # on SerenaAgent's per-call task field, which a concurrent activation in another session would
-            # overwrite), so multi-session daemons get a stable per-project signal regardless of activation
-            # interleaving. Bounded by LS_MANAGER_INIT_WAIT_SECONDS so the activation response itself does
-            # not hang on a slow cold-start; any tool call that follows will block longer via
-            # :meth:`Project.get_language_server_manager_or_raise`.
+            # activation IS a blocking call until the language server manager is up: wait on the
+            # project's readiness event with the same bound the read path uses
+            # (:meth:`Project.get_language_server_manager_or_raise`) — ``tool_timeout`` from the
+            # serena config, or None for an indefinite wait. The event lives on Project (not on
+            # SerenaAgent's per-call task field, which a concurrent activation in another session
+            # would overwrite), so multi-session daemons get a stable per-project signal regardless
+            # of activation interleaving. The "still initializing" branch below is only reachable
+            # when ``tool_timeout`` is exceeded — at which point the MCP transport will surface a
+            # timeout to the caller and the fallback message is informational rather than load-bearing.
             ls_manager = self.get_language_server_manager()
             if ls_manager is None:
-                proj._lsm_ready_event.wait(timeout=LS_MANAGER_INIT_WAIT_SECONDS)
+                tool_timeout = proj.serena_config.tool_timeout
+                wait_timeout = None if (tool_timeout is None or tool_timeout < 0) else tool_timeout
+                proj._lsm_ready_event.wait(timeout=wait_timeout)
                 ls_manager = self.get_language_server_manager()
             if ls_manager is None:
                 msg += "\nLanguage servers are still initializing; check logs or query get_current_config for the latest status."

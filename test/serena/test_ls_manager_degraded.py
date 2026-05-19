@@ -19,7 +19,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from serena import agent as agent_module
 from serena.agent import SerenaAgent
 from serena.config.serena_config import (
     LanguageBackend,
@@ -234,13 +233,11 @@ class TestActivationMessageWaitsForLsInit:
         finally:
             agent.on_shutdown(timeout=5)
 
-    def test_activation_message_falls_back_to_still_initializing_on_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # shrink the bounded wait so the test does not have to sleep 10 seconds to
-        # observe the fallback path; the scripted factory blocks on a gate that is never
-        # released within the patched timeout, guaranteeing wait_until_done times out
-        # and the activation message falls through to the 'still initializing' branch
-        monkeypatch.setattr(agent_module, "LS_MANAGER_INIT_WAIT_SECONDS", 0.1)
-
+    def test_activation_message_falls_back_to_still_initializing_on_timeout(self) -> None:
+        # shrink the project's tool_timeout so the test does not have to sleep the default
+        # 240 seconds to observe the fallback path; the scripted factory blocks on a gate
+        # that is never released within the patched timeout, guaranteeing the readiness
+        # wait expires and the activation message falls through to 'still initializing'.
         init_gate = threading.Event()
 
         def create_manager(project: Project) -> LanguageServerManager:
@@ -259,6 +256,10 @@ class TestActivationMessageWaitsForLsInit:
         # _activate_project is called directly for the same reason as the companion
         # test: to keep our custom project instance (with the gated create_language_server_manager)
         agent, project = self._build_agent(create_manager)
+        # tool_timeout is now the unified wait budget for both activation and the
+        # read path; shrink it so the activation wait expires fast and the test does
+        # not stall on the 240s default
+        project.serena_config.tool_timeout = 0.1
         try:
             agent._activate_project(project)
             msg = agent.get_project_activation_message()
