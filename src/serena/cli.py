@@ -372,7 +372,12 @@ class TopLevelCommands(AutoRegisteringGroup):
         # to detect daemons whose main thread is responsive only to the MCP initialize
         # handler. Registered after logging init so the dump is visible in the operator
         # log.
-        faulthandler.register(signal.SIGUSR1, file=sys.stderr, all_threads=True, chain=False)
+        try:
+            faulthandler.register(signal.SIGUSR1, file=sys.stderr, all_threads=True, chain=False)
+        except OSError:
+            # sys.stderr lacks fileno() under click's CliRunner; the SIGUSR1 traceback
+            # is daemon-runtime defense-in-depth, harmless to skip in test harnesses.
+            pass
 
         log.info("Initializing Serena MCP server")
         log.info("Storing logs in %s", log_path)
