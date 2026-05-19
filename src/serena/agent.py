@@ -344,7 +344,10 @@ class SerenaAgent:
         # every session that ever connected (leak), and id() reuse can let a future session inherit stale
         # state at the same memory address. Registration happens lazily on the first tool call from a
         # given session in Tool.apply_ex; the finalizer drops both per-session dict entries on GC.
-        self._session_finalizers: dict[int, weakref.finalize] = {}
+        self._session_finalizers: dict[str | int, weakref.finalize] = {}
+        # one-time warning tracker for sessions that arrive without an
+        # X-Forwarded-Mcp-Session-Id header (legacy direct-stdio path).
+        self._warned_missing_forwarded_session_keys: set[str | int] = set()
         self._session_finalizers_lock = threading.Lock()
         # startup activation error preserved here so the first tool call that requires
         # the project can surface the real cause instead of a generic "No active project".
@@ -860,7 +863,7 @@ class SerenaAgent:
         if _ACTIVE_PROJECT_VAR.get(_UNSET) is not _UNSET or session_key is not None:
             _ACTIVE_PROJECT_VAR.set(project)
 
-    def _register_session_finalizer(self, mcp_session: object, session_key: int) -> None:
+    def _register_session_finalizer(self, mcp_session: object, session_key: str | int) -> None:
         """Lazily register a GC finalizer that drops this session's per-session entries.
 
         Called from ``Tool.apply_ex`` on every tool dispatch; the guard dict makes registration
@@ -888,7 +891,7 @@ class SerenaAgent:
                 return
             self._session_finalizers[session_key] = finalizer
 
-    def _evict_session_state(self, session_key: int) -> None:
+    def _evict_session_state(self, session_key: str | int) -> None:
         """
         Pop ``session_key`` out of every per-session map so its entries cannot leak.
 
@@ -900,6 +903,7 @@ class SerenaAgent:
         """
         self._active_projects_by_session.pop(session_key, None)
         self._cursor_managers_by_session.pop(session_key, None)
+        self._warned_missing_forwarded_session_keys.discard(session_key)
         with self._session_finalizers_lock:
             self._session_finalizers.pop(session_key, None)
         # tear down the session's per-session executor so its worker thread does not idle in
@@ -910,6 +914,32 @@ class SerenaAgent:
         if executor is not None:
             executor.shutdown()
 
+    def _warn_missing_forwarded_session_id_once(self, session_key: str | int) -> None:
+        """Emits a one-time warning when no X-Forwarded-Mcp-Session-Id header is present.
+
+        Tier 3 of the session-key derivation in :meth:`Tool.apply_ex` falls back to
+        ``id(mcp_ctx.session)`` when no header is present (e.g. legacy direct-stdio
+        clients that bypass the multiplexer, or stateless streamable-http inbound).
+        Per plan://Serena:serena/streamable-http-cc-session-id-pass-through-v2, that
+        path is supported but must be visible in operator logs.
+
+        Idempotent per ``session_key``: the first call emits a warning and tracks
+        the key; subsequent calls for the same key are no-ops. The tracker entry
+        is dropped by :meth:`_evict_session_state` when the session is GC'd.
+
+        :param session_key: the per-session dict key used in
+            :attr:`_active_projects_by_session` (an ``id()`` int for tier 3).
+        """
+        if session_key in self._warned_missing_forwarded_session_keys:
+            return
+        self._warned_missing_forwarded_session_keys.add(session_key)
+        log.warning(
+            "streamable-http session without X-Forwarded-Mcp-Session-Id header; "
+            "falling back to id(mcp_ctx.session)=%s. Multiple Claude Code sessions "
+            "sharing a multiplexer will collapse onto this same daemon-side slot. "
+            "See plan://Serena:serena/streamable-http-cc-session-id-pass-through-v2.",
+            session_key,
+        )
     def evict_pipe_session(self, session_id: str) -> None:
         """Drop ``session_id`` from every per-session map.
 

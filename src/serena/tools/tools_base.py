@@ -284,32 +284,69 @@ class Tool(Component):
         """
         Applies the tool with logging and exception handling, using the given keyword arguments
         """
-        # derive a per-session key. The pipe transport (src/serena/pipe.py) supplies a stable
-        # handshake-asserted UUID4 via _PIPE_SESSION_ID_VAR; when set, that id is the session_key
-        # and the per-pipe-connection finalizer (T6) -- not the mcp_ctx GC finalizer -- drives
-        # eviction. For direct-stdio / streamable-http / sse clients (no pipe) we fall back to
-        # id(mcp_ctx.session), which is unique for the lifetime of a session but unstable across
-        # streamable-http per-request task churn (a documented limitation that the pipe addresses).
+        # derive a per-session key in three tiers:
+        #   1. pipe transport (src/serena/pipe.py) supplies the project_root via
+        #      _PIPE_SESSION_ID_VAR -- the project_root IS the session_id under
+        #      plan://Serena:serena/serena-pipe-session-id-is-the-session-id; eviction
+        #      is driven by the per-pipe-connection finalizer (T6) rather than the GC.
+        #   2. streamable-http with the multiplexer forwarding the inbound CC client's
+        #      Mcp-Session-Id as X-Forwarded-Mcp-Session-Id (per
+        #      plan://Serena:serena/streamable-http-cc-session-id-pass-through-v2)
+        #      -- keyed on the CC session so two CC sessions through one persistent
+        #      multiplexer<->serena session do not collide on _active_projects_by_session.
+        #   3. legacy direct-stdio / streamable-http without the multiplexer -- falls back
+        #      to id(mcp_ctx.session) and emits a one-time warning per session.
         from serena.agent import _ACTIVE_PROJECT_VAR, _MCP_CALL_IN_FLIGHT, _PIPE_SESSION_ID_VAR, _SESSION_KEY_VAR
 
         pipe_session_id = _PIPE_SESSION_ID_VAR.get()
 
         session_key: str | int | None = None
         if pipe_session_id is not None:
-            # pipe transport: the daemon-allocated session_id is the stable per-client key.
-            # Eviction is driven by pipe-socket disconnect (T6 of plan://Serena:serena/serena-pipe-implementation),
-            # so we deliberately skip the mcp_ctx GC finalizer registration below -- it would tie
-            # the cleanup to the SDK's transport-layer Session lifetime, which is exactly the
-            # transport-churn instability the pipe redesign exists to eliminate.
+            # tier 1: pipe transport. Eviction driven by pipe-socket disconnect (T6 of
+            # plan://Serena:serena/serena-pipe-implementation), so we deliberately skip
+            # the mcp_ctx GC finalizer registration -- it would tie cleanup to the SDK's
+            # transport-layer Session lifetime, the very transport-churn instability the
+            # pipe redesign exists to eliminate.
             session_key = pipe_session_id
         elif mcp_ctx is not None:
             try:
-                session_key = id(mcp_ctx.session)
-                # register a GC finalizer (idempotent per session) that drops the per-session
-                # entries from ``_active_projects_by_session`` / ``_cursor_managers_by_session``
-                # when the session is collected. Without this, entries leak forever and a
-                # future session whose ``id()`` is reused inherits stale state.
-                self.agent._register_session_finalizer(mcp_ctx.session, session_key)
+                # tier 2: read X-Forwarded-Mcp-Session-Id from the inbound HTTP request.
+                # FastMCP exposes the underlying transport request via either
+                # request_context.request or request -- both case-insensitive
+                # Starlette-style header maps. weakref.finalize admits multiple
+                # finalizers per target, so distinct CC session ids seen on the same
+                # persistent mcp_ctx.session each get their own finalizer that fires
+                # when the multiplexer disconnects and the persistent session is GC'd.
+                forwarded_cc_session_id: str | None = None
+                req_candidates: list = []
+                request_context = getattr(mcp_ctx, "request_context", None)
+                if request_context is not None:
+                    req_candidates.append(getattr(request_context, "request", None))
+                req_candidates.append(getattr(mcp_ctx, "request", None))
+                for req in req_candidates:
+                    if req is None:
+                        continue
+                    headers = getattr(req, "headers", None)
+                    if headers is None:
+                        continue
+                    try:
+                        candidate = headers.get("x-forwarded-mcp-session-id") or headers.get("X-Forwarded-Mcp-Session-Id")
+                    except Exception:
+                        candidate = None
+                    if candidate:
+                        forwarded_cc_session_id = candidate
+                        break
+                if forwarded_cc_session_id:
+                    session_key = forwarded_cc_session_id
+                    self.agent._register_session_finalizer(mcp_ctx.session, session_key)
+                else:
+                    # tier 3: legacy direct-stdio / streamable-http without the multiplexer.
+                    # id(mcp_ctx.session) is unique for the lifetime of a Session but unstable
+                    # across streamable-http per-request task churn; emit a one-time warning
+                    # per session for observability so the legacy path stays visible in logs.
+                    session_key = id(mcp_ctx.session)
+                    self.agent._register_session_finalizer(mcp_ctx.session, session_key)
+                    self.agent._warn_missing_forwarded_session_id_once(session_key)
             except Exception as e:
                 log.info(f"Failed to derive MCP session key: {e}.")
 
