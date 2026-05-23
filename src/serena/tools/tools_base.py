@@ -296,11 +296,22 @@ class Tool(Component):
         #      multiplexer<->serena session do not collide on _active_projects_by_session.
         #   3. legacy direct-stdio / streamable-http without the multiplexer -- falls back
         #      to id(mcp_ctx.session) and emits a one-time warning per session.
-        from serena.agent import _ACTIVE_PROJECT_VAR, _MCP_CALL_IN_FLIGHT, _PIPE_SESSION_ID_VAR, _SESSION_KEY_VAR
+        from serena.agent import (
+            _ACTIVE_PROJECT_VAR,
+            _MCP_CALL_IN_FLIGHT,
+            _MCP_SESSION_ID_VAR,
+            _PIPE_SESSION_ID_VAR,
+            _SESSION_KEY_VAR,
+        )
 
         pipe_session_id = _PIPE_SESSION_ID_VAR.get()
 
         session_key: str | int | None = None
+        # captured for the auto-reactivate fallback (handoff://Serena:serena/
+        # implement-auto-reactivate-fallback-for-streamable-http-subagent-drops): the ambient
+        # "last activated project" map is keyed by id(mcp_ctx.session), so we record the id once
+        # here and propagate it into the worker thread via _MCP_SESSION_ID_VAR.
+        mcp_session_id: int | None = None
         if pipe_session_id is not None:
             # tier 1: pipe transport. Eviction driven by pipe-socket disconnect (T6 of
             # plan://Serena:serena/serena-pipe-implementation), so we deliberately skip
@@ -309,6 +320,11 @@ class Tool(Component):
             # pipe redesign exists to eliminate.
             session_key = pipe_session_id
         elif mcp_ctx is not None:
+            mcp_session_id = id(mcp_ctx.session)
+            # register the per-MCP-session ambient finalizer once. Idempotent on repeat calls
+            # over the same persistent multiplexer<->serena session; multi-CC-session traffic on
+            # one MCP session shares one ambient finalizer.
+            self.agent._register_ambient_finalizer(mcp_ctx.session)
             try:
                 # tier 2: read X-Forwarded-Mcp-Session-Id from the inbound HTTP request.
                 # FastMCP exposes the underlying transport request via either
@@ -385,6 +401,11 @@ class Tool(Component):
                 # absent or stale here, since nested calls inherit the closure-captured locals
                 # only through the outer call's bookkeeping).
                 _PIPE_SESSION_ID_VAR.set(pipe_session_id)
+            if mcp_session_id is not None:
+                # propagate the multiplexer connection id so _activate_project (called either by
+                # the activate_project tool or by the auto-reactivate fallback below) can record
+                # the ambient under this MCP session.
+                _MCP_SESSION_ID_VAR.set(mcp_session_id)
             if persisted_project is not None:
                 _ACTIVE_PROJECT_VAR.set(persisted_project)
 
@@ -401,14 +422,37 @@ class Tool(Component):
                 # check whether the tool requires an active project and language server
                 if not isinstance(self, ToolMarkerDoesNotRequireActiveProject):
                     if self.agent.get_active_project() is None:
-                        return (
-                            "Error: No active project for this MCP session. To resume work, call "
-                            "`activate_project` with the absolute path of the project root (it will be "
-                            "auto-registered if Serena does not yet know it). Per-session state (active "
-                            "project, cursor positions) does not survive Serena daemon restarts; clients "
-                            "must re-activate on each fresh session. Known registered projects: "
-                            + f"{self.agent.serena_config.project_names}"
-                        )
+                        # Auto-reactivate fallback (handoff://Serena:serena/
+                        # implement-auto-reactivate-fallback-for-streamable-http-subagent-drops):
+                        # when the per-CC-session slot is empty for a streamable-http call, try to
+                        # recover by activating the project most recently activated on the same
+                        # multiplexer<->serena MCP session. This makes subagent CC sessions that
+                        # spawned from a parent on the same multiplexer inherit the parent's
+                        # project instead of paying a manual `activate_project` round-trip.
+                        # IRONCLAD: only fires when mcp_ctx is present (streamable-http path); the
+                        # pipe path and CLI/dashboard callers are unaffected. Auto-reactivation
+                        # writes through the per-CC-session setter (via _SESSION_KEY_VAR already
+                        # set on this worker thread), so the legacy single-slot fallback is never
+                        # consulted.
+                        if mcp_ctx is not None and mcp_session_id is not None:
+                            recovered = self.agent._try_auto_reactivate_from_ambient(mcp_session_id)
+                            if recovered is not None:
+                                log.info(
+                                    f"Auto-reactivated session_key={session_key!r} to "
+                                    f"{recovered.project_root!r} from ambient on mcp_session_id={mcp_session_id} "
+                                    f"(tool={self.get_name_from_cls()})"
+                                )
+                        # If auto-reactivate did not produce an active project, surface the
+                        # IRONCLAD fail-closed error so the client must explicitly activate.
+                        if self.agent.get_active_project() is None:
+                            return (
+                                "Error: No active project for this MCP session. To resume work, call "
+                                "`activate_project` with the absolute path of the project root (it will be "
+                                "auto-registered if Serena does not yet know it). Per-session state (active "
+                                "project, cursor positions) does not survive Serena daemon restarts; clients "
+                                "must re-activate on each fresh session. Known registered projects: "
+                                + f"{self.agent.serena_config.project_names}"
+                            )
 
                 # apply the actual tool
                 try:
