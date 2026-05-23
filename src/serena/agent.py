@@ -100,17 +100,6 @@ _PIPE_SESSION_ID_VAR: "_contextvars.ContextVar[str | None]" = _contextvars.Conte
     "serena_pipe_session_id", default=None
 )
 
-# id(mcp_ctx.session) for the multiplexer<->serena MCP session currently dispatching this tool
-# call. Set in Tool.apply_ex's worker thread when mcp_ctx is present so that
-# :meth:`SerenaAgent._activate_project` can record a per-multiplexer-connection "last active project"
-# entry (see :attr:`SerenaAgent._last_active_project_by_mcp_session`) used by the auto-reactivate
-# fallback for subagent CC sessions arriving with an empty per-session slot (handoff://Serena:serena/
-# implement-auto-reactivate-fallback-for-streamable-http-subagent-drops). Unset on the pipe path —
-# the pipe transport supplies session identity via _PIPE_SESSION_ID_VAR instead.
-_MCP_SESSION_ID_VAR: "_contextvars.ContextVar[int | None]" = _contextvars.ContextVar(
-    "serena_mcp_session_id", default=None
-)
-
 
 log = logging.getLogger(__name__)
 
@@ -354,28 +343,6 @@ class SerenaAgent:
         # X-Forwarded-Mcp-Session-Id header (legacy direct-stdio path).
         self._warned_missing_forwarded_session_keys: set[str | int] = set()
         self._session_finalizers_lock = threading.Lock()
-        # per-multiplexer-connection "last activated project" map used by the auto-reactivate
-        # fallback in :meth:`Tool.apply_ex`. Keyed by ``id(mcp_ctx.session)`` so every CC session
-        # arriving on the same multiplexer<->serena MCP session shares one fallback target. When a
-        # streamable-http call arrives with no per-CC-session entry in
-        # :attr:`_active_projects_by_session`, the apply_ex worker thread consults this map to
-        # recover the project a recent sibling CC session activated and re-activates it under the
-        # current session_key instead of returning the IRONCLAD "No active project" error. See
-        # handoff://Serena:serena/implement-auto-reactivate-fallback-for-streamable-http-subagent-drops.
-        # Values are absolute project root paths (str); :meth:`_activate_project` writes here when
-        # :data:`_MCP_SESSION_ID_VAR` is set. Eviction is driven by
-        # :meth:`_register_ambient_finalizer`, which attaches a weakref finalizer to the MCP
-        # session object so the ambient entry disappears when the multiplexer disconnects.
-        self._last_active_project_by_mcp_session: dict[int, str] = {}
-        self._ambient_project_lock = threading.Lock()
-        # finalizer registry mirroring :attr:`_session_finalizers` but keyed on
-        # ``id(mcp_ctx.session)`` rather than on a CC ``session_key``: registered lazily on the
-        # first streamable-http tool dispatch from each MCP session (Tool.apply_ex). One finalizer
-        # per MCP session; multiple per-CC-session finalizers may coexist for the same MCP session
-        # (one for each forwarded CC session_key) without conflict — weakref.finalize permits
-        # multiple finalizers per target.
-        self._ambient_finalizers: dict[int, weakref.finalize] = {}
-        self._ambient_finalizers_lock = threading.Lock()
         # startup activation error preserved here so the first tool call that requires
         # the project can surface the real cause instead of a generic "No active project".
         self._startup_activation_error: Exception | None = None
@@ -937,104 +904,6 @@ class SerenaAgent:
         if executor is not None:
             executor.shutdown()
 
-    def _register_ambient_finalizer(self, mcp_session: object) -> None:
-        """
-        Lazily register a GC finalizer that drops the ambient-project entry for an MCP session.
-
-        Called from :meth:`Tool.apply_ex` on every streamable-http dispatch; the guard dict makes
-        registration exactly-once per MCP session. When the MCP session object is garbage-collected
-        (the multiplexer<->serena transport drops its references), the finalizer fires and pops the
-        ambient entry from :attr:`_last_active_project_by_mcp_session`. Without this, ``id()`` reuse
-        could let a future MCP session land on a dead session's id and inherit stale state, and the
-        ambient map would grow unbounded over the daemon's lifetime.
-
-        :param mcp_session: the ``mcp_ctx.session`` object whose lifetime gates eviction.
-        """
-        mcp_session_id = id(mcp_session)
-        with self._ambient_finalizers_lock:
-            if mcp_session_id in self._ambient_finalizers:
-                return
-            try:
-                finalizer = weakref.finalize(mcp_session, self._evict_ambient_project, mcp_session_id)
-            except TypeError as e:
-                # weakref.finalize requires the target to support weak references; mock sessions
-                # using plain ``object()`` do not. Skip silently — eviction will not fire, but
-                # without a real session lifecycle there is nothing to evict against either.
-                log.debug(f"Could not register ambient finalizer for mcp_session_id {mcp_session_id}: {e}")
-                return
-            self._ambient_finalizers[mcp_session_id] = finalizer
-
-    def _evict_ambient_project(self, mcp_session_id: int) -> None:
-        """
-        Pop ``mcp_session_id`` out of :attr:`_last_active_project_by_mcp_session` and its finalizer
-        registry. Called by the per-MCP-session weakref finalizer registered in
-        :meth:`_register_ambient_finalizer`. Idempotent.
-        """
-        with self._ambient_project_lock:
-            self._last_active_project_by_mcp_session.pop(mcp_session_id, None)
-        with self._ambient_finalizers_lock:
-            self._ambient_finalizers.pop(mcp_session_id, None)
-
-    def _record_ambient_activation(self, project_root: str) -> None:
-        """
-        Record ``project_root`` as the most-recently-activated project for the MCP session
-        currently dispatching this tool call. No-op when :data:`_MCP_SESSION_ID_VAR` is unset
-        (CLI / dashboard / pipe-transport callers have no multiplexer connection to attribute the
-        activation to).
-
-        :param project_root: absolute project root path that was just activated.
-        """
-        mcp_session_id = _MCP_SESSION_ID_VAR.get(None)
-        if mcp_session_id is None:
-            return
-        with self._ambient_project_lock:
-            self._last_active_project_by_mcp_session[mcp_session_id] = project_root
-
-    def _get_ambient_project_root(self, mcp_session_id: int) -> str | None:
-        """
-        :return: the absolute path of the project most recently activated by *any* CC session
-            dispatching over ``mcp_session_id`` (typically the multiplexer<->serena MCP session),
-            or ``None`` if no activation has happened on that MCP session yet.
-        """
-        with self._ambient_project_lock:
-            return self._last_active_project_by_mcp_session.get(mcp_session_id)
-
-    def _try_auto_reactivate_from_ambient(self, mcp_session_id: int) -> Project | None:
-        """
-        Recover from an empty per-CC-session slot by reactivating the project most recently
-        activated on the same multiplexer<->serena MCP session.
-
-        The caller (:meth:`Tool.apply_ex`) must already have :data:`_SESSION_KEY_VAR` and
-        :data:`_MCP_SESSION_ID_VAR` set in the calling ContextVar context, so the activation routes
-        through :meth:`_active_project`'s per-session setter to :attr:`_active_projects_by_session`
-        rather than the legacy fallback slot — preserving the IRONCLAD per-CC-session isolation
-        guarantee.
-
-        :param mcp_session_id: ``id(mcp_ctx.session)`` of the multiplexer connection.
-        :return: the activated :class:`Project` on success, ``None`` when no ambient entry exists
-            or the recorded project is no longer registered.
-        """
-        ambient_root = self._get_ambient_project_root(mcp_session_id)
-        if ambient_root is None:
-            return None
-        try:
-            self.activate_project_from_path_or_name(
-                ambient_root, update_active_modes=False, update_active_tools=False
-            )
-        except ProjectNotFoundError:
-            # the previously-active project was deregistered or its directory was removed
-            # between the ambient capture and the auto-reactivate attempt; clear the stale
-            # entry so we do not retry indefinitely.
-            log.info(
-                f"Auto-reactivate skipped: ambient project {ambient_root!r} for mcp_session_id "
-                f"{mcp_session_id} is no longer registered; clearing ambient entry."
-            )
-            with self._ambient_project_lock:
-                if self._last_active_project_by_mcp_session.get(mcp_session_id) == ambient_root:
-                    self._last_active_project_by_mcp_session.pop(mcp_session_id, None)
-            return None
-        return self._active_project
-
     def _warn_missing_forwarded_session_id_once(self, session_key: str | int) -> None:
         """Emits a one-time warning when no X-Forwarded-Mcp-Session-Id header is present.
 
@@ -1338,10 +1207,6 @@ class SerenaAgent:
         # otherwise the legacy slot — see the _active_project property)
         current = self._active_project
         if current is not None and current.project_root == project.project_root:
-            # already-active short-circuit still refreshes the per-multiplexer ambient so future
-            # subagent CC sessions on the same MCP session can auto-reactivate to this project
-            # (handoff://Serena:serena/implement-auto-reactivate-fallback-for-streamable-http-subagent-drops)
-            self._record_ambient_activation(project.project_root)
             return False
 
         log.info(f"Activating {project.project_name} at {project.project_root}")
@@ -1400,13 +1265,6 @@ class SerenaAgent:
 
         if self._project_activation_callback is not None:
             self._project_activation_callback()
-
-        # record this activation as the per-multiplexer-connection ambient so a subsequent subagent
-        # CC session arriving on the same MCP session with an empty per-CC-session slot can
-        # auto-reactivate to this project (handoff://Serena:serena/
-        # implement-auto-reactivate-fallback-for-streamable-http-subagent-drops). No-op when no
-        # streamable-http session is in scope (e.g. CLI / pipe-transport callers).
-        self._record_ambient_activation(project.project_root)
 
         return True
 
