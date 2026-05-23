@@ -173,6 +173,12 @@ class TestForwardedHeaderTier:
         ``mcp_ctx.request_context.request.headers`` -> session_key equals
         the header value AND is a ``str`` (NOT an ``int`` like the
         ``id()``-derived legacy key).
+
+        Post idle-TTL-eviction landing
+        (plan://Serena:serena/decouple-tier-2-eviction-from-transport-add-idle-ttl-impl)
+        tier-2 no longer registers a weakref.finalize on mcp_ctx.session; instead
+        it stamps :attr:`SerenaAgent._session_last_touched` so the idle-TTL
+        sweeper can evict the slot if the named CC owner falls silent.
         """
         token = _reset_pipe_var()
         try:
@@ -183,12 +189,18 @@ class TestForwardedHeaderTier:
             )
             tool.apply_ex(mcp_ctx=ctx, log_call=False)
 
-            # the finalizer is registered under the header value as a str key
-            assert cc_session_id in agent._session_finalizers, (
-                f"finalizer not registered under str key {cc_session_id!r}; "
-                f"keys present: {list(agent._session_finalizers.keys())!r}"
+            # tier-2 stamps last-touched under the header value as a str key
+            assert cc_session_id in agent._session_last_touched, (
+                f"tier-2 last-touched not stamped under str key {cc_session_id!r}; "
+                f"keys present: {list(agent._session_last_touched.keys())!r}"
             )
             assert isinstance(cc_session_id, str)
+            # tier-2 does NOT register a weakref.finalize -- eviction decoupling
+            # is the entire point of the idle-TTL fix.
+            assert cc_session_id not in agent._session_finalizers, (
+                "tier-2 must not register a finalizer post idle-TTL landing; "
+                f"finalizers present: {list(agent._session_finalizers.keys())!r}"
+            )
             # the int-keyed legacy slot must NOT have been touched
             assert not any(isinstance(k, int) for k in agent._session_finalizers), (
                 f"unexpected int-keyed finalizer registered alongside str key: "
@@ -205,7 +217,8 @@ class TestForwardedHeaderTier:
         """Case (a)+(e) alternate attribute path: header reached via
         ``mcp_ctx.request.headers`` when ``request_context`` is unavailable.
         This path is the second probe in apply_ex's header-extraction loop;
-        the test confirms the fallback works.
+        the test confirms the fallback works and that tier-2 stamps
+        last-touched (not a weakref.finalize) post idle-TTL landing.
         """
         token = _reset_pipe_var()
         try:
@@ -215,21 +228,25 @@ class TestForwardedHeaderTier:
                 header_attr_path="request.headers",
             )
             tool.apply_ex(mcp_ctx=ctx, log_call=False)
-            assert cc_session_id in agent._session_finalizers, (
-                "fallback header probe via mcp_ctx.request.headers must yield a registered finalizer; "
-                f"keys: {list(agent._session_finalizers.keys())!r}"
+            assert cc_session_id in agent._session_last_touched, (
+                "fallback header probe via mcp_ctx.request.headers must stamp last-touched; "
+                f"keys: {list(agent._session_last_touched.keys())!r}"
+            )
+            assert cc_session_id not in agent._session_finalizers, (
+                "tier-2 must not register a finalizer post idle-TTL landing"
             )
             assert agent._warned_missing_forwarded_session_keys == set()
         finally:
             _PIPE_SESSION_ID_VAR.reset(token)
 
-    def test_two_distinct_headers_on_same_session_register_distinct_finalizers(
+    def test_two_distinct_headers_on_same_session_register_distinct_last_touched(
         self, agent: SerenaAgent, tool: _NoOpProbeTool
     ) -> None:
         """Case (c): the multiplexer multiplexes many CC sessions onto a
-        single persistent ``mcp_ctx.session``. apply_ex must register a
-        distinct finalizer for each X-Forwarded value seen on the same
-        underlying session object.
+        single persistent ``mcp_ctx.session``. apply_ex must stamp a
+        distinct :attr:`SerenaAgent._session_last_touched` entry for each
+        X-Forwarded value seen on the same underlying session object, so
+        the idle-TTL sweeper can independently evict each CC session.
         """
         token = _reset_pipe_var()
         try:
@@ -243,13 +260,12 @@ class TestForwardedHeaderTier:
             tool.apply_ex(mcp_ctx=ctx_a, log_call=False)
             tool.apply_ex(mcp_ctx=ctx_b, log_call=False)
 
-            # both string keys are registered, and they are independent
-            assert cc_a in agent._session_finalizers
-            assert cc_b in agent._session_finalizers
-            assert agent._session_finalizers[cc_a] is not agent._session_finalizers[cc_b], (
-                "each forwarded CC session id must own its own finalizer object even when "
-                "they share the underlying mcp_ctx.session target"
-            )
+            # both string keys are independently stamped in last-touched
+            assert cc_a in agent._session_last_touched
+            assert cc_b in agent._session_last_touched
+            # and neither is registered as a transport-tied finalizer
+            assert cc_a not in agent._session_finalizers
+            assert cc_b not in agent._session_finalizers
         finally:
             _PIPE_SESSION_ID_VAR.reset(token)
 

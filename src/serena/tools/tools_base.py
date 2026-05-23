@@ -284,18 +284,27 @@ class Tool(Component):
         """
         Applies the tool with logging and exception handling, using the given keyword arguments
         """
-        # derive a per-session key in three tiers:
+        # derive a per-session key in three tiers, each with its own eviction trigger:
         #   1. pipe transport (src/serena/pipe.py) supplies the project_root via
         #      _PIPE_SESSION_ID_VAR -- the project_root IS the session_id under
-        #      plan://Serena:serena/serena-pipe-session-id-is-the-session-id; eviction
-        #      is driven by the per-pipe-connection finalizer (T6) rather than the GC.
+        #      plan://Serena:serena/serena-pipe-session-id-is-the-session-id. Eviction
+        #      is driven by pipe-socket disconnect via SerenaAgent.evict_pipe_session,
+        #      NOT by transport GC and NOT by the idle-TTL sweeper. Pipe keys are
+        #      never registered in _session_last_touched.
         #   2. streamable-http with the multiplexer forwarding the inbound CC client's
         #      Mcp-Session-Id as X-Forwarded-Mcp-Session-Id (per
         #      plan://Serena:serena/streamable-http-cc-session-id-pass-through-v2)
         #      -- keyed on the CC session so two CC sessions through one persistent
         #      multiplexer<->serena session do not collide on _active_projects_by_session.
+        #      Eviction is driven by idle TTL via the SerenaAgent session sweeper
+        #      thread (per plan://Serena:serena/decouple-tier-2-eviction-from-transport-add-idle-ttl-impl).
+        #      No weakref.finalize is registered against mcp_ctx.session for this tier,
+        #      so SSE-connection churn between the multiplexer and serena does NOT
+        #      wipe a still-named CC owner's per-session slot.
         #   3. legacy direct-stdio / streamable-http without the multiplexer -- falls back
-        #      to id(mcp_ctx.session) and emits a one-time warning per session.
+        #      to id(mcp_ctx.session) and emits a one-time warning per session. Eviction
+        #      is driven by mcp_ctx.session GC via weakref.finalize, which is the correct
+        #      trigger here because the SDK session IS the CC session boundary on this path.
         from serena.agent import _ACTIVE_PROJECT_VAR, _MCP_CALL_IN_FLIGHT, _PIPE_SESSION_ID_VAR, _SESSION_KEY_VAR
 
         pipe_session_id = _PIPE_SESSION_ID_VAR.get()
@@ -338,7 +347,7 @@ class Tool(Component):
                         break
                 if forwarded_cc_session_id:
                     session_key = forwarded_cc_session_id
-                    self.agent._register_session_finalizer(mcp_ctx.session, session_key)
+                    self.agent._touch_session(session_key)
                 else:
                     # tier 3: legacy direct-stdio / streamable-http without the multiplexer.
                     # id(mcp_ctx.session) is unique for the lifetime of a Session but unstable
