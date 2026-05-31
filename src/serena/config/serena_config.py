@@ -647,7 +647,13 @@ class RegisteredProject(ToStringMixin):
         :param path: the path to check
         :return: True if the path matches the project root, False otherwise
         """
-        return self.project_root.samefile(Path(path).resolve())
+        try:
+            return self.project_root.samefile(Path(path).resolve())
+        except OSError:
+            # a registered root that no longer exists on disk (e.g. the project directory was moved
+            # or deleted after registration) cannot match any path; report no-match rather than
+            # letting the FileNotFoundError abort resolution of unrelated registered projects
+            return False
 
     def get_project_instance(self, serena_config: "SerenaConfig") -> "Project":
         """

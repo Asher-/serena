@@ -660,3 +660,61 @@ class TestRegisteredProjectReloadIfChanged:
         self.yml_path.write_text("this: is: not: valid: yaml: :\n", encoding="utf-8")
         assert self.registered.reload_if_changed(self.serena_config) is False
         assert self.registered.project_config.languages == [Language.PYTHON]
+
+
+class TestGetRegisteredProjectWithRelocatedRoot:
+    """Tests that a registered project whose directory is relocated or deleted *after* registration
+    does not break resolution of other projects.
+
+    The daemon caches each registered project in memory at load time. If a project directory is then
+    moved or removed during the daemon's lifetime (e.g. a repo extracted into a submodule elsewhere),
+    the stale in-memory registration must not raise ``FileNotFoundError`` from
+    :meth:`RegisteredProject.matches_root_path` and abort the by-path resolution loop in
+    :meth:`SerenaConfig.get_registered_project`. Projects registered *after* the dead entry must still
+    resolve -- the regression that broke ``activate_project`` (by path) for every project listed below
+    a relocated one.
+    """
+
+    def setup_method(self):
+        # three on-disk projects registered in list order -- a live one, a soon-to-be-relocated one,
+        # and the target listed AFTER it (mirrors the real failure ordering: a live project, then the
+        # dead entry, then the project that fails to resolve because it sits below the dead entry).
+        self.serena_config = create_default_serena_config()
+        self.dirs: dict[str, Path] = {}
+        registered: list[RegisteredProject] = []
+        for name in ("live_before", "relocated", "target_after"):
+            project_dir = Path(tempfile.mkdtemp())
+            self.dirs[name] = project_dir
+            serena_dir = project_dir / SERENA_MANAGED_DIR_NAME
+            serena_dir.mkdir(parents=True, exist_ok=True)
+            (serena_dir / ProjectConfig.SERENA_PROJECT_FILE).write_text(
+                f"project_name: {name}\nlanguages:\n  - python\n",
+                encoding="utf-8",
+            )
+            registered.append(RegisteredProject.from_project_root(str(project_dir), serena_config=self.serena_config))
+        self.serena_config.projects = registered
+
+        # relocate the middle project out from under its registration: the directory is gone but the
+        # in-memory RegisteredProject (with its cached project_config) survives.
+        shutil.rmtree(self.dirs["relocated"])
+
+    def teardown_method(self):
+        shutil.rmtree(self.dirs["live_before"], ignore_errors=True)
+        shutil.rmtree(self.dirs["target_after"], ignore_errors=True)
+
+    def test_matches_root_path_returns_false_for_relocated_root(self):
+        """A registration whose directory no longer exists matches nothing instead of raising FileNotFoundError."""
+        relocated = self.serena_config.projects[1]
+        assert relocated.matches_root_path(str(self.dirs["target_after"])) is False
+
+    def test_resolves_project_listed_after_relocated_entry_by_path(self):
+        """by-path resolution skips the dead entry and still finds a project registered after it."""
+        resolved = self.serena_config.get_registered_project(str(self.dirs["target_after"]))
+        assert resolved is not None
+        assert resolved.project_name == "target_after"
+
+    def test_resolution_by_name_unaffected_by_relocated_entry(self):
+        """by-name resolution reads in-memory config and is unaffected by a relocated entry."""
+        resolved = self.serena_config.get_registered_project("target_after")
+        assert resolved is not None
+        assert resolved.project_name == "target_after"
