@@ -180,3 +180,42 @@ def test_task_executor_cancellation_via_task_info(executor):
         pass
     end_time = time.time()
     assert (end_time - start_time) < 9, "Cancelled task did not stop in time"
+
+
+def test_keepalive_idle_worker_relinquishes_and_revives() -> None:
+    """A per-session executor's worker exits after its idle window; the next task revives it."""
+    ex = TaskExecutor("KeepaliveIdle", idle_keepalive_seconds=0.2)
+    assert ex._worker_alive is True
+    # after the idle window with no work, the worker relinquishes its thread
+    time.sleep(0.6)
+    assert ex._worker_alive is False
+    assert ex._task_executor_thread is not None and not ex._task_executor_thread.is_alive()
+    # the next task revives a worker and runs to completion
+    assert ex.execute_task(lambda: 42, name="after-idle") == 42
+    assert ex._worker_alive is True
+    ex.shutdown()
+
+
+def test_keepalive_preserves_serial_ordering() -> None:
+    """With a worker kept alive, tasks issued together run in FIFO order on the single worker."""
+    ex = TaskExecutor("KeepaliveOrder", idle_keepalive_seconds=5.0)
+    order: list[int] = []
+    tasks = [ex.issue_task((lambda i=i: order.append(i)), name=f"t{i}") for i in range(10)]
+    for t in tasks:
+        t.result()
+    assert order == list(range(10))
+    ex.shutdown()
+
+
+def test_keepalive_ordering_preserved_across_revival() -> None:
+    """After an idle relinquish-and-revive cycle, subsequently issued tasks still run in order."""
+    ex = TaskExecutor("KeepaliveRevive", idle_keepalive_seconds=0.2)
+    assert ex.execute_task(lambda: "a", name="a") == "a"
+    time.sleep(0.6)
+    assert ex._worker_alive is False
+    order: list[int] = []
+    tasks = [ex.issue_task((lambda i=i: order.append(i)), name=f"r{i}") for i in range(5)]
+    for t in tasks:
+        t.result()
+    assert order == [0, 1, 2, 3, 4]
+    ex.shutdown()

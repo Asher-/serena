@@ -17,19 +17,34 @@ T = TypeVar("T")
 
 
 class TaskExecutor:
-    def __init__(self, name: str):
+    # idle window after which a per-session worker thread relinquishes itself; the next
+    # issue_task revives it. This bounds a per-session worker to its active life instead of
+    # the daemon's lifetime, without any separate sweeper. Overridable per instance for tests.
+    IDLE_KEEPALIVE_SECONDS: float = 300.0
+
+    def __init__(self, name: str, idle_keepalive_seconds: float | None = None):
+        self._name = name
+        self._idle_keepalive_seconds = self.IDLE_KEEPALIVE_SECONDS if idle_keepalive_seconds is None else idle_keepalive_seconds
         self._task_executor_lock = threading.Lock()
         self._task_executor_queue: list[TaskExecutor.Task] = []
-        # signals the dispatcher loop should exit; set by :meth:`shutdown`. Without this
-        # flag the daemon thread idles in ``time.sleep(0.1)`` for the entire process
-        # lifetime even after the executor's owning session has been evicted, which
-        # accumulates idle threads at one per ever-connected session.
+        # set by :meth:`shutdown` to stop the worker permanently (distinct from idle relinquishment).
         self._shutdown_requested = threading.Event()
-        self._task_executor_thread = Thread(target=self._process_task_queue, name=name, daemon=True)
-        self._task_executor_thread.start()
+        # whether a worker thread is currently servicing the queue. A worker idle past
+        # _idle_keepalive_seconds clears this and exits, so per-session threads do not
+        # accumulate one-per-ever-connected-session; issue_task revives one under the same
+        # lock, so the empty-queue exit and the enqueue can never strand a task.
+        self._worker_alive = False
+        self._task_executor_thread: Thread | None = None
         self._task_executor_task_index = 1
         self._task_executor_current_task: TaskExecutor.Task | None = None
         self._task_executor_last_executed_task_info: TaskExecutor.TaskInfo | None = None
+        self._start_worker()
+
+    def _start_worker(self) -> None:
+        """Start a fresh daemon worker for the queue and mark a worker live. Caller holds the lock (or is __init__)."""
+        self._worker_alive = True
+        self._task_executor_thread = Thread(target=self._process_task_queue, name=self._name, daemon=True)
+        self._task_executor_thread.start()
 
     class Task(ToStringMixin, Generic[T]):
         def __init__(self, function: Callable[[], T], name: str, logged: bool = True, timeout: float | None = None):
@@ -124,15 +139,24 @@ class TaskExecutor:
                 pass
 
     def _process_task_queue(self) -> None:
+        last_active = time.monotonic()
         while not self._shutdown_requested.is_set():
             # obtain task from the queue
             task: TaskExecutor.Task | None = None
             with self._task_executor_lock:
                 if len(self._task_executor_queue) > 0:
                     task = self._task_executor_queue.pop(0)
+                elif (time.monotonic() - last_active) > self._idle_keepalive_seconds:
+                    # idle past the keepalive window: relinquish this worker thread. The empty-queue
+                    # check and this exit are atomic under the lock, so a concurrent issue_task either
+                    # appends before we look (we take the task) or revives a fresh worker after we
+                    # clear the flag -- no task is ever stranded on a dead thread.
+                    self._worker_alive = False
+                    return
             if task is None:
                 time.sleep(0.1)
                 continue
+            last_active = time.monotonic()
 
             # start task execution asynchronously
             with self._task_executor_lock:
@@ -210,6 +234,10 @@ class TaskExecutor:
                 log.info(f"Scheduling {task_name}")
             task_obj = self.Task(function=task, name=task_name, logged=logged, timeout=timeout)
             self._task_executor_queue.append(task_obj)
+            # revive a worker that relinquished itself after going idle; under the same lock as the
+            # worker's empty-queue exit, so enqueue and exit can never race a task onto a dead thread.
+            if not self._worker_alive and not self._shutdown_requested.is_set():
+                self._start_worker()
             return task_obj
 
     def execute_task(self, task: Callable[[], T], name: str | None = None, logged: bool = True, timeout: float | None = None) -> T:
