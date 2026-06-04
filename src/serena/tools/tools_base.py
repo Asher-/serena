@@ -427,6 +427,12 @@ class Tool(Component):
                         # worker so concurrent sessions never cross-bind -- instead of erroring.
                         # Recovers a session whose slot was never established or was lost (e.g.
                         # across a serena daemon restart) on its very next tool call.
+                        # the per-session slot is re-read here unlocked -- it was snapshotted on the
+                        # main thread into persisted_project above -- so a concurrent activation of the
+                        # same session_key can race this re-check. entering the heal branch twice is
+                        # benign: activate_project_from_path_or_name re-registers the same root
+                        # idempotently, so the redundant re-activation cannot corrupt the slot. the
+                        # re-entrancy is intentional and needs no lock.
                         healed = False
                         if (
                             session_key is not None

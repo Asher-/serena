@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 from serena.tools.file_tools import CreateTextFileTool
 
 
@@ -134,3 +136,16 @@ def test_non_ascii_content_round_trips_and_count_is_characters_not_bytes(tmp_pat
     # ... and the report counts characters, which is strictly fewer than the byte length here
     assert result == f"Created unicode.txt ({len(content)} characters)."
     assert len(content) < target.stat().st_size
+
+
+def test_bare_filename_skips_makedirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # bare filename + empty root: os.path.dirname is "" so the parent guard skips makedirs
+    monkeypatch.chdir(tmp_path)
+    tool = _make_tool(project_root="")
+
+    # the bare path resolves under the current working directory (the chdir'd temp dir)
+    result = tool.apply("bare.txt", "hi")
+
+    # written verbatim and reported created -- the no-parent-directory branch is exercised
+    assert (tmp_path / "bare.txt").read_text(encoding="utf-8") == "hi"
+    assert result == "Created bare.txt (2 characters)."
