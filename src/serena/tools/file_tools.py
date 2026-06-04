@@ -8,7 +8,7 @@ File and file system-related tools, specifically for
 
 import os
 
-from serena.symbol import LanguageServerSymbol
+from serena.tools import Tool, ToolMarkerCanEdit
 from serena.tools import Tool
 from serena.util.file_system import scan_directory
 from serena.util.text_utils import search_files
@@ -222,3 +222,38 @@ class SearchForPatternTool(Tool):
             max_answer_chars,
             shortened_result_factories=[make_symbol_list, make_per_file_counts, make_summary],
         )
+
+
+class CreateTextFileTool(Tool, ToolMarkerCanEdit):
+    """
+    Creates or overwrites a text file at a project-relative path, writing the exact
+    content given. Path-addressed (not symbol-anchored), so it can bootstrap a
+    brand-new file and write empty / zero-byte content -- neither of which a cursor
+    or symbol edit can do, since an empty file has no symbol to anchor to.
+    """
+
+    def apply(self, relative_path: str, content: str = "") -> str:
+        """
+        Create or overwrite a UTF-8 text file with the given content.
+
+        Parent directories are created as needed. ``content`` may be empty, in which
+        case a zero-byte file is written. ``relative_path`` is resolved against the
+        active project root.
+
+        :param relative_path: path of the file to write, relative to the project root
+        :param content: UTF-8 text to write; defaults to "" (writes a zero-byte file)
+        :return: a confirmation stating whether the file was created or overwritten
+        """
+        # resolve the target against the active project root
+        abs_path = os.path.join(self.get_project_root(), relative_path)
+        existed = os.path.isfile(abs_path)
+
+        # create parent directories, then write the exact content (empty -> genuine zero-byte file)
+        parent = os.path.dirname(abs_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(abs_path, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+
+        # report the outcome
+        return f"{'Overwrote' if existed else 'Created'} {relative_path} ({len(content)} characters)."
