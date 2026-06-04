@@ -309,6 +309,10 @@ class Tool(Component):
         pipe_session_id = _PIPE_SESSION_ID_VAR.get()
 
         session_key: str | int | None = None
+        # X-Forwarded-Project-Dir captured on the main thread for the no-project self-heal
+        # inside the worker (the task() closure reads it; it is never reassigned there, so no
+        # nonlocal is needed). Stays None on the pipe path and when no project root is forwarded.
+        forwarded_project_root: str | None = None
         if pipe_session_id is not None:
             # tier 1: pipe transport. Eviction driven by pipe-socket disconnect (T6 of
             # plan://Serena:serena/serena-pipe-implementation), so we deliberately skip
@@ -343,6 +347,13 @@ class Tool(Component):
                         candidate = None
                     if candidate:
                         forwarded_cc_session_id = candidate
+                        # both forwarded-CC headers ride the same request (multiplexer sets
+                        # X-Forwarded-Project-Dir alongside X-Forwarded-Mcp-Session-Id), so read
+                        # the project root here for the active-project self-heal at the gate below.
+                        try:
+                            forwarded_project_root = headers.get("x-forwarded-project-dir") or headers.get("X-Forwarded-Project-Dir")
+                        except Exception:
+                            forwarded_project_root = None
                         break
                 if forwarded_cc_session_id:
                     session_key = forwarded_cc_session_id
@@ -408,12 +419,35 @@ class Tool(Component):
                 # check whether the tool requires an active project and language server
                 if not isinstance(self, ToolMarkerDoesNotRequireActiveProject):
                     if self.agent.get_active_project() is None:
-                        return (
-                            "Error: No active project for this MCP session. "
-                            "Call `activate_project(<absolute path of your project root>)` "
-                            "before any other Serena tool. If you do not know the project root, "
-                            "use your current working directory; the daemon auto-registers it if unknown."
-                        )
+                        # self-heal a stranded session: when this session has no per-session
+                        # active-project slot but the multiplexer forwarded the inbound CC
+                        # client's project root (X-Forwarded-Project-Dir, captured into
+                        # forwarded_project_root on the main thread above), re-activate that
+                        # project for *this* session -- keyed via _SESSION_KEY_VAR set on this
+                        # worker so concurrent sessions never cross-bind -- instead of erroring.
+                        # Recovers a session whose slot was never established or was lost (e.g.
+                        # across a serena daemon restart) on its very next tool call.
+                        healed = False
+                        if (
+                            session_key is not None
+                            and forwarded_project_root
+                            and self.agent._active_projects_by_session.get(session_key) is None
+                        ):
+                            try:
+                                self.agent.activate_project_from_path_or_name(forwarded_project_root)
+                                healed = self.agent.get_active_project() is not None
+                            except Exception as e:
+                                log.info(
+                                    f"Self-heal activation from forwarded project root "
+                                    f"{forwarded_project_root!r} failed: {e}."
+                                )
+                        if not healed:
+                            return (
+                                "Error: No active project for this MCP session. "
+                                "Call `activate_project(<absolute path of your project root>)` "
+                                "before any other Serena tool. If you do not know the project root, "
+                                "use your current working directory; the daemon auto-registers it if unknown."
+                            )
 
                 # apply the actual tool
                 try:
