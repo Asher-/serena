@@ -15,20 +15,18 @@ next tool call from that client would hit an empty
 Fix (per plan://Serena:serena/decouple-tier-2-eviction-from-transport-add-idle-ttl-impl):
 
   - tier 1 (pipe via ``_PIPE_SESSION_ID_VAR``): unchanged. Eviction is
-    socket-disconnect driven. Pipe keys NEVER enter
-    ``_session_last_touched``.
-  - tier 2 (X-Forwarded-Mcp-Session-Id): eviction is now idle-TTL
-    driven by :meth:`SerenaAgent._sweep_idle_sessions`, fed by
-    :meth:`SerenaAgent._touch_session` calls from
-    :meth:`Tool.apply_ex`. Transport churn no longer wipes the slot.
+    socket-disconnect driven.
+  - tier 2 (X-Forwarded-Mcp-Session-Id): the slot is no longer evicted by a
+    periodic sweeper; it persists for the daemon's lifetime (the LSP/Project
+    it references are agent-wide shared resources). Transport churn no longer
+    wipes the slot because tier-2 registers no finalizer on ``mcp_ctx.session``.
   - tier 3 (id() fallback for direct-stdio without the multiplexer):
     unchanged. ``weakref.finalize`` on ``mcp_ctx.session`` remains
     correct because the SDK session IS the CC session boundary.
 
-These six tests verify that every constraint above holds.
+These tests verify that every constraint above holds.
 """
 
-import contextvars
 import gc
 import threading
 from collections.abc import Iterator
@@ -41,7 +39,6 @@ from serena.agent import _PIPE_SESSION_ID_VAR, SerenaAgent
 from serena.config.serena_config import SerenaConfig
 from serena.tools.tools_base import Tool, ToolMarkerDoesNotRequireActiveProject
 
-
 # ---------------------------------------------------------------------------
 # Test fixtures and helpers (mirroring test_streamable_http_cc_session_key.py)
 # ---------------------------------------------------------------------------
@@ -51,7 +48,7 @@ class _NoOpProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
     """A Tool subclass that never needs a project and always returns OK.
 
     The body of :meth:`Tool.apply_ex` runs its session-key derivation
-    (and ``_touch_session`` for tier-2) before the task executor is
+    before the task executor is
     engaged; side effects on agent state are observable when apply_ex
     returns.
     """
@@ -157,9 +154,8 @@ class TestTier2SurvivesTransportGC:
         project = MagicMock()
         project.project_root = "/tmp/test-tier-2-survives"
 
-        # simulate the tier-2 tool dispatch having stamped both the
-        # last-touched timestamp and the per-session active project
-        agent._touch_session(cc_session_id)
+        # simulate the tier-2 tool dispatch having stamped the per-session
+        # active project slot
         agent._active_projects_by_session[cc_session_id] = project
 
         # tier 2 must NOT have registered an mcp_ctx finalizer.
@@ -184,101 +180,6 @@ class TestTier2SurvivesTransportGC:
         assert agent._active_projects_by_session[cc_session_id] is project
         # and the id()-typed key from the transport object is NOT present.
         assert session_id_int not in agent._active_projects_by_session
-
-
-# ---------------------------------------------------------------------------
-# Case 2: TTL-elapsed slots are evicted on sweep.
-# ---------------------------------------------------------------------------
-
-
-class TestTier2TtlEviction:
-    """Tier-2 slots are evicted by :meth:`_sweep_idle_sessions` once
-    ``time.monotonic() - last_touched > SESSION_IDLE_TTL_SECONDS``.
-    """
-
-    def test_tier_2_slot_evicted_after_ttl_elapses_plus_sweep(
-        self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        cc_session_id = "cc-session-tier-2-ttl-evict"
-        project = MagicMock()
-        project.project_root = "/tmp/test-tier-2-ttl"
-        agent._active_projects_by_session[cc_session_id] = project
-
-        # touch at simulated t=0
-        monkeypatch.setattr("serena.agent.time.monotonic", lambda: 0.0)
-        agent._touch_session(cc_session_id)
-        assert cc_session_id in agent._session_last_touched
-
-        # advance the clock just past TTL and sweep
-        ttl = agent.SESSION_IDLE_TTL_SECONDS
-        monkeypatch.setattr(
-            "serena.agent.time.monotonic", lambda: ttl + 1.0
-        )
-        agent._sweep_idle_sessions()
-
-        assert cc_session_id not in agent._active_projects_by_session, (
-            "TTL-cold slot should have been evicted by _sweep_idle_sessions; "
-            f"keys still present: {list(agent._active_projects_by_session.keys())!r}"
-        )
-        assert cc_session_id not in agent._session_last_touched, (
-            "TTL-cold slot's last-touched timestamp should also have been "
-            f"dropped; keys still present: {list(agent._session_last_touched.keys())!r}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Case 3: every apply_ex dispatch refreshes last-touched.
-# ---------------------------------------------------------------------------
-
-
-class TestTier2TouchRefresh:
-    """:meth:`_touch_session` writes the current monotonic timestamp on
-    every call, so an active CC client never goes TTL-cold.
-    """
-
-    def test_every_apply_ex_dispatch_refreshes_last_touched(
-        self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        cc_session_id = "cc-session-tier-2-touch-refresh"
-
-        # touch at t=0; record the stored timestamp
-        clock = {"t": 0.0}
-        monkeypatch.setattr("serena.agent.time.monotonic", lambda: clock["t"])
-        agent._touch_session(cc_session_id)
-        assert agent._session_last_touched[cc_session_id] == pytest.approx(0.0)
-
-        # advance to t=3600 (half the default TTL of 7200s) and touch again;
-        # the stored value must update to reflect the second touch.
-        clock["t"] = 3600.0
-        agent._touch_session(cc_session_id)
-        assert agent._session_last_touched[cc_session_id] == pytest.approx(3600.0)
-
-        # advance to t=3600 + TTL + 1 (so the gap since the last touch
-        # exceeds TTL) and sweep; the slot is evicted.
-        agent._active_projects_by_session[cc_session_id] = MagicMock()
-        ttl = agent.SESSION_IDLE_TTL_SECONDS
-        clock["t"] = 3600.0 + ttl + 1.0
-        agent._sweep_idle_sessions()
-        assert cc_session_id not in agent._active_projects_by_session
-        assert cc_session_id not in agent._session_last_touched
-
-        # now exercise continuous touching: touch at t=0, TTL/2, TTL, 3*TTL/2.
-        # Re-populate the slot, then sweep at t=TTL+TTL/2 WITHOUT touching
-        # in the final TTL/2 gap; the cold slot must be evicted since the
-        # gap exceeds TTL.
-        key2 = "cc-session-tier-2-touch-refresh-2"
-        agent._active_projects_by_session[key2] = MagicMock()
-        for t in (0.0, ttl / 2.0, ttl, 3.0 * ttl / 2.0):
-            clock["t"] = t
-            agent._touch_session(key2)
-        # last touch was at 3*ttl/2; advance to 3*ttl/2 + ttl + 1.
-        # The gap from last touch is exactly ttl+1, which exceeds TTL.
-        clock["t"] = 3.0 * ttl / 2.0 + ttl + 1.0
-        agent._sweep_idle_sessions()
-        assert key2 not in agent._active_projects_by_session, (
-            "after a gap longer than TTL, the slot must be evicted "
-            "regardless of prior touch density"
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -317,113 +218,22 @@ class TestTier3GCEvictionStillWorks:
 
 
 # ---------------------------------------------------------------------------
-# Case 5: pipe-path keys NEVER enter _session_last_touched.
+# Sweeper removed: no SerenaSessionSweeper janitor thread is started.
 # ---------------------------------------------------------------------------
 
 
-class TestPipeNeverTouched:
-    """Pipe-path session keys (project_root strings) must NEVER enter
-    :attr:`SerenaAgent._session_last_touched`. The sweeper must
-    therefore never evict pipe-path slots; pipe eviction stays driven
-    by socket disconnect (:meth:`SerenaAgent.evict_pipe_session`).
+class TestNoSessionSweeperThread:
+    """The idle-TTL sweeper (``SerenaSessionSweeper``) has been removed
+    (plan://Brain:brain/serena-session-state-self-reclaim-impl, t3). Per-session
+    task executors self-expire on idle instead of being reaped by a janitor, so
+    constructing an agent must start no sweeper thread.
     """
 
-    def test_pipe_path_session_keys_never_enter_session_last_touched(
-        self, agent: SerenaAgent, tool: _NoOpProbeTool
-    ) -> None:
-        pipe_project_root = "/tmp/test-pipe-not-touched"
-
-        # drive apply_ex through the pipe-tier path: _PIPE_SESSION_ID_VAR set,
-        # X-Forwarded header also present (should be ignored), mcp_ctx given.
-        ctx = _make_mcp_ctx(forwarded_header="should-be-ignored-by-tier-1")
-        token = _PIPE_SESSION_ID_VAR.set(pipe_project_root)
-        try:
-            tool.apply_ex(mcp_ctx=ctx, log_call=False)
-        finally:
-            _PIPE_SESSION_ID_VAR.reset(token)
-
-        # the pipe project_root must NOT have been stamped in last-touched
-        assert pipe_project_root not in agent._session_last_touched, (
-            "pipe-tier session_keys must never enter _session_last_touched; "
-            f"keys present: {list(agent._session_last_touched.keys())!r}"
-        )
-        # the ignored header value must also not have been stamped
-        assert "should-be-ignored-by-tier-1" not in agent._session_last_touched
-
-
-# ---------------------------------------------------------------------------
-# Case 6: concurrent touch + sweep is race-safe.
-# ---------------------------------------------------------------------------
-
-
-class TestConcurrentTouchSweepRaceSafe:
-    """Concurrent threads calling :meth:`_touch_session` and
-    :meth:`_sweep_idle_sessions` must not crash and must not wrongly
-    evict an actively-touched slot.
-    """
-
-    def test_concurrent_touch_and_sweep_is_race_safe(
-        self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Use a generous TTL so that any session touched in the loop is
-        # never TTL-cold; the test catches: (a) data-race crashes inside
-        # touch or sweep, (b) wrongful eviction of warm slots.
-        monkeypatch.setattr(agent, "SESSION_IDLE_TTL_SECONDS", 10.0)
-
-        n_threads = 20
-        run_duration = 0.5  # seconds of concurrent activity
-        stop_event = threading.Event()
-        keys = [f"sess-{i}" for i in range(n_threads)]
-
-        # populate the active-projects map under each key so an
-        # accidental sweep would evict observable state
-        for key in keys:
-            agent._active_projects_by_session[key] = MagicMock()
-
-        errors: list[BaseException] = []
-
-        def toucher(key: str) -> None:
-            try:
-                while not stop_event.is_set():
-                    agent._touch_session(key)
-                    # let other threads progress; busy spinning would
-                    # starve the sweeper and mask races
-                    threading.Event().wait(0.001)
-            except BaseException as e:
-                errors.append(e)
-
-        def sweeper() -> None:
-            try:
-                while not stop_event.is_set():
-                    agent._sweep_idle_sessions()
-                    threading.Event().wait(0.001)
-            except BaseException as e:
-                errors.append(e)
-
-        toucher_threads = [
-            threading.Thread(target=toucher, args=(k,), name=f"toucher-{k}")
-            for k in keys
+    def test_no_session_sweeper_thread_is_started(self, agent: SerenaAgent) -> None:
+        sweeper_threads = [
+            t for t in threading.enumerate() if t.name == "SerenaSessionSweeper"
         ]
-        sweeper_thread = threading.Thread(target=sweeper, name="sweeper")
-
-        for t in toucher_threads:
-            t.start()
-        sweeper_thread.start()
-
-        threading.Event().wait(run_duration)
-        stop_event.set()
-
-        for t in toucher_threads:
-            t.join(timeout=2.0)
-        sweeper_thread.join(timeout=2.0)
-
-        assert not errors, f"race-stress raised exceptions: {errors!r}"
-
-        # every actively-touched slot survived: the sweeper never
-        # falsely evicted a TTL-warm slot
-        for key in keys:
-            assert key in agent._active_projects_by_session, (
-                f"actively-touched key {key!r} was wrongly evicted by sweeper; "
-                "the TTL guard or the lock discipline is broken"
-            )
-            assert key in agent._session_last_touched
+        assert sweeper_threads == [], (
+            "the idle-TTL sweeper was removed; no SerenaSessionSweeper thread "
+            f"may run after agent construction; found: {[t.name for t in sweeper_threads]!r}"
+        )

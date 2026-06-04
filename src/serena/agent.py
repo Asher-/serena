@@ -10,7 +10,6 @@ import signal
 import subprocess
 import sys
 import threading
-import time
 import weakref
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -293,14 +292,6 @@ class ActiveModes:
 
 
 class SerenaAgent:
-    # idle-TTL for tier-2 (X-Forwarded-Mcp-Session-Id) session entries: a
-    # tier-2 slot is evicted by :meth:`_sweep_idle_sessions` once its
-    # last-touched age exceeds this value. Tier-1 (pipe) and tier-3 (id()
-    # fallback) have separate eviction triggers and are not affected.
-    SESSION_IDLE_TTL_SECONDS: float = 7200.0  # 2 hours
-    # how often the daemon sweeper thread wakes to check for TTL-cold
-    # tier-2 entries. Worst-case eviction lag is TTL + this interval.
-    SESSION_SWEEP_INTERVAL_SECONDS: float = 900.0  # 15 minutes
 
     def __init__(
         self,
@@ -353,18 +344,6 @@ class SerenaAgent:
         self._warned_missing_forwarded_session_keys: set[str | int] = set()
         self._warned_missing_forwarded_session_keys: set[str | int] = set()
         self._session_finalizers_lock = threading.Lock()
-        # tier-2 (X-Forwarded-Mcp-Session-Id) eviction is decoupled from transport
-        # GC because the persistent multiplexer<->serena SSE connection lifetime
-        # differs from the CC client lifetime: SSE churn would GC mcp_ctx.session
-        # and wipe a still-named owner's per-session slot. Instead we track
-        # last-touched timestamps and a daemon sweeper thread evicts entries
-        # whose age exceeds :attr:`SESSION_IDLE_TTL_SECONDS`. Tier-3 (id()
-        # fallback for direct-stdio clients) keeps the existing weakref.finalize
-        # because there the SDK session IS the CC session boundary.
-        self._session_last_touched: dict[str | int, float] = {}
-        self._session_last_touched_lock = threading.Lock()
-        self._session_sweeper_stop_event = threading.Event()
-        self._session_sweeper_thread: threading.Thread | None = None
         # the project can surface the real cause instead of a generic "No active project".
         self._startup_activation_error: Exception | None = None
         self._startup_activation_target: str | None = None
@@ -516,11 +495,6 @@ class SerenaAgent:
             # inform the GUI window (if any)
             if self._gui_log_viewer is not None:
                 self._gui_log_viewer.set_dashboard_url(dashboard_url)
-
-
-        # launch the tier-2 idle-TTL sweeper. Daemon thread so process exit does
-        # not have to join; on_shutdown signals the stop event for clean teardown.
-        self._start_session_sweeper()
 
         self._send_usage_info()
 
@@ -912,23 +886,16 @@ class SerenaAgent:
         Pop ``session_key`` out of every per-session map so its entries cannot leak.
 
         Called by the per-session weakref finalizer registered in
-        :meth:`_register_session_finalizer` (tier-3 only after the eviction-decoupling
-        change -- tier-2 is now driven by :meth:`_sweep_idle_sessions`) and by any
-        explicit eviction path that hands us a session key directly. Idempotent. Does
-        not shut down language servers or projects (those are agent-wide resources
-        owned by :meth:`on_shutdown`).
+        :meth:`_register_session_finalizer` (tier-3) and by any explicit eviction
+        path that hands us a session key directly. Idempotent. Does not shut down
+        language servers or projects (those are agent-wide resources owned by
+        :meth:`on_shutdown`).
         """
         self._active_projects_by_session.pop(session_key, None)
         self._cursor_managers_by_session.pop(session_key, None)
         self._warned_missing_forwarded_session_keys.discard(session_key)
         with self._session_finalizers_lock:
             self._session_finalizers.pop(session_key, None)
-        # drop the tier-2 last-touched bookkeeping too, so the sweeper does not
-        # carry a dangling entry for an already-evicted key. Pipe (tier-1) and
-        # id()-fallback (tier-3) keys are never registered here, so this pop
-        # is always a no-op for those tiers.
-        with self._session_last_touched_lock:
-            self._session_last_touched.pop(session_key, None)
         # tear down the session's per-session executor so its worker thread does not idle in
         # ``time.sleep(0.1)`` for the rest of the daemon's lifetime; pending tasks have their
         # futures cancelled so any blocked caller raises CancelledError instead of hanging.
@@ -937,71 +904,11 @@ class SerenaAgent:
         if executor is not None:
             executor.shutdown()
 
-    def _touch_session(self, session_key: str | int) -> None:
-        """Refresh the last-touched timestamp for a tier-2 session key.
+    
 
-        Called from :class:`Tool.apply_ex` at the top of every tier-2 dispatch
-        (X-Forwarded-Mcp-Session-Id header present). The idle-TTL sweeper
-        evicts entries whose age exceeds :attr:`SESSION_IDLE_TTL_SECONDS`;
-        every dispatch refreshes liveness, including dispatches whose tool
-        body raises. Tier-1 (pipe) and tier-3 (id() fallback) do NOT call
-        this method -- their eviction triggers are separate.
+    
 
-        :param session_key: the X-Forwarded-Mcp-Session-Id value (a string)
-            used as the key in :attr:`_active_projects_by_session`.
-        """
-        with self._session_last_touched_lock:
-            self._session_last_touched[session_key] = time.monotonic()
-
-    def _sweep_idle_sessions(self) -> None:
-        """Evict tier-2 session entries whose last-touched age exceeds the TTL.
-
-        Snapshots :attr:`_session_last_touched` under
-        :attr:`_session_last_touched_lock`, releases the lock, then calls
-        :meth:`_evict_session_state` for each TTL-cold key.
-        :meth:`_evict_session_state` is idempotent and is extended to also
-        drop the key from :attr:`_session_last_touched`, so the sweep is
-        consistent with non-sweep eviction paths.
-        """
-        now = time.monotonic()
-        with self._session_last_touched_lock:
-            to_evict = [
-                key
-                for key, ts in self._session_last_touched.items()
-                if (now - ts) > self.SESSION_IDLE_TTL_SECONDS
-            ]
-        for key in to_evict:
-            try:
-                self._evict_session_state(key)
-            except Exception:
-                log.exception(
-                    f"sweep_idle_sessions: eviction failed for key {key!r}; continuing"
-                )
-
-    def _start_session_sweeper(self) -> None:
-        """Launch the daemon thread that periodically runs :meth:`_sweep_idle_sessions`.
-
-        Daemon thread so the process can exit without joining it; the loop
-        waits on :attr:`_session_sweeper_stop_event` so :meth:`on_shutdown`
-        can signal a clean exit. Exceptions inside the loop are logged and
-        swallowed; the loop never terminates on a transient error.
-        """
-        if self._session_sweeper_thread is not None:
-            return
-
-        def _run() -> None:
-            while not self._session_sweeper_stop_event.is_set():
-                if self._session_sweeper_stop_event.wait(self.SESSION_SWEEP_INTERVAL_SECONDS):
-                    return
-                try:
-                    self._sweep_idle_sessions()
-                except Exception:
-                    log.exception("session sweeper: unexpected error; continuing")
-
-        self._session_sweeper_thread = threading.Thread(
-            target=_run, name="SerenaSessionSweeper", daemon=True
-        )
-        self._session_sweeper_thread.start()
+    
 
     def _warn_missing_forwarded_session_id_once(self, session_key: str | int) -> None:
         """Emits a one-time warning when no X-Forwarded-Mcp-Session-Id header is present.
@@ -1530,14 +1437,6 @@ class SerenaAgent:
         slot), deduplicating in case multiple sessions share the same Project instance.
         """
         log.info("SerenaAgent is shutting down ...")
-
-        # signal the tier-2 idle-TTL sweeper to stop and join it. Daemon=True
-        # means we don't strictly need to join, but joining gives a clean
-        # tear-down for tests that build and discard agents in a tight loop.
-        self._session_sweeper_stop_event.set()
-        if self._session_sweeper_thread is not None:
-            self._session_sweeper_thread.join(timeout=5.0)
-            self._session_sweeper_thread = None
 
         # collect every project instance held in any slot, deduplicated by identity
         projects: list[Project] = []

@@ -35,10 +35,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from serena.agent import _PIPE_SESSION_ID_VAR, SerenaAgent
+from serena.agent import _PIPE_SESSION_ID_VAR, _SESSION_KEY_VAR, SerenaAgent
 from serena.config.serena_config import SerenaConfig
 from serena.tools.tools_base import Tool, ToolMarkerDoesNotRequireActiveProject
-
 
 # --- test infrastructure --------------------------------------------------
 
@@ -46,16 +45,22 @@ from serena.tools.tools_base import Tool, ToolMarkerDoesNotRequireActiveProject
 class _NoOpProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
     """A Tool subclass that never needs a project and always returns OK.
 
-    The body of ``apply_ex`` only runs its session-key derivation before the
-    task executor is engaged; the actual ``apply`` may or may not run
-    depending on whether ``is_active()`` returns True. Either way, the
-    side effects on :attr:`SerenaAgent._active_projects_by_session`,
-    :attr:`SerenaAgent._session_finalizers`, and
-    :attr:`SerenaAgent._warned_missing_forwarded_session_keys` happen
-    synchronously and are observable when apply_ex returns.
+    ``apply`` runs inside the per-session task-executor worker, where
+    ``apply_ex`` has bound :data:`_SESSION_KEY_VAR` to the derived session
+    key. The probe appends every key it observes to
+    :attr:`observed_session_keys`, so a test can assert which session key a
+    dispatch was bound to (the tier-2 contract: the X-Forwarded value as a
+    ``str``, distinct per CC session). Absence of a finalizer on
+    ``mcp_ctx.session`` stays observable via
+    :attr:`SerenaAgent._session_finalizers`.
     """
 
-    def apply(self) -> str:  # pragma: no cover -- not reached when is_active is patched False
+    def __init__(self, agent: SerenaAgent) -> None:
+        super().__init__(agent)
+        self.observed_session_keys: list[str | int | None] = []
+
+    def apply(self) -> str:
+        self.observed_session_keys.append(_SESSION_KEY_VAR.get(None))
         return "OK"
 
 
@@ -174,11 +179,9 @@ class TestForwardedHeaderTier:
         the header value AND is a ``str`` (NOT an ``int`` like the
         ``id()``-derived legacy key).
 
-        Post idle-TTL-eviction landing
-        (plan://Serena:serena/decouple-tier-2-eviction-from-transport-add-idle-ttl-impl)
-        tier-2 no longer registers a weakref.finalize on mcp_ctx.session; instead
-        it stamps :attr:`SerenaAgent._session_last_touched` so the idle-TTL
-        sweeper can evict the slot if the named CC owner falls silent.
+        Tier-2 registers no weakref.finalize on mcp_ctx.session (so SSE churn
+        between the multiplexer and serena cannot wipe a still-named owner's
+        slot); the derived session key is the X-Forwarded value as a str.
         """
         token = _reset_pipe_var()
         try:
@@ -189,14 +192,14 @@ class TestForwardedHeaderTier:
             )
             tool.apply_ex(mcp_ctx=ctx, log_call=False)
 
-            # tier-2 stamps last-touched under the header value as a str key
-            assert cc_session_id in agent._session_last_touched, (
-                f"tier-2 last-touched not stamped under str key {cc_session_id!r}; "
-                f"keys present: {list(agent._session_last_touched.keys())!r}"
+            # tier-2 binds the session key to the header value (a str)
+            assert tool.observed_session_keys == [cc_session_id], (
+                f"tier-2 did not bind the str session key {cc_session_id!r}; "
+                f"observed: {tool.observed_session_keys!r}"
             )
             assert isinstance(cc_session_id, str)
-            # tier-2 does NOT register a weakref.finalize -- eviction decoupling
-            # is the entire point of the idle-TTL fix.
+            # tier-2 does NOT register a weakref.finalize -- decoupling tier-2
+            # from transport GC is the entire point.
             assert cc_session_id not in agent._session_finalizers, (
                 "tier-2 must not register a finalizer post idle-TTL landing; "
                 f"finalizers present: {list(agent._session_finalizers.keys())!r}"
@@ -228,12 +231,12 @@ class TestForwardedHeaderTier:
                 header_attr_path="request.headers",
             )
             tool.apply_ex(mcp_ctx=ctx, log_call=False)
-            assert cc_session_id in agent._session_last_touched, (
-                "fallback header probe via mcp_ctx.request.headers must stamp last-touched; "
-                f"keys: {list(agent._session_last_touched.keys())!r}"
+            assert tool.observed_session_keys == [cc_session_id], (
+                "fallback header probe via mcp_ctx.request.headers must bind the str session key; "
+                f"observed: {tool.observed_session_keys!r}"
             )
             assert cc_session_id not in agent._session_finalizers, (
-                "tier-2 must not register a finalizer post idle-TTL landing"
+                "tier-2 must not register a transport-tied finalizer"
             )
             assert agent._warned_missing_forwarded_session_keys == set()
         finally:
@@ -243,10 +246,10 @@ class TestForwardedHeaderTier:
         self, agent: SerenaAgent, tool: _NoOpProbeTool
     ) -> None:
         """Case (c): the multiplexer multiplexes many CC sessions onto a
-        single persistent ``mcp_ctx.session``. apply_ex must stamp a
-        distinct :attr:`SerenaAgent._session_last_touched` entry for each
-        X-Forwarded value seen on the same underlying session object, so
-        the idle-TTL sweeper can independently evict each CC session.
+        single persistent ``mcp_ctx.session``. apply_ex must derive a
+        distinct session key for each X-Forwarded value seen on the same
+        underlying session object, so two CC sessions never collide on one
+        per-session slot.
         """
         token = _reset_pipe_var()
         try:
@@ -260,9 +263,8 @@ class TestForwardedHeaderTier:
             tool.apply_ex(mcp_ctx=ctx_a, log_call=False)
             tool.apply_ex(mcp_ctx=ctx_b, log_call=False)
 
-            # both string keys are independently stamped in last-touched
-            assert cc_a in agent._session_last_touched
-            assert cc_b in agent._session_last_touched
+            # apply_ex bound a distinct session key for each X-Forwarded value
+            assert tool.observed_session_keys == [cc_a, cc_b]
             # and neither is registered as a transport-tied finalizer
             assert cc_a not in agent._session_finalizers
             assert cc_b not in agent._session_finalizers

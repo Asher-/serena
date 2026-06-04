@@ -289,15 +289,14 @@ class Tool(Component):
         #      _PIPE_SESSION_ID_VAR -- the project_root IS the session_id under
         #      plan://Serena:serena/serena-pipe-session-id-is-the-session-id. Eviction
         #      is driven by pipe-socket disconnect via SerenaAgent.evict_pipe_session,
-        #      NOT by transport GC and NOT by the idle-TTL sweeper. Pipe keys are
-        #      never registered in _session_last_touched.
+        #      NOT by transport GC.
         #   2. streamable-http with the multiplexer forwarding the inbound CC client's
         #      Mcp-Session-Id as X-Forwarded-Mcp-Session-Id (per
         #      plan://Serena:serena/streamable-http-cc-session-id-pass-through-v2)
         #      -- keyed on the CC session so two CC sessions through one persistent
         #      multiplexer<->serena session do not collide on _active_projects_by_session.
-        #      Eviction is driven by idle TTL via the SerenaAgent session sweeper
-        #      thread (per plan://Serena:serena/decouple-tier-2-eviction-from-transport-add-idle-ttl-impl).
+        #      The slot persists for the daemon's lifetime; it is no longer evicted
+        #      by a periodic idle-TTL sweeper (removed).
         #      No weakref.finalize is registered against mcp_ctx.session for this tier,
         #      so SSE-connection churn between the multiplexer and serena does NOT
         #      wipe a still-named CC owner's per-session slot.
@@ -347,7 +346,6 @@ class Tool(Component):
                         break
                 if forwarded_cc_session_id:
                     session_key = forwarded_cc_session_id
-                    self.agent._touch_session(session_key)
                 else:
                     # tier 3: legacy direct-stdio / streamable-http without the multiplexer.
                     # id(mcp_ctx.session) is unique for the lifetime of a Session but unstable
