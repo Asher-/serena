@@ -1016,15 +1016,20 @@ class CursorManager:
                 lines.append(gist_line)
 
         # body block (opt-in): full statement-widened body for symbols whose
-        # LSP extent is name-only; falls back to the LSP-reported body
+        # LSP extent is name-only; falls back to the LSP-reported body. Each
+        # line is prefixed with its 0-based file line number so a non-symbol
+        # region (e.g. a switch case) can be anchored for cursor_replace_range
+        # without hand-counting -- bug://serena/cursor-edit-non-symbol-regions-need-line-numbers
         if state.include_body:
             body_text = self._format_widened_body(symbol)
             if body_text is None:
                 body_text = symbol.body
             if body_text:
+                body_start = symbol.get_body_start_position()
+                start_line = body_start.line if body_start is not None else None
                 lines.append("")
                 lines.append("--- body ---")
-                lines.append(body_text)
+                lines.extend(self._number_body_lines(body_text, start_line))
                 lines.append("--- end body ---")
 
         return "\n".join(lines)
@@ -1174,6 +1179,25 @@ class CursorManager:
         from serena.symbol_extent import compute_widened_body_text
 
         return compute_widened_body_text(symbol, self._project)
+
+    def _number_body_lines(self, body_text: str, start_line: int | None) -> list[str]:
+        """Prefix each line of a body projection with its 0-based file line number.
+
+        The numbers let an agent anchor ``cursor_replace_range`` on a non-symbol
+        region inside the body (e.g. a switch ``case``) without hand-counting from
+        the anchor range. ``start_line`` is the 0-based file line at which
+        ``body_text`` begins (the symbol's body-start line); when it is ``None``
+        the line numbers cannot be known, so the text is returned unchanged rather
+        than fabricating numbers.
+
+        :param body_text: the body source text (possibly multi-line).
+        :param start_line: the 0-based file line of ``body_text``'s first line, or
+            ``None`` when unavailable.
+        :return: the body as a list of lines, each numbered when ``start_line`` is known.
+        """
+        if start_line is None:
+            return [body_text]
+        return [f"{start_line + i}: {line}" for i, line in enumerate(body_text.splitlines())]
 
     def _format_structural_cursor_view(self, state: StructuralCursorState) -> str:
         """Render a structural cursor's position as a compact symbolic projection.

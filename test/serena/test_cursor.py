@@ -18,7 +18,7 @@ from serena.cursor import (
     EdgeType,
     NeighborSymbol,
 )
-from serena.symbol import LanguageServerSymbol, LanguageServerSymbolLocation
+from serena.symbol import LanguageServerSymbol, LanguageServerSymbolLocation, PositionInFile
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_utils import PathUtils
 
@@ -58,6 +58,9 @@ def _make_symbol(
     # symbolic-projection helpers consult these; default to a symbol with no
     # body extent, no ancestors, and no parent so tests exercising the new
     # format pass without rewiring every fixture
+    # the --- body --- projection numbers each line from the symbol's body-start
+    # line; default it to the identifier line so include_body tests get numbers
+    sym.get_body_start_position.return_value = PositionInFile(line=line, col=col or 0) if line is not None else None
     sym.body_end_position = None
     sym.iter_ancestors.return_value = iter([])
     sym.get_parent.return_value = None
@@ -621,7 +624,50 @@ class TestFormatting:
         view = manager.format_cursor_view(cid)
 
         assert "--- body ---" in view
-        assert "def func(): pass" in view
+        # body lines are numbered from the symbol's 0-based body-start line (10)
+        assert "10: def func(): pass" in view
+
+    @patch("serena.cursor.LanguageServerSymbolRetriever")
+    def test_format_cursor_view_body_lines_numbered_from_body_start(self, mock_retriever_cls):
+        """Regression for bug://serena/cursor-edit-non-symbol-regions-need-line-numbers.
+
+        The --- body --- projection must prefix every line with its 0-based file
+        line number (counting from the symbol's body-start line) so a non-symbol
+        region (e.g. a switch ``case``) can be anchored for cursor_replace_range
+        without hand-counting from the anchor range.
+        """
+        manager = _make_manager()
+        # a Go file -> identity extent strategy, so the body is symbol.body sliced
+        # from its LSP range start (line 92); five lines -> 92..96
+        body = "func handler() {\n\tswitch x {\n\tcase 1:\n\t}\n}"
+        sym = _make_symbol(name="handler", kind_name="Function", rel_path="src/handler.go", line=92, body=body)
+        mock_retriever = mock_retriever_cls.return_value
+        mock_retriever.find_unique.return_value = sym
+        mock_retriever.get_language_server.return_value = MagicMock(
+            request_definition=MagicMock(return_value=[]),
+            request_referencing_symbols=MagicMock(return_value=[]),
+            request_call_hierarchy_outgoing=MagicMock(return_value=[]),
+            request_call_hierarchy_incoming=MagicMock(return_value=[]),
+            request_type_hierarchy_supertypes=MagicMock(return_value=[]),
+            request_type_hierarchy_subtypes=MagicMock(return_value=[]),
+        )
+
+        cid, _ = manager.start_cursor("handler")
+        manager.get_cursor(cid).include_body = True
+        view = manager.format_cursor_view(cid)
+
+        assert "92: func handler() {" in view
+        assert "93: \tswitch x {" in view
+        assert "94: \tcase 1:" in view
+        assert "96: }" in view
+
+    def test_number_body_lines(self):
+        """``_number_body_lines`` prefixes each line with its 0-based file line
+        number; with no known start line it returns the text unchanged."""
+        manager = _make_manager()
+        assert manager._number_body_lines("a\nb\nc", 5) == ["5: a", "6: b", "7: c"]
+        # unknown body-start line -> preserve the raw text rather than fabricate numbers
+        assert manager._number_body_lines("a\nb", None) == ["a\nb"]
 
     @patch("serena.cursor.LanguageServerSymbolRetriever")
     def test_format_cursor_view_no_neighbors_silent(self, mock_retriever_cls):
