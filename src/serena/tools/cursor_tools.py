@@ -477,17 +477,17 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
     """
     Find a textual pattern and start a cursor at every enclosing symbol.
 
-    cursor_grep is the symbol-aware sibling of ``search_for_pattern``: it
-    runs the same regex pipeline but, for each hit that lives inside an
-    LSP-addressable symbol, opens a fresh cursor at that enclosing symbol
-    so the agent can navigate each hit's neighborhood symbolically -- read
-    the body, walk references, follow calls. Hits that fall outside any
-    addressable symbol are counted in the report but no cursor is opened
-    for them (they have no LSP handle to anchor on).
+    cursor_grep is the cursor surface's regex search: for each hit that
+    lives inside an LSP-addressable symbol it opens a fresh cursor at the
+    enclosing symbol, so the agent can navigate each hit's neighborhood
+    symbolically -- read the body, walk references, follow calls. Hits on
+    non-symbol lines (comments, imports) are reported as a count; reach
+    them through the cursor surface -- ``cursor_find``/``cursor_look`` to
+    navigate to the region -- rather than treating them as out of reach.
 
-    Use this when you want to *explore* the symbols that contain a
-    pattern. Use ``search_for_pattern`` when you only need to *read* the
-    matched lines and have no follow-up navigation in mind.
+    Use this whenever you want to locate or explore a pattern through the
+    cursor. ``search_for_pattern`` remains available as a plain file-level
+    reader for when you only need the matched lines.
     """
 
     def apply(
@@ -582,10 +582,11 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
             return (
                 f"why: {because}\n\n"
                 f"Found {n_unsymboled} match(es) for {substring_pattern!r}, "
-                f"none inside any LSP-addressable symbol (they fall on non-symbol "
-                f"lines such as comments or imports). Use search_for_pattern for the "
-                f"file-level listing, or cursor_find <name> where search_for_pattern "
-                f"is unavailable."
+                f"all on non-symbol lines (comments, imports) -- no enclosing "
+                f"symbol to anchor a cursor. Reach them through the cursor surface: "
+                f"cursor_find <name> (or cursor_look) to navigate to the region, "
+                f"then cursor_replace_range to edit. search_for_pattern still gives "
+                f"the flat file-level listing where you want it."
             )
 
         # cap cursor creation at max_matches; the remainder are listed
@@ -614,8 +615,9 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
         ]
         if n_unsymboled:
             header_parts.append(
-                f"{n_unsymboled} hit(s) outside any LSP symbol "
-                f"(use search_for_pattern, or cursor_find <name> where it is gated)."
+                f"{n_unsymboled} hit(s) on non-symbol lines -- reach them via "
+                f"cursor_find <name>/cursor_look (or search_for_pattern for a flat "
+                f"file-level listing)."
             )
         lines: list[str] = [f"why: {because}", "", " ".join(header_parts), ""]
 

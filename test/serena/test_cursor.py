@@ -1061,8 +1061,9 @@ class TestTopLevelSymbolCoveringLine:
 
 
 class TestCursorGrepFallbackMessage:
-    """``cursor_grep`` recovery guidance must not dead-end on the (hook-gated)
-    ``search_for_pattern`` -- it also points to ``cursor_find``.
+    """``cursor_grep`` recovery guidance leads with the cursor surface
+    (``cursor_find``/``cursor_look``) and does not dead-end on the
+    (hook-gated) ``search_for_pattern``.
 
     Regression for bug://serena/cursor-grep-skips-package-level-symbol-declarations
     (recovery-message half).
@@ -1083,7 +1084,9 @@ class TestCursorGrepFallbackMessage:
         tool, _ = self._make_tool(groups=[], n_unsymboled=1)
         out = tool.apply(substring_pattern="rfaStart", because="x", relative_path="m.go")
         assert "cursor_find" in out
-        assert "search_for_pattern" in out  # still offered where available
+        assert "cursor_look" in out  # cursor-native locating path
+        assert "cursor_replace_range" in out  # edit anchor, not search_for_pattern
+        assert "search_for_pattern" in out  # still offered, demoted to optional reader
 
     def test_unsymboled_header_offers_cursor_find(self):
         from serena.cursor import CursorState
@@ -1097,3 +1100,4 @@ class TestCursorGrepFallbackMessage:
             substring_pattern="Foo", because="x", relative_path="m.go", max_answer_chars=1000000
         )
         assert "cursor_find" in out
+        assert "cursor_look" in out  # cursor-native path leads
