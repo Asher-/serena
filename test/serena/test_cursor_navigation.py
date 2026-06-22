@@ -591,7 +591,7 @@ class TestCursorGrep:
             substring_pattern=r"__absolutely_no_such_token_xyzzy__",
             relative_path=os.path.join("test_repo", "services.py"),
         )
-        assert "No matches" in result or "none inside any LSP-addressable symbol" in result
+        assert "No matches" in result
 
     def test_cursor_grep_max_matches_caps_cursor_creation(self, python_serena_agent: SerenaAgent) -> None:
         """When more enclosing symbols match than max_matches allows, the rest go in a deferred section."""
