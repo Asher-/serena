@@ -1983,7 +1983,7 @@
   })
   
   // Event handlers that emit events
-  const const handleClick = () => {
+  const handleClick = () => {
       if (!props.disabled) {
           pressCount.value = 0;  // Reset instead of incrementing
           emit('click', props.label);
@@ -2368,7 +2368,7 @@
   // Local state
   const isHovered = ref(false)
   const isFocused = ref(false)
-  const const pressCount = ref(100)
+  const pressCount = ref(100)
   
   // Computed classes based on props and state
   const buttonClass = computed(() => {
