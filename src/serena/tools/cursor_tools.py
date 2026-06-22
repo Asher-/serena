@@ -13,7 +13,7 @@ import difflib
 from collections import defaultdict
 from collections.abc import Sequence
 
-from serena.cursor import EdgeType, StructuralCursorState
+from serena.cursor import CursorManager, EdgeType, StructuralCursorState
 from serena.symbol import LanguageServerSymbol
 from serena.tools import SUCCESS_RESULT
 from serena.tools.tools_base import Tool, ToolMarkerSymbolicEdit, ToolMarkerSymbolicRead
@@ -431,6 +431,12 @@ class CursorFindTool(Tool, ToolMarkerSymbolicRead):
             )
             # record the agent's stated goal on the started cursor
             state.last_reasoning = because
+            # honor include_body on the unique-match path: register_cursor_at_symbol creates
+            # a cursor with include_body=False, so without this the documented include_body
+            # flag was silently dropped for unique matches (the multi-candidate path below
+            # already honors it via candidate_list_json)
+            if include_body:
+                state.include_body = True
             view = manager.format_cursor_view(cid)
             return f"Found unique match; started cursor {cid}.\n\n{view}"
         def candidate_list_json() -> str:
@@ -667,9 +673,8 @@ class CursorReplaceBodyTool(Tool, ToolMarkerSymbolicEdit):
         if isinstance(state, StructuralCursorState):
             before, after = manager.apply_container_edit(cursor_id, "replace", body)
             removed, added = self._count_diff_lines(before, after)
-            manager.reanchor_cursor(cursor_id)
             diff_summary = f"Diff: -{removed} / +{added} lines"
-            return f"{SUCCESS_RESULT}\n{diff_summary}\n\n" + manager.format_cursor_view(cursor_id)
+            return self._reanchor_and_format(manager, cursor_id, diff_summary)
 
         name_path = state.current_symbol.get_name_path()
         relative_path = state.current_location.relative_path
@@ -705,8 +710,37 @@ class CursorReplaceBodyTool(Tool, ToolMarkerSymbolicEdit):
                 f"has already been applied — inspect the file and run `git checkout` to recover."
             )
 
-        manager.reanchor_cursor(cursor_id)
         diff_summary = f"Diff: -{removed} / +{added} lines"
+        return self._reanchor_and_format(manager, cursor_id, diff_summary)
+
+    @staticmethod
+    def _reanchor_and_format(manager: CursorManager, cursor_id: str, diff_summary: str) -> str:
+        """
+        Re-anchor the cursor after an applied edit and render the result, tolerating a
+        re-anchor failure.
+
+        The edit has ALREADY been applied and saved by the time this runs. If
+        re-anchoring then fails -- e.g. the body renamed the symbol so its old name path
+        no longer resolves, or the new text is not yet resolvable by the language server
+        -- that failure must NOT surface as a bare error that reads like the edit was a
+        no-op. That was the non-atomic-corruption bug: the file was mutated but the caller
+        saw only ``No symbol matching ...`` and treated it as "nothing happened". Instead,
+        report success with the diff and a re-anchor note so the caller knows the edit
+        landed.
+
+        :param manager: the cursor manager owning ``cursor_id``.
+        :param cursor_id: the cursor to re-anchor and render.
+        :param diff_summary: the pre-computed ``Diff: -R / +A lines`` summary.
+        :return: a success message with the cursor view, or a success message with a
+            re-anchor note when re-anchoring fails.
+        """
+        try:
+            manager.reanchor_cursor(cursor_id)
+        except ValueError as e:
+            return (
+                f"{SUCCESS_RESULT}\n{diff_summary}\n\n"
+                f"(edit applied; cursor {cursor_id} could not re-anchor afterward: {e})"
+            )
         return f"{SUCCESS_RESULT}\n{diff_summary}\n\n" + manager.format_cursor_view(cursor_id)
 
     @staticmethod

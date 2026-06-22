@@ -26,10 +26,13 @@ language server.
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from serena.code_editor import CodeEditor
 from serena.symbol import PositionInFile
+from serena.tools import SUCCESS_RESULT
 from serena.tools.cursor_tools import CursorReplaceBodyTool
 
 
@@ -187,6 +190,76 @@ class TestCountDiffLines:
         removed, added = CursorReplaceBodyTool._count_diff_lines(before, after)
         assert removed >= 39
         assert added == 0
+
+
+class TestStripRedundantLeadingPrefix:
+    """
+    Exercises ``CodeEditor._strip_redundant_leading_prefix`` — the guard that
+    prevents the doubled ``var`` / ``type`` keyword corruption when a language
+    server reports a declaration extent that begins at the symbol *name* rather
+    than the leading keyword (the Go/gopls case in
+    ``bug://serena/cursor-replace-body-nonatomic-doubles-decl-keyword``).
+    """
+
+    def test_go_var_keyword_is_elided(self) -> None:
+        """A body repeating the ``var`` keyword already on the line is de-duplicated."""
+        assert CodeEditor._strip_redundant_leading_prefix("var ", "var X = expr") == "X = expr"
+
+    def test_go_type_keyword_is_elided(self) -> None:
+        """The same applies to ``type`` declarations (``type type Foo`` corruption)."""
+        assert CodeEditor._strip_redundant_leading_prefix("type ", "type Foo struct {}") == "Foo struct {}"
+
+    def test_indented_prefix_keyword_is_elided_but_body_remainder_kept(self) -> None:
+        """Indentation stays in the file (it is part of the prefix); only the keyword is dropped."""
+        assert CodeEditor._strip_redundant_leading_prefix("    var ", "var x = 2") == "x = 2"
+
+    def test_body_without_keyword_passes_through(self) -> None:
+        """A body that correctly omits the keyword must be left untouched (no over-strip)."""
+        assert CodeEditor._strip_redundant_leading_prefix("var ", "X = expr") == "X = expr"
+
+    def test_empty_prefix_is_noop(self) -> None:
+        """Functions / markdown / Python-widened extents have no keyword prefix."""
+        assert CodeEditor._strip_redundant_leading_prefix("", "func foo() {}") == "func foo() {}"
+
+    def test_whitespace_only_prefix_is_noop(self) -> None:
+        """Indentation alone (extent already includes the keyword) strips nothing."""
+        assert CodeEditor._strip_redundant_leading_prefix("    ", "value = 1") == "value = 1"
+
+    def test_shared_spelling_without_word_boundary_is_not_elided(self) -> None:
+        """``various`` merely starts with ``var``; without a following space we must not bite in."""
+        assert CodeEditor._strip_redundant_leading_prefix("var ", "various = 1") == "various = 1"
+
+
+class TestReanchorAndFormat:
+    """
+    Exercises ``CursorReplaceBodyTool._reanchor_and_format`` — the atomicity guard
+    that keeps an already-applied, successful edit from surfacing as a bare error
+    when the post-edit cursor re-anchor fails (the silent-corruption half of
+    ``bug://serena/cursor-replace-body-nonatomic-doubles-decl-keyword``: file
+    mutated, but the caller saw only ``No symbol matching ...``).
+    """
+
+    def test_successful_reanchor_returns_cursor_view(self) -> None:
+        """On a clean re-anchor the result carries the success marker, diff, and view."""
+        manager = MagicMock()
+        manager.format_cursor_view.return_value = "@ Foo :Function@x.go:1-3:"
+        result = CursorReplaceBodyTool._reanchor_and_format(manager, "c1", "Diff: -1 / +1 lines")
+        manager.reanchor_cursor.assert_called_once_with("c1")
+        assert result.startswith(SUCCESS_RESULT)
+        assert "Diff: -1 / +1 lines" in result
+        assert "@ Foo :Function@x.go:1-3:" in result
+
+    def test_reanchor_failure_still_reports_success(self) -> None:
+        """A ValueError from re-anchor must NOT mask the already-applied edit."""
+        manager = MagicMock()
+        manager.reanchor_cursor.side_effect = ValueError("No symbol matching 'Foo' found")
+        result = CursorReplaceBodyTool._reanchor_and_format(manager, "c1", "Diff: -1 / +1 lines")
+        assert result.startswith(SUCCESS_RESULT)
+        assert "Diff: -1 / +1 lines" in result
+        assert "could not re-anchor" in result
+        assert "No symbol matching 'Foo' found" in result
+        # the view is not rendered when re-anchoring fails
+        manager.format_cursor_view.assert_not_called()
 
 
 if __name__ == "__main__":  # pragma: no cover

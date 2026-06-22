@@ -162,10 +162,57 @@ class CodeEditor(Generic[TSymbol], ABC):
             leading = original[: len(original) - len(original.lstrip())]
             trailing = original[len(original.rstrip()) :]
             stripped_body = body.strip()
+
+            # elide a redundant leading declaration keyword: some language servers
+            # (e.g. gopls for Go ``var`` / ``type`` / ``const``) report a symbol extent
+            # that begins at the NAME, excluding the ``var ``/``type `` keyword that
+            # precedes it on the line. A replacement body that includes that keyword
+            # would duplicate it once re-inserted at the extent start (``var var X = ...``).
+            # Detect and drop the duplicate.
+            contents_lines = edited_file.get_contents().splitlines(keepends=True)
+            line_prefix = contents_lines[start_pos.line][: start_pos.col] if start_pos.line < len(contents_lines) else ""
+            stripped_body = self._strip_redundant_leading_prefix(line_prefix, stripped_body)
+
             framed_body = leading + stripped_body + trailing
 
             edited_file.delete_text_between_positions(start_pos, end_pos)
             edited_file.insert_text_at_position(start_pos, framed_body)
+
+    @staticmethod
+    def _strip_redundant_leading_prefix(line_prefix: str, body: str) -> str:
+        """
+        Drop a leading declaration keyword from ``body`` when it merely duplicates the
+        text already present immediately before the symbol's extent.
+
+        Some language servers report the extent of a ``var`` / ``type`` / ``const``
+        declaration starting at the symbol NAME rather than the leading keyword (gopls
+        does this for Go). :meth:`replace_body` re-inserts the body at the extent start,
+        so a body that includes the keyword (``var X = ...``) lands right after the
+        ``var `` already on the line and produces the invalid ``var var X = ...``.
+
+        This helper removes that duplication: when ``body`` begins with the exact
+        non-whitespace text of ``line_prefix`` (the indentation + keyword preceding the
+        extent) followed by whitespace, the redundant leading token is stripped. The
+        check is conservative — a body that already omits the keyword, or an identifier
+        that merely shares the prefix's spelling without a following whitespace
+        boundary, is returned unchanged.
+
+        :param line_prefix: the text on the extent's first line that precedes the extent
+            start (indentation plus any declaration keyword).
+        :param body: the replacement body, already stripped of surrounding whitespace.
+        :return: ``body`` with a redundant leading declaration keyword removed, or
+            ``body`` unchanged when no exact duplication is present.
+        """
+        prefix_token = line_prefix.strip()
+        if not prefix_token or not body.startswith(prefix_token):
+            return body
+        remainder = body[len(prefix_token) :]
+        # only elide when the prefix is a standalone leading token in the body (followed
+        # by whitespace), so we never bite into an identifier that merely shares the
+        # prefix's spelling (e.g. ``various`` after a ``var`` prefix)
+        if not remainder[:1].isspace():
+            return body
+        return remainder.lstrip()
 
     @staticmethod
     def _count_leading_newlines(text: Iterable) -> int:

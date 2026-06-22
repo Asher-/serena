@@ -922,3 +922,43 @@ class TestFindAndAnchor:
         assert state.current_symbol is renamed_sym
         # Verify the retriever was called with the new name
         assert mock_retriever_cls.return_value.find_unique.call_args.args == ("new_name",)
+
+
+# ── CursorFindTool: include_body on the unique-match path ─────────────────
+
+
+class TestCursorFindIncludeBody:
+    """``cursor_find`` must honor ``include_body`` on the unique-match path.
+
+    Regression for ``bug://serena/cursor-find-include-body-ignored-on-unique-match``:
+    a unique match started a cursor whose ``include_body`` defaulted to ``False``,
+    so the documented flag was silently dropped and only the anchor was returned.
+    """
+
+    def _make_tool_with_unique_match(self, sym):
+        from serena.cursor import CursorState
+        from serena.tools.cursor_tools import CursorFindTool
+
+        # bypass Tool.__init__ (needs a full Agent); inject just what apply() touches
+        tool = object.__new__(CursorFindTool)
+        manager = MagicMock()
+        manager.find_symbols.return_value = [sym]
+        state = CursorState(cursor_id="c1", current_symbol=sym, current_location=sym.location)
+        manager.register_cursor_at_symbol.return_value = ("c1", state)
+        manager.format_cursor_view.return_value = "view"
+        agent = MagicMock()
+        agent.get_cursor_manager.return_value = manager
+        tool.agent = agent
+        return tool, state
+
+    def test_include_body_true_sets_state_include_body(self):
+        sym = _make_symbol(name="Foo")
+        tool, state = self._make_tool_with_unique_match(sym)
+        tool.apply(name_path_pattern="Foo", because="x", include_body=True)
+        assert state.include_body is True
+
+    def test_include_body_false_leaves_state_default(self):
+        sym = _make_symbol(name="Foo")
+        tool, state = self._make_tool_with_unique_match(sym)
+        tool.apply(name_path_pattern="Foo", because="x", include_body=False)
+        assert state.include_body is False
