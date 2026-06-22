@@ -582,8 +582,10 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
             return (
                 f"why: {because}\n\n"
                 f"Found {n_unsymboled} match(es) for {substring_pattern!r}, "
-                f"none inside any LSP-addressable symbol. "
-                f"Use search_for_pattern for the file-level listing."
+                f"none inside any LSP-addressable symbol (they fall on non-symbol "
+                f"lines such as comments or imports). Use search_for_pattern for the "
+                f"file-level listing, or cursor_find <name> where search_for_pattern "
+                f"is unavailable."
             )
 
         # cap cursor creation at max_matches; the remainder are listed
@@ -612,7 +614,8 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
         ]
         if n_unsymboled:
             header_parts.append(
-                f"{n_unsymboled} hit(s) outside any LSP symbol (use search_for_pattern)."
+                f"{n_unsymboled} hit(s) outside any LSP symbol "
+                f"(use search_for_pattern, or cursor_find <name> where it is gated)."
             )
         lines: list[str] = [f"why: {because}", "", " ".join(header_parts), ""]
 

@@ -1525,9 +1525,17 @@ class CursorManager:
                 log.debug(f"Could not resolve containing symbol for {rel_path}:{line_0idx}: {e}")
                 sym_dict = None
             if sym_dict is None:
-                n_unsymboled += 1
-                continue
-            sym = LanguageServerSymbol(sym_dict)
+                # request_containing_symbol(strict=False) returns None for a hit on a
+                # top-level symbol's OWN declaration line: it is not inside any deeper
+                # container. Recover that symbol from the file overview so the hit
+                # attaches to it instead of being counted as unsymboled.
+                # bug://serena/cursor-grep-skips-package-level-symbol-declarations
+                sym = self._top_level_symbol_covering_line(rel_path, line_0idx)
+                if sym is None:
+                    n_unsymboled += 1
+                    continue
+            else:
+                sym = LanguageServerSymbol(sym_dict)
             name_path = sym.get_name_path()
             key = (rel_path, name_path)
             if key not in groups:
@@ -1538,6 +1546,43 @@ class CursorManager:
 
         # build the ordered result preserving discovery order
         return [(groups[k], hits_per_group[k]) for k in group_order], n_unsymboled
+
+    def _top_level_symbol_covering_line(self, relative_path: str, line_0idx: int) -> LanguageServerSymbol | None:
+        """Recover the top-level symbol whose extent covers a 0-based line.
+
+        ``request_containing_symbol(strict=False)`` returns ``None`` for a regex hit
+        landing on a package-level (top-level) symbol's own declaration line -- the
+        line is the symbol's own extent, not the interior of any deeper container, so
+        the LSP reports no *containing* symbol. This fallback consults the file
+        overview and returns the narrowest top-level symbol whose body extent contains
+        the line, letting :meth:`find_pattern_with_enclosing_symbols` anchor a cursor
+        on a top-level var/const/type declaration instead of dropping the hit.
+
+        :param relative_path: the file the hit is in (relative to the project root).
+        :param line_0idx: the 0-based line of the hit.
+        :return: the covering top-level symbol, or ``None`` when none covers the line
+            (a genuine non-symbol region such as a comment or import).
+        """
+        try:
+            overview = self._retriever.get_symbol_overview(relative_path)
+        except Exception as e:
+            # best-effort, mirroring the containment-query handling in the caller
+            log.debug(f"Could not load symbol overview for {relative_path}: {e}")
+            return None
+        best: LanguageServerSymbol | None = None
+        best_span: int | None = None
+        for symbols in overview.values():
+            for sym in symbols:
+                start = sym.get_body_start_position()
+                end = sym.get_body_end_position()
+                if start is None or end is None:
+                    continue
+                if start.line <= line_0idx <= end.line:
+                    span = end.line - start.line
+                    if best is None or (best_span is not None and span < best_span):
+                        best = sym
+                        best_span = span
+        return best
 
     def register_cursor_at_symbol(
         self,

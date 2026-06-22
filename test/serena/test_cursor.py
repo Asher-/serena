@@ -1008,3 +1008,92 @@ class TestCursorFindIncludeBody:
         tool, state = self._make_tool_with_unique_match(sym)
         tool.apply(name_path_pattern="Foo", because="x", include_body=False)
         assert state.include_body is False
+
+
+# ── CursorManager: top-level-symbol grep fallback ────────────────────────
+
+
+class TestTopLevelSymbolCoveringLine:
+    """``cursor_grep`` must attach a hit on a top-level symbol's own declaration
+    line to that symbol instead of dropping it as unsymboled.
+
+    Regression for bug://serena/cursor-grep-skips-package-level-symbol-declarations:
+    ``request_containing_symbol(strict=False)`` returns ``None`` for a package-level
+    var/const/type's own line (it is not inside a deeper container), so the hit was
+    counted as unsymboled; the manager now recovers the symbol from the file overview.
+    """
+
+    @staticmethod
+    def _decl(name, start, end, rel="m.go", kind="Variable"):
+        sym = _make_symbol(name=name, kind_name=kind, rel_path=rel, line=start)
+        sym.get_body_start_position.return_value = PositionInFile(line=start, col=0)
+        sym.get_body_end_position.return_value = PositionInFile(line=end, col=1)
+        return sym
+
+    @patch("serena.cursor.LanguageServerSymbolRetriever")
+    def test_returns_symbol_whose_extent_covers_line(self, mock_retriever_cls):
+        manager = _make_manager()
+        sym = self._decl("rfaStart", 65, 65)
+        mock_retriever_cls.return_value.get_symbol_overview.return_value = {"m.go": [sym]}
+        assert manager._top_level_symbol_covering_line("m.go", 65) is sym
+
+    @patch("serena.cursor.LanguageServerSymbolRetriever")
+    def test_returns_none_when_no_symbol_covers_line(self, mock_retriever_cls):
+        manager = _make_manager()
+        sym = self._decl("rfaStart", 65, 65)
+        mock_retriever_cls.return_value.get_symbol_overview.return_value = {"m.go": [sym]}
+        # line 70 is a comment/import region outside the var's extent
+        assert manager._top_level_symbol_covering_line("m.go", 70) is None
+
+    @patch("serena.cursor.LanguageServerSymbolRetriever")
+    def test_prefers_narrowest_covering_symbol(self, mock_retriever_cls):
+        manager = _make_manager()
+        outer = self._decl("Outer", 10, 30, kind="Struct")
+        inner = self._decl("field", 15, 15, kind="Field")
+        mock_retriever_cls.return_value.get_symbol_overview.return_value = {"m.go": [outer, inner]}
+        assert manager._top_level_symbol_covering_line("m.go", 15) is inner
+
+    @patch("serena.cursor.LanguageServerSymbolRetriever")
+    def test_returns_none_on_overview_error(self, mock_retriever_cls):
+        manager = _make_manager()
+        mock_retriever_cls.return_value.get_symbol_overview.side_effect = RuntimeError("LSP down")
+        assert manager._top_level_symbol_covering_line("m.go", 1) is None
+
+
+class TestCursorGrepFallbackMessage:
+    """``cursor_grep`` recovery guidance must not dead-end on the (hook-gated)
+    ``search_for_pattern`` -- it also points to ``cursor_find``.
+
+    Regression for bug://serena/cursor-grep-skips-package-level-symbol-declarations
+    (recovery-message half).
+    """
+
+    def _make_tool(self, groups, n_unsymboled):
+        from serena.tools.cursor_tools import CursorGrepTool
+
+        tool = object.__new__(CursorGrepTool)
+        manager = MagicMock()
+        manager.find_pattern_with_enclosing_symbols.return_value = (groups, n_unsymboled)
+        agent = MagicMock()
+        agent.get_cursor_manager.return_value = manager
+        tool.agent = agent
+        return tool, manager
+
+    def test_no_symbol_groups_message_offers_cursor_find(self):
+        tool, _ = self._make_tool(groups=[], n_unsymboled=1)
+        out = tool.apply(substring_pattern="rfaStart", because="x", relative_path="m.go")
+        assert "cursor_find" in out
+        assert "search_for_pattern" in out  # still offered where available
+
+    def test_unsymboled_header_offers_cursor_find(self):
+        from serena.cursor import CursorState
+
+        sym = _make_symbol(name="Foo", kind_name="Function", rel_path="m.go", line=1)
+        state = CursorState(cursor_id="c1", current_symbol=sym, current_location=sym.location)
+        tool, manager = self._make_tool(groups=[(sym, ["  1: hit"])], n_unsymboled=2)
+        manager.register_cursor_at_symbol.return_value = ("c1", state)
+        manager.format_cursor_view.return_value = "@ Foo :Function@m.go:1:"
+        out = tool.apply(
+            substring_pattern="Foo", because="x", relative_path="m.go", max_answer_chars=1000000
+        )
+        assert "cursor_find" in out
