@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -412,3 +412,42 @@ class TestStructuralOverview:
         project.read_file = MagicMock(side_effect=lambda p: Path(tmp_path / p).read_text(encoding="utf-8"))
         manager = CursorManager(project)
         assert manager.structural_overview("nope.yaml") == []
+
+
+class TestFindPatternSurfacesNonSymbolHits:
+    """``find_pattern_with_enclosing_symbols`` surfaces matches with no enclosing
+    LSP symbol as file-level ``(relative_path, [display])`` blocks carrying the
+    matched line + number, instead of dropping them to a count (spec-v2
+    §5.1/§5.3). Exercises the REAL manager method end-to-end against a real
+    non-LSP file -- the live counterpart to the mocked tool-layer tests in
+    test_cursor.py::TestCursorGrepSurfacesNonSymbolHits.
+    """
+
+    def test_non_symbol_match_surfaced_with_content_not_counted(self, tmp_path: Path) -> None:
+        (tmp_path / "compose.yaml").write_text(
+            "services:\n  serena:\n    image: serena:latest\n", encoding="utf-8"
+        )
+        project = MagicMock()
+        project.project_root = str(tmp_path)
+        project.read_file = MagicMock(side_effect=lambda p: Path(tmp_path / p).read_text(encoding="utf-8"))
+        # No language server serves a .yaml file, so the read ladder resolves it
+        # off the LSP rung and the match routes through the non-symbol surfacing
+        # path -- exactly as in production. Patch ONLY the LSP retriever (mirrors
+        # test_cursor.py); the manager method, structural registry, file I/O, and
+        # _record_unsymboled all run for real against the on-disk file.
+        with patch("serena.cursor.LanguageServerSymbolRetriever") as retriever_cls:
+            retriever_cls.return_value.can_analyze_file.return_value = False
+            manager = CursorManager(project)
+            groups, unsymboled = manager.find_pattern_with_enclosing_symbols(
+                substring_pattern=r"serena:latest",
+                relative_path="compose.yaml",
+                restrict_to_code_files=False,
+            )
+        # a non-LSP file has no enclosing symbol to anchor a cursor ...
+        assert groups == []
+        # ... but the match is SURFACED as a file-level block with its matched
+        # line content -- not reduced to a bare count, not dropped
+        assert len(unsymboled) == 1
+        path, displays = unsymboled[0]
+        assert path == "compose.yaml"
+        assert any("serena:latest" in d for d in displays), displays

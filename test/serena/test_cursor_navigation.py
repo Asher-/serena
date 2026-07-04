@@ -557,8 +557,8 @@ class TestCursorGrep:
             relative_path=os.path.join("test_repo", "services.py"),
         )
         assert "Started" in result and "cursor" in result
-        # the report header counts matches and symbols
-        assert re.search(r"Found \d+ match\(es\) across \d+ symbol\(s\)", result)
+        # the report header counts matches, split into symbol-anchored vs non-symbol
+        assert re.search(r"Found \d+ match\(es\): \d+ in \d+ symbol\(s\), \d+ on non-symbol lines\.", result)
         # the cursor's anchor mentions the enclosing method's name path
         assert "UserService/create_user" in result or "create_user" in result
         # at least one cursor id was assigned

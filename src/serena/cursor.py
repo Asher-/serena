@@ -1484,11 +1484,12 @@ class CursorManager:
         """Find regex matches grouped by their enclosing LSP symbol.
 
         Each match is associated with the smallest LSP symbol that contains
-        its hit line; matches that fall outside any addressable LSP symbol
-        are counted but not surfaced (the caller -- typically
-        :class:`~serena.tools.cursor_tools.CursorGrepTool` -- has nowhere
-        to anchor a cursor for them, so they are reported as a count
-        rather than returned).
+        its hit line. Matches that fall outside any addressable LSP symbol
+        -- a hit in a non-LSP file (yaml/LICENSE/...) or in a genuine
+        non-symbol region (comment/import/blank line) of an LSP file -- are
+        NOT dropped: they are surfaced as file-level blocks carrying their
+        matched line + number + context (spec-v2 §5.1/§5.3), so the cursor
+        surface serves the read itself instead of deferring to another tool.
 
         :param substring_pattern: regular expression compiled with
             ``re.DOTALL``; mirrors :class:`~serena.tools.file_tools.SearchForPatternTool`
@@ -1507,11 +1508,14 @@ class CursorManager:
             hit's matched line in the returned display strings.
         :param context_lines_after: extra lines rendered alongside each
             hit's matched line in the returned display strings.
-        :return: a 2-tuple ``(groups, n_unsymboled)``. ``groups`` is a list
+        :return: a 2-tuple ``(groups, unsymboled)``. ``groups`` is a list
             of ``(enclosing_symbol, hit_display_strings)`` tuples in
-            discovery order -- one tuple per unique enclosing symbol.
-            ``n_unsymboled`` counts matches that landed outside any
-            addressable LSP symbol (skipped for cursor-creation purposes).
+            discovery order -- one tuple per unique enclosing symbol (each
+            anchors a cursor). ``unsymboled`` is a list of
+            ``(relative_path, hit_display_strings)`` tuples in discovery
+            order -- one per file with matches outside any addressable LSP
+            symbol; their matched lines are surfaced verbatim rather than
+            reduced to a count.
         :raises FileNotFoundError: when ``relative_path`` does not exist
             on disk.
         """
