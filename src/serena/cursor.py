@@ -15,6 +15,7 @@ from typing import Any
 
 from serena.project import Project
 from serena.symbol import LanguageServerSymbol, LanguageServerSymbolLocation, LanguageServerSymbolRetriever
+from serena.util.line_numbers import format_line_range, to_display_line
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_utils import PathUtils
 from solidlsp.lsp_protocol_handler.lsp_types import (
@@ -111,7 +112,7 @@ class NeighborSymbol:
     @property
     def location_str(self) -> str:
         if self.relative_path and self.line is not None:
-            return f"{self.relative_path}:{self.line}"
+            return f"{self.relative_path}:{to_display_line(self.line)}"
         elif self.relative_path:
             return self.relative_path
         return "?"
@@ -377,11 +378,12 @@ def _format_loc_str(relative_path: str | None, line: int | None) -> str:
     """Format a ``file:line`` cite for the symbolic projection.
 
     Returns ``"?"`` when no location information is available, the bare
-    relative path when the line is unknown, and ``"path:line"`` (0-indexed
-    to match the cursor edit API) when both are present.
+    relative path when the line is unknown, and ``"path:line"`` (1-based,
+    ``cat -n`` equivalent) when both are present. ``line`` is the internal
+    0-based index; it is converted to 1-based here at the display boundary.
     """
     if relative_path and line is not None:
-        return f"{relative_path}:{line}"
+        return f"{relative_path}:{to_display_line(line)}"
     if relative_path:
         return relative_path
     return "?"
@@ -899,8 +901,8 @@ class CursorManager:
             if found:
                 return found.name
         except Exception as e:
-            log.debug(f"Could not resolve symbol name at {relative_path}:{line + 1}: {e}")
-        return f"{os.path.basename(relative_path)}:{line + 1}"
+            log.debug(f"Could not resolve symbol name at {relative_path}:{to_display_line(line)}: {e}")
+        return f"{os.path.basename(relative_path)}:{to_display_line(line)}"
 
     def _neighbor_from_hierarchy_item(
         self,
@@ -1067,8 +1069,8 @@ class CursorManager:
         end_pos = symbol.body_end_position
         end_line = end_pos["line"] if end_pos else None
         if end_line is None or end_line == start_line:
-            return f"@ {name_path} :{kind}@{rel}:{start_line}:"
-        return f"@ {name_path} :{kind}@{rel}:{start_line}-{end_line}:"
+            return f"@ {name_path} :{kind}@{rel}:{to_display_line(start_line)}:"
+        return f"@ {name_path} :{kind}@{rel}:{format_line_range(start_line, end_line)}:"
 
     def _render_trail(self, state: CursorState) -> list[str]:
         """Render the cursor's trail block, last-N prior hops + ``<- here`` marker.
@@ -1198,23 +1200,25 @@ class CursorManager:
         return compute_widened_body_text(symbol, self._project)
 
     def _number_body_lines(self, body_text: str, start_line: int | None) -> list[str]:
-        """Prefix each line of a body projection with its 0-based file line number.
+        """Prefix each line of a body projection with its 1-based file line number.
 
         The numbers let an agent anchor ``cursor_replace_range`` on a non-symbol
         region inside the body (e.g. a switch ``case``) without hand-counting from
-        the anchor range. ``start_line`` is the 0-based file line at which
-        ``body_text`` begins (the symbol's body-start line); when it is ``None``
-        the line numbers cannot be known, so the text is returned unchanged rather
-        than fabricating numbers.
+        the anchor range. ``start_line`` is the internal 0-based file line at which
+        ``body_text`` begins (the symbol's body-start line); it is converted to the
+        1-based ``cat -n`` number at this display boundary. When it is ``None`` the
+        line numbers cannot be known, so the text is returned unchanged rather than
+        fabricating numbers.
 
         :param body_text: the body source text (possibly multi-line).
         :param start_line: the 0-based file line of ``body_text``'s first line, or
             ``None`` when unavailable.
-        :return: the body as a list of lines, each numbered when ``start_line`` is known.
+        :return: the body as a list of lines, each numbered (1-based) when
+            ``start_line`` is known.
         """
         if start_line is None:
             return [body_text]
-        return [f"{start_line + i}: {line}" for i, line in enumerate(body_text.splitlines())]
+        return [f"{to_display_line(start_line + i)}: {line}" for i, line in enumerate(body_text.splitlines())]
 
     def _format_structural_cursor_view(self, state: StructuralCursorState) -> str:
         """Render a structural cursor's position as a compact symbolic projection.

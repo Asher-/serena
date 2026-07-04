@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 from joblib import Parallel, delayed
 
 from serena.constants import DEFAULT_SOURCE_FILE_ENCODING
+from serena.util.line_numbers import to_display_line
 from solidlsp.ls_utils import TextUtils
 
 log = logging.getLogger(__name__)
@@ -46,11 +47,13 @@ class TextLine:
     def format_line(self, include_line_numbers: bool = True) -> str:
         """Format the line for display (e.g.,for logging or passing to an LLM).
 
-        :param include_line_numbers: Whether to include the line number in the result.
+        :param include_line_numbers: Whether to include the (1-based, ``cat -n``
+            equivalent) line number in the result. The stored ``line_number`` is
+            0-based; it is converted to 1-based here at the display boundary.
         """
         prefix = self.get_display_prefix()
         if include_line_numbers:
-            line_num = str(self.line_number).rjust(4)
+            line_num = str(to_display_line(self.line_number)).rjust(4)
             prefix = f"{prefix}{line_num}"
         return f"{prefix}:{self.line_content}"
 

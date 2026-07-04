@@ -17,6 +17,7 @@ from serena.cursor import CursorManager, EdgeType, ReadRung, StructuralCursorSta
 from serena.symbol import LanguageServerSymbol
 from serena.tools import SUCCESS_RESULT
 from serena.tools.tools_base import Tool, ToolMarkerSymbolicEdit, ToolMarkerSymbolicRead
+from serena.util.line_numbers import to_display_line, to_internal_line
 from solidlsp.ls_types import SymbolKind
 
 
@@ -1010,8 +1011,8 @@ class CursorReplaceRangeTool(Tool, ToolMarkerSymbolicEdit):
         other non-symbolic region that ``cursor_replace_body`` cannot reach.
 
         :param relative_path: relative path to the file to edit.
-        :param start_line: the 0-based index of the first line to replace (inclusive).
-        :param end_line: the 0-based index of the last line to replace (inclusive).
+        :param start_line: the 1-based line number of the first line to replace (inclusive).
+        :param end_line: the 1-based line number of the last line to replace (inclusive).
             Must satisfy ``start_line <= end_line``. To replace a single line, pass
             ``start_line == end_line``.
         :param body: the replacement text. The edit is line-oriented: when ``body``
@@ -1022,9 +1023,9 @@ class CursorReplaceRangeTool(Tool, ToolMarkerSymbolicEdit):
         :return: a success confirmation and the diff summary.
         """
         # validate input before any filesystem work so callers see a clean error message
-        if start_line < 0 or end_line < start_line:
+        if start_line < 1 or end_line < start_line:
             raise ValueError(
-                f"cursor_replace_range: invalid range [{start_line}, {end_line}] in {relative_path!r}; require 0 <= start_line <= end_line."
+                f"cursor_replace_range: invalid range [{start_line}, {end_line}] in {relative_path!r}; require 1 <= start_line <= end_line."
             )
 
         # snapshot content so we can report a line-diff summary after the edit
@@ -1034,7 +1035,7 @@ class CursorReplaceRangeTool(Tool, ToolMarkerSymbolicEdit):
         # bypasses the LSP's workspace-edit interface intentionally — workspace edits
         # are rejected for regions the server does not recognize as symbols
         code_editor = self.create_code_editor()
-        code_editor.replace_lines(relative_path, start_line, end_line, body)
+        code_editor.replace_lines(relative_path, to_internal_line(start_line), to_internal_line(end_line), body)
 
         # compute a diff summary for the return value so the caller can verify the edit
         # size against their intent (mirrors cursor_replace_body's diff-summary style)
@@ -1076,8 +1077,8 @@ class CursorReplaceRangeVerifiedTool(Tool, ToolMarkerSymbolicEdit):
         ``expected_content``.
 
         :param relative_path: relative path to the file to edit.
-        :param start_line: the 0-based index of the first line to replace (inclusive).
-        :param end_line: the 0-based index of the last line to replace (inclusive).
+        :param start_line: the 1-based line number of the first line to replace (inclusive).
+        :param end_line: the 1-based line number of the last line to replace (inclusive).
             Must satisfy ``start_line <= end_line``.
         :param expected_content: the text the caller expects to find at
             ``[start_line, end_line]``. Compared line-by-line via
@@ -1093,22 +1094,27 @@ class CursorReplaceRangeVerifiedTool(Tool, ToolMarkerSymbolicEdit):
         :return: a success confirmation and the diff summary.
         """
         # validate input before any filesystem work so callers see a clean error message
-        if start_line < 0 or end_line < start_line:
+        if start_line < 1 or end_line < start_line:
             raise ValueError(
                 f"cursor_replace_range_verified: invalid range [{start_line}, {end_line}] "
-                f"in {relative_path!r}; require 0 <= start_line <= end_line."
+                f"in {relative_path!r}; require 1 <= start_line <= end_line."
             )
+
+        # convert the 1-based agent args to internal 0-based indices once at the tool
+        # boundary; the drift check and the editor layer both operate 0-based
+        internal_start = to_internal_line(start_line)
+        internal_end = to_internal_line(end_line)
 
         # snapshot content for both drift verification and the post-edit diff summary
         pre_content = self.project.read_file(relative_path)
 
         # drift check: expected text must match what is currently at the range
-        self._verify_expected(relative_path, pre_content, start_line, end_line, expected_content)
+        self._verify_expected(relative_path, pre_content, internal_start, internal_end, expected_content)
 
         # execute the edit via the filesystem-level code editor layer (same path as
         # cursor_replace_range so the two tools share a single mutation implementation)
         code_editor = self.create_code_editor()
-        code_editor.replace_lines(relative_path, start_line, end_line, body)
+        code_editor.replace_lines(relative_path, internal_start, internal_end, body)
 
         # compute a diff summary for the return value so the caller can verify the
         # edit size against their intent (mirrors cursor_replace_range)
@@ -1140,7 +1146,7 @@ class CursorReplaceRangeVerifiedTool(Tool, ToolMarkerSymbolicEdit):
         all_lines = pre_content.splitlines(keepends=True)
         if start_line >= len(all_lines):
             raise ValueError(
-                f"cursor_replace_range_verified: start_line={start_line} is beyond the "
+                f"cursor_replace_range_verified: start_line={to_display_line(start_line)} is beyond the "
                 f"file's line count ({len(all_lines)}) in {relative_path!r}."
             )
         actual_slice = all_lines[start_line : end_line + 1]
@@ -1159,7 +1165,7 @@ class CursorReplaceRangeVerifiedTool(Tool, ToolMarkerSymbolicEdit):
                 expected_normalised,
                 actual_normalised,
                 fromfile="expected",
-                tofile=f"actual ({relative_path}:{start_line}-{end_line})",
+                tofile=f"actual ({relative_path}:{to_display_line(start_line)}-{to_display_line(end_line)})",
                 lineterm="",
             )
         )
@@ -1237,9 +1243,9 @@ class CursorReplaceBetweenTool(Tool, ToolMarkerSymbolicEdit):
         if start_line > end_line:
             raise ValueError(
                 f"cursor_replace_between: no interstitial lines between "
-                f"{before_symbol!r} (body ends at line {before_end}) and "
-                f"{after_symbol!r} (body starts at line {after_start}); "
-                f"computed range [{start_line}, {end_line}] is empty. "
+                f"{before_symbol!r} (body ends at line {to_display_line(before_end)}) and "
+                f"{after_symbol!r} (body starts at line {to_display_line(after_start)}); "
+                f"computed range [{to_display_line(start_line)}, {to_display_line(end_line)}] is empty. "
                 f"Use cursor_insert_after {before_symbol!r} or "
                 f"cursor_insert_before {after_symbol!r} for adjacent symbols."
             )
@@ -1259,7 +1265,7 @@ class CursorReplaceBetweenTool(Tool, ToolMarkerSymbolicEdit):
         removed, added = CursorReplaceBodyTool._count_diff_lines(pre_content, post_content)
         diff_summary = f"Diff: -{removed} / +{added} lines"
         return (
-            f"{SUCCESS_RESULT}\n{diff_summary}\n(replaced lines [{start_line}, {end_line}] between {before_symbol!r} and {after_symbol!r})"
+            f"{SUCCESS_RESULT}\n{diff_summary}\n(replaced lines [{to_display_line(start_line)}, {to_display_line(end_line)}] between {before_symbol!r} and {after_symbol!r})"
         )
 
     def _resolve_unique_anchor(self, role: str, name_path: str, relative_path: str) -> "LanguageServerSymbol":
@@ -1389,7 +1395,9 @@ class CursorOverviewTool(Tool, ToolMarkerSymbolicRead):
             lines: list[str] = [f"why: {because}", "", f"Top-level symbols in {relative_path}:"]
             for sym in top_level:
                 line = sym.line
-                loc = f"{relative_path}:{line}" if line is not None else relative_path
+                # sym.line is the internal 0-based index; convert to the 1-based
+                # cat -n number at this display boundary (spec-v2 §5.7)
+                loc = f"{relative_path}:{to_display_line(line)}" if line is not None else relative_path
                 kind = sym.symbol_kind_name
                 if kind:
                     lines.append(f"  {sym.name} :{kind}@{loc}:")

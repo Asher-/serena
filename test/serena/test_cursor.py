@@ -109,7 +109,7 @@ class TestEdgeType:
 class TestNeighborSymbol:
     def test_location_str_with_path_and_line(self):
         n = NeighborSymbol(name="foo", kind="Function", relative_path="src/a.py", line=9, column=4, edge_type=EdgeType.CONTAINS)
-        assert n.location_str == "src/a.py:9"
+        assert n.location_str == "src/a.py:10"
 
     def test_location_str_with_path_no_line(self):
         n = NeighborSymbol(name="foo", kind="Module", relative_path="src/a.py", line=None, column=None, edge_type=EdgeType.CONTAINS)
@@ -122,18 +122,18 @@ class TestNeighborSymbol:
     def test_format_compact_basic(self):
         n = NeighborSymbol(name="bar", kind="Method", relative_path="x.py", line=5, column=0, edge_type=EdgeType.CALLS)
         formatted = n.format_compact()
-        assert formatted == "bar :Method@x.py:5:"
+        assert formatted == "bar :Method@x.py:6:"
 
     def test_format_compact_no_kind(self):
         n = NeighborSymbol(name="bar", kind="", relative_path="x.py", line=5, column=0, edge_type=EdgeType.REFERENCES)
         formatted = n.format_compact()
-        assert formatted == "bar @x.py:5:"
+        assert formatted == "bar @x.py:6:"
 
     def test_format_compact_with_detail(self):
         n = NeighborSymbol(
             name="bar", kind="Method", relative_path="x.py", line=5, column=0, edge_type=EdgeType.CALLS, detail="returns int"
         )
-        assert n.format_compact() == "bar :Method@x.py:5:  -- returns int"
+        assert n.format_compact() == "bar :Method@x.py:6:  -- returns int"
 
 
 # ── CursorState ──────────────────────────────────────────────────────────
@@ -567,7 +567,7 @@ class TestFormatting:
         view = manager.format_cursor_view(cid)
 
         # anchor combines name, kind, and location into a parseable handle
-        assert "@ MyClass :Class@src/m.py:10" in view
+        assert "@ MyClass :Class@src/m.py:11" in view
         # cursor metadata is no longer rendered into the view itself
         assert f"cursor: {cid}" not in view
         assert "trail: 0 steps" not in view
@@ -599,8 +599,8 @@ class TestFormatting:
 
         trail = manager.format_trail(cid)
         assert "1 steps" in trail
-        assert "a.py:5" in trail
-        assert "b.py:15" in trail  # current position
+        assert "a.py:6" in trail
+        assert "b.py:16" in trail  # current position
         assert "(current)" in trail
 
     @patch("serena.cursor.LanguageServerSymbolRetriever")
@@ -624,21 +624,21 @@ class TestFormatting:
         view = manager.format_cursor_view(cid)
 
         assert "--- body ---" in view
-        # body lines are numbered from the symbol's 0-based body-start line (10)
-        assert "10: def func(): pass" in view
+        # body lines are numbered 1-based from the symbol's body-start line (0-based 10 -> displayed 11)
+        assert "11: def func(): pass" in view
 
     @patch("serena.cursor.LanguageServerSymbolRetriever")
     def test_format_cursor_view_body_lines_numbered_from_body_start(self, mock_retriever_cls):
         """Regression for bug://serena/cursor-edit-non-symbol-regions-need-line-numbers.
 
-        The --- body --- projection must prefix every line with its 0-based file
-        line number (counting from the symbol's body-start line) so a non-symbol
-        region (e.g. a switch ``case``) can be anchored for cursor_replace_range
-        without hand-counting from the anchor range.
+        The --- body --- projection must prefix every line with its 1-based file
+        line number (``cat -n`` equivalent, counting from the symbol's body-start
+        line) so a non-symbol region (e.g. a switch ``case``) can be anchored for
+        cursor_replace_range without hand-counting from the anchor range.
         """
         manager = _make_manager()
         # a Go file -> identity extent strategy, so the body is symbol.body sliced
-        # from its LSP range start (line 92); five lines -> 92..96
+        # from its LSP range start (0-based line 92); five lines displayed 1-based 93..97
         body = "func handler() {\n\tswitch x {\n\tcase 1:\n\t}\n}"
         sym = _make_symbol(name="handler", kind_name="Function", rel_path="src/handler.go", line=92, body=body)
         mock_retriever = mock_retriever_cls.return_value
@@ -656,16 +656,16 @@ class TestFormatting:
         manager.get_cursor(cid).include_body = True
         view = manager.format_cursor_view(cid)
 
-        assert "92: func handler() {" in view
-        assert "93: \tswitch x {" in view
-        assert "94: \tcase 1:" in view
-        assert "96: }" in view
+        assert "93: func handler() {" in view
+        assert "94: \tswitch x {" in view
+        assert "95: \tcase 1:" in view
+        assert "97: }" in view
 
     def test_number_body_lines(self):
-        """``_number_body_lines`` prefixes each line with its 0-based file line
+        """``_number_body_lines`` prefixes each line with its 1-based file line
         number; with no known start line it returns the text unchanged."""
         manager = _make_manager()
-        assert manager._number_body_lines("a\nb\nc", 5) == ["5: a", "6: b", "7: c"]
+        assert manager._number_body_lines("a\nb\nc", 5) == ["6: a", "7: b", "8: c"]
         # unknown body-start line -> preserve the raw text rather than fabricate numbers
         assert manager._number_body_lines("a\nb", None) == ["a\nb"]
 

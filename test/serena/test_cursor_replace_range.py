@@ -335,7 +335,7 @@ class TestCursorReplaceRangeTool:
         """
         tool = python_serena_agent.get_tool(CursorReplaceRangeTool)
 
-        result = tool.apply(relative_path=throwaway_layout_file, start_line=0, end_line=2, body="")
+        result = tool.apply(relative_path=throwaway_layout_file, start_line=1, end_line=3, body="")
 
         assert "OK" in result
         assert "Diff:" in result
@@ -356,14 +356,14 @@ class TestCursorReplaceRangeTool:
 
         # first, remove the header (lines 0..2) via the tool, then reorder the
         # imports; this also exercises two sequential edits on the same file
-        tool.apply(relative_path=throwaway_layout_file, start_line=0, end_line=2, body="")
+        tool.apply(relative_path=throwaway_layout_file, start_line=1, end_line=3, body="")
         # after the first edit, the file starts with a blank line then imports.
-        # replace lines 1..5 (import z, blank, import a, import m, blank) with
+        # replace 1-based lines 2..6 (import z, blank, import a, import m, blank) with
         # the alphabetised block.
         result = tool.apply(
             relative_path=throwaway_layout_file,
-            start_line=1,
-            end_line=5,
+            start_line=2,
+            end_line=6,
             body="import a\nimport m\nimport z\n\n",
         )
 
@@ -381,11 +381,11 @@ class TestCursorReplaceRangeTool:
         """
         tool = python_serena_agent.get_tool(CursorReplaceRangeTool)
 
-        # the doc comment is at line 9 in the fixture (0-based)
+        # the doc comment is on 1-based line 10 in the fixture (0-based index 9)
         result = tool.apply(
             relative_path=throwaway_layout_file,
-            start_line=9,
-            end_line=9,
+            start_line=10,
+            end_line=10,
             body="# pg_hba auth: 127.0.0.1/32 trust + LAN trust rules\n",
         )
 
@@ -496,8 +496,8 @@ class TestCursorReplaceRangeVerifiedTool:
         expected = "# Orphan header describing the file.\n# Inserted by a prior edit, now detached.\n# Will be removed.\n"
         result = tool.apply(
             relative_path=throwaway_layout_file,
-            start_line=0,
-            end_line=2,
+            start_line=1,
+            end_line=3,
             expected_content=expected,
             body="",
         )
@@ -526,8 +526,8 @@ class TestCursorReplaceRangeVerifiedTool:
         with pytest.raises(ValueError) as excinfo:
             tool.apply(
                 relative_path=throwaway_layout_file,
-                start_line=0,
-                end_line=2,
+                start_line=1,
+                end_line=3,
                 expected_content=wrong_expected,
                 body="# replacement\n",
             )
@@ -556,8 +556,8 @@ class TestCursorReplaceRangeVerifiedTool:
         )
         result = tool.apply(
             relative_path=throwaway_layout_file,
-            start_line=0,
-            end_line=2,
+            start_line=1,
+            end_line=3,
             expected_content=expected_without_trailing_newline,
             body="",
         )
