@@ -13,7 +13,7 @@ import difflib
 from collections import defaultdict
 from collections.abc import Sequence
 
-from serena.cursor import CursorManager, EdgeType, StructuralCursorState
+from serena.cursor import CursorManager, EdgeType, ReadRung, StructuralCursorState
 from serena.symbol import LanguageServerSymbol
 from serena.tools import SUCCESS_RESULT
 from serena.tools.tools_base import Tool, ToolMarkerSymbolicEdit, ToolMarkerSymbolicRead
@@ -564,7 +564,7 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
             received a cursor if not for ``max_matches``.
         """
         manager = self.agent.get_cursor_manager()
-        groups, n_unsymboled = manager.find_pattern_with_enclosing_symbols(
+        groups, unsymboled = manager.find_pattern_with_enclosing_symbols(
             substring_pattern=substring_pattern,
             relative_path=relative_path or None,
             paths_include_glob=paths_include_glob,
@@ -574,20 +574,12 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
             context_lines_after=context_lines_after,
         )
 
-        # nothing landed inside an LSP symbol -- short-circuit to a clean
-        # message rather than a header with zero entries
-        if not groups:
-            if n_unsymboled == 0:
-                return f"why: {because}\n\nNo matches for {substring_pattern!r}."
-            return (
-                f"why: {because}\n\n"
-                f"Found {n_unsymboled} match(es) for {substring_pattern!r}, "
-                f"all on non-symbol lines (comments, imports) -- no enclosing "
-                f"symbol to anchor a cursor. Reach them through the cursor surface: "
-                f"cursor_find <name> (or cursor_look) to navigate to the region, "
-                f"then cursor_replace_range to edit. search_for_pattern still gives "
-                f"the flat file-level listing where you want it."
-            )
+        n_symboled = sum(len(hits) for _, hits in groups)
+        n_unsymboled = sum(len(hits) for _, hits in unsymboled)
+
+        # no hits at all -- clean message rather than an empty header
+        if not groups and not unsymboled:
+            return f"why: {because}\n\nNo matches for {substring_pattern!r}."
 
         # cap cursor creation at max_matches; the remainder are listed
         # without cursors so the agent can decide whether to widen
@@ -605,34 +597,38 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
             state.last_reasoning = because
             opened_cursors.append((cid, sym, hits))
 
-        # build the multi-cursor report header (lead with the agent's why so
-        # the trace shows intent before observation)
-        n_hits = sum(len(hits) for _, hits in groups)
+        # header: total hits split into symbol-anchored vs file-level, plus how
+        # many cursors opened. Non-symbol hits are SURFACED below (with their
+        # matched lines), never routed to another tool (spec-v2 §5.1/§5.3).
         header_parts = [
-            f"Found {n_hits} match(es) across {len(groups)} symbol(s).",
+            f"Found {n_symboled + n_unsymboled} match(es): "
+            f"{n_symboled} in {len(groups)} symbol(s), {n_unsymboled} on non-symbol lines.",
             f"Started {len(opened_cursors)} cursor(s)"
             + (f"; {len(deferred)} symbol(s) deferred." if deferred else "."),
         ]
-        if n_unsymboled:
-            header_parts.append(
-                f"{n_unsymboled} hit(s) on non-symbol lines -- reach them via "
-                f"cursor_find <name>/cursor_look (or search_for_pattern for a flat "
-                f"file-level listing)."
-            )
         lines: list[str] = [f"why: {because}", "", " ".join(header_parts), ""]
 
         # per-cursor anchor + indented hit display strings
         for cid, _sym, hits in opened_cursors:
-            anchor = manager.format_cursor_view(cid).splitlines()[0]
-            # anchor line of a cursor whose last_reasoning was just set
-            # is the ``why: ...`` line; we want the actual ``@ ...`` anchor
-            # for the report instead, so skip past the why line
             view_lines = manager.format_cursor_view(cid).splitlines()
+            # skip past the ``why: ...`` line to the actual ``@ ...`` anchor
             anchor = next((line for line in view_lines if line.startswith("@ ")), view_lines[0])
             lines.append(f"[{cid}]  {anchor}    {len(hits)} hit(s)")
             for hit in hits:
                 for hit_line in hit.splitlines():
                     lines.append(f"    {hit_line}")
+            lines.append("")
+
+        # non-symbol hits: surfaced as file-level blocks (path + matched
+        # line/number/context) so they are directly readable here -- the cursor
+        # surface serves the read itself rather than deferring to another tool.
+        if unsymboled:
+            lines.append("-- non-symbol hits (no enclosing symbol; matched lines shown) --")
+            for rel_path, hits in unsymboled:
+                lines.append(f"  {rel_path}    {len(hits)} hit(s)")
+                for hit in hits:
+                    for hit_line in hit.splitlines():
+                        lines.append(f"    {hit_line}")
             lines.append("")
 
         # deferred groups: just identifiers + counts so the agent can
@@ -1378,31 +1374,53 @@ class CursorOverviewTool(Tool, ToolMarkerSymbolicRead):
         if os.path.isdir(file_path):
             raise ValueError(f"Expected a file path, but got a directory path: {relative_path}.")
 
-        retriever = self.create_language_server_symbol_retriever()
-        if not retriever.can_analyze_file(relative_path):
-            raise ValueError(
-                f"Cannot extract symbols from file {relative_path}. "
-                f"Active languages: {[l.value for l in self.agent.get_active_lsp_languages()]}"
-            )
-        top_level = retriever.get_symbol_overview(relative_path).get(relative_path, [])
-        if not top_level:
-            return f"why: {because}\n\nNo top-level symbols found in {relative_path}."
+        manager = self.agent.get_cursor_manager()
+        rung = manager.resolve_read_rung(relative_path)
 
-        # render each symbol as ``name :Kind@file:line:`` -- the same handle shape
-        # used by format_cursor_view's anchor and by NeighborSymbol.format_compact,
-        # so the agent can treat overview entries and cursor projections uniformly.
-        # The agent's why prefixes the listing so the trace shows intent before observation.
-        lines: list[str] = [f"why: {because}", "", f"Top-level symbols in {relative_path}:"]
-        for sym in top_level:
-            line = sym.line
-            loc = f"{relative_path}:{line}" if line is not None else relative_path
-            kind = sym.symbol_kind_name
-            if kind:
-                lines.append(f"  {sym.name} :{kind}@{loc}:")
-            else:
-                lines.append(f"  {sym.name} @{loc}:")
-        result = "\n".join(lines)
-        return self._limit_length(result, max_answer_chars)
+        # Rung 1 -- LSP: the language server's top-level symbols (unchanged).
+        if rung is ReadRung.LSP:
+            retriever = self.create_language_server_symbol_retriever()
+            top_level = retriever.get_symbol_overview(relative_path).get(relative_path, [])
+            if not top_level:
+                return f"why: {because}\n\nNo top-level symbols found in {relative_path}."
+            # render each symbol as ``name :Kind@file:line:`` -- the same handle
+            # shape used by format_cursor_view's anchor, so the agent treats
+            # overview entries and cursor projections uniformly.
+            lines: list[str] = [f"why: {because}", "", f"Top-level symbols in {relative_path}:"]
+            for sym in top_level:
+                line = sym.line
+                loc = f"{relative_path}:{line}" if line is not None else relative_path
+                kind = sym.symbol_kind_name
+                if kind:
+                    lines.append(f"  {sym.name} :{kind}@{loc}:")
+                else:
+                    lines.append(f"  {sym.name} @{loc}:")
+            return self._limit_length("\n".join(lines), max_answer_chars)
+
+        # Rung 2 -- structural: fall through to the structural backend so a
+        # non-LSP file (yaml/json/toml/...) still lists its top-level nodes
+        # instead of the old "Cannot extract symbols" dead-end (spec §5.1/§5.3).
+        if rung is ReadRung.STRUCTURAL:
+            structural = manager.structural_overview(relative_path)
+            if not structural:
+                return f"why: {because}\n\nNo top-level structural nodes found in {relative_path}."
+            lines = [f"why: {because}", "", f"Top-level structural nodes in {relative_path}:"]
+            for name_path, kind in structural:
+                if kind:
+                    lines.append(f"  {name_path} :{kind}@{relative_path}:")
+                else:
+                    lines.append(f"  {name_path} @{relative_path}:")
+            return self._limit_length("\n".join(lines), max_answer_chars)
+
+        # Rung 3 -- plaintext floor: no analyzer or structural backend claims
+        # this file. NEVER raise; point at the read path that works today. A
+        # line/size/encoding summary lands with the plaintext backend (T4).
+        return (
+            f"why: {because}\n\n"
+            f"No symbol structure in {relative_path} "
+            f"(no language server or structural backend for this file type). "
+            f"Use cursor_grep to read its contents."
+        )
 
 
 

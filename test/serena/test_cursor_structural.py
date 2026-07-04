@@ -25,6 +25,7 @@ import pytest
 
 from serena.cursor import (
     CursorManager,
+    ReadRung,
     StructuralCursorState,
     StructuralResolution,
 )
@@ -330,3 +331,84 @@ class TestFormatStructuralNodeSourceRendersValue:
             include_body=True,
         )
         assert manager._format_structural_node_source(state) == "line-length = 140"
+
+
+class TestReadRungLadder:
+    """``resolve_read_rung`` is the single read-resolution ladder ``cursor_overview`` /
+    ``cursor_grep`` / ``cursor_start`` share (spec-v2 §5.1/§5.3): LSP -> structural ->
+    plaintext floor, and it NEVER raises -- every path resolves to a rung.
+    """
+
+    def _manager(self, tmp_path: Path) -> CursorManager:
+        project = MagicMock()
+        project.project_root = str(tmp_path)
+        project.read_file = MagicMock(side_effect=lambda p: Path(tmp_path / p).read_text(encoding="utf-8"))
+        return CursorManager(project)  # default 13-backend registry
+
+    def test_lsp_rung_when_analyzer_claims_file(self, tmp_path: Path) -> None:
+        manager = self._manager(tmp_path)
+        retriever = MagicMock()
+        retriever.can_analyze_file.return_value = True
+        assert manager.resolve_read_rung("src/app.py", retriever=retriever) is ReadRung.LSP
+
+    def test_structural_rung_when_backend_registered_and_no_lsp(self, tmp_path: Path) -> None:
+        manager = self._manager(tmp_path)
+        retriever = MagicMock()
+        retriever.can_analyze_file.return_value = False
+        assert manager.resolve_read_rung("compose.yaml", retriever=retriever) is ReadRung.STRUCTURAL
+        assert manager.resolve_read_rung("pkg.json", retriever=retriever) is ReadRung.STRUCTURAL
+        assert manager.resolve_read_rung("Cargo.toml", retriever=retriever) is ReadRung.STRUCTURAL
+
+    def test_plaintext_floor_when_no_lsp_and_no_backend(self, tmp_path: Path) -> None:
+        manager = self._manager(tmp_path)
+        retriever = MagicMock()
+        retriever.can_analyze_file.return_value = False
+        assert manager.resolve_read_rung("LICENSE", retriever=retriever) is ReadRung.PLAINTEXT
+        assert manager.resolve_read_rung("notes.txt", retriever=retriever) is ReadRung.PLAINTEXT
+        assert manager.resolve_read_rung(".gitignore", retriever=retriever) is ReadRung.PLAINTEXT
+        assert manager.resolve_read_rung("Dockerfile", retriever=retriever) is ReadRung.PLAINTEXT
+
+    def test_never_raises_and_always_returns_a_rung(self, tmp_path: Path) -> None:
+        manager = self._manager(tmp_path)
+        retriever = MagicMock()
+        retriever.can_analyze_file.return_value = False
+        for p in ("weird.unknownext", "no_ext", "a.b.c"):
+            assert isinstance(manager.resolve_read_rung(p, retriever=retriever), ReadRung)
+
+
+class TestStructuralOverview:
+    """``structural_overview`` lists a non-LSP file's TOP-LEVEL nodes so
+    ``cursor_overview`` can fall through to the structural rung instead of the
+    old 'Cannot extract symbols' raise (spec-v2 §5.1/§5.3). Never raises.
+    """
+
+    def _manager(self, tmp_path: Path, rel_path: str, source: str) -> CursorManager:
+        (tmp_path / rel_path).write_text(source, encoding="utf-8")
+        project = MagicMock()
+        project.project_root = str(tmp_path)
+        project.read_file = MagicMock(side_effect=lambda p: Path(tmp_path / p).read_text(encoding="utf-8"))
+        return CursorManager(project)
+
+    def test_yaml_lists_top_level_keys_only(self, tmp_path: Path) -> None:
+        manager = self._manager(
+            tmp_path,
+            "compose.yaml",
+            "services:\n  serena:\n    image: serena:latest\nversion: '3'\n",
+        )
+        top = manager.structural_overview("compose.yaml")
+        names = [name for name, _kind in top]
+        assert "services" in names
+        assert "version" in names
+        # nested keys are NOT top level
+        assert "services/serena" not in names
+
+    def test_empty_for_unregistered_extension(self, tmp_path: Path) -> None:
+        manager = self._manager(tmp_path, "LICENSE", "All rights reserved.\n")
+        assert manager.structural_overview("LICENSE") == []
+
+    def test_empty_for_missing_file(self, tmp_path: Path) -> None:
+        project = MagicMock()
+        project.project_root = str(tmp_path)
+        project.read_file = MagicMock(side_effect=lambda p: Path(tmp_path / p).read_text(encoding="utf-8"))
+        manager = CursorManager(project)
+        assert manager.structural_overview("nope.yaml") == []

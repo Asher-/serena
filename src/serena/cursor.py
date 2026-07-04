@@ -51,6 +51,23 @@ ALL_EDGE_TYPES = frozenset(EdgeType)
 # the fact via ``cursor_configure``.
 DEFAULT_EDGE_TYPES: frozenset[EdgeType] = frozenset()
 
+
+class ReadRung(Enum):
+    """Rungs of the single read-resolution ladder (spec-v2 §5.1).
+
+    Ordered strongest->floor. Every readable file resolves to exactly one rung
+    and no rung raises a terminal error: ``LSP`` is the language-server surface
+    (symbols, references, call/type hierarchy); ``STRUCTURAL`` is a registered
+    structural backend (json/yaml/toml/... and, later, tree-sitter);
+    ``PLAINTEXT`` is the universal floor for any file no richer rung claims.
+    :meth:`CursorManager.resolve_read_rung` is the one place ``cursor_overview``
+    and ``cursor_grep`` agree with ``cursor_start`` about how a file is read.
+    """
+
+    LSP = "lsp"
+    STRUCTURAL = "structural"
+    PLAINTEXT = "plaintext"
+
 # operations that require the cursor to be positioned on a container node
 _CONTAINER_POSITIONED_OPERATIONS: frozenset[str] = frozenset({"insert_start", "insert_end"})
 # operations that require the cursor to be positioned on a container's member
@@ -1392,6 +1409,68 @@ class CursorManager:
             within_relative_path=relative_path,
         )
 
+    def resolve_read_rung(
+        self,
+        relative_path: str,
+        retriever: LanguageServerSymbolRetriever | None = None,
+    ) -> ReadRung:
+        """Resolve which rung of the read ladder serves ``relative_path`` (spec-v2 §5.1).
+
+        The single ladder ``cursor_overview`` and ``cursor_grep`` consult so they
+        never disagree with ``cursor_start`` about how a file is read:
+
+        * :attr:`ReadRung.LSP` when the language server can analyze the file;
+        * else :attr:`ReadRung.STRUCTURAL` when a structural backend is
+          registered for the extension;
+        * else :attr:`ReadRung.PLAINTEXT` -- the universal floor.
+
+        Never raises: every path resolves to a rung.
+
+        :param relative_path: project-relative path to classify.
+        :param retriever: optional retriever to reuse (the grep loop passes its
+            own so per-match classification does not re-instantiate one);
+            defaults to a fresh :attr:`_retriever`.
+        :return: the rung that serves the file.
+        """
+        retriever = retriever if retriever is not None else self._retriever
+        if retriever.can_analyze_file(relative_path):
+            return ReadRung.LSP
+        if self._structural_registry.for_relative_path(relative_path) is not None:
+            return ReadRung.STRUCTURAL
+        return ReadRung.PLAINTEXT
+
+    def structural_overview(self, relative_path: str) -> list[tuple[str, KindName]]:
+        """Return the file's TOP-LEVEL structural nodes as ``(name_path, kind)``.
+
+        Used by ``cursor_overview``'s structural rung so a non-LSP file
+        (yaml/json/toml/...) still yields a symbol listing instead of the old
+        "Cannot extract symbols" dead-end. Returns the depth-1 nodes from the
+        structural walk in document order. Empty list when no structural backend
+        is registered for the file or the file cannot be read/parsed -- never
+        raises (the caller falls through to the plaintext floor).
+
+        :param relative_path: project-relative path of the file to summarize.
+        :return: top-level ``(name_path, kind)`` pairs; empty when the file has
+            no structural rung or cannot be parsed.
+        """
+        backend = self._structural_registry.for_relative_path(relative_path)
+        if backend is None:
+            return []
+        try:
+            cache_entry = self._structural_cache_entry(backend, relative_path)
+        except Exception as e:
+            # parsing is best-effort: a malformed file falls through to the
+            # floor rather than raising (spec-v2 §5.1: no rung raises)
+            log.debug(f"structural_overview: could not parse {relative_path}: {e}")
+            return []
+        if cache_entry is None:
+            return []
+        top_level: list[tuple[str, KindName]] = []
+        for name_path, (kind, _node) in cache_entry.nodes_by_path.items():
+            if name_path and len(_split_name_path_segments(name_path)) == 1:
+                top_level.append((name_path, kind))
+        return top_level
+
     def find_pattern_with_enclosing_symbols(
         self,
         substring_pattern: str,
@@ -1401,7 +1480,7 @@ class CursorManager:
         restrict_to_code_files: bool = True,
         context_lines_before: int = 0,
         context_lines_after: int = 0,
-    ) -> tuple[list[tuple[LanguageServerSymbol, list[str]]], int]:
+    ) -> tuple[list[tuple[LanguageServerSymbol, list[str]]], list[tuple[str, list[str]]]]:
         """Find regex matches grouped by their enclosing LSP symbol.
 
         Each match is associated with the smallest LSP symbol that contains
@@ -1484,7 +1563,18 @@ class CursorManager:
         groups: dict[tuple[str, str], LanguageServerSymbol] = {}
         hits_per_group: dict[tuple[str, str], list[str]] = {}
         group_order: list[tuple[str, str]] = []
-        n_unsymboled = 0
+        # non-symbol hits are SURFACED as file-level blocks rather than dropped
+        # (spec-v2 §5.1/§5.3): a hit in a non-LSP file (yaml/LICENSE/...) or in a
+        # genuine non-symbol region (comment/import/blank) of an LSP file keeps
+        # its matched line+number+context instead of being reduced to a count.
+        unsymboled: dict[str, list[str]] = {}
+        unsymboled_order: list[str] = []
+
+        def _record_unsymboled(path: str, display: str) -> None:
+            if path not in unsymboled:
+                unsymboled[path] = []
+                unsymboled_order.append(path)
+            unsymboled[path].append(display)
 
         for match in matches:
             assert match.source_file_path is not None
@@ -1500,8 +1590,11 @@ class CursorManager:
             line_content = matched_line.line_content or ""
             stripped = line_content.lstrip()
             col_0idx = len(line_content) - len(stripped) if stripped else 0
-            if not retriever.can_analyze_file(rel_path):
-                n_unsymboled += 1
+            # rung check via the ONE ladder resolver: only the LSP rung can
+            # anchor a hit to an enclosing symbol. A structural/plaintext file
+            # still surfaces its matched line as a file-level hit (spec §5.1/§5.3).
+            if self.resolve_read_rung(rel_path, retriever=retriever) is not ReadRung.LSP:
+                _record_unsymboled(rel_path, match.to_display_string())
                 continue
             try:
                 ls = retriever.get_language_server(rel_path)
@@ -1520,7 +1613,9 @@ class CursorManager:
                 # bug://serena/cursor-grep-skips-package-level-symbol-declarations
                 sym = self._top_level_symbol_covering_line(rel_path, line_0idx)
                 if sym is None:
-                    n_unsymboled += 1
+                    # genuine non-symbol region inside an LSP file (comment,
+                    # import, blank line): surface the matched line, don't drop it
+                    _record_unsymboled(rel_path, match.to_display_string())
                     continue
             else:
                 sym = LanguageServerSymbol(sym_dict)
@@ -1532,8 +1627,12 @@ class CursorManager:
                 group_order.append(key)
             hits_per_group[key].append(match.to_display_string())
 
-        # build the ordered result preserving discovery order
-        return [(groups[k], hits_per_group[k]) for k in group_order], n_unsymboled
+        # build the ordered results preserving discovery order for both the
+        # symbol-anchored groups and the file-level non-symbol blocks
+        return (
+            [(groups[k], hits_per_group[k]) for k in group_order],
+            [(p, unsymboled[p]) for p in unsymboled_order],
+        )
 
     def _top_level_symbol_covering_line(self, relative_path: str, line_0idx: int) -> LanguageServerSymbol | None:
         """Recover the top-level symbol whose extent covers a 0-based line.

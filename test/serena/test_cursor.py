@@ -1060,44 +1060,122 @@ class TestTopLevelSymbolCoveringLine:
         assert manager._top_level_symbol_covering_line("m.go", 1) is None
 
 
-class TestCursorGrepFallbackMessage:
-    """``cursor_grep`` recovery guidance leads with the cursor surface
-    (``cursor_find``/``cursor_look``) and does not dead-end on the
-    (hook-gated) ``search_for_pattern``.
-
-    Regression for bug://serena/cursor-grep-skips-package-level-symbol-declarations
-    (recovery-message half).
+class TestCursorGrepSurfacesNonSymbolHits:
+    """``cursor_grep`` surfaces hits with no enclosing symbol as file-level
+    blocks (matched line + number + context) instead of dropping them to a
+    count or routing to the hook-gated ``search_for_pattern`` (spec-v2
+    §5.1/§5.3). Supersedes the wording-only recovery for
+    bug://serena/cursor-grep-skips-package-level-symbol-declarations and fixes
+    bug://serena/cursor-grep-overview-no-content-for-non-lsp-files.
     """
 
-    def _make_tool(self, groups, n_unsymboled):
+    def _make_tool(self, groups, unsymboled):
         from serena.tools.cursor_tools import CursorGrepTool
 
         tool = object.__new__(CursorGrepTool)
         manager = MagicMock()
-        manager.find_pattern_with_enclosing_symbols.return_value = (groups, n_unsymboled)
+        manager.find_pattern_with_enclosing_symbols.return_value = (groups, unsymboled)
         agent = MagicMock()
         agent.get_cursor_manager.return_value = manager
         tool.agent = agent
         return tool, manager
 
-    def test_no_symbol_groups_message_offers_cursor_find(self):
-        tool, _ = self._make_tool(groups=[], n_unsymboled=1)
-        out = tool.apply(substring_pattern="rfaStart", because="x", relative_path="m.go")
-        assert "cursor_find" in out
-        assert "cursor_look" in out  # cursor-native locating path
-        assert "cursor_replace_range" in out  # edit anchor, not search_for_pattern
-        assert "search_for_pattern" in out  # still offered, demoted to optional reader
+    def test_only_non_symbol_hits_surface_with_content(self):
+        tool, _ = self._make_tool(groups=[], unsymboled=[("m.go", ["  65: rfaStart := compute()"])])
+        out = tool.apply(
+            substring_pattern="rfaStart", because="x", relative_path="m.go", max_answer_chars=1000000
+        )
+        # the matched line CONTENT is surfaced -- not a bare count, not a dead-end
+        assert "rfaStart := compute()" in out
+        assert "65:" in out
+        assert "m.go" in out
+        # never routes the agent to the hook-gated reader
+        assert "search_for_pattern" not in out
 
-    def test_unsymboled_header_offers_cursor_find(self):
+    def test_no_hits_at_all_is_clean_no_match(self):
+        tool, _ = self._make_tool(groups=[], unsymboled=[])
+        out = tool.apply(substring_pattern="zzz", because="x", relative_path="m.go")
+        assert "No matches" in out
+        assert "search_for_pattern" not in out
+
+    def test_symbol_and_non_symbol_hits_both_surface(self):
         from serena.cursor import CursorState
 
         sym = _make_symbol(name="Foo", kind_name="Function", rel_path="m.go", line=1)
         state = CursorState(cursor_id="c1", current_symbol=sym, current_location=sym.location)
-        tool, manager = self._make_tool(groups=[(sym, ["  1: hit"])], n_unsymboled=2)
+        tool, manager = self._make_tool(
+            groups=[(sym, ["  1: Foo()"])],
+            unsymboled=[("conf.yaml", ["  3: name: Foo", "  9: alias: Foo"])],
+        )
         manager.register_cursor_at_symbol.return_value = ("c1", state)
         manager.format_cursor_view.return_value = "@ Foo :Function@m.go:1:"
         out = tool.apply(
-            substring_pattern="Foo", because="x", relative_path="m.go", max_answer_chars=1000000
+            substring_pattern="Foo", because="x", relative_path="", max_answer_chars=1000000
         )
-        assert "cursor_find" in out
-        assert "cursor_look" in out  # cursor-native path leads
+        # symbol-anchored hit
+        assert "@ Foo :Function@m.go:1:" in out
+        assert "1: Foo()" in out
+        # file-level non-symbol hits, with content
+        assert "conf.yaml" in out
+        assert "3: name: Foo" in out
+        assert "9: alias: Foo" in out
+        assert "search_for_pattern" not in out
+
+
+class TestCursorOverviewFallthrough:
+    """``cursor_overview`` consults the read ladder and NEVER raises for a
+    non-LSP file: it lists structural nodes when a backend exists, else emits a
+    plaintext-floor message (spec-v2 §5.1/§5.3). Supersedes the old
+    'Cannot extract symbols' raise (bug://serena/cursor-grep-overview-no-content-for-non-lsp-files).
+    """
+
+    def _make_tool(self, tmp_path, rel_path, source, rung, structural=None):
+        from serena.tools.cursor_tools import CursorOverviewTool
+
+        (tmp_path / rel_path).write_text(source, encoding="utf-8")
+        tool = object.__new__(CursorOverviewTool)
+        manager = MagicMock()
+        manager.resolve_read_rung.return_value = rung
+        manager.structural_overview.return_value = structural or []
+        agent = MagicMock()
+        agent.get_cursor_manager.return_value = manager
+        tool.agent = agent
+        project = MagicMock()
+        project.project_root = str(tmp_path)
+        return tool, project, manager
+
+    def test_structural_rung_lists_nodes_no_raise(self, tmp_path):
+        from unittest.mock import PropertyMock
+
+        from serena.cursor import ReadRung
+        from serena.tools.cursor_tools import CursorOverviewTool
+
+        tool, project, _ = self._make_tool(
+            tmp_path,
+            "compose.yaml",
+            "services:\n  serena:\n    image: x\n",
+            ReadRung.STRUCTURAL,
+            structural=[("services", "pair")],
+        )
+        with patch.object(CursorOverviewTool, "project", new_callable=PropertyMock, return_value=project):
+            out = tool.apply(relative_path="compose.yaml", because="x", max_answer_chars=1000000)
+        assert "services" in out
+        assert "Cannot extract symbols" not in out
+
+    def test_plaintext_floor_never_raises(self, tmp_path):
+        from unittest.mock import PropertyMock
+
+        from serena.cursor import ReadRung
+        from serena.tools.cursor_tools import CursorOverviewTool
+
+        tool, project, _ = self._make_tool(
+            tmp_path,
+            "LICENSE",
+            "All rights reserved.\n",
+            ReadRung.PLAINTEXT,
+        )
+        with patch.object(CursorOverviewTool, "project", new_callable=PropertyMock, return_value=project):
+            out = tool.apply(relative_path="LICENSE", because="x")
+        # never raises; points at a working read path
+        assert "cursor_grep" in out
+        assert "Cannot extract symbols" not in out
