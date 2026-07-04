@@ -81,3 +81,13 @@ class NameResolutionError(StructuralError):
         super().__init__(f"cannot resolve {logical_name!r}: {detail}")
         self.logical_name = logical_name
         self.detail = detail
+
+
+class NodeRenderError(StructuralError):
+    """A walked node could not be rendered to standalone source text.
+
+    Raised by :meth:`solidlsp.structural.base.StructuralLanguage.render_node_source`
+    when a backend has no faithful way to emit a node's value as source. The
+    cursor surface catches this and omits the body rather than leaking an
+    internal repr across the agent boundary.
+    """

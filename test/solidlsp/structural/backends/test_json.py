@@ -17,6 +17,7 @@ import pytest
 
 from solidlsp.structural.backends.json import (
     JsonLogicalNameResolver,
+    JsonStructuralLanguage,
     _JsonArray,
     _JsonBool,
     _JsonDocument,
@@ -981,3 +982,13 @@ class TestJsonContainerMemberEdits:
         tree = backend.parse(self._MULTI)
         with pytest.raises(ValueError):
             backend.container_remove_member(tree, "nested/missing")
+
+
+class TestRenderNodeSource:
+    """A walked object member renders its exact source slice (spec-v2 §5.2)."""
+
+    def test_object_member_renders_exact_slice(self, backend: JsonStructuralLanguage) -> None:
+        tree = backend.parse('{"a": 1, "b": 2}')
+        nodes = {path: node for path, _kind, node in walk_symbols(tree)}
+        assert backend.render_node_source(nodes["a"]) == '"a": 1'
+        assert backend.render_node_source(nodes["b"]) == '"b": 2'

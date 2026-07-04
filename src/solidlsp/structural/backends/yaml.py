@@ -305,6 +305,19 @@ def _stringify_key(key: Any) -> str:
     return str(key)
 
 
+@dataclass(frozen=True)
+class _YamlPair:
+    """A mapping pair's walked payload: its parent mapping plus the key.
+
+    Carries typed structure (not a bare ``(mapping, key)`` tuple) so
+    :meth:`YamlStructuralLanguage.render_node_source` can emit ``key: value``
+    source instead of leaking a tuple repr.
+    """
+
+    mapping: Any
+    key: Any
+
+
 def _walk(node: Any, prefix: str) -> Iterable[tuple[str, KindName, Any]]:
     """Yield addressable symbols under ``node`` with name paths built on ``prefix``.
 
@@ -318,7 +331,7 @@ def _walk(node: Any, prefix: str) -> Iterable[tuple[str, KindName, Any]]:
             rendered = _stringify_key(key)
             pair_path = f"{prefix}/{rendered}" if prefix else rendered
             value = node[key]
-            yield pair_path, "pair", (node, key)
+            yield pair_path, "pair", _YamlPair(node, key)
             yield from _walk(value, pair_path)
         return
 
@@ -620,6 +633,20 @@ class YamlStructuralLanguage(StructuralLanguage):
             # declarations are fragments; render their data via ruamel
             return _dump(tree.data) if tree.data is not None else ""
         raise TypeError(f"cannot serialize handle of type {type(tree).__name__}")
+
+    def render_node_source(self, node: Any) -> str:
+        # a mapping pair renders as a one-entry ``key: value`` mapping fragment
+        if isinstance(node, _YamlPair):
+            fragment = CommentedMap()
+            fragment[node.key] = node.mapping[node.key]
+            return _dump(fragment).rstrip("\n")
+        # a compound value node (mapping / sequence) renders via ruamel directly
+        if isinstance(node, CommentedMap | CommentedSeq | dict | list):
+            return _dump(node).rstrip("\n")
+        # a scalar sequence element renders as its own value, never a repr
+        if isinstance(node, str | int | float):
+            return str(node)
+        return super().render_node_source(node)
 
     # ---- symbol-tree introspection ----------------------------------------
 
@@ -955,18 +982,16 @@ def _mapping_with_inserted(
 def _mapping_anchor_key(mapping: Any, anchor: Any) -> Any:
     """Return the mapping key an anchor identifies.
 
-    Anchors in the yaml backend come from :func:`walk_symbols`, which yields
-    pair tuples ``(parent, key)``. This helper accepts either that tuple form
-    or a raw key already present in ``mapping``.
+    Anchors in the yaml backend come from :func:`walk_symbols`, which yields a
+    :class:`_YamlPair` for each mapping entry. This helper accepts that pair
+    (or the legacy ``(parent, key)`` tuple, or a raw key already present in
+    ``mapping``).
     """
+    if isinstance(anchor, _YamlPair):
+        return anchor.key if anchor.key in mapping else None
     if isinstance(anchor, tuple) and len(anchor) == 2:
-        parent, key = anchor
-        if parent is mapping and key in mapping:
-            return key
-        # fall through to try key-in-mapping directly
-        if key in mapping:
-            return key
-        return None
+        _parent, key = anchor
+        return key if key in mapping else None
     if isinstance(anchor, str) and anchor in mapping:
         return anchor
     return None

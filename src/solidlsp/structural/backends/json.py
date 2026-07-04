@@ -1423,6 +1423,14 @@ class JsonStructuralLanguage(StructuralLanguage):
             raise TypeError(f"cannot serialize handle of type {type(tree).__name__}")
         return serialize_json(tree)
 
+    def render_node_source(self, node: Any) -> str:
+        # every JSON CST node (incl. _JsonMember) serializes to its exact source
+        # slice via _emit; .strip() drops a member's leading pre-token whitespace
+        try:
+            return serialize_json(node).strip()
+        except TypeError:
+            return super().render_node_source(node)
+
     # ---- symbol-tree introspection ----------------------------------------
 
     def root_kind(self, tree: Any) -> KindName:

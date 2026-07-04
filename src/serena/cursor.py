@@ -1361,28 +1361,16 @@ class CursorManager:
 
     @staticmethod
     def _serialize_node_for_display(backend: StructuralLanguage, node: Any) -> str:
-        """Coerce ``node`` into text using the backend's native rendering.
+        """Render ``node`` to standalone source via the backend's renderer.
 
-        LibCST, the JSON CST, tomlkit and ruamel.yaml all expose a
-        ``__str__``/``code`` hook that renders the sub-tree with its original
-        formatting. We try the most faithful options in order and fall back to
-        ``str(node)`` so callers see *something* even for backends without a
-        dedicated renderer.
+        Rendering is the backend's responsibility
+        (:meth:`~solidlsp.structural.base.StructuralLanguage.render_node_source`):
+        a backend emits a walked node's VALUE, and one that cannot raises
+        :class:`~solidlsp.structural.errors.NodeRenderError`, which
+        :meth:`_format_structural_node_source` catches and reports as "no body
+        available". An internal node repr never crosses this boundary.
         """
-        # libcst nodes expose a `.code` property for module-level rendering
-        code_attr = getattr(node, "code", None)
-        if isinstance(code_attr, str):
-            return code_attr
-        # tomlkit items have a `.as_string()` for their literal text
-        as_string = getattr(node, "as_string", None)
-        if callable(as_string):
-            try:
-                result = as_string()
-            except TypeError:
-                result = None
-            if isinstance(result, str):
-                return result
-        return str(node)
+        return backend.render_node_source(node)
 
     def find_symbols(
         self,

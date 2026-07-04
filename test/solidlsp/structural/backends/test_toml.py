@@ -10,6 +10,7 @@ rejected at parse time) and the flat table / AoT layout that toml uses.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -799,3 +800,31 @@ class TestRegistryExposure:
     def test_registered_language_keys_includes_toml(self) -> None:
         registry = default_structural_backend_registry()
         assert "toml" in registry.registered_languages()
+
+
+# =============================================================================
+# render_node_source (spec-v2 §5.2)
+# =============================================================================
+
+
+class TestRenderNodeSource:
+    """A walked node renders its VALUE, never the ``(mapping, key)`` tuple repr.
+
+    Regression companion to the yaml leak (the toml walk had the identical
+    ``(node, key)`` tuple defect): the toml walk yields a pair as a typed
+    ``_TomlPair`` and the backend renders it to ``key = value`` source text.
+    """
+
+    def _node_for(self, source: str, target_path: str) -> tuple[TomlStructuralLanguage, object]:
+        backend = TomlStructuralLanguage()
+        tree = backend.parse(source)
+        for path, _kind, node in walk_symbols(tree):
+            if path == target_path:
+                return backend, node
+        raise AssertionError(f"no walked node at {target_path!r}")
+
+    def test_scalar_pair_renders_key_and_value(self) -> None:
+        backend, node = self._node_for("[tool.ruff]\nline-length = 140\n", "tool/ruff/line-length")
+        rendered = backend.render_node_source(node)
+        assert rendered == "line-length = 140"
+        assert not re.fullmatch(r"\(.*, '.*'\)", rendered)

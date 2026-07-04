@@ -37,6 +37,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from solidlsp.structural.errors import NodeRenderError
 from solidlsp.structural.kinds import KindName, KindSchema
 from solidlsp.structural.names import LogicalNameResolver
 from solidlsp.structural.patterns import AstPattern, PatternMatch
@@ -91,6 +92,37 @@ class StructuralLanguage(ABC):
         any deviation fails the harness with
         :class:`~solidlsp.structural.errors.RoundTripViolation`.
         """
+
+    def render_node_source(self, node: Any) -> str:
+        """Render a single walked ``node`` back to standalone source text.
+
+        Unlike :meth:`serialize` (which renders a whole tree handle), this
+        renders one node yielded by :meth:`walk_nodes` / :meth:`walk_symbols`
+        so the cursor surface can show a node's body. Rendering is the
+        backend's responsibility: a leaf emits its VALUE, never an internal
+        repr.
+
+        The default handles code-language backends whose nodes expose a
+        faithful text hook (libcst ``.code``, tomlkit ``.as_string()``);
+        structural backends (yaml / json / toml) override it. A node with no
+        faithful source form raises
+        :class:`~solidlsp.structural.errors.NodeRenderError` rather than
+        falling back to ``str(node)``.
+        """
+        code_attr = getattr(node, "code", None)
+        if isinstance(code_attr, str):
+            return code_attr
+        as_string = getattr(node, "as_string", None)
+        if callable(as_string):
+            try:
+                result = as_string()
+            except TypeError:
+                result = None
+            if isinstance(result, str):
+                return result
+        raise NodeRenderError(
+            f"{type(self).__name__} cannot render {type(node).__name__} as source",
+        )
 
     # ---- symbol-tree introspection ----------------------------------------
 

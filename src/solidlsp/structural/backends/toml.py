@@ -294,6 +294,19 @@ def _stringify_key(key: Any) -> str:
     return str(key)
 
 
+@dataclass(frozen=True)
+class _TomlPair:
+    """A mapping pair's walked payload: its parent mapping plus the key.
+
+    Carries typed structure (not a bare ``(mapping, key)`` tuple) so
+    :meth:`TomlStructuralLanguage.render_node_source` can emit ``key = value``
+    source instead of leaking a tuple repr.
+    """
+
+    mapping: Any
+    key: Any
+
+
 def _walk(node: Any, prefix: str) -> Iterable[tuple[str, KindName, Any]]:
     """Yield addressable symbols under ``node`` with name paths built on ``prefix``.
 
@@ -307,7 +320,7 @@ def _walk(node: Any, prefix: str) -> Iterable[tuple[str, KindName, Any]]:
             rendered = _stringify_key(key)
             pair_path = f"{prefix}/{rendered}" if prefix else rendered
             value = node[key]
-            yield pair_path, "pair", (node, key)
+            yield pair_path, "pair", _TomlPair(node, key)
             yield from _walk(value, pair_path)
         return
 
@@ -635,6 +648,16 @@ class TomlStructuralLanguage(StructuralLanguage):
                 return tree.data.as_string()
             return str(tree.data)
         raise TypeError(f"cannot serialize handle of type {type(tree).__name__}")
+
+    def render_node_source(self, node: Any) -> str:
+        # a mapping pair renders as a one-entry ``key = value`` document fragment
+        if isinstance(node, _TomlPair):
+            doc = tomlkit.document()
+            doc[node.key] = node.mapping[node.key]
+            return _dump(doc).strip()
+        # tomlkit value items (tables, arrays, scalars) expose .as_string();
+        # the ABC default renders those and raises for anything unrenderable
+        return super().render_node_source(node)
 
     # ---- symbol-tree introspection ----------------------------------------
 
@@ -1025,15 +1048,14 @@ def _mapping_anchor_key(mapping: Any, anchor: Any) -> str | None:
     pair tuples ``(parent, key)`` for mapping entries. This helper accepts
     either that tuple form or a raw key already present in ``mapping``.
     """
+    keys = [_stringify_key(k) for k in mapping.keys()]
+    if isinstance(anchor, _TomlPair):
+        key_str = _stringify_key(anchor.key)
+        return key_str if key_str in keys else None
     if isinstance(anchor, tuple) and len(anchor) == 2:
-        parent, key = anchor
-        key_str = _stringify_key(key)
-        if parent is mapping and key_str in [_stringify_key(k) for k in mapping.keys()]:
-            return key_str
-        if key_str in [_stringify_key(k) for k in mapping.keys()]:
-            return key_str
-        return None
-    if isinstance(anchor, str) and anchor in [_stringify_key(k) for k in mapping.keys()]:
+        key_str = _stringify_key(anchor[1])
+        return key_str if key_str in keys else None
+    if isinstance(anchor, str) and anchor in keys:
         return anchor
     return None
 

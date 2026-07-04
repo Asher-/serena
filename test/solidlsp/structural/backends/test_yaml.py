@@ -10,6 +10,7 @@ rejected at parse time) and the block/flow mixture that yaml allows.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -717,3 +718,47 @@ class TestRegistryExposure:
         backend = registry.for_relative_path("config/db.yml")
         assert backend is not None
         assert backend.language_key == "yaml"
+
+
+# =============================================================================
+# render_node_source (spec-v2 §5.2)
+# =============================================================================
+
+
+class TestRenderNodeSource:
+    """A walked node renders its VALUE, never the ``(mapping, key)`` tuple repr.
+
+    Regression for bug://serena/cursor-structural-scalar-include-body-leaks-node-repr:
+    the yaml walk yields a pair as a typed ``_YamlPair`` and the backend renders
+    it to ``key: value`` source text.
+    """
+
+    def _node_for(self, source: str, target_path: str) -> tuple[YamlStructuralLanguage, object]:
+        backend = YamlStructuralLanguage()
+        tree = backend.parse(source)
+        for path, _kind, node in walk_symbols(tree):
+            if path == target_path:
+                return backend, node
+        raise AssertionError(f"no walked node at {target_path!r}")
+
+    def test_scalar_pair_renders_key_and_value(self) -> None:
+        backend, node = self._node_for(
+            "services:\n  serena:\n    image: serena:latest\n",
+            "services/serena/image",
+        )
+        rendered = backend.render_node_source(node)
+        assert rendered == "image: serena:latest"
+        assert not re.fullmatch(r"\(.*, '.*'\)", rendered)
+
+    def test_compound_pair_renders_nested_mapping(self) -> None:
+        backend, node = self._node_for(
+            "services:\n  serena:\n    image: serena:latest\n",
+            "services/serena",
+        )
+        rendered = backend.render_node_source(node)
+        assert rendered == "serena:\n  image: serena:latest"
+        assert not re.fullmatch(r"\(.*, '.*'\)", rendered)
+
+    def test_scalar_sequence_element_renders_value(self) -> None:
+        backend, node = self._node_for("items:\n  - one\n  - two\n", "items/[0]")
+        assert backend.render_node_source(node) == "one"

@@ -26,6 +26,7 @@ from solidlsp.structural.backends.python import (
 from solidlsp.structural.errors import (
     DeclarationError,
     NameResolutionError,
+    NodeRenderError,
     ParseError,
     PatternError,
 )
@@ -606,3 +607,18 @@ class TestEmptySource:
     def test_empty_source_rejects_unknown_kind(self, backend: PythonStructuralLanguage) -> None:
         with pytest.raises(DeclarationError):
             backend.empty_source("class")
+
+
+class TestRenderNodeSourceDefault:
+    """The ABC default render_node_source raises NodeRenderError for a node it
+    cannot faithfully render, instead of leaking ``str(node)`` (spec-v2 §5.2).
+
+    Code-language backends (python, cpp, ...) inherit this default from
+    :class:`~solidlsp.structural.base.StructuralLanguage`; a node exposing
+    neither ``.code`` nor a callable ``.as_string`` has no faithful source
+    form and must raise rather than leak a repr.
+    """
+
+    def test_raises_node_render_error_for_unrenderable_node(self, backend: PythonStructuralLanguage) -> None:
+        with pytest.raises(NodeRenderError):
+            backend.render_node_source(object())

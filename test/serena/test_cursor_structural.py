@@ -25,9 +25,12 @@ import pytest
 
 from serena.cursor import (
     CursorManager,
+    StructuralCursorState,
     StructuralResolution,
 )
 from solidlsp.structural.backends.python import PythonStructuralLanguage
+from solidlsp.structural.backends.toml import TomlStructuralLanguage
+from solidlsp.structural.backends.yaml import YamlStructuralLanguage
 from solidlsp.structural.registry import (
     StructuralBackendRegistry,
     default_structural_backend_registry,
@@ -267,3 +270,63 @@ class TestResolveStructuralNamePath:
 
         assert resolution is not None
         assert resolution.kind == "class"
+
+
+class TestFormatStructuralNodeSourceRendersValue:
+    """_format_structural_node_source returns the node's VALUE text, never the
+    ``(mapping, key)`` tuple repr the pre-fix ``str(node)`` fallback leaked
+    (spec-v2 §5.2; bug://serena/cursor-structural-scalar-include-body-leaks-node-repr).
+    """
+
+    def _manager_for(
+        self,
+        tmp_path: Path,
+        rel_path: str,
+        source: str,
+        language: str,
+        extensions: list[str],
+        backend_cls: type,
+    ) -> CursorManager:
+        (tmp_path / rel_path).write_text(source, encoding="utf-8")
+        project = MagicMock()
+        project.project_root = str(tmp_path)
+        project.read_file = MagicMock(side_effect=lambda p: Path(tmp_path / p).read_text(encoding="utf-8"))
+        registry = StructuralBackendRegistry()
+        registry.register(language, extensions, backend_cls)
+        return CursorManager(project, structural_registry=registry)
+
+    def test_yaml_pair_body_is_value_not_tuple(self, tmp_path: Path) -> None:
+        manager = self._manager_for(
+            tmp_path,
+            "compose.yaml",
+            "services:\n  serena:\n    image: serena:latest\n",
+            "yaml",
+            [".yaml", ".yml"],
+            YamlStructuralLanguage,
+        )
+        state = StructuralCursorState(
+            cursor_id="c1",
+            relative_path="compose.yaml",
+            name_path="services/serena/image",
+            kind="pair",
+            include_body=True,
+        )
+        assert manager._format_structural_node_source(state) == "image: serena:latest"
+
+    def test_toml_pair_body_is_value_not_tuple(self, tmp_path: Path) -> None:
+        manager = self._manager_for(
+            tmp_path,
+            "pyproject.toml",
+            "[tool.ruff]\nline-length = 140\n",
+            "toml",
+            [".toml"],
+            TomlStructuralLanguage,
+        )
+        state = StructuralCursorState(
+            cursor_id="c2",
+            relative_path="pyproject.toml",
+            name_path="tool/ruff/line-length",
+            kind="pair",
+            include_body=True,
+        )
+        assert manager._format_structural_node_source(state) == "line-length = 140"
