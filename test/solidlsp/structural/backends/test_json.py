@@ -17,7 +17,6 @@ import pytest
 
 from solidlsp.structural.backends.json import (
     JsonLogicalNameResolver,
-    JsonStructuralLanguage,
     _JsonArray,
     _JsonBool,
     _JsonDocument,
