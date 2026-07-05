@@ -1036,7 +1036,7 @@ class CursorManager:
 
         # body block (opt-in): full statement-widened body for symbols whose
         # LSP extent is name-only; falls back to the LSP-reported body. Each
-        # line is prefixed with its 0-based file line number so a non-symbol
+        # line is prefixed with its 1-based file line number so a non-symbol
         # region (e.g. a switch case) can be anchored for cursor_replace_range
         # without hand-counting -- bug://serena/cursor-edit-non-symbol-regions-need-line-numbers
         if state.include_body:

@@ -983,7 +983,7 @@ class CursorReplaceRangeTool(Tool, ToolMarkerSymbolicEdit):
     Replace a non-symbolic line range in a file. Unlike ``cursor_replace_body`` and the
     ``cursor_insert_before`` / ``cursor_insert_after`` pair, this primitive does not
     address an LSP symbol — it operates directly on a ``[start_line, end_line]``
-    (inclusive, 0-based) range of file lines. It is the escape hatch for editing
+    (inclusive, 1-based) range of file lines. It is the escape hatch for editing
     regions that the language server does not surface as symbols: free-floating
     comment blocks, blank-line gaps between imports, imports themselves (on LSPs that
     do not expose them as symbols), license headers, and any content before the first
