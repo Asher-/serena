@@ -19,18 +19,29 @@ from pathlib import Path
 
 import pytest
 
-from serena.tools.file_tools import CreateTextFileTool
+from serena.tools.file_tools import (
+    CreateTextFileTool,
+    DeleteFileTool,
+    FindFileTool,
+    ListDirTool,
+    RenameFileTool,
+    StatTool,
+)
 
 
 @dataclass
 class _ProjectStub:
     """minimal stand-in for :class:`Project`.
 
-    exposes only ``project_root`` -- the sole attribute :meth:`Tool.get_project_root` reads off
-    the active project.
+    exposes ``project_root`` (the sole attribute :meth:`Tool.get_project_root` reads off the active
+    project) and ``is_ignored_path`` (the ignore predicate the lifecycle tools thread into the service).
     """
 
     project_root: str
+
+    def is_ignored_path(self, path: str) -> bool:
+        # the stub project ignores nothing; gitignore policy is exercised at the service level
+        return False
 
 
 class _DummyAgent:
@@ -52,6 +63,11 @@ def _make_tool(project_root: Path) -> CreateTextFileTool:
     # Tool's base constructor only stores ``agent``; the temp project root flows in via the stub
     # agent so apply() resolves relative paths against ``project_root``.
     return CreateTextFileTool(agent=_DummyAgent(str(project_root)))
+
+
+def _make(tool_cls, project_root: Path):
+    # generic builder over the same stub agent, for the lifecycle tools beyond create
+    return tool_cls(agent=_DummyAgent(str(project_root)))
 
 
 def test_create_new_file_writes_content_and_reports_created(tmp_path: Path) -> None:
@@ -80,9 +96,9 @@ def test_empty_content_yields_zero_byte_file(tmp_path: Path) -> None:
 def test_overwrite_existing_file_replaces_content_and_reports_overwrote(tmp_path: Path) -> None:
     tool = _make_tool(tmp_path)
 
-    # seed a file, then overwrite it through the tool
+    # seed a file, then overwrite it through the tool -- overwriting now requires explicit intent
     tool.apply("data.txt", "original contents")
-    result = tool.apply("data.txt", "replaced!")
+    result = tool.apply("data.txt", "replaced!", overwrite=True)
 
     # the second write reports "Overwrote" and the content is fully replaced (not appended)
     assert (tmp_path / "data.txt").read_text(encoding="utf-8") == "replaced!"
@@ -149,3 +165,98 @@ def test_bare_filename_skips_makedirs(tmp_path: Path, monkeypatch: pytest.Monkey
     # written verbatim and reported created -- the no-parent-directory branch is exercised
     assert (tmp_path / "bare.txt").read_text(encoding="utf-8") == "hi"
     assert result == "Created bare.txt (2 characters)."
+
+
+# --- the reflex lifecycle tools: list_dir / find_file / stat / delete_file / rename_file ---
+# the service logic is unit-tested in test_file_lifecycle.py; these pin the tool wiring -- that each
+# tool resolves the project root, threads the project ignore policy, and renders a typed result.
+
+
+def test_create_without_overwrite_refuses_existing_and_leaves_original(tmp_path: Path) -> None:
+    tool = _make_tool(tmp_path)
+
+    tool.apply("data.txt", "original")
+    result = tool.apply("data.txt", "replacement")
+
+    # refused, and the original bytes are intact (no silent clobber)
+    assert "already exists" in result
+    assert (tmp_path / "data.txt").read_text(encoding="utf-8") == "original"
+
+
+def test_list_dir_tool_lists_typed_entries(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("hi")
+    (tmp_path / "sub").mkdir()
+
+    out = _make(ListDirTool, tmp_path).apply(".")
+    assert "a.txt" in out
+    assert "sub/" in out
+
+
+def test_find_file_tool_matches_paths_and_never_names_search_for_pattern(tmp_path: Path) -> None:
+    (tmp_path / "mod.py").write_text("x")
+    (tmp_path / "note.txt").write_text("y")
+
+    out = _make(FindFileTool, tmp_path).apply("*.py")
+    assert "mod.py" in out
+    assert "note.txt" not in out
+    assert "search_for_pattern" not in out
+
+
+def test_stat_tool_reports_version_and_metadata(tmp_path: Path) -> None:
+    (tmp_path / "f.txt").write_bytes(b"hello\n")
+
+    out = _make(StatTool, tmp_path).apply("f.txt")
+    assert "file" in out
+    assert "version " in out
+    assert "trailing newline" in out
+
+
+def test_stat_version_pairs_with_delete_compare_and_swap(tmp_path: Path) -> None:
+    (tmp_path / "f.txt").write_text("payload")
+
+    # the version stat prints is exactly the token delete accepts as expect_version
+    stat_out = _make(StatTool, tmp_path).apply("f.txt")
+    version = stat_out.split("version ")[1].split(",")[0].strip()
+
+    result = _make(DeleteFileTool, tmp_path).apply("f.txt", expect_version=version)
+    assert "Deleted" in result
+    assert not (tmp_path / "f.txt").exists()
+
+
+def test_delete_file_tool_is_idempotent(tmp_path: Path) -> None:
+    result = _make(DeleteFileTool, tmp_path).apply("ghost.txt")
+    assert "nothing to delete" in result
+
+
+def test_rename_file_tool_moves_and_creates_parents(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("x")
+
+    result = _make(RenameFileTool, tmp_path).apply("a.txt", "sub/b.txt")
+    assert "Renamed" in result
+    assert (tmp_path / "sub" / "b.txt").read_text(encoding="utf-8") == "x"
+    assert not (tmp_path / "a.txt").exists()
+
+
+def test_lifecycle_tools_register_with_expected_names_killing_the_deleted_tool_orphan() -> None:
+    # the JetBrains overview docstring points agents at `list_dir` and `find_file`; assert those names
+    # now resolve to real, registered Tool classes so the deleted-tool signpost no longer dangles.
+    from serena.tools.jetbrains_tools import JetBrainsGetSymbolsOverviewTool
+    from serena.tools.tools_base import ToolRegistry
+
+    reflex_names = {
+        ListDirTool.get_name_from_cls(),
+        FindFileTool.get_name_from_cls(),
+        StatTool.get_name_from_cls(),
+        DeleteFileTool.get_name_from_cls(),
+        RenameFileTool.get_name_from_cls(),
+    }
+    assert reflex_names == {"list_dir", "find_file", "stat", "delete_file", "rename_file"}
+
+    # constructing the registry scans every Tool subclass and raises on any duplicate name, so this
+    # also proves the five reflex tools register without colliding with an existing tool
+    ToolRegistry()
+
+    doc = JetBrainsGetSymbolsOverviewTool.apply.__doc__ or ""
+    for referenced in ("list_dir", "find_file"):
+        assert referenced in doc
+        assert referenced in reflex_names

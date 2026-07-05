@@ -8,8 +8,9 @@ File and file system-related tools, specifically for
 
 import os
 
+from serena.symbol import LanguageServerSymbol
 from serena.tools import Tool, ToolMarkerCanEdit
-from serena.tools import Tool
+from serena.util.file_lifecycle import FilesystemLifecycle
 from serena.util.file_system import scan_directory
 from serena.util.text_utils import search_files
 
@@ -226,34 +227,154 @@ class SearchForPatternTool(Tool):
 
 class CreateTextFileTool(Tool, ToolMarkerCanEdit):
     """
-    Creates or overwrites a text file at a project-relative path, writing the exact
-    content given. Path-addressed (not symbol-anchored), so it can bootstrap a
-    brand-new file and write empty / zero-byte content -- neither of which a cursor
-    or symbol edit can do, since an empty file has no symbol to anchor to.
+    Creates or (with explicit intent) overwrites a text file at a project-relative path, writing the
+    exact content given. Path-addressed rather than symbol-anchored, so it can bootstrap a brand-new
+    file and write empty / zero-byte content -- neither of which a cursor or symbol edit can do, since
+    an empty file has no symbol to anchor to. The write is atomic (temp + ``os.replace``): a crash or
+    error never leaves a half-written file.
     """
 
-    def apply(self, relative_path: str, content: str = "") -> str:
+    def apply(self, relative_path: str, content: str = "", overwrite: bool = False, expect_version: str = "") -> str:
         """
-        Create or overwrite a UTF-8 text file with the given content.
+        Create, or with explicit intent overwrite, a UTF-8 text file with the given content.
 
-        Parent directories are created as needed. ``content`` may be empty, in which
-        case a zero-byte file is written. ``relative_path`` is resolved against the
-        active project root.
+        Creating a new file needs nothing beyond the path and content. Overwriting an existing file
+        requires ``overwrite=True`` -- without it the call is refused and the original bytes are left
+        intact (no silent clobber). For a safe overwrite, pass ``expect_version`` (the ``version`` a
+        prior ``stat`` reported): if the file changed under you the write is refused with a typed stale
+        state carrying the current content; omit ``expect_version`` to overwrite unconditionally.
+        Parent directories are created as needed; ``content`` may be empty (a genuine zero-byte file).
 
         :param relative_path: path of the file to write, relative to the project root
         :param content: UTF-8 text to write; defaults to "" (writes a zero-byte file)
-        :return: a confirmation stating whether the file was created or overwritten
+        :param overwrite: set True to replace an existing file; without it, an existing path is refused
+        :param expect_version: the file's expected content version (from ``stat``) for a safe
+            compare-and-swap overwrite; empty overwrites unconditionally
+        :return: a confirmation, a refusal (already exists), or a typed stale state
         """
-        # resolve the target against the active project root
-        abs_path = os.path.join(self.get_project_root(), relative_path)
-        existed = os.path.isfile(abs_path)
+        # resolve and mutate through the lifecycle service (read-root == write-root)
+        service = FilesystemLifecycle(self.get_project_root(), is_ignored=self.project.is_ignored_path)
+        return service.create(relative_path, content, overwrite=overwrite, expect_version=expect_version).render()
 
-        # create parent directories, then write the exact content (empty -> genuine zero-byte file)
-        parent = os.path.dirname(abs_path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        with open(abs_path, "w", encoding="utf-8", newline="") as f:
-            f.write(content)
 
-        # report the outcome
-        return f"{'Overwrote' if existed else 'Created'} {relative_path} ({len(content)} characters)."
+class ListDirTool(Tool):
+    """
+    Lists the entries of a project directory as a typed listing (name, kind, size) -- the reflex
+    replacement for raw ``ls``. Gitignored and hidden (dot-prefixed) entries are skipped by default so
+    the listing matches what the project treats as source; the opt-outs surface them explicitly.
+    Symlinks are reported with their target and never followed.
+    """
+
+    def apply(
+        self,
+        relative_path: str = ".",
+        recursive: bool = False,
+        max_entries: int = 1000,
+        include_ignored: bool = False,
+        include_hidden: bool = False,
+    ) -> str:
+        """
+        List a directory's entries, relative to the project root.
+
+        :param relative_path: the directory to list, relative to the project root (default: the root)
+        :param recursive: whether to descend into sub-directories (symlinked directories are never followed)
+        :param max_entries: maximum entries to return; the listing declares when it was truncated
+        :param include_ignored: set True to include gitignored entries (skipped by default)
+        :param include_hidden: set True to include hidden dot-prefixed entries (skipped by default)
+        :return: a typed listing, or a typed not-found / not-a-directory state (never an exception)
+        """
+        service = FilesystemLifecycle(self.get_project_root(), is_ignored=self.project.is_ignored_path)
+        return service.list_dir(
+            relative_path,
+            recursive=recursive,
+            max_entries=max_entries,
+            include_ignored=include_ignored,
+            include_hidden=include_hidden,
+        ).render()
+
+
+class FindFileTool(Tool):
+    """
+    Finds files whose PATH matches a glob or substring -- the reflex replacement for raw ``find``. This
+    matches paths, not contents; to search file contents use ``search_for_pattern``. Gitignored and
+    hidden files are skipped and symlinked directories are not traversed.
+    """
+
+    def apply(
+        self, pattern: str, relative_path: str = ".", max_results: int = 1000, include_ignored: bool = False
+    ) -> str:
+        """
+        Find files by path pattern under a directory.
+
+        :param pattern: a glob (e.g. ``"*.py"``, matched against the relative path and base name) or,
+            when it has no glob metacharacters, a path substring
+        :param relative_path: the directory to search under, relative to the project root (default: root)
+        :param max_results: maximum matches to return; the result declares when it was truncated
+        :param include_ignored: set True to include gitignored files (skipped by default)
+        :return: a typed list of matching project-relative paths
+        """
+        service = FilesystemLifecycle(self.get_project_root(), is_ignored=self.project.is_ignored_path)
+        return service.find_file(
+            pattern, relative_path=relative_path, max_results=max_results, include_ignored=include_ignored
+        ).render()
+
+
+class StatTool(Tool):
+    """
+    Reports a path's metadata -- kind, size, permissions, and, for a regular file, its encoding,
+    line-ending style, trailing-newline state, and content version -- the reflex replacement for raw
+    ``stat``. The content version is the token ``create`` / ``delete_file`` / ``rename_file`` accept as
+    ``expect_version`` for a safe compare-and-swap write. Symlinks are described without following.
+    """
+
+    def apply(self, relative_path: str) -> str:
+        """
+        Describe a file, directory, or symlink.
+
+        :param relative_path: the path to describe, relative to the project root
+        :return: a typed metadata line, or a typed not-found state (never an exception)
+        """
+        service = FilesystemLifecycle(self.get_project_root(), is_ignored=self.project.is_ignored_path)
+        return service.stat(relative_path).render()
+
+
+class DeleteFileTool(Tool, ToolMarkerCanEdit):
+    """
+    Deletes a file -- the reflex replacement for raw ``rm``. Deleting a missing path is a no-op success
+    (idempotent). For a safe delete, pass ``expect_version`` (from ``stat``): if the content changed
+    under you the delete is refused; omit it to delete unconditionally.
+    """
+
+    def apply(self, relative_path: str, expect_version: str = "") -> str:
+        """
+        Delete a file at a project-relative path.
+
+        :param relative_path: the file to delete, relative to the project root
+        :param expect_version: the file's expected content version (from ``stat``) for a safe
+            compare-and-swap delete; empty deletes unconditionally
+        :return: a confirmation, an idempotent no-op notice, or a typed stale state
+        """
+        service = FilesystemLifecycle(self.get_project_root(), is_ignored=self.project.is_ignored_path)
+        return service.delete(relative_path, expect_version=expect_version).render()
+
+
+class RenameFileTool(Tool, ToolMarkerCanEdit):
+    """
+    Renames or moves a file -- one verb for both -- the reflex replacement for raw ``mv``. Missing
+    destination parent directories are created. For a safe move, pass ``expect_version`` (from ``stat``
+    of the source); omit it to move unconditionally. This is a plain move; reference-aware companion
+    edits are not performed.
+    """
+
+    def apply(self, source: str, destination: str, expect_version: str = "") -> str:
+        """
+        Rename or move a file within the project.
+
+        :param source: the existing path, relative to the project root
+        :param destination: the target path, relative to the project root (parents are created)
+        :param expect_version: the source's expected content version (from ``stat``) for a safe
+            compare-and-swap move; empty moves unconditionally
+        :return: a confirmation, a refusal, or a typed stale state
+        """
+        service = FilesystemLifecycle(self.get_project_root(), is_ignored=self.project.is_ignored_path)
+        return service.rename(source, destination, expect_version=expect_version).render()
