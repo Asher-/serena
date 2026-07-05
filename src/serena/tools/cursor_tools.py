@@ -266,7 +266,7 @@ class CursorConfigureTool(Tool, ToolMarkerSymbolicRead):
         # structural cursors carry no LSP edges; silently ignore edge_types so the
         # tool stays uniform across cursor kinds. The projection toggles still
         # apply -- structural views honour the same include_* flags.
-        if isinstance(state, (StructuralCursorState, PlaintextCursorState)):
+        if isinstance(state, StructuralCursorState | PlaintextCursorState):
             state.include_body = include_body
             state.include_chain = include_chain
             state.include_trail = include_trail

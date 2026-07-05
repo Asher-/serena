@@ -8,6 +8,8 @@ floor makes any file readable through the cursor surface without a terminal rais
 from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock, patch
 
+import pytest
+
 from serena.cursor import CursorManager, PlaintextCursorState
 
 
@@ -95,8 +97,6 @@ class TestPlaintextCursorNeverRaisesOnNonReadOps:
         assert manager.reanchor_cursor(cid) is state  # no-op, returns the same state
 
     def test_symbol_edit_gives_typed_error_not_attributeerror(self) -> None:
-        import pytest
-
         from serena.tools.cursor_tools import CursorReplaceBodyTool
 
         tool = object.__new__(CursorReplaceBodyTool)
@@ -107,3 +107,93 @@ class TestPlaintextCursorNeverRaisesOnNonReadOps:
         tool.agent = agent
         with pytest.raises(TypeError, match="plaintext"):
             tool.apply(cursor_id="c1", body="x")
+
+
+class TestPlaintextCursorRejectsSymbolNavAndEdits:
+    """Symbol-only ops (move, rename, insert-before/after) reject a plaintext cursor
+    with a typed ``TypeError`` naming the whole-file rung -- never a raw ``AttributeError``.
+
+    Regression for the T4 merge-audit block: ``get_lsp_cursor`` formatted its rejection
+    message from ``state.name_path``, which ``PlaintextCursorState`` lacks, so ``cursor_move``
+    and ``cursor_rename`` crashed with ``AttributeError`` instead of rejecting cleanly.
+    """
+
+    def _plaintext_manager_and_cid(self, tmp_path: Path) -> tuple[CursorManager, str]:
+        (tmp_path / "notes.txt").write_bytes(b"alpha\nbeta\n")
+        manager = _manager(tmp_path)
+        with _force_lsp_miss():
+            cid, _ = manager.start_cursor("notes.txt", relative_path="notes.txt")
+        return manager, cid
+
+    @staticmethod
+    def _tool_over(tool_cls: type, manager: CursorManager):
+        tool = object.__new__(tool_cls)
+        agent = MagicMock()
+        agent.get_cursor_manager.return_value = manager
+        tool.agent = agent
+        return tool
+
+    def test_get_lsp_cursor_on_plaintext_is_typed_not_attributeerror(self, tmp_path: Path) -> None:
+        manager, cid = self._plaintext_manager_and_cid(tmp_path)
+        with pytest.raises(TypeError, match="plaintext"):
+            manager.get_lsp_cursor(cid)
+
+    def test_move_cursor_on_plaintext_is_typed_not_attributeerror(self, tmp_path: Path) -> None:
+        from serena.tools.cursor_tools import CursorMoveTool
+
+        manager, cid = self._plaintext_manager_and_cid(tmp_path)
+        tool = self._tool_over(CursorMoveTool, manager)
+        with pytest.raises(TypeError, match="plaintext"):
+            tool.apply(cursor_id=cid, target_name="beta", because="probe")
+
+    def test_rename_on_plaintext_is_typed_not_attributeerror(self, tmp_path: Path) -> None:
+        from serena.tools.cursor_tools import CursorRenameTool
+
+        manager, cid = self._plaintext_manager_and_cid(tmp_path)
+        tool = self._tool_over(CursorRenameTool, manager)
+        with pytest.raises(TypeError, match="plaintext"):
+            tool.apply(cursor_id=cid, new_name="renamed")
+
+    def test_insert_before_on_plaintext_is_typed_reject(self, tmp_path: Path) -> None:
+        from serena.tools.cursor_tools import CursorInsertBeforeTool
+
+        manager, cid = self._plaintext_manager_and_cid(tmp_path)
+        tool = self._tool_over(CursorInsertBeforeTool, manager)
+        with pytest.raises(TypeError, match="plaintext"):
+            tool.apply(cursor_id=cid, body="x")
+
+    def test_insert_after_on_plaintext_is_typed_reject(self, tmp_path: Path) -> None:
+        from serena.tools.cursor_tools import CursorInsertAfterTool
+
+        manager, cid = self._plaintext_manager_and_cid(tmp_path)
+        tool = self._tool_over(CursorInsertAfterTool, manager)
+        with pytest.raises(TypeError, match="plaintext"):
+            tool.apply(cursor_id=cid, body="x")
+
+
+class TestPlaintextCursorNavigationAndConfigure:
+    """``resolve_neighbors`` is empty (a whole file exposes no graph) and ``cursor_configure``
+    applies its toggles on the plaintext branch -- both previously-untested arms exercised."""
+
+    def test_resolve_neighbors_is_empty(self, tmp_path: Path) -> None:
+        (tmp_path / "notes.txt").write_bytes(b"alpha\nbeta\n")
+        manager = _manager(tmp_path)
+        with _force_lsp_miss():
+            cid, _ = manager.start_cursor("notes.txt", relative_path="notes.txt")
+        assert manager.resolve_neighbors(cid) == []  # whole-file cursor exposes no navigable neighbors
+
+    def test_configure_applies_toggles_and_renders(self, tmp_path: Path) -> None:
+        from serena.tools.cursor_tools import CursorConfigureTool
+
+        (tmp_path / "notes.txt").write_bytes(b"alpha\nbeta\n")
+        manager = _manager(tmp_path)
+        with _force_lsp_miss():
+            cid, state = manager.start_cursor("notes.txt", relative_path="notes.txt")
+        tool = object.__new__(CursorConfigureTool)
+        agent = MagicMock()
+        agent.get_cursor_manager.return_value = manager
+        tool.agent = agent
+        out = tool.apply(cursor_id=cid, include_body=False)
+        assert state.include_body is False  # toggle applied on the plaintext branch
+        assert "notes.txt" in out  # still renders the view, no crash
+        assert "--- body ---" not in out  # body suppressed by the toggle

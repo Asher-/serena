@@ -303,13 +303,14 @@ class PlaintextCursorState:
 
     :ivar cursor_id: the cursor's handle.
     :ivar relative_path: POSIX-style project-relative path of the file.
-    :ivar trail: prior relative paths visited by this cursor.
+    :ivar trail: unused at the plaintext rung; always empty -- a whole-file cursor
+        does not navigate, so nothing is ever appended. Present for state uniformity.
     :ivar include_body: when ``True`` (the default -- the floor exists to show
         content), the projection appends the file's byte-exact numbered body.
         Mirrors the ``include_*`` toggles on the other cursor states so
         ``cursor_configure`` stays uniform across cursor kinds.
     :ivar include_chain: unused at the plaintext rung; present for toggle uniformity.
-    :ivar include_trail: when ``True``, the projection includes the visited trail.
+    :ivar include_trail: unused at the plaintext rung; present for toggle uniformity.
     :ivar include_siblings: unused at the plaintext rung; present for uniformity.
     :ivar include_gist: unused at the plaintext rung; present for uniformity.
     :ivar last_reasoning: the agent's most-recent stated semantic goal, rendered as
@@ -520,17 +521,28 @@ class CursorManager:
     def get_lsp_cursor(self, cursor_id: str) -> CursorState:
         """Return the cursor strictly as an LSP :class:`CursorState`.
 
-        Raises :class:`TypeError` when the cursor is a
-        :class:`StructuralCursorState` -- callers that cannot operate on
-        structural cursors use this accessor to fail fast.
+        Raises :class:`TypeError` when the cursor is a non-LSP cursor -- a
+        :class:`StructuralCursorState` (container member) or a
+        :class:`PlaintextCursorState` (whole file at the floor rung). Callers
+        that can only operate on the language server's symbol graph use this
+        accessor to fail fast with a typed error that names the cursor kind and
+        points at the right tool, never a raw ``AttributeError`` (spec-v2 §5.1:
+        no rung raises a terminal error to the agent).
         """
         state = self.get_cursor(cursor_id)
-        if not isinstance(state, CursorState):
+        if isinstance(state, CursorState):
+            return state
+        if isinstance(state, PlaintextCursorState):
             raise TypeError(
-                f"Cursor '{cursor_id}' is a structural cursor at "
-                f"{state.relative_path}:{state.name_path!r}; this operation requires an LSP cursor",
+                f"Cursor '{cursor_id}' is a plaintext (whole-file) cursor at "
+                f"{state.relative_path}; a whole-file cursor has no symbol graph to "
+                f"navigate or rename. Edit it by line via cursor_replace_range, or "
+                f"cursor_start on a symbol to obtain an LSP cursor.",
             )
-        return state
+        raise TypeError(
+            f"Cursor '{cursor_id}' is a structural cursor at "
+            f"{state.relative_path}:{state.name_path!r}; this operation requires an LSP cursor",
+        )
 
     def list_cursors(self) -> list[str]:
         return list(self._cursors.keys())
@@ -1403,14 +1415,6 @@ class CursorManager:
         kind = "binary" if view.is_binary else "file"
         lines.append(f"@ {state.relative_path} :{kind}@{state.relative_path}:  {self._plaintext_floor.describe(view)}")
 
-        # trail: prior relative paths + current marked '<- here'; opt-in
-        if state.include_trail and state.trail:
-            lines.append("")
-            lines.append("trail")
-            for prior_path in state.trail[-_TRAIL_TAIL_LENGTH:]:
-                lines.append(f"   {prior_path}:")
-            lines.append(f"   {state.relative_path}:    <- here")
-
         # body block (opt-in, default on): the file's byte-exact numbered body,
         # numbered from file line 0 through the 1-based display converter
         if state.include_body and view.text is not None:
@@ -2138,13 +2142,9 @@ class CursorManager:
         """Format the cursor's visited trail as text."""
         state = self.get_cursor(cursor_id)
         if isinstance(state, PlaintextCursorState):
-            if not state.trail:
-                return f"Cursor {cursor_id}: no trail (at starting position)"
-            lines = [f"Cursor {cursor_id} trail ({len(state.trail)} steps):"]
-            for i, prior_path in enumerate(state.trail):
-                lines.append(f"  {i + 1}. {prior_path}")
-            lines.append(f"  -> {state.relative_path} (current)")
-            return "\n".join(lines)
+            # a whole-file plaintext cursor never navigates (cursor_move rejects it),
+            # so its trail is always empty
+            return f"Cursor {cursor_id}: no trail (at starting position)"
         if isinstance(state, StructuralCursorState):
             if not state.trail:
                 return f"Cursor {cursor_id}: no trail (at starting position)"

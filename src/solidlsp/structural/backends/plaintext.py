@@ -27,7 +27,7 @@ _BINARY_SNIFF_BYTES = 8192
 
 
 def _plural(n: int) -> str:
-    """the plural suffix for a count -- ``""`` for one, ``"s"`` otherwise."""
+    """The plural suffix for a count -- ``""`` for one, ``"s"`` otherwise."""
     return "" if n == 1 else "s"
 
 
