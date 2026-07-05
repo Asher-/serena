@@ -23,9 +23,10 @@ from solidlsp.lsp_protocol_handler.lsp_types import (
     SymbolKind,
     TypeHierarchyItem,
 )
+from solidlsp.structural.backends.plaintext import PlaintextView
 from solidlsp.structural.base import StructuralLanguage
 from solidlsp.structural.kinds import KindName
-from solidlsp.structural.registry import StructuralBackendRegistry, default_structural_backend_registry
+from solidlsp.structural.registry import StructuralBackendRegistry, default_plaintext_floor, default_structural_backend_registry
 
 log = logging.getLogger(__name__)
 
@@ -288,7 +289,45 @@ class StructuralCursorState:
     last_reasoning: str | None = None
 
 
-AnyCursorState = CursorState | StructuralCursorState
+@dataclass
+class PlaintextCursorState:
+    """The state of a cursor positioned on a whole file at the plaintext floor rung.
+
+    Used when neither the language server nor a structural backend claims the file
+    (spec-v2 §5.1 rung3): the cursor addresses the file as a whole and its view is a
+    :class:`~solidlsp.structural.backends.plaintext.PlaintextView` -- a line/size/
+    encoding descriptor plus, when ``include_body`` is set, the byte-exact numbered
+    body. The floor never raises, so ``cursor_start`` / ``cursor_look`` always land
+    here rather than dead-ending. Editing a plaintext file is line-addressed
+    (``cursor_replace_range``), so this cursor carries no structural edit surface.
+
+    :ivar cursor_id: the cursor's handle.
+    :ivar relative_path: POSIX-style project-relative path of the file.
+    :ivar trail: prior relative paths visited by this cursor.
+    :ivar include_body: when ``True`` (the default -- the floor exists to show
+        content), the projection appends the file's byte-exact numbered body.
+        Mirrors the ``include_*`` toggles on the other cursor states so
+        ``cursor_configure`` stays uniform across cursor kinds.
+    :ivar include_chain: unused at the plaintext rung; present for toggle uniformity.
+    :ivar include_trail: when ``True``, the projection includes the visited trail.
+    :ivar include_siblings: unused at the plaintext rung; present for uniformity.
+    :ivar include_gist: unused at the plaintext rung; present for uniformity.
+    :ivar last_reasoning: the agent's most-recent stated semantic goal, rendered as
+        ``why: <text>`` above the anchor whenever set.
+    """
+
+    cursor_id: str
+    relative_path: str
+    trail: list[str] = field(default_factory=list)
+    include_body: bool = True
+    include_chain: bool = False
+    include_trail: bool = False
+    include_siblings: bool = False
+    include_gist: bool = False
+    last_reasoning: str | None = None
+
+
+AnyCursorState = CursorState | StructuralCursorState | PlaintextCursorState
 
 
 @dataclass(frozen=True)
@@ -455,6 +494,9 @@ class CursorManager:
         self._structural_registry = structural_registry if structural_registry is not None else default_structural_backend_registry()
         # per-file cache of structural walk_nodes output; keyed by relative path
         self._structural_nodes_cache: dict[str, _StructuralNodeCacheEntry] = {}
+        # the universal plaintext floor (spec-v2 §5.1 rung3): renders any file the
+        # LSP and structural rungs do not claim; the manager owns the byte read
+        self._plaintext_floor = default_plaintext_floor()
 
     @property
     def project(self) -> Project:
@@ -548,7 +590,16 @@ class CursorManager:
                 raise
             structural = self.resolve_structural_name_path(relative_path, name_path)
             if structural is None:
-                raise lsp_error
+                # plaintext floor (spec-v2 §5.1 rung3): neither the language server
+                # nor a structural backend claims this file -> land a whole-file
+                # plaintext cursor rather than dead-ending, provided the file exists.
+                view = self._plaintext_view(relative_path)
+                if not view.exists:
+                    raise lsp_error
+                floor_id = cursor_id if cursor_id is not None else self._generate_cursor_id()
+                plain_state = PlaintextCursorState(cursor_id=floor_id, relative_path=relative_path)
+                self._cursors[floor_id] = plain_state
+                return floor_id, plain_state
             assigned_id = cursor_id if cursor_id is not None else self._generate_cursor_id()
             struct_state = StructuralCursorState(
                 cursor_id=assigned_id,
@@ -652,6 +703,10 @@ class CursorManager:
         :return: list of neighbor symbols with their edge types
         """
         state = self.get_cursor(cursor_id)
+        # plaintext cursors address a whole file at the floor rung; they expose no
+        # navigable neighbors (moving line-to-line is line-addressed, not a graph)
+        if isinstance(state, PlaintextCursorState):
+            return []
         # structural cursors use the structural-cache walk to surface container
         # membership as the CONTAINS edge; other edge types remain no-ops.
         if isinstance(state, StructuralCursorState):
@@ -976,6 +1031,8 @@ class CursorManager:
         :return: the multi-line projection.
         """
         state = self.get_cursor(cursor_id)
+        if isinstance(state, PlaintextCursorState):
+            return self._format_plaintext_cursor_view(state)
         if isinstance(state, StructuralCursorState):
             return self._format_structural_cursor_view(state)
 
@@ -1288,6 +1345,78 @@ class CursorManager:
             lines.append("")
             lines.append("--- body ---")
             lines.append(body_text)
+            lines.append("--- end body ---")
+
+        return "\n".join(lines)
+
+    def _plaintext_view(self, relative_path: str) -> PlaintextView:
+        """Read a file's raw bytes and render the plaintext-floor view; never raise.
+
+        The manager owns the byte-access boundary, so the read happens here and the
+        pure :class:`~solidlsp.structural.backends.plaintext.PlaintextFloor` renders
+        the result. A missing or unreadable file becomes a typed view (spec-v2 §5.9),
+        never an exception -- so no floor lookup dead-ends.
+
+        :param relative_path: project-relative path of the file to read.
+        :return: the file's :class:`PlaintextView`.
+        """
+        abs_path = os.path.join(self._project.project_root, relative_path)
+        try:
+            with open(abs_path, "rb") as f:
+                data = f.read()
+        except FileNotFoundError:
+            return self._plaintext_floor.not_found_view(relative_path)
+        except OSError as e:
+            return self._plaintext_floor.error_view(relative_path, str(e))
+        return self._plaintext_floor.render(data, relative_path)
+
+    def plaintext_overview(self, relative_path: str) -> str:
+        """Return the plaintext floor's one-line summary for ``relative_path``.
+
+        Used by ``cursor_overview``'s rung-3 branch so a file no LSP or structural
+        rung claims still yields a line/size/encoding descriptor instead of the old
+        "Cannot extract symbols" dead-end (spec-v2 §5.1 rung3). Never raises.
+
+        :param relative_path: project-relative path of the file to summarize.
+        :return: the descriptor line (e.g. ``"42 lines, 1310 bytes, utf-8, LF, trailing newline"``).
+        """
+        return self._plaintext_floor.describe(self._plaintext_view(relative_path))
+
+    def _format_plaintext_cursor_view(self, state: PlaintextCursorState) -> str:
+        """Render a plaintext cursor's position: why + anchor + descriptor + body.
+
+        Mirrors :meth:`_format_structural_cursor_view` for the floor rung. The anchor
+        carries the file's descriptor (line/size/encoding); the byte-exact numbered
+        body follows when ``include_body`` is set, its line numbers routed through the
+        1-based display converter (spec-v2 §5.7) so they agree with cat -n. The file
+        is re-read on each projection so concurrent on-disk edits are reflected.
+        """
+        view = self._plaintext_view(state.relative_path)
+        lines: list[str] = []
+
+        # why: agent's stated semantic goal, rendered above the anchor
+        if state.last_reasoning:
+            lines.append(f"why: {state.last_reasoning}")
+            lines.append("")
+
+        # anchor: the file handle carrying its plaintext descriptor
+        kind = "binary" if view.is_binary else "file"
+        lines.append(f"@ {state.relative_path} :{kind}@{state.relative_path}:  {self._plaintext_floor.describe(view)}")
+
+        # trail: prior relative paths + current marked '<- here'; opt-in
+        if state.include_trail and state.trail:
+            lines.append("")
+            lines.append("trail")
+            for prior_path in state.trail[-_TRAIL_TAIL_LENGTH:]:
+                lines.append(f"   {prior_path}:")
+            lines.append(f"   {state.relative_path}:    <- here")
+
+        # body block (opt-in, default on): the file's byte-exact numbered body,
+        # numbered from file line 0 through the 1-based display converter
+        if state.include_body and view.text is not None:
+            lines.append("")
+            lines.append("--- body ---")
+            lines.extend(self._number_body_lines(view.text, 0))
             lines.append("--- end body ---")
 
         return "\n".join(lines)
@@ -1977,6 +2106,10 @@ class CursorManager:
         :return: the updated cursor state (same kind as the stored one)
         """
         state = self.get_cursor(cursor_id)
+        if isinstance(state, PlaintextCursorState):
+            # plaintext cursors re-read the file on every projection, so there is
+            # nothing to re-anchor
+            return state
         if isinstance(state, StructuralCursorState):
             # structural re-anchor: invalidate the per-file cache so walk_nodes
             # re-indexes against the freshly-written file, then look the path up.
@@ -2004,6 +2137,14 @@ class CursorManager:
     def format_trail(self, cursor_id: str) -> str:
         """Format the cursor's visited trail as text."""
         state = self.get_cursor(cursor_id)
+        if isinstance(state, PlaintextCursorState):
+            if not state.trail:
+                return f"Cursor {cursor_id}: no trail (at starting position)"
+            lines = [f"Cursor {cursor_id} trail ({len(state.trail)} steps):"]
+            for i, prior_path in enumerate(state.trail):
+                lines.append(f"  {i + 1}. {prior_path}")
+            lines.append(f"  -> {state.relative_path} (current)")
+            return "\n".join(lines)
         if isinstance(state, StructuralCursorState):
             if not state.trail:
                 return f"Cursor {cursor_id}: no trail (at starting position)"

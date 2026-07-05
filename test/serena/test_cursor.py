@@ -1168,14 +1168,18 @@ class TestCursorOverviewFallthrough:
         from serena.cursor import ReadRung
         from serena.tools.cursor_tools import CursorOverviewTool
 
-        tool, project, _ = self._make_tool(
+        tool, project, manager = self._make_tool(
             tmp_path,
             "LICENSE",
             "All rights reserved.\n",
             ReadRung.PLAINTEXT,
         )
+        # rung-3 now renders the plaintext floor's line/size/encoding descriptor
+        # (spec-v2 §5.1 rung3) instead of the old "use cursor_grep" signpost
+        manager.plaintext_overview.return_value = "1 line, 21 bytes, utf-8, LF, trailing newline"
         with patch.object(CursorOverviewTool, "project", new_callable=PropertyMock, return_value=project):
             out = tool.apply(relative_path="LICENSE", because="x")
-        # never raises; points at a working read path
-        assert "cursor_grep" in out
+        # never raises; renders the descriptor
+        assert "utf-8" in out
+        assert "1 line" in out
         assert "Cannot extract symbols" not in out

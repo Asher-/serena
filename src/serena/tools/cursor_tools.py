@@ -13,7 +13,7 @@ import difflib
 from collections import defaultdict
 from collections.abc import Sequence
 
-from serena.cursor import CursorManager, EdgeType, ReadRung, StructuralCursorState
+from serena.cursor import CursorManager, EdgeType, PlaintextCursorState, ReadRung, StructuralCursorState
 from serena.symbol import LanguageServerSymbol
 from serena.tools import SUCCESS_RESULT
 from serena.tools.tools_base import Tool, ToolMarkerSymbolicEdit, ToolMarkerSymbolicRead
@@ -266,7 +266,7 @@ class CursorConfigureTool(Tool, ToolMarkerSymbolicRead):
         # structural cursors carry no LSP edges; silently ignore edge_types so the
         # tool stays uniform across cursor kinds. The projection toggles still
         # apply -- structural views honour the same include_* flags.
-        if isinstance(state, StructuralCursorState):
+        if isinstance(state, (StructuralCursorState, PlaintextCursorState)):
             state.include_body = include_body
             state.include_chain = include_chain
             state.include_trail = include_trail
@@ -678,6 +678,11 @@ class CursorReplaceBodyTool(Tool, ToolMarkerSymbolicEdit):
             diff_summary = f"Diff: -{removed} / +{added} lines"
             return self._reanchor_and_format(manager, cursor_id, diff_summary)
 
+        if isinstance(state, PlaintextCursorState):
+            raise TypeError(
+                f"Cursor '{cursor_id}' is a plaintext (whole-file) cursor at {state.relative_path}; "
+                f"plaintext files are edited by line via cursor_replace_range, not symbol/member edits.",
+            )
         name_path = state.current_symbol.get_name_path()
         relative_path = state.current_location.relative_path
         if relative_path is None:
@@ -804,6 +809,11 @@ class CursorInsertBeforeTool(Tool, ToolMarkerSymbolicEdit):
             manager.reanchor_cursor(cursor_id)
             return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
 
+        if isinstance(state, PlaintextCursorState):
+            raise TypeError(
+                f"Cursor '{cursor_id}' is a plaintext (whole-file) cursor at {state.relative_path}; "
+                f"plaintext files are edited by line via cursor_replace_range, not symbol/member edits.",
+            )
         name_path = state.current_symbol.get_name_path()
         relative_path = state.current_location.relative_path
         if relative_path is None:
@@ -850,6 +860,11 @@ class CursorInsertAfterTool(Tool, ToolMarkerSymbolicEdit):
             manager.reanchor_cursor(cursor_id)
             return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
 
+        if isinstance(state, PlaintextCursorState):
+            raise TypeError(
+                f"Cursor '{cursor_id}' is a plaintext (whole-file) cursor at {state.relative_path}; "
+                f"plaintext files are edited by line via cursor_replace_range, not symbol/member edits.",
+            )
         name_path = state.current_symbol.get_name_path()
         relative_path = state.current_location.relative_path
         if relative_path is None:
@@ -1420,15 +1435,11 @@ class CursorOverviewTool(Tool, ToolMarkerSymbolicRead):
                     lines.append(f"  {name_path} @{relative_path}:")
             return self._limit_length("\n".join(lines), max_answer_chars)
 
-        # Rung 3 -- plaintext floor: no analyzer or structural backend claims
-        # this file. NEVER raise; point at the read path that works today. A
-        # line/size/encoding summary lands with the plaintext backend (T4).
-        return (
-            f"why: {because}\n\n"
-            f"No symbol structure in {relative_path} "
-            f"(no language server or structural backend for this file type). "
-            f"Use cursor_grep to read its contents."
-        )
+        # Rung 3 -- plaintext floor: no analyzer or structural backend claims this
+        # file. NEVER raise; render the line/size/encoding descriptor so the file is
+        # readable through the cursor surface (spec-v2 §5.1 rung3). cursor_start on
+        # the file lands a plaintext cursor whose body is its byte-exact content.
+        return f"why: {because}\n\n{relative_path}: {manager.plaintext_overview(relative_path)}"
 
 
 

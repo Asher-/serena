@@ -27,6 +27,7 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from solidlsp.structural.backends.plaintext import PlaintextFloor
     from solidlsp.structural.base import StructuralLanguage
 
 
@@ -284,7 +285,25 @@ def default_structural_backend_registry() -> StructuralBackendRegistry:
     return registry
 
 
+def default_plaintext_floor() -> PlaintextFloor:
+    """Construct the universal plaintext floor -- the read ladder's bottom rung.
+
+    The floor (spec-v2 §5.1 rung3) is the terminal fallback consulted for any file
+    no LSP or structural rung claims. It is deliberately NOT a
+    :class:`StructuralLanguage` (a file's bytes are not an AST), so it lives outside
+    the extension-keyed backend registry; this factory is co-located here as the one
+    place the cursor layer obtains it, mirroring
+    :func:`default_structural_backend_registry`.
+
+    :return: a fresh :class:`~solidlsp.structural.backends.plaintext.PlaintextFloor`.
+    """
+    from solidlsp.structural.backends.plaintext import PlaintextFloor
+
+    return PlaintextFloor()
+
+
 __all__ = [
     "StructuralBackendRegistry",
+    "default_plaintext_floor",
     "default_structural_backend_registry",
 ]
