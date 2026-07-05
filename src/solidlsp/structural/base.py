@@ -124,6 +124,20 @@ class StructuralLanguage(ABC):
             f"{type(self).__name__} cannot render {type(node).__name__} as source",
         )
 
+    def node_line_range(self, node: Any) -> tuple[int, int] | None:
+        """Return the 0-based inclusive ``(start_line, end_line)`` span of a walked ``node``.
+
+        Optional structural-surface hook. A backend that can locate a walked node
+        within its source returns the node's line span (0-based, the internal
+        convention; the cursor converts to the 1-based ``cat -n`` range at the
+        display boundary per spec-v2 §5.7). Backends whose nodes carry no line
+        information return ``None`` and the cursor omits the range.
+
+        The default returns ``None`` so the thirteen AST-editor backends keep a
+        line-less structural anchor; the tree-sitter fallback rung overrides it.
+        """
+        return None
+
     # ---- symbol-tree introspection ----------------------------------------
 
     @abstractmethod

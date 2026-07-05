@@ -927,7 +927,7 @@ class CursorManager:
             :data:`EdgeType.CONTAINS`. Empty when the cursor is a leaf or
             the file is no longer backed by a registered backend.
         """
-        backend = self._structural_registry.for_relative_path(state.relative_path)
+        backend = self._structural_registry.structural_backend_for(state.relative_path)
         if backend is None:
             return []
 
@@ -1307,12 +1307,18 @@ class CursorManager:
             lines.append(f"why: {state.last_reasoning}")
             lines.append("")
 
-        # anchor: structural anchor lacks a single line, so no line range
+        # anchor: a structural node carries a line range only when its backend
+        # exposes one (the tree-sitter rung does; the thirteen AST-editor backends
+        # return None and the anchor stays line-less). When present it renders
+        # 1-based (cat -n) via the T3 converter, so the ts rung never leaks a
+        # 0-based line (spec-v2 §5.7/§5.8).
         kind_str = state.kind or ""
+        line_range = self._structural_node_line_range(state)
+        range_suffix = f"{format_line_range(*line_range)}:" if line_range is not None else ""
         if kind_str:
-            lines.append(f"@ {state.name_path} :{kind_str}@{state.relative_path}:")
+            lines.append(f"@ {state.name_path} :{kind_str}@{state.relative_path}:{range_suffix}")
         else:
-            lines.append(f"@ {state.name_path} @{state.relative_path}:")
+            lines.append(f"@ {state.name_path} @{state.relative_path}:{range_suffix}")
 
         # trail: prior name_paths + current marked '<- here'; opt-in
         if state.include_trail and state.trail:
@@ -1432,7 +1438,7 @@ class CursorManager:
         its kind decorates the chain entry. The final frame is the file
         path itself, mirroring :meth:`_render_chain`.
         """
-        backend = self._structural_registry.for_relative_path(state.relative_path)
+        backend = self._structural_registry.structural_backend_for(state.relative_path)
         cache_entry = self._structural_cache_entry(backend, state.relative_path) if backend is not None else None
         ancestor_paths: list[str] = []
         path = _parent_name_path(state.name_path)
@@ -1460,7 +1466,7 @@ class CursorManager:
         parent_path = _parent_name_path(state.name_path)
         if parent_path is None:
             return None
-        backend = self._structural_registry.for_relative_path(state.relative_path)
+        backend = self._structural_registry.structural_backend_for(state.relative_path)
         if backend is None:
             return None
         cache_entry = self._structural_cache_entry(backend, state.relative_path)
@@ -1494,7 +1500,7 @@ class CursorManager:
         ``cst.Dict``/``cst.List`` has no standalone module serializer
         attached). Callers should treat ``None`` as "no body available".
         """
-        backend = self._structural_registry.for_relative_path(state.relative_path)
+        backend = self._structural_registry.structural_backend_for(state.relative_path)
         if backend is None:
             return None
         # _structural_cache_entry re-parses on mtime change, so the view reflects on-disk state
@@ -1511,6 +1517,34 @@ class CursorManager:
             # rendering is best-effort: when a backend cannot turn a sub-node
             # into standalone text, omit the body rather than fail the view
             log.debug(f"Could not serialize structural node for display: {e}")
+            return None
+
+    def _structural_node_line_range(self, state: StructuralCursorState) -> tuple[int, int] | None:
+        """Return the addressed node's 0-based inclusive ``(start, end)`` line span, or ``None``.
+
+        Only a backend that exposes
+        :meth:`~solidlsp.structural.base.StructuralLanguage.node_line_range` (the
+        tree-sitter fallback rung) carries a line span; the thirteen AST-editor
+        backends return ``None`` and the structural anchor stays line-less. The
+        span is 0-based internally and converted to a 1-based ``cat -n`` range at
+        the display boundary (spec-v2 §5.7/§5.8). Mirrors
+        :meth:`_format_structural_node_source`'s node lookup and is best-effort:
+        any backend hiccup omits the range rather than failing the view.
+        """
+        backend = self._structural_registry.structural_backend_for(state.relative_path)
+        if backend is None:
+            return None
+        cache_entry = self._structural_cache_entry(backend, state.relative_path)
+        if cache_entry is None:
+            return None
+        match = cache_entry.nodes_by_path.get(state.name_path)
+        if match is None:
+            return None
+        _kind, node = match
+        try:
+            return backend.node_line_range(node)
+        except Exception as e:
+            log.debug(f"Could not compute structural node line range: {e}")
             return None
 
     @staticmethod
@@ -1572,7 +1606,7 @@ class CursorManager:
         retriever = retriever if retriever is not None else self._retriever
         if retriever.can_analyze_file(relative_path):
             return ReadRung.LSP
-        if self._structural_registry.for_relative_path(relative_path) is not None:
+        if self._structural_registry.structural_backend_for(relative_path) is not None:
             return ReadRung.STRUCTURAL
         return ReadRung.PLAINTEXT
 
@@ -1590,7 +1624,7 @@ class CursorManager:
         :return: top-level ``(name_path, kind)`` pairs; empty when the file has
             no structural rung or cannot be parsed.
         """
-        backend = self._structural_registry.for_relative_path(relative_path)
+        backend = self._structural_registry.structural_backend_for(relative_path)
         if backend is None:
             return []
         try:
@@ -1867,7 +1901,7 @@ class CursorManager:
         :return: a :class:`StructuralResolution` on match, or ``None``.
         """
         # route by the file's extension; no registered backend -> caller falls back
-        backend = self._structural_registry.for_relative_path(relative_path)
+        backend = self._structural_registry.structural_backend_for(relative_path)
         if backend is None:
             return None
 
@@ -2036,7 +2070,7 @@ class CursorManager:
         self._validate_container_edit_positioning(state, operation)
 
         # route to a backend by file extension; no backend -> the cursor is stale
-        backend = self._structural_registry.for_relative_path(state.relative_path)
+        backend = self._structural_registry.structural_backend_for(state.relative_path)
         if backend is None:
             raise ValueError(
                 f"No structural backend registered for {state.relative_path!r}; "

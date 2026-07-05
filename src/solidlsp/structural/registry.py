@@ -50,6 +50,9 @@ class StructuralBackendRegistry:
         self._factories: dict[str, Callable[[], StructuralLanguage]] = {}
         self._instances: dict[str, StructuralLanguage] = {}
         self._language_by_extension: dict[str, str] = {}
+        # optional unknown-extension fallback (the tree-sitter rung, spec-v2 §5.8);
+        # consulted by structural_backend_for only after the explicit map misses
+        self._fallback_resolver: Callable[[str], "StructuralLanguage | None"] | None = None
 
     def register(
         self,
@@ -119,6 +122,47 @@ class StructuralBackendRegistry:
         if language_key is None:
             return None
         return self.for_language(language_key)
+
+    def register_fallback(self, resolver: Callable[[str], "StructuralLanguage | None"]) -> None:
+        """Register the unknown-extension fallback resolver (the tree-sitter rung).
+
+        :param resolver: a callable taking a relative path and returning a
+            structural backend for it, or ``None``. Consulted by
+            :meth:`structural_backend_for` only when the explicit extension map
+            has no entry, so the explicit backends always win.
+        """
+        self._fallback_resolver = resolver
+
+    def default_backend_for_unknown_extension(self, relative_path: str) -> "StructuralLanguage | None":
+        """Return the fallback backend for an extension no explicit backend owns.
+
+        Returns ``None`` when an explicit backend already claims the extension (so
+        the explicit backend is never shadowed), when no fallback is registered,
+        or when the fallback itself declines the path.
+
+        :param relative_path: POSIX-style path relative to a project root.
+        :return: the fallback backend, or ``None``.
+        """
+        # explicit backends win: never let the fallback shadow a registered extension
+        if self.for_relative_path(relative_path) is not None:
+            return None
+        if self._fallback_resolver is None:
+            return None
+        return self._fallback_resolver(relative_path)
+
+    def structural_backend_for(self, relative_path: str) -> "StructuralLanguage | None":
+        """Return the structural backend serving ``relative_path``: explicit first, then fallback.
+
+        The single resolver the cursor layer consults, so the explicit
+        extension-keyed backends and the tree-sitter fallback rung compose behind
+        one call. ``None`` means neither claims the file (the caller drops to the
+        plaintext floor).
+
+        :param relative_path: POSIX-style path relative to a project root.
+        :return: the explicit backend for the extension, else the fallback
+            backend, else ``None``.
+        """
+        return self.for_relative_path(relative_path) or self.default_backend_for_unknown_extension(relative_path)
 
     def registered_languages(self) -> frozenset[str]:
         """Return the set of normalized language keys currently registered.
@@ -222,6 +266,14 @@ def _csharp_backend_factory() -> "StructuralLanguage":
     return CSharpStructuralLanguage()
 
 
+def _tree_sitter_fallback(relative_path: str) -> "StructuralLanguage | None":
+    # lazy import: the tree-sitter language pack loads only when an unknown
+    # extension actually reaches the fallback, keeping registry construction cheap.
+    from solidlsp.structural.backends.treesitter import tree_sitter_fallback_resolver
+
+    return tree_sitter_fallback_resolver(relative_path)
+
+
 def default_structural_backend_registry() -> StructuralBackendRegistry:
     """Build the default registry pre-populated with Serena's thirteen structural backends.
 
@@ -281,6 +333,11 @@ def default_structural_backend_registry() -> StructuralBackendRegistry:
     # C#: Roslyn via subprocess bridge; lazy because it spawns a process on
     # first use and `dotnet build` runs on demand on the first request.
     registry.register("csharp", [".cs"], _csharp_backend_factory)
+
+    # tree-sitter fallback rung (spec-v2 §5.8): the unknown-extension resolver,
+    # below the explicit thirteen, so any unmapped-but-parseable file still reads
+    # structurally instead of dropping straight to the plaintext floor.
+    registry.register_fallback(_tree_sitter_fallback)
 
     return registry
 

@@ -48,6 +48,8 @@ dependencies = [
   "markdown-it-py==3.0.0", # Markdown structural backend: source-mapped CommonMark tokenizer
   "mdit-py-plugins==0.5.0", # Markdown structural backend: tables, front-matter, footnote extensions
   "tomlkit==0.14.0", # TOML structural backend: round-trip capable with comment preservation
+  "tree-sitter>=0.23", # tree-sitter universal structural fallback rung (spec-v2 §5.8): read + byte-span write
+  "tree-sitter-language-pack", # ships the tree-sitter grammars the fallback rung parses (bash/css/sql/dockerfile/xml/...)
 
   # Transitive deps pinned for security (dependabot alerts).
   # Exact pins because uvx installs from git, ignoring the lock file.

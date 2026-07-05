@@ -358,6 +358,10 @@ class TestReadRungLadder:
         assert manager.resolve_read_rung("compose.yaml", retriever=retriever) is ReadRung.STRUCTURAL
         assert manager.resolve_read_rung("pkg.json", retriever=retriever) is ReadRung.STRUCTURAL
         assert manager.resolve_read_rung("Cargo.toml", retriever=retriever) is ReadRung.STRUCTURAL
+        # tree-sitter fallback rung (T6, spec-v2 §5.8): a file no explicit backend
+        # owns but a shipped grammar covers now reads structurally, above the floor
+        assert manager.resolve_read_rung("Dockerfile", retriever=retriever) is ReadRung.STRUCTURAL
+        assert manager.resolve_read_rung("styles.css", retriever=retriever) is ReadRung.STRUCTURAL
 
     def test_plaintext_floor_when_no_lsp_and_no_backend(self, tmp_path: Path) -> None:
         manager = self._manager(tmp_path)
@@ -366,7 +370,8 @@ class TestReadRungLadder:
         assert manager.resolve_read_rung("LICENSE", retriever=retriever) is ReadRung.PLAINTEXT
         assert manager.resolve_read_rung("notes.txt", retriever=retriever) is ReadRung.PLAINTEXT
         assert manager.resolve_read_rung(".gitignore", retriever=retriever) is ReadRung.PLAINTEXT
-        assert manager.resolve_read_rung("Dockerfile", retriever=retriever) is ReadRung.PLAINTEXT
+        # Dockerfile moved to the structural rung in T6 (tree-sitter fallback); the
+        # floor now serves only files no grammar covers (LICENSE / .txt / dotfiles)
 
     def test_never_raises_and_always_returns_a_rung(self, tmp_path: Path) -> None:
         manager = self._manager(tmp_path)
