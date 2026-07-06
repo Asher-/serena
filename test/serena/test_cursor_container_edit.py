@@ -406,7 +406,7 @@ class TestCursorEditToolsStructuralBranch:
         harness = _ToolHarness(manager, project)
         tool = _bind_tool(CursorReplaceBodyTool, harness)
 
-        result = tool.apply(cursor_id="c1", body="42")
+        result = tool.apply(cursor_id="c1", body="42", expect_version="*")
 
         assert "SUCCESS" in result or "Diff:" in result
         content = file_path.read_text(encoding="utf-8")
@@ -426,7 +426,7 @@ class TestCursorEditToolsStructuralBranch:
         harness = _ToolHarness(manager, project)
         tool = _bind_tool(CursorInsertAfterTool, harness)
 
-        tool.apply(cursor_id="c1", body='"new_field": 2')
+        tool.apply(cursor_id="c1", body='"new_field": 2', expect_version="*")
 
         content = file_path.read_text(encoding="utf-8")
         assert '"existing": 1' in content
@@ -445,7 +445,7 @@ class TestCursorEditToolsStructuralBranch:
         harness = _ToolHarness(manager, project)
         tool = _bind_tool(CursorInsertBeforeTool, harness)
 
-        tool.apply(cursor_id="c1", body='"new_field": 2')
+        tool.apply(cursor_id="c1", body='"new_field": 2', expect_version="*")
 
         content = file_path.read_text(encoding="utf-8")
         assert '"existing": 1' in content
@@ -897,7 +897,7 @@ class TestNewToolSurface:
         )
         tool = _bind_tool(CursorInsertAtStartTool, _ToolHarness(manager, project))
 
-        tool.apply(cursor_id="c1", body='"zero": 0')
+        tool.apply(cursor_id="c1", body='"zero": 0', expect_version="*")
 
         content = file_path.read_text(encoding="utf-8")
         lines = content.splitlines()
@@ -917,7 +917,7 @@ class TestNewToolSurface:
         )
         tool = _bind_tool(CursorInsertAtEndTool, _ToolHarness(manager, project))
 
-        tool.apply(cursor_id="c1", body='"omega": 99')
+        tool.apply(cursor_id="c1", body='"omega": 99', expect_version="*")
 
         content = file_path.read_text(encoding="utf-8")
         lines = content.splitlines()
@@ -937,7 +937,7 @@ class TestNewToolSurface:
         )
         tool = _bind_tool(CursorRemoveMemberTool, _ToolHarness(manager, project))
 
-        tool.apply(cursor_id="c1")
+        tool.apply(cursor_id="c1", expect_version="*")
 
         content = file_path.read_text(encoding="utf-8")
         assert "alpha" not in content

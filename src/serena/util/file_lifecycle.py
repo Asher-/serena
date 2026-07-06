@@ -457,6 +457,14 @@ class FilesystemLifecycle:
         # write via a temp file in the target directory, then os.replace: the swap is atomic and
         # crash-safe (a failure before replace leaves the original intact and never litters a temp).
         parent = os.path.dirname(abs_path)
+        # capture the target's prior mode on an OVERWRITE: mkstemp creates the temp at 0o600, so
+        # replacing an existing file would silently strip its permission bits (notably +x)
+        existing = self._lstat(abs_path)
+        prior_mode = (
+            stat_module.S_IMODE(existing.st_mode)
+            if existing is not None and stat_module.S_ISREG(existing.st_mode)
+            else None
+        )
         try:
             if parent:
                 os.makedirs(parent, exist_ok=True)
@@ -468,6 +476,10 @@ class FilesystemLifecycle:
                 handle.write(data)
                 handle.flush()
                 os.fsync(handle.fileno())
+            # restore the overwritten file's mode (mkstemp reset it to 0o600); a brand-new file
+            # keeps the default mode
+            if prior_mode is not None:
+                os.chmod(tmp_path, prior_mode)
             os.replace(tmp_path, abs_path)
             return None
         except BaseException as error:

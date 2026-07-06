@@ -16,6 +16,7 @@ from typing import Any
 from serena.project import Project
 from serena.symbol import LanguageServerSymbol, LanguageServerSymbolLocation, LanguageServerSymbolRetriever
 from serena.util.line_numbers import format_line_range, to_display_line
+from serena.util.staleness import read_file_version
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_utils import PathUtils
 from solidlsp.lsp_protocol_handler.lsp_types import (
@@ -1043,6 +1044,14 @@ class CursorManager:
         :return: the multi-line projection.
         """
         state = self.get_cursor(cursor_id)
+
+        # cursor-fate (spec-v2 §5.5): the plaintext/structural views re-read the file's bytes on
+        # every projection, so if the file was deleted or renamed away render a typed gone state
+        # rather than showing stale bytes. LSP cursors render from in-memory symbol data (no
+        # re-read) and their write path is compare-and-swap-protected, so they keep prior behavior.
+        if isinstance(state, StructuralCursorState | PlaintextCursorState) and self.file_version(state.relative_path) is None:
+            return f"cursor stale: {state.relative_path} no longer exists (deleted or renamed away); re-open a cursor on its current location."
+
         if isinstance(state, PlaintextCursorState):
             return self._format_plaintext_cursor_view(state)
         if isinstance(state, StructuralCursorState):
@@ -1061,6 +1070,11 @@ class CursorManager:
 
         # anchor: the cursor's own handle with body extent (always rendered)
         lines.append(self._render_anchor(symbol, location))
+
+        # version: the file's content token (spec-v2 §5.5), so a subsequent write can CAS on it
+        version = self.file_version(location.relative_path) if location.relative_path else None
+        if version is not None:
+            lines.append(f"version: {version}")
 
         # trail: prior hops + current marked '<- here'; opt-in via include_trail
         if state.include_trail:
@@ -1121,6 +1135,15 @@ class CursorManager:
                 lines.append("--- end body ---")
 
         return "\n".join(lines)
+
+    def file_version(self, relative_path: str) -> str | None:
+        """The file's content version (spec-v2 §5.5), or ``None`` when it cannot be read.
+
+        Reuses the same raw-bytes fingerprint ``stat`` reports and the write compare-and-swap
+        recomputes, so the version a read projection shows is the token a subsequent write compares
+        against (the staleness-base invariant).
+        """
+        return read_file_version(self._project.project_root, relative_path)
 
     def _render_anchor(self, symbol: LanguageServerSymbol, location: LanguageServerSymbolLocation) -> str:
         """Render the cursor anchor as ``@ name :Kind@file:start-end:``.
@@ -1320,6 +1343,11 @@ class CursorManager:
         else:
             lines.append(f"@ {state.name_path} @{state.relative_path}:{range_suffix}")
 
+        # version: the file's content token (spec-v2 §5.5), so a subsequent write can CAS on it
+        version = self.file_version(state.relative_path)
+        if version is not None:
+            lines.append(f"version: {version}")
+
         # trail: prior name_paths + current marked '<- here'; opt-in
         if state.include_trail and state.trail:
             lines.append("")
@@ -1420,6 +1448,11 @@ class CursorManager:
         # anchor: the file handle carrying its plaintext descriptor
         kind = "binary" if view.is_binary else "file"
         lines.append(f"@ {state.relative_path} :{kind}@{state.relative_path}:  {self._plaintext_floor.describe(view)}")
+
+        # version: the file's content token (spec-v2 §5.5), so a subsequent write can CAS on it
+        version = self.file_version(state.relative_path)
+        if version is not None:
+            lines.append(f"version: {version}")
 
         # body block (opt-in, default on): the file's byte-exact numbered body,
         # numbered from file line 0 through the 1-based display converter

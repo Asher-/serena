@@ -335,7 +335,7 @@ class TestCursorReplaceRangeTool:
         """
         tool = python_serena_agent.get_tool(CursorReplaceRangeTool)
 
-        result = tool.apply(relative_path=throwaway_layout_file, start_line=1, end_line=3, body="")
+        result = tool.apply(relative_path=throwaway_layout_file, start_line=1, end_line=3, body="", expect_version="*")
 
         assert "OK" in result
         assert "Diff:" in result
@@ -356,7 +356,7 @@ class TestCursorReplaceRangeTool:
 
         # first, remove the header (lines 0..2) via the tool, then reorder the
         # imports; this also exercises two sequential edits on the same file
-        tool.apply(relative_path=throwaway_layout_file, start_line=1, end_line=3, body="")
+        tool.apply(relative_path=throwaway_layout_file, start_line=1, end_line=3, body="", expect_version="*")
         # after the first edit, the file starts with a blank line then imports.
         # replace 1-based lines 2..6 (import z, blank, import a, import m, blank) with
         # the alphabetised block.
@@ -365,6 +365,7 @@ class TestCursorReplaceRangeTool:
             start_line=2,
             end_line=6,
             body="import a\nimport m\nimport z\n\n",
+            expect_version="*",
         )
 
         assert "OK" in result
@@ -387,6 +388,7 @@ class TestCursorReplaceRangeTool:
             start_line=10,
             end_line=10,
             body="# pg_hba auth: 127.0.0.1/32 trust + LAN trust rules\n",
+            expect_version="*",
         )
 
         assert "OK" in result
@@ -403,7 +405,7 @@ class TestCursorReplaceRangeTool:
         tool = python_serena_agent.get_tool(CursorReplaceRangeTool)
 
         with pytest.raises(ValueError):
-            tool.apply(relative_path="test_repo/does_not_matter.py", start_line=5, end_line=2, body="")
+            tool.apply(relative_path="test_repo/does_not_matter.py", start_line=5, end_line=2, body="", expect_version="*")
 
 
 @pytest.fixture
@@ -486,6 +488,7 @@ class TestCursorReplaceRangeVerifiedTool:
                 end_line=2,
                 expected_content="",
                 body="",
+                expect_version="*",
             )
 
     def test_matching_expected_content_applies_edit(self, python_serena_agent: "SerenaAgent", throwaway_layout_file: str) -> None:
@@ -500,6 +503,7 @@ class TestCursorReplaceRangeVerifiedTool:
             end_line=3,
             expected_content=expected,
             body="",
+            expect_version="*",
         )
 
         assert "OK" in result
@@ -530,6 +534,7 @@ class TestCursorReplaceRangeVerifiedTool:
                 end_line=3,
                 expected_content=wrong_expected,
                 body="# replacement\n",
+                expect_version="*",
             )
 
         # the error message must contain "drift detected" and a unified diff
@@ -560,6 +565,7 @@ class TestCursorReplaceRangeVerifiedTool:
             end_line=3,
             expected_content=expected_without_trailing_newline,
             body="",
+            expect_version="*",
         )
 
         assert "OK" in result
@@ -577,6 +583,7 @@ class TestCursorReplaceRangeVerifiedTool:
                 end_line=9999,
                 expected_content="",
                 body="",
+                expect_version="*",
             )
 
 
@@ -635,6 +642,7 @@ class TestCursorReplaceBetweenTool:
             before_symbol="SymAnchorBefore",
             after_symbol="SymAnchorAfter",
             body="\n# fresh interstitial content\n\n",
+            expect_version="*",
         )
 
         assert "OK" in result
@@ -660,6 +668,7 @@ class TestCursorReplaceBetweenTool:
                 before_symbol="DoesNotExist",
                 after_symbol="SymAnchorAfter",
                 body="\n",
+                expect_version="*",
             )
         msg = str(excinfo.value)
         assert "before_symbol" in msg
@@ -674,6 +683,7 @@ class TestCursorReplaceBetweenTool:
                 before_symbol="SymAnchorBefore",
                 after_symbol="AlsoMissing",
                 body="\n",
+                expect_version="*",
             )
         msg = str(excinfo.value)
         assert "after_symbol" in msg
@@ -692,6 +702,7 @@ class TestCursorReplaceBetweenTool:
                 before_symbol="AdjA",
                 after_symbol="AdjB",
                 body="\n",
+                expect_version="*",
             )
         msg = str(excinfo.value)
         assert "no interstitial lines" in msg
@@ -713,6 +724,7 @@ class TestCursorReplaceBetweenTool:
                 after_symbol="SymAnchorAfter",
                 body="\n# x\n",
                 expected_content="completely different content\n",
+                expect_version="*",
             )
         assert abs_path.read_text() == pre
 
@@ -725,6 +737,7 @@ class TestCursorReplaceBetweenTool:
             after_symbol="SymAnchorAfter",
             body="\n# verified replacement\n\n",
             expected_content=expected,
+            expect_version="*",
         )
         assert "OK" in result
         assert "verified replacement" in abs_path.read_text()
@@ -754,6 +767,7 @@ class TestCursorReplaceBetweenTool:
             before_symbol="SymAnchorBefore",
             after_symbol="SymAnchorAfter",
             body="\n# post-shift replacement\n\n",
+            expect_version="*",
         )
         assert "OK" in result
 

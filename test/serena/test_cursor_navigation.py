@@ -820,6 +820,7 @@ class TestCursorEditTools:
         result = replace_tool.apply(
             cursor_id="edit-replace",
             body="def sandbox_fn():\n    return 42\n",
+            expect_version="*",
         )
         assert "OK" in result
         assert "sandbox_fn" in result
@@ -843,6 +844,7 @@ class TestCursorEditTools:
         result = insert_tool.apply(
             cursor_id="edit-before",
             body="# inserted-before-marker\n",
+            expect_version="*",
         )
         assert "OK" in result
 
@@ -867,6 +869,7 @@ class TestCursorEditTools:
         result = insert_tool.apply(
             cursor_id="edit-after",
             body="# inserted-after-marker\n",
+            expect_version="*",
         )
         assert "OK" in result
 
@@ -903,6 +906,7 @@ class TestCursorEditTools:
             result = insert_tool.apply(
                 cursor_id="var-after",
                 body="BAR = 42\n",
+                expect_version="*",
             )
             assert "OK" in result
 
@@ -956,6 +960,7 @@ class TestCursorEditTools:
             result = insert_tool.apply(
                 cursor_id="var-before",
                 body="PRECEDING = 0\n",
+                expect_version="*",
             )
             assert "OK" in result
 
@@ -1006,6 +1011,7 @@ class TestCursorEditTools:
             result = insert_tool.apply(
                 cursor_id="field-after",
                 body="    z: int = 0\n",
+                expect_version="*",
             )
             assert "OK" in result
 
@@ -1124,4 +1130,4 @@ class TestCursorEditTools:
         state.current_location = sandbox_location
 
         with pytest.raises(ValueError, match="no relative path"):
-            replace_tool.apply(cursor_id="no-loc", body="irrelevant")
+            replace_tool.apply(cursor_id="no-loc", body="irrelevant", expect_version="*")

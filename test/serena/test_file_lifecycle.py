@@ -306,6 +306,20 @@ class TestCreate:
         # and the temp file is cleaned up rather than left as litter next to the target
         assert {p.name for p in tmp_path.iterdir()} == {"f.txt"}
 
+    def test_overwrite_preserves_executable_mode(self, tmp_path: Path) -> None:
+        # mkstemp creates the temp at 0o600, so a naive temp+os.replace overwrite would strip the
+        # target's +x bits; _atomic_write captures the prior mode and restores it on an overwrite.
+        target = tmp_path / "run.sh"
+        target.write_text("#!/bin/sh\necho old\n")
+        os.chmod(target, 0o755)
+
+        result = _fs(tmp_path).create("run.sh", "#!/bin/sh\necho new\n", overwrite=True)
+
+        assert result.ok is True
+        assert target.read_text() == "#!/bin/sh\necho new\n"
+        # the executable bits survive the atomic overwrite (mode preserved, not reset to 0o600)
+        assert os.stat(target).st_mode & 0o111 == 0o111
+
 
 # --- delete: idempotent + CAS (spec-v2 §5.4/§5.5) ---
 

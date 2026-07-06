@@ -106,7 +106,7 @@ class TestPlaintextCursorNeverRaisesOnNonReadOps:
         agent.get_cursor_manager.return_value = manager
         tool.agent = agent
         with pytest.raises(TypeError, match="plaintext"):
-            tool.apply(cursor_id="c1", body="x")
+            tool.apply(cursor_id="c1", body="x", expect_version="*")
 
 
 class TestPlaintextCursorRejectsSymbolNavAndEdits:
@@ -160,7 +160,7 @@ class TestPlaintextCursorRejectsSymbolNavAndEdits:
         manager, cid = self._plaintext_manager_and_cid(tmp_path)
         tool = self._tool_over(CursorInsertBeforeTool, manager)
         with pytest.raises(TypeError, match="plaintext"):
-            tool.apply(cursor_id=cid, body="x")
+            tool.apply(cursor_id=cid, body="x", expect_version="*")
 
     def test_insert_after_on_plaintext_is_typed_reject(self, tmp_path: Path) -> None:
         from serena.tools.cursor_tools import CursorInsertAfterTool
@@ -168,7 +168,7 @@ class TestPlaintextCursorRejectsSymbolNavAndEdits:
         manager, cid = self._plaintext_manager_and_cid(tmp_path)
         tool = self._tool_over(CursorInsertAfterTool, manager)
         with pytest.raises(TypeError, match="plaintext"):
-            tool.apply(cursor_id=cid, body="x")
+            tool.apply(cursor_id=cid, body="x", expect_version="*")
 
 
 class TestPlaintextCursorNavigationAndConfigure:

@@ -18,6 +18,7 @@ from serena.symbol import LanguageServerSymbol
 from serena.tools import SUCCESS_RESULT
 from serena.tools.tools_base import Tool, ToolMarkerSymbolicEdit, ToolMarkerSymbolicRead
 from serena.util.line_numbers import to_display_line, to_internal_line
+from serena.util.staleness import UNCONDITIONAL, check_stale, read_file_version
 from solidlsp.ls_types import SymbolKind
 
 
@@ -40,6 +41,26 @@ def _parse_edge_types(edge_types: list[str]) -> frozenset[EdgeType]:
             valid_names = [e.value for e in EdgeType]
             raise ValueError(f"Unknown edge type '{name}'. Valid edge types: {valid_names}")
     return frozenset(parsed)
+
+
+def _refuse_if_stale(tool: Tool, relative_path: str, expect_version: str) -> str | None:
+    """Optimistic-concurrency compare-and-swap gate for the cursor write tools (spec-v2 §5.5).
+
+    :param tool: the edit tool, whose ``project.project_root`` roots the version check.
+    :param relative_path: the file about to be mutated.
+    :param expect_version: the file version the caller carried from a read projection or ``stat``;
+        the sentinel :data:`~serena.util.staleness.UNCONDITIONAL` (``"*"``) bypasses the check as
+        the explicit, opt-in unconditional overwrite.
+    :return: the rendered stale state to return to the caller when the write must be refused (the
+        file changed under the caller, or was deleted / renamed away), else ``None`` when the write
+        may proceed.
+    """
+    # short-circuit the unconditional escape BEFORE touching project_root so tool-harness tests
+    # that drive the tools without a real project stay green on an explicit "*"
+    if expect_version == UNCONDITIONAL:
+        return None
+    stale = check_stale(tool.project.project_root, relative_path, expect_version)
+    return stale.render() if stale is not None else None
 
 
 class CursorStartTool(Tool, ToolMarkerSymbolicRead):
@@ -651,7 +672,7 @@ class CursorReplaceBodyTool(Tool, ToolMarkerSymbolicEdit):
     The cursor remains positioned on the same symbol (its stored location is refreshed).
     """
 
-    def apply(self, cursor_id: str, body: str) -> str:
+    def apply(self, cursor_id: str, body: str, expect_version: str) -> str:
         """
         Replace the body of the symbol at the cursor's current position.
 
@@ -665,6 +686,7 @@ class CursorReplaceBodyTool(Tool, ToolMarkerSymbolicEdit):
 
         :param cursor_id: the cursor whose current symbol to replace.
         :param body: the new body text.
+        :param expect_version: the file's content version from a read/stat; "*" overwrites unconditionally.
         :return: confirmation and the updated cursor view.
         """
         manager = self.agent.get_cursor_manager()
@@ -673,6 +695,9 @@ class CursorReplaceBodyTool(Tool, ToolMarkerSymbolicEdit):
         # body is a bare value expression — the backend preserves the key half
         # of mapping-like containers.
         if isinstance(state, StructuralCursorState):
+            stale = _refuse_if_stale(self, state.relative_path, expect_version)
+            if stale is not None:
+                return stale
             before, after = manager.apply_container_edit(cursor_id, "replace", body)
             removed, added = self._count_diff_lines(before, after)
             diff_summary = f"Diff: -{removed} / +{added} lines"
@@ -687,6 +712,10 @@ class CursorReplaceBodyTool(Tool, ToolMarkerSymbolicEdit):
         relative_path = state.current_location.relative_path
         if relative_path is None:
             raise ValueError(f"Cursor {cursor_id} has no relative path; cannot perform edit.")
+
+        stale = _refuse_if_stale(self, relative_path, expect_version)
+        if stale is not None:
+            return stale
 
         # snapshot extent and file content before the edit so we can report a diff summary
         # and detect gross over-deletion (e.g. a ballooned symbol extent absorbing siblings)
@@ -779,7 +808,7 @@ class CursorInsertBeforeTool(Tool, ToolMarkerSymbolicEdit):
     The cursor stays on the target symbol; its stored location is refreshed.
     """
 
-    def apply(self, cursor_id: str, body: str) -> str:
+    def apply(self, cursor_id: str, body: str, expect_version: str) -> str:
         """
         Insert content before the symbol at the cursor's current position.
 
@@ -799,12 +828,16 @@ class CursorInsertBeforeTool(Tool, ToolMarkerSymbolicEdit):
         :param cursor_id: the cursor whose current symbol to insert before.
         :param body: the content to insert; it will be placed immediately before the line
             where the symbol is defined.
+        :param expect_version: the file's content version from a read/stat; "*" overwrites unconditionally.
         :return: confirmation and the updated cursor view.
         """
         manager = self.agent.get_cursor_manager()
         state = manager.get_cursor(cursor_id)
         # structural-cursor branch: container-member insertion before the anchor
         if isinstance(state, StructuralCursorState):
+            stale = _refuse_if_stale(self, state.relative_path, expect_version)
+            if stale is not None:
+                return stale
             manager.apply_container_edit(cursor_id, "insert_before", body)
             manager.reanchor_cursor(cursor_id)
             return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
@@ -818,6 +851,9 @@ class CursorInsertBeforeTool(Tool, ToolMarkerSymbolicEdit):
         relative_path = state.current_location.relative_path
         if relative_path is None:
             raise ValueError(f"Cursor {cursor_id} has no relative path; cannot perform edit.")
+        stale = _refuse_if_stale(self, relative_path, expect_version)
+        if stale is not None:
+            return stale
         code_editor = self.create_code_editor()
         code_editor.insert_before_symbol(name_path, relative_file_path=relative_path, body=body)
         manager.reanchor_cursor(cursor_id)
@@ -830,7 +866,7 @@ class CursorInsertAfterTool(Tool, ToolMarkerSymbolicEdit):
     The cursor stays on the target symbol; its stored location is refreshed.
     """
 
-    def apply(self, cursor_id: str, body: str) -> str:
+    def apply(self, cursor_id: str, body: str, expect_version: str) -> str:
         """
         Insert content after the symbol at the cursor's current position.
 
@@ -850,12 +886,16 @@ class CursorInsertAfterTool(Tool, ToolMarkerSymbolicEdit):
         :param cursor_id: the cursor whose current symbol to insert after.
         :param body: the content to insert; it will be placed on the line following the
             end of the symbol's definition.
+        :param expect_version: the file's content version from a read/stat; "*" overwrites unconditionally.
         :return: confirmation and the updated cursor view.
         """
         manager = self.agent.get_cursor_manager()
         state = manager.get_cursor(cursor_id)
         # structural-cursor branch: container-member insertion after the anchor
         if isinstance(state, StructuralCursorState):
+            stale = _refuse_if_stale(self, state.relative_path, expect_version)
+            if stale is not None:
+                return stale
             manager.apply_container_edit(cursor_id, "insert_after", body)
             manager.reanchor_cursor(cursor_id)
             return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
@@ -869,6 +909,9 @@ class CursorInsertAfterTool(Tool, ToolMarkerSymbolicEdit):
         relative_path = state.current_location.relative_path
         if relative_path is None:
             raise ValueError(f"Cursor {cursor_id} has no relative path; cannot perform edit.")
+        stale = _refuse_if_stale(self, relative_path, expect_version)
+        if stale is not None:
+            return stale
         code_editor = self.create_code_editor()
         code_editor.insert_after_symbol(name_path, relative_file_path=relative_path, body=body)
         manager.reanchor_cursor(cursor_id)
@@ -886,7 +929,7 @@ class CursorInsertAtStartTool(Tool, ToolMarkerSymbolicEdit):
     on the first child.
     """
 
-    def apply(self, cursor_id: str, body: str) -> str:
+    def apply(self, cursor_id: str, body: str, expect_version: str) -> str:
         """
         Insert a member at the start of the container at the cursor's position.
 
@@ -896,6 +939,7 @@ class CursorInsertAtStartTool(Tool, ToolMarkerSymbolicEdit):
 
         :param cursor_id: the structural cursor positioned on the container.
         :param body: the new member's source-text fragment.
+        :param expect_version: the file's content version from a read/stat; "*" overwrites unconditionally.
         :return: confirmation and the updated cursor view.
         :raises TypeError: if ``cursor_id`` is an LSP cursor.
         """
@@ -905,6 +949,9 @@ class CursorInsertAtStartTool(Tool, ToolMarkerSymbolicEdit):
             raise TypeError(
                 f"Cursor '{cursor_id}' is an LSP cursor; cursor_insert_at_start requires a structural cursor on a container.",
             )
+        stale = _refuse_if_stale(self, state.relative_path, expect_version)
+        if stale is not None:
+            return stale
         manager.apply_container_edit(cursor_id, "insert_start", body)
         manager.reanchor_cursor(cursor_id)
         return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
@@ -919,12 +966,13 @@ class CursorInsertAtEndTool(Tool, ToolMarkerSymbolicEdit):
     rejected.
     """
 
-    def apply(self, cursor_id: str, body: str) -> str:
+    def apply(self, cursor_id: str, body: str, expect_version: str) -> str:
         """
         Insert a member at the end of the container at the cursor's position.
 
         :param cursor_id: the structural cursor positioned on the container.
         :param body: the new member's source-text fragment.
+        :param expect_version: the file's content version from a read/stat; "*" overwrites unconditionally.
         :return: confirmation and the updated cursor view.
         :raises TypeError: if ``cursor_id`` is an LSP cursor.
         """
@@ -934,6 +982,9 @@ class CursorInsertAtEndTool(Tool, ToolMarkerSymbolicEdit):
             raise TypeError(
                 f"Cursor '{cursor_id}' is an LSP cursor; cursor_insert_at_end requires a structural cursor on a container.",
             )
+        stale = _refuse_if_stale(self, state.relative_path, expect_version)
+        if stale is not None:
+            return stale
         manager.apply_container_edit(cursor_id, "insert_end", body)
         manager.reanchor_cursor(cursor_id)
         return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
@@ -950,7 +1001,7 @@ class CursorRemoveMemberTool(Tool, ToolMarkerSymbolicEdit):
     reference safety for LSP symbols should keep using :class:`SafeDeleteSymbol`.
     """
 
-    def apply(self, cursor_id: str) -> str:
+    def apply(self, cursor_id: str, expect_version: str) -> str:
         """
         Remove the structural member the cursor is positioned on.
 
@@ -961,6 +1012,7 @@ class CursorRemoveMemberTool(Tool, ToolMarkerSymbolicEdit):
 
         :param cursor_id: the structural cursor identifying the member to
             remove.
+        :param expect_version: the file's content version from a read/stat; "*" overwrites unconditionally.
         :return: confirmation and the updated cursor view, or a confirmation
             and close notice when the removed member was top-level.
         :raises TypeError: if ``cursor_id`` is an LSP cursor (symbol
@@ -974,6 +1026,10 @@ class CursorRemoveMemberTool(Tool, ToolMarkerSymbolicEdit):
                 "cursor_remove_member requires a structural cursor "
                 "(use safe_delete_symbol for LSP symbols).",
             )
+
+        stale = _refuse_if_stale(self, state.relative_path, expect_version)
+        if stale is not None:
+            return stale
 
         # compute the parent container path BEFORE dispatching so we can
         # re-anchor after the removed path disappears from the index
@@ -1016,7 +1072,7 @@ class CursorReplaceRangeTool(Tool, ToolMarkerSymbolicEdit):
     ``ToolMarkerFileLineEdit`` marker.
     """
 
-    def apply(self, relative_path: str, start_line: int, end_line: int, body: str) -> str:
+    def apply(self, relative_path: str, start_line: int, end_line: int, body: str, expect_version: str) -> str:
         """
         Replace the file's lines ``[start_line, end_line]`` (inclusive) with ``body``.
 
@@ -1035,6 +1091,7 @@ class CursorReplaceRangeTool(Tool, ToolMarkerSymbolicEdit):
             (``\\r\\n`` for CRLF files, ``\\n`` otherwise) is appended automatically
             so the next file line is never fused onto the body's final line. Pass
             an empty string to delete the range with no replacement.
+        :param expect_version: the file's content version from a read/stat; "*" overwrites unconditionally.
         :return: a success confirmation and the diff summary.
         """
         # validate input before any filesystem work so callers see a clean error message
@@ -1042,6 +1099,10 @@ class CursorReplaceRangeTool(Tool, ToolMarkerSymbolicEdit):
             raise ValueError(
                 f"cursor_replace_range: invalid range [{start_line}, {end_line}] in {relative_path!r}; require 1 <= start_line <= end_line."
             )
+
+        stale = _refuse_if_stale(self, relative_path, expect_version)
+        if stale is not None:
+            return stale
 
         # snapshot content so we can report a line-diff summary after the edit
         pre_content = self.project.read_file(relative_path)
@@ -1085,6 +1146,7 @@ class CursorReplaceRangeVerifiedTool(Tool, ToolMarkerSymbolicEdit):
         end_line: int,
         expected_content: str,
         body: str,
+        expect_version: str,
     ) -> str:
         """
         Replace the file's lines ``[start_line, end_line]`` (inclusive) with
@@ -1106,6 +1168,7 @@ class CursorReplaceRangeVerifiedTool(Tool, ToolMarkerSymbolicEdit):
             (``\\r\\n`` for CRLF files, ``\\n`` otherwise) is appended automatically
             so the next file line is never fused onto the body's final line. Pass
             an empty string to delete the range with no replacement.
+        :param expect_version: the file's content version from a read/stat; "*" overwrites unconditionally.
         :return: a success confirmation and the diff summary.
         """
         # validate input before any filesystem work so callers see a clean error message
@@ -1114,6 +1177,10 @@ class CursorReplaceRangeVerifiedTool(Tool, ToolMarkerSymbolicEdit):
                 f"cursor_replace_range_verified: invalid range [{start_line}, {end_line}] "
                 f"in {relative_path!r}; require 1 <= start_line <= end_line."
             )
+
+        stale = _refuse_if_stale(self, relative_path, expect_version)
+        if stale is not None:
+            return stale
 
         # convert the 1-based agent args to internal 0-based indices once at the tool
         # boundary; the drift check and the editor layer both operate 0-based
@@ -1220,6 +1287,7 @@ class CursorReplaceBetweenTool(Tool, ToolMarkerSymbolicEdit):
         before_symbol: str,
         after_symbol: str,
         body: str,
+        expect_version: str,
         expected_content: str | None = None,
     ) -> str:
         """
@@ -1237,6 +1305,7 @@ class CursorReplaceBetweenTool(Tool, ToolMarkerSymbolicEdit):
             (``\\r\\n`` for CRLF files, ``\\n`` otherwise) is appended automatically
             so ``after_symbol``'s opening line is never fused onto the body's final
             line.
+        :param expect_version: the file's content version from a read/stat; "*" overwrites unconditionally.
         :param expected_content: optional text the caller expects at the
             interstitial range, enabling a drift check identical to
             ``cursor_replace_range_verified``'s. Line-by-line comparison via
@@ -1244,6 +1313,12 @@ class CursorReplaceBetweenTool(Tool, ToolMarkerSymbolicEdit):
             ignored.
         :return: a success confirmation, the diff summary, and the computed range.
         """
+        # refuse the write up front if the file changed under the caller (spec-v2 §5.5); the
+        # anchors are resolved against the current bytes, so gate before resolving them
+        stale = _refuse_if_stale(self, relative_path, expect_version)
+        if stale is not None:
+            return stale
+
         # resolve both anchors on every call so drift is structurally eliminated
         before = self._resolve_unique_anchor("before_symbol", before_symbol, relative_path)
         after = self._resolve_unique_anchor("after_symbol", after_symbol, relative_path)
@@ -1395,6 +1470,11 @@ class CursorOverviewTool(Tool, ToolMarkerSymbolicRead):
         if os.path.isdir(file_path):
             raise ValueError(f"Expected a file path, but got a directory path: {relative_path}.")
 
+        # every read output carries the file's content version so a later write can
+        # compare-and-swap against it (spec-v2 §5.5); an unreadable file omits the line
+        version = read_file_version(self.project.project_root, relative_path)
+        why = f"why: {because}\nversion: {version}" if version is not None else f"why: {because}"
+
         manager = self.agent.get_cursor_manager()
         rung = manager.resolve_read_rung(relative_path)
 
@@ -1403,11 +1483,11 @@ class CursorOverviewTool(Tool, ToolMarkerSymbolicRead):
             retriever = self.create_language_server_symbol_retriever()
             top_level = retriever.get_symbol_overview(relative_path).get(relative_path, [])
             if not top_level:
-                return f"why: {because}\n\nNo top-level symbols found in {relative_path}."
+                return f"{why}\n\nNo top-level symbols found in {relative_path}."
             # render each symbol as ``name :Kind@file:line:`` -- the same handle
             # shape used by format_cursor_view's anchor, so the agent treats
             # overview entries and cursor projections uniformly.
-            lines: list[str] = [f"why: {because}", "", f"Top-level symbols in {relative_path}:"]
+            lines: list[str] = [why, "", f"Top-level symbols in {relative_path}:"]
             for sym in top_level:
                 line = sym.line
                 # sym.line is the internal 0-based index; convert to the 1-based
@@ -1426,8 +1506,8 @@ class CursorOverviewTool(Tool, ToolMarkerSymbolicRead):
         if rung is ReadRung.STRUCTURAL:
             structural = manager.structural_overview(relative_path)
             if not structural:
-                return f"why: {because}\n\nNo top-level structural nodes found in {relative_path}."
-            lines = [f"why: {because}", "", f"Top-level structural nodes in {relative_path}:"]
+                return f"{why}\n\nNo top-level structural nodes found in {relative_path}."
+            lines = [why, "", f"Top-level structural nodes in {relative_path}:"]
             for name_path, kind in structural:
                 if kind:
                     lines.append(f"  {name_path} :{kind}@{relative_path}:")
@@ -1439,7 +1519,7 @@ class CursorOverviewTool(Tool, ToolMarkerSymbolicRead):
         # file. NEVER raise; render the line/size/encoding descriptor so the file is
         # readable through the cursor surface (spec-v2 §5.1 rung3). cursor_start on
         # the file lands a plaintext cursor whose body is its byte-exact content.
-        return f"why: {because}\n\n{relative_path}: {manager.plaintext_overview(relative_path)}"
+        return f"{why}\n\n{relative_path}: {manager.plaintext_overview(relative_path)}"
 
 
 
