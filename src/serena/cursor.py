@@ -15,8 +15,9 @@ from typing import Any
 
 from serena.project import Project
 from serena.symbol import LanguageServerSymbol, LanguageServerSymbolLocation, LanguageServerSymbolRetriever
-from serena.util.line_numbers import format_line_range, to_display_line
-from serena.util.staleness import read_file_version
+from serena.util.line_numbers import format_line_range, to_display_line, to_internal_line
+from serena.util.staleness import check_stale, read_file_version
+from serena.util.windowing import InvalidContinuation, WindowRequest, decode_continuation, window_body
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_utils import PathUtils
 from solidlsp.lsp_protocol_handler.lsp_types import (
@@ -70,6 +71,7 @@ class ReadRung(Enum):
     LSP = "lsp"
     STRUCTURAL = "structural"
     PLAINTEXT = "plaintext"
+
 
 # operations that require the cursor to be positioned on a container node
 _CONTAINER_POSITIONED_OPERATIONS: frozenset[str] = frozenset({"insert_start", "insert_end"})
@@ -162,7 +164,6 @@ class CursorTrailEntry:
 
 
 @dataclass
-
 class CursorState:
     """The state of a single navigation cursor.
 
@@ -236,7 +237,6 @@ class CursorState:
 
 
 @dataclass
-
 class StructuralCursorState:
     """The state of a cursor positioned on a structural (non-LSP) node.
 
@@ -900,9 +900,7 @@ class CursorManager:
         total_elapsed = time.perf_counter() - total_started
         if per_edge_timing:
             breakdown = ", ".join(
-                f"{e.value}={per_edge_timing[e] * 1000.0:.1f}ms/{per_edge_counts[e]}"
-                for e in EdgeType
-                if e in per_edge_timing
+                f"{e.value}={per_edge_timing[e] * 1000.0:.1f}ms/{per_edge_counts[e]}" for e in EdgeType if e in per_edge_timing
             )
             timing_log.info(
                 "cursor=%s resolve_neighbors total_ms=%.1f [%s]",
@@ -1004,7 +1002,9 @@ class CursorManager:
         # TypeHierarchyItem and CallHierarchyItem share the same relevant fields
         return self._neighbor_from_hierarchy_item(item, edge_type)  # type: ignore[arg-type]
 
-    def format_cursor_view(self, cursor_id: str) -> str:
+    def format_cursor_view(
+        self, cursor_id: str, *, offset_line: int = 0, max_lines: int = 0, max_bytes: int = 0, continuation: str = ""
+    ) -> str:
         """Render the cursor as a compact symbolic projection.
 
         The projection is built from layered facts; only the **anchor**
@@ -1050,12 +1050,14 @@ class CursorManager:
         # rather than showing stale bytes. LSP cursors render from in-memory symbol data (no
         # re-read) and their write path is compare-and-swap-protected, so they keep prior behavior.
         if isinstance(state, StructuralCursorState | PlaintextCursorState) and self.file_version(state.relative_path) is None:
-            return f"cursor stale: {state.relative_path} no longer exists (deleted or renamed away); re-open a cursor on its current location."
+            return (
+                f"cursor stale: {state.relative_path} no longer exists (deleted or renamed away); re-open a cursor on its current location."
+            )
 
         if isinstance(state, PlaintextCursorState):
-            return self._format_plaintext_cursor_view(state)
+            return self._format_plaintext_cursor_view(state, offset_line, max_lines, max_bytes, continuation)
         if isinstance(state, StructuralCursorState):
-            return self._format_structural_cursor_view(state)
+            return self._format_structural_cursor_view(state, offset_line, max_lines, max_bytes, continuation)
 
         symbol = state.current_symbol
         location = state.current_location
@@ -1129,10 +1131,26 @@ class CursorManager:
             if body_text:
                 body_start = symbol.get_body_start_position()
                 start_line = body_start.line if body_start is not None else None
+                if location.relative_path is not None:
+                    request, body_version, stale = self._resolve_window(
+                        location.relative_path, offset_line, max_lines, max_bytes, continuation
+                    )
+                else:
+                    request, body_version, stale = WindowRequest(), version, None
                 lines.append("")
-                lines.append("--- body ---")
-                lines.extend(self._number_body_lines(body_text, start_line))
-                lines.append("--- end body ---")
+                lines.extend(
+                    self._render_body_block(
+                        relative_path=location.relative_path or "",
+                        body_text=body_text,
+                        body_start_line=start_line,
+                        numbered=True,
+                        version=body_version,
+                        request=request,
+                        stale=stale,
+                        total_bytes=None,
+                        encoding="utf-8",
+                    )
+                )
 
         return "\n".join(lines)
 
@@ -1310,9 +1328,104 @@ class CursorManager:
         """
         if start_line is None:
             return [body_text]
-        return [f"{to_display_line(start_line + i)}: {line}" for i, line in enumerate(body_text.splitlines())]
+        return self._number_lines(body_text.splitlines(), start_line)
 
-    def _format_structural_cursor_view(self, state: StructuralCursorState) -> str:
+    def _number_lines(self, lines: list[str], start_line: int | None) -> list[str]:
+        """Prefix each line with its 1-based file line number, or return them unchanged.
+
+        Shared by :meth:`_number_body_lines` and the windowed body block. ``start_line``
+        is the 0-based file line of ``lines[0]``, converted to the 1-based ``cat -n``
+        number at this display boundary (spec-v2 §5.7); ``None`` means the base is
+        unknown, so the lines are returned unnumbered rather than fabricating numbers.
+        """
+        if start_line is None:
+            return lines
+        return [f"{to_display_line(start_line + i)}: {line}" for i, line in enumerate(lines)]
+
+    def _resolve_window(
+        self, relative_path: str, offset_line: int, max_lines: int, max_bytes: int, continuation: str
+    ) -> tuple[WindowRequest, str | None, str | None]:
+        """Resolve a body-window request against ``relative_path`` (spec-v2 §5.6).
+
+        :return: ``(request, version, stale)`` -- the normalized
+            :class:`~serena.util.windowing.WindowRequest`, the file's current content
+            version (embedded in any continuation token so the next page is
+            CAS-checkable), and a typed stale message when a continuation token was
+            supplied for a file that has since changed (rendered in place of the body,
+            never stale bytes). A continuation supersedes ``offset_line``; an
+            undecodable token is itself a stale signal. ``offset_line`` is the 1-based
+            agent line (``0`` = from the start).
+        """
+        version = read_file_version(self._project.project_root, relative_path)
+        if continuation:
+            try:
+                token = decode_continuation(continuation)
+            except InvalidContinuation:
+                return WindowRequest(), version, f"stale window: continuation token is invalid; re-read {relative_path}."
+            stale = check_stale(self._project.project_root, relative_path, token.version)
+            if stale is not None:
+                return (
+                    WindowRequest(),
+                    version,
+                    f"stale window: {relative_path} changed since the continuation token was issued "
+                    f"(expected {token.version}, now {stale.actual or 'gone'}); re-read {relative_path}.",
+                )
+            offset = token.next_offset_line
+        else:
+            offset = to_internal_line(offset_line) if offset_line >= 1 else 0
+        request = WindowRequest(
+            offset_line=max(0, offset),
+            max_lines=max_lines if max_lines > 0 else None,
+            max_bytes=max_bytes if max_bytes > 0 else None,
+        )
+        return request, version, None
+
+    def _render_body_block(
+        self,
+        *,
+        relative_path: str,
+        body_text: str,
+        body_start_line: int | None,
+        numbered: bool,
+        version: str | None,
+        request: WindowRequest,
+        stale: str | None,
+        total_bytes: int | None,
+        encoding: str,
+    ) -> list[str]:
+        """Build the ``--- body ---`` block with the always-present §5.6 window descriptor.
+
+        The shared body renderer for the LSP, structural, and plaintext views: it windows
+        ``body_text`` (line-granular, CRLF/codepoint-safe), prefixes a ``window:``
+        descriptor line (plus a ``continuation:`` handle when more remains), and -- for a
+        ``numbered`` body -- 1-based whole-file line numbers. A non-``None`` ``stale``
+        replaces the body with the typed stale state rather than serving stale bytes.
+        """
+        block = ["--- body ---"]
+        if stale is not None:
+            block.append(stale)
+            block.append("--- end body ---")
+            return block
+        wb = window_body(
+            body_text,
+            request=request,
+            path=relative_path,
+            version=version,
+            total_bytes=total_bytes,
+            encoding=encoding,
+            line_base=body_start_line if body_start_line is not None else 0,
+        )
+        block.append(f"window: {wb.descriptor.render()}")
+        if numbered and body_start_line is not None:
+            block.extend(self._number_lines(wb.display_lines, wb.numbering_start_line))
+        else:
+            block.extend(wb.display_lines)
+        block.append("--- end body ---")
+        return block
+
+    def _format_structural_cursor_view(
+        self, state: StructuralCursorState, offset_line: int = 0, max_lines: int = 0, max_bytes: int = 0, continuation: str = ""
+    ) -> str:
         """Render a structural cursor's position as a compact symbolic projection.
 
         Mirrors :meth:`format_cursor_view` for non-LSP cursors: the LSP
@@ -1386,12 +1499,25 @@ class CursorManager:
                 lines.append("")
                 lines.append(f"gist        {gist}")
 
-        # body block (opt-in): the addressed node's serialized source
+        # body block (opt-in): the addressed node's serialized source, windowed with an
+        # always-present descriptor in whole-file line coords (spec-v2 §5.6)
         if state.include_body and body_text is not None:
+            line_range = self._structural_node_line_range(state)
+            request, body_version, stale = self._resolve_window(state.relative_path, offset_line, max_lines, max_bytes, continuation)
             lines.append("")
-            lines.append("--- body ---")
-            lines.append(body_text)
-            lines.append("--- end body ---")
+            lines.extend(
+                self._render_body_block(
+                    relative_path=state.relative_path,
+                    body_text=body_text,
+                    body_start_line=line_range[0] if line_range is not None else 0,
+                    numbered=False,
+                    version=body_version,
+                    request=request,
+                    stale=stale,
+                    total_bytes=None,
+                    encoding="utf-8",
+                )
+            )
 
         return "\n".join(lines)
 
@@ -1428,7 +1554,9 @@ class CursorManager:
         """
         return self._plaintext_floor.describe(self._plaintext_view(relative_path))
 
-    def _format_plaintext_cursor_view(self, state: PlaintextCursorState) -> str:
+    def _format_plaintext_cursor_view(
+        self, state: PlaintextCursorState, offset_line: int = 0, max_lines: int = 0, max_bytes: int = 0, continuation: str = ""
+    ) -> str:
         """Render a plaintext cursor's position: why + anchor + descriptor + body.
 
         Mirrors :meth:`_format_structural_cursor_view` for the floor rung. The anchor
@@ -1454,13 +1582,25 @@ class CursorManager:
         if version is not None:
             lines.append(f"version: {version}")
 
-        # body block (opt-in, default on): the file's byte-exact numbered body,
-        # numbered from file line 0 through the 1-based display converter
+        # body block (opt-in, default on): the file's byte-exact numbered body, windowed
+        # with an always-present descriptor (spec-v2 §5.6); numbered from file line 0
+        # through the 1-based display converter
         if state.include_body and view.text is not None:
+            request, body_version, stale = self._resolve_window(state.relative_path, offset_line, max_lines, max_bytes, continuation)
             lines.append("")
-            lines.append("--- body ---")
-            lines.extend(self._number_body_lines(view.text, 0))
-            lines.append("--- end body ---")
+            lines.extend(
+                self._render_body_block(
+                    relative_path=state.relative_path,
+                    body_text=view.text,
+                    body_start_line=0,
+                    numbered=True,
+                    version=body_version,
+                    request=request,
+                    stale=stale,
+                    total_bytes=view.byte_size,
+                    encoding=view.encoding,
+                )
+            )
 
         return "\n".join(lines)
 
@@ -1743,6 +1883,7 @@ class CursorManager:
         else:
             from serena.util.file_system import scan_directory
             from serena.util.text_utils import search_files
+
             if os.path.isfile(abs_path):
                 rel_paths_to_search = [rel]
             else:

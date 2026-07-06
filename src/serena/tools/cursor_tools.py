@@ -79,6 +79,10 @@ class CursorStartTool(Tool, ToolMarkerSymbolicRead):
         relative_path: str = "",
         cursor_id: str = "",
         edge_types: list[str] = [],  # noqa: B006
+        offset_line: int = 0,
+        max_lines: int = 0,
+        max_bytes: int = 0,
+        continuation: str = "",
     ) -> str:
         """
         Start a new cursor at the specified symbol and return its view.
@@ -143,6 +147,12 @@ class CursorStartTool(Tool, ToolMarkerSymbolicRead):
             position. Valid names: ``contains``, ``references``,
             ``referenced-by``, ``calls``, ``called-by``, ``inherits``,
             ``inherited-by``. Ignored for structural cursors.
+        :param offset_line: 1-based body line to start a ``--- body ---`` window at
+            (spec-v2 §5.6); 0 = from the start.
+        :param max_lines: cap on body lines shown (0 = no line cap).
+        :param max_bytes: cap on body bytes shown (0 = no byte cap).
+        :param continuation: a token a prior truncated read handed back; pages the next
+            window ("give me the rest") and supersedes ``offset_line``.
         :return: a ``Started cursor <id>.`` line followed by the cursor's
             symbolic projection. The prefix mirrors :class:`CursorFindTool`'s
             output so callers can extract the cursor handle uniformly across
@@ -160,7 +170,11 @@ class CursorStartTool(Tool, ToolMarkerSymbolicRead):
         state.last_reasoning = because
         # prefix the projection with the assigned cursor id so callers can
         # parse the handle without inspecting the projection body
-        return f"Started cursor {cid}.\n\n{manager.format_cursor_view(cid)}"
+        return (
+            f"Started cursor {cid}.\n\n"
+            f"{manager.format_cursor_view(cid, offset_line=offset_line, max_lines=max_lines, max_bytes=max_bytes, continuation=continuation)}"
+        )
+
 
 class CursorMoveTool(Tool, ToolMarkerSymbolicRead):
     """
@@ -183,8 +197,8 @@ class CursorMoveTool(Tool, ToolMarkerSymbolicRead):
         that the previous position did not. Phrase as the gap in your
         understanding the move closes -- not a description of where
         you are going or a hypothesis about what the target contains.
-        Examples:
 
+        Examples:
         ✓ "to confirm the rate limiter sees the same clock the auth
            middleware does"
         ✓ "to check whether this method is the only path that decrements
@@ -203,6 +217,7 @@ class CursorMoveTool(Tool, ToolMarkerSymbolicRead):
             the semantic question this neighbor lets you answer. Required.
         :param target_relative_path: optional file path to disambiguate if multiple neighbors share the same name.
         :return: the updated cursor view at the new position.
+
         """
         manager = self.agent.get_cursor_manager()
         manager.move_cursor(
@@ -221,15 +236,27 @@ class CursorLookTool(Tool, ToolMarkerSymbolicRead):
     Useful for re-examining the current position after changing edge type configuration.
     """
 
-    def apply(self, cursor_id: str) -> str:
+    def apply(self, cursor_id: str, offset_line: int = 0, max_lines: int = 0, max_bytes: int = 0, continuation: str = "") -> str:
         """
         Show the current cursor position and its neighborhood.
 
+        When the cursor projects a ``--- body ---`` block (spec-v2 §5.6), the window
+        params bound and page it: ``max_lines`` / ``max_bytes`` cap the shown body,
+        ``offset_line`` (1-based) starts it elsewhere, and ``continuation`` (a token a
+        prior truncated read handed back) reads the next page -- a plain "give me the
+        rest", no offset math. The body always carries a ``window:`` descriptor.
+
         :param cursor_id: the ID of the cursor to look from.
+        :param offset_line: 1-based body line to start the window at (0 = from the start).
+        :param max_lines: cap on body lines shown (0 = no line cap).
+        :param max_bytes: cap on body bytes shown (0 = no byte cap).
+        :param continuation: a continuation token from a prior truncated read; supersedes ``offset_line``.
         :return: the cursor view showing the symbol and its neighborhood.
         """
         manager = self.agent.get_cursor_manager()
-        return manager.format_cursor_view(cursor_id)
+        return manager.format_cursor_view(
+            cursor_id, offset_line=offset_line, max_lines=max_lines, max_bytes=max_bytes, continuation=continuation
+        )
 
 
 class CursorConfigureTool(Tool, ToolMarkerSymbolicRead):
@@ -307,6 +334,7 @@ class CursorConfigureTool(Tool, ToolMarkerSymbolicRead):
 
         return manager.format_cursor_view(cursor_id)
 
+
 class CursorHistoryTool(Tool, ToolMarkerSymbolicRead):
     """
     Show the trail of symbols visited by a cursor, from start to current position.
@@ -373,6 +401,10 @@ class CursorFindTool(Tool, ToolMarkerSymbolicRead):
         max_matches: int = -1,
         cursor_id: str = "",
         edge_types: list[str] = [],  # noqa: B006
+        offset_line: int = 0,
+        max_lines: int = 0,
+        max_bytes: int = 0,
+        continuation: str = "",
         max_answer_chars: int = -1,
     ) -> str:
         """
@@ -459,8 +491,11 @@ class CursorFindTool(Tool, ToolMarkerSymbolicRead):
             # already honors it via candidate_list_json)
             if include_body:
                 state.include_body = True
-            view = manager.format_cursor_view(cid)
+            view = manager.format_cursor_view(
+                cid, offset_line=offset_line, max_lines=max_lines, max_bytes=max_bytes, continuation=continuation
+            )
             return f"Found unique match; started cursor {cid}.\n\n{view}"
+
         def candidate_list_json() -> str:
             candidate_dicts = [
                 s.to_dict(
@@ -548,8 +583,8 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
         ``because`` is required and articulates your **goal in
         understanding** -- the semantic question the search lets you
         answer, not a description of what you are searching for.
-        Examples:
 
+        Examples:
         ✓ "to map every site that mutates the quota counter so I can
            reason about race conditions under concurrent withdrawal"
         ✓ "to find where the timezone fallback is applied so I can decide
@@ -584,6 +619,7 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
         :return: a multi-cursor report listing each opened cursor's anchor
             and hit count, plus any deferred symbols that would have
             received a cursor if not for ``max_matches``.
+
         """
         manager = self.agent.get_cursor_manager()
         groups, unsymboled = manager.find_pattern_with_enclosing_symbols(
@@ -623,10 +659,8 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
         # many cursors opened. Non-symbol hits are SURFACED below (with their
         # matched lines), never routed to another tool (spec-v2 §5.1/§5.3).
         header_parts = [
-            f"Found {n_symboled + n_unsymboled} match(es): "
-            f"{n_symboled} in {len(groups)} symbol(s), {n_unsymboled} on non-symbol lines.",
-            f"Started {len(opened_cursors)} cursor(s)"
-            + (f"; {len(deferred)} symbol(s) deferred." if deferred else "."),
+            f"Found {n_symboled + n_unsymboled} match(es): {n_symboled} in {len(groups)} symbol(s), {n_unsymboled} on non-symbol lines.",
+            f"Started {len(opened_cursors)} cursor(s)" + (f"; {len(deferred)} symbol(s) deferred." if deferred else "."),
         ]
         lines: list[str] = [f"why: {because}", "", " ".join(header_parts), ""]
 
@@ -659,9 +693,7 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
             lines.append("-- Deferred (no cursor opened; tighten the pattern or raise max_matches) --")
             for sym, hits in deferred:
                 rel = sym.location.relative_path or "?"
-                lines.append(
-                    f"  @ {sym.get_name_path()} :{sym.symbol_kind_name}@{rel}    {len(hits)} hit(s)"
-                )
+                lines.append(f"  @ {sym.get_name_path()} :{sym.symbol_kind_name}@{rel}    {len(hits)} hit(s)")
 
         return self._limit_length("\n".join(lines).rstrip() + "\n", max_answer_chars)
 
@@ -773,10 +805,7 @@ class CursorReplaceBodyTool(Tool, ToolMarkerSymbolicEdit):
         try:
             manager.reanchor_cursor(cursor_id)
         except ValueError as e:
-            return (
-                f"{SUCCESS_RESULT}\n{diff_summary}\n\n"
-                f"(edit applied; cursor {cursor_id} could not re-anchor afterward: {e})"
-            )
+            return f"{SUCCESS_RESULT}\n{diff_summary}\n\n(edit applied; cursor {cursor_id} could not re-anchor afterward: {e})"
         return f"{SUCCESS_RESULT}\n{diff_summary}\n\n" + manager.format_cursor_view(cursor_id)
 
     @staticmethod
@@ -1354,9 +1383,7 @@ class CursorReplaceBetweenTool(Tool, ToolMarkerSymbolicEdit):
         post_content = self.project.read_file(relative_path)
         removed, added = CursorReplaceBodyTool._count_diff_lines(pre_content, post_content)
         diff_summary = f"Diff: -{removed} / +{added} lines"
-        return (
-            f"{SUCCESS_RESULT}\n{diff_summary}\n(replaced lines [{to_display_line(start_line)}, {to_display_line(end_line)}] between {before_symbol!r} and {after_symbol!r})"
-        )
+        return f"{SUCCESS_RESULT}\n{diff_summary}\n(replaced lines [{to_display_line(start_line)}, {to_display_line(end_line)}] between {before_symbol!r} and {after_symbol!r})"
 
     def _resolve_unique_anchor(self, role: str, name_path: str, relative_path: str) -> "LanguageServerSymbol":
         """
@@ -1520,7 +1547,6 @@ class CursorOverviewTool(Tool, ToolMarkerSymbolicRead):
         # readable through the cursor surface (spec-v2 §5.1 rung3). cursor_start on
         # the file lands a plaintext cursor whose body is its byte-exact content.
         return f"{why}\n\n{relative_path}: {manager.plaintext_overview(relative_path)}"
-
 
 
 class CursorNarrateTool(Tool, ToolMarkerSymbolicRead):

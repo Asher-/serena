@@ -94,7 +94,7 @@ class TestWriteAcceptsOneBased:
         """
         rel_path, abs_path = four_line_file
         tool = python_serena_agent.get_tool(CursorReplaceRangeTool)
-        tool.apply(relative_path=rel_path, start_line=2, end_line=2, body="B = 22\n")
+        tool.apply(relative_path=rel_path, start_line=2, end_line=2, body="B = 22\n", expect_version="*")
         assert abs_path.read_text() == "A = 1\nB = 22\nC = 3\nD = 4\n"
 
     def test_replace_range_verified_matches_one_based_expected(
@@ -105,7 +105,7 @@ class TestWriteAcceptsOneBased:
         """
         rel_path, abs_path = four_line_file
         tool = python_serena_agent.get_tool(CursorReplaceRangeVerifiedTool)
-        tool.apply(relative_path=rel_path, start_line=3, end_line=3, expected_content="C = 3\n", body="C = 33\n")
+        tool.apply(relative_path=rel_path, start_line=3, end_line=3, expected_content="C = 3\n", body="C = 33\n", expect_version="*")
         assert abs_path.read_text() == "A = 1\nB = 2\nC = 33\nD = 4\n"
 
     def test_replace_range_rejects_line_zero(self, python_serena_agent: "SerenaAgent", four_line_file: tuple[str, Path]) -> None:
@@ -113,7 +113,7 @@ class TestWriteAcceptsOneBased:
         rel_path, _ = four_line_file
         tool = python_serena_agent.get_tool(CursorReplaceRangeTool)
         with pytest.raises(ValueError, match="invalid range"):
-            tool.apply(relative_path=rel_path, start_line=0, end_line=0, body="x\n")
+            tool.apply(relative_path=rel_path, start_line=0, end_line=0, body="x\n", expect_version="*")
 
     def test_verified_drift_message_cites_one_based_range(
         self, python_serena_agent: "SerenaAgent", four_line_file: tuple[str, Path]
@@ -122,7 +122,7 @@ class TestWriteAcceptsOneBased:
         rel_path, _ = four_line_file
         tool = python_serena_agent.get_tool(CursorReplaceRangeVerifiedTool)
         with pytest.raises(ValueError) as excinfo:
-            tool.apply(relative_path=rel_path, start_line=2, end_line=2, expected_content="not B\n", body="x\n")
+            tool.apply(relative_path=rel_path, start_line=2, end_line=2, expected_content="not B\n", body="x\n", expect_version="*")
         msg = str(excinfo.value)
         assert "drift detected" in msg
         assert f"{rel_path}:2-2" in msg
