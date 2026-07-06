@@ -179,7 +179,7 @@ class PythonSymbolExtentStrategy(SymbolExtentStrategy):
 
 
 class GoSymbolExtentStrategy(SymbolExtentStrategy):
-    """
+    r"""
     Strategy that widens Go ``var``/``const``/``type`` declaration extents to include the
     leading declaration keyword.
 
