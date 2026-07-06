@@ -5,6 +5,7 @@ Recreate the snapshots with `pytest --snapshot-update`.
 
 import logging
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -275,6 +276,28 @@ class DeleteSymbolTest(EditingTest):
 )
 def test_delete_symbol(test_case, snapshot: SnapshotAssertion):
     test_case.run_test(content_after_ground_truth=snapshot)
+
+
+@pytest.mark.go
+def test_delete_go_top_level_type_removes_leading_keyword() -> None:
+    """
+    Guard bug://serena/safe-delete-symbol-leaves-dangling-decl-keyword: deleting a
+    top-level Go ``type`` (whose gopls extent begins at the NAME, excluding the ``type``
+    keyword) must remove the whole declaration rather than leave a dangling ``type``
+    keyword on an otherwise-empty line (invalid Go).
+    """
+    test = DeleteSymbolTest(Language.GO, "main.go", "DemoStruct")
+    with test._setup() as symbol_retriever:
+        content_before = test._read_file("main.go")
+        assert "type DemoStruct" in content_before  # precondition: the fixture declares it
+        editor = LanguageServerCodeEditor(symbol_retriever)
+        test._apply_edit(editor)
+        content_after = test._read_file("main.go")
+    # the declaration is removed cleanly: the ``type DemoStruct`` line is gone and -- the bug
+    # under test -- no dangling bare ``type`` keyword is left behind. (A method receiver may
+    # still mention the DemoStruct identifier; that is expected and not part of this delete.)
+    assert "type DemoStruct" not in content_after
+    assert re.search(r"(?m)^[ \t]*type[ \t]*$", content_after) is None, f"safe_delete left a dangling 'type' keyword:\n{content_after}"
 
 
 NEW_PYTHON_FUNCTION = """def new_inserted_function():

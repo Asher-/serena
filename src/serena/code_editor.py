@@ -387,9 +387,13 @@ class CodeEditor(Generic[TSymbol], ABC):
         Deletes the symbol with the given name in the given file.
         """
         symbol = self._find_unique_symbol(name_path, relative_file_path)
-        start_pos = symbol.get_body_start_position_or_raise()
-        end_pos = symbol.get_body_end_position_or_raise()
         with self.edited_file_context(relative_file_path) as edited_file:
+            # widen the LSP-reported extent to the enclosing statement so a declaration whose
+            # extent the language server reports name-only (e.g. gopls for Go var/const/type,
+            # which excludes the leading keyword) is deleted whole rather than leaving a
+            # dangling ``var ``/``const ``/``type `` keyword behind; mirrors replace_body
+            start_pos = self._get_statement_start_position(symbol, edited_file)
+            end_pos = self._get_statement_end_position(symbol, edited_file)
             edited_file.delete_text_between_positions(start_pos, end_pos)
 
     @abstractmethod

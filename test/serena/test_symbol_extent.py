@@ -14,6 +14,7 @@ import pytest
 
 from serena.symbol import LanguageServerSymbol, PositionInFile
 from serena.symbol_extent import (
+    GoSymbolExtentStrategy,
     IdentitySymbolExtentStrategy,
     PythonSymbolExtentStrategy,
     get_symbol_extent_strategy,
@@ -71,6 +72,70 @@ class TestGetSymbolExtentStrategy:
 
     def test_extensionless_file_yields_identity(self) -> None:
         assert isinstance(get_symbol_extent_strategy("Makefile"), IdentitySymbolExtentStrategy)
+
+    def test_go_file_yields_go_strategy(self) -> None:
+        assert isinstance(get_symbol_extent_strategy("main.go"), GoSymbolExtentStrategy)
+
+
+class TestGoStrategyWidensDeclarationStart:
+    """
+    ``GoSymbolExtentStrategy`` widens a gopls name-only ``var``/``const``/``type`` start
+    back to the leading keyword so statement-level edits cover the whole declaration; it
+    leaves grouped members, non-declarations and out-of-range positions untouched.
+    """
+
+    @staticmethod
+    def _widen_start(file_text: str, name: str, name_line: int, name_col: int) -> PositionInFile:
+        # widen an explicitly supplied (name-only) start position for a synthetic Go symbol
+        strategy = GoSymbolExtentStrategy()
+        symbol = _make_symbol(name, SymbolKind.Variable, name_line)
+        return strategy.get_statement_start_position(symbol, file_text, PositionInFile(line=name_line, col=name_col))
+
+    def test_var_start_widens_to_keyword(self) -> None:
+        start = self._widen_start("package main\n\nvar Foo = 42\n", "Foo", 2, 4)
+        assert (start.line, start.col) == (2, 0)
+
+    def test_const_start_widens_to_keyword(self) -> None:
+        start = self._widen_start('package main\n\nconst Bar = "x"\n', "Bar", 2, 6)
+        assert (start.line, start.col) == (2, 0)
+
+    def test_type_start_widens_to_keyword(self) -> None:
+        start = self._widen_start("package main\n\ntype Thing struct {\n\tN int\n}\n", "Thing", 2, 5)
+        assert (start.line, start.col) == (2, 0)
+
+    def test_indented_declaration_widens_to_keyword_keeping_indent(self) -> None:
+        # a var inside a func keeps its indentation; only the keyword is drawn into the extent
+        start = self._widen_start("package main\n\nfunc f() {\n\tvar x = 1\n}\n", "x", 3, 5)
+        assert (start.line, start.col) == (3, 1)
+
+    def test_grouped_declaration_member_is_not_widened(self) -> None:
+        # grouped block: the keyword sits on a prior line, so the member must be left untouched
+        strategy = GoSymbolExtentStrategy()
+        symbol = _make_symbol("Foo", SymbolKind.Variable, 3)
+        lsp_start = PositionInFile(line=3, col=1)
+        result = strategy.get_statement_start_position(symbol, "package main\n\nvar (\n\tFoo = 1\n)\n", lsp_start)
+        assert result is lsp_start
+
+    def test_non_declaration_start_is_not_widened(self) -> None:
+        # a function name is preceded by ``func ``, not a var/const/type keyword
+        strategy = GoSymbolExtentStrategy()
+        symbol = _make_symbol("Helper", SymbolKind.Function, 2)
+        lsp_start = PositionInFile(line=2, col=5)
+        result = strategy.get_statement_start_position(symbol, "package main\n\nfunc Helper() {}\n", lsp_start)
+        assert result is lsp_start
+
+    def test_end_position_is_returned_unchanged(self) -> None:
+        # gopls already reports the end at the value/body close; the strategy never moves it
+        strategy = GoSymbolExtentStrategy()
+        symbol = _make_symbol("Foo", SymbolKind.Variable, 2)
+        lsp_end = PositionInFile(line=2, col=12)
+        assert strategy.get_statement_end_position(symbol, "package main\n\nvar Foo = 42\n", lsp_end) is lsp_end
+
+    def test_out_of_range_start_is_returned_unchanged(self) -> None:
+        strategy = GoSymbolExtentStrategy()
+        symbol = _make_symbol("Foo", SymbolKind.Variable, 99)
+        lsp_start = PositionInFile(line=99, col=4)
+        assert strategy.get_statement_start_position(symbol, "package main\n", lsp_start) is lsp_start
 
 
 class TestIdentityStrategy:

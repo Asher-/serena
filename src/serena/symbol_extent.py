@@ -178,17 +178,66 @@ class PythonSymbolExtentStrategy(SymbolExtentStrategy):
         return False
 
 
+class GoSymbolExtentStrategy(SymbolExtentStrategy):
+    """
+    Strategy that widens Go ``var``/``const``/``type`` declaration extents to include the
+    leading declaration keyword.
+
+    gopls reports the extent of such a declaration starting at the symbol NAME, excluding
+    the ``var ``/``const ``/``type `` keyword that precedes it on the line. Statement-level
+    edits therefore begin after the keyword: for deletion this leaves the keyword dangling
+    on an otherwise-empty line (invalid Go); for replacement it duplicated the keyword
+    before the extent was widened. This strategy draws the start back to the keyword. Only
+    the start is affected — gopls already reports the end at the value/body close.
+
+    Widening applies only when the text preceding the name on its line is exactly an
+    (optionally indented) declaration keyword followed by whitespace. Grouped declarations
+    (``var (\\n    Foo = 1\\n)``), whose keyword sits on a previous line, and non-declaration
+    symbols (functions, fields) are left untouched — the LSP-reported ``lsp_start`` object
+    is returned unchanged, so the identity short-circuit in :func:`compute_widened_body_text`
+    still fires.
+    """
+
+    # Go declaration keywords whose gopls-reported extent begins at the name, not the keyword
+    _DECL_KEYWORDS: frozenset[str] = frozenset({"var", "const", "type"})
+
+    def get_statement_end_position(self, symbol: LanguageServerSymbol, file_text: str, lsp_end: PositionInFile) -> PositionInFile:
+        # gopls already reports the end at the value/body close; only the start needs widening
+        return lsp_end
+
+    def get_statement_start_position(self, symbol: LanguageServerSymbol, file_text: str, lsp_start: PositionInFile) -> PositionInFile:
+        # locate the extent's own line; an out-of-range position disables widening
+        lines = file_text.splitlines(keepends=True)
+        if not 0 <= lsp_start.line < len(lines):
+            return lsp_start
+
+        # widen only when the whole text before the name is an (optionally indented)
+        # declaration keyword followed by whitespace — this catches the single
+        # ``var X = ...`` form while leaving grouped ``var ( ... )`` members (keyword on a
+        # prior line) and non-declarations (``func``, fields) untouched
+        prefix = lines[lsp_start.line][: lsp_start.col]
+        if prefix.strip() not in self._DECL_KEYWORDS or not prefix[-1:].isspace():
+            return lsp_start
+
+        # the keyword begins right after any leading indentation
+        keyword_col = len(prefix) - len(prefix.lstrip())
+        return PositionInFile(line=lsp_start.line, col=keyword_col)
+
+
 def get_symbol_extent_strategy(relative_path: str) -> SymbolExtentStrategy:
     """
     Pick the appropriate :class:`SymbolExtentStrategy` for the file at ``relative_path``.
 
     :param relative_path: the file path relative to the project root; dispatch is by file
         extension only, so callers only need to pass the path used by the LSP.
-    :return: a Python-aware strategy for ``.py``/``.pyi`` files, an identity strategy otherwise.
+    :return: a Python-aware strategy for ``.py``/``.pyi`` files, a Go-aware strategy for
+        ``.go`` files, an identity strategy otherwise.
     """
     _, ext = os.path.splitext(relative_path)
     if ext.lower() in (".py", ".pyi"):
         return PythonSymbolExtentStrategy()
+    if ext.lower() == ".go":
+        return GoSymbolExtentStrategy()
     return IdentitySymbolExtentStrategy()
 
 
