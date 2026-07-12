@@ -164,15 +164,30 @@ class GitignoreParser:
         queue: list[str] = [self.repo_root]
 
         def scan(abs_path: str | None) -> Iterator[str]:
-            for entry in os.scandir(abs_path):
-                try:
-                    if entry.is_dir(follow_symlinks=follow_symlinks):
-                        queue.append(entry.path)
-                    elif entry.is_file(follow_symlinks=follow_symlinks) and entry.name == ".gitignore":
-                        yield entry.path
-                except PermissionError as ex:
-                    log.debug(f"Skipping entry due to permission error: {entry.path}", exc_info=ex)
-                    continue
+            try:
+                with os.scandir(abs_path) as entries:
+                    for entry in entries:
+                        try:
+                            if entry.is_dir(follow_symlinks=follow_symlinks):
+                                queue.append(entry.path)
+                            elif entry.is_file(follow_symlinks=follow_symlinks) and entry.name == ".gitignore":
+                                yield entry.path
+                        except PermissionError as ex:
+                            log.debug(f"Skipping entry due to permission error: {entry.path}", exc_info=ex)
+                            continue
+            except PermissionError as ex:
+                if abs_path == self.repo_root:
+                    # The repository root itself cannot be read — e.g. a macOS privacy-protected
+                    # folder such as ~/Desktop, ~/Documents or ~/Downloads. Fail with an actionable
+                    # message rather than an opaque crash or a silently-empty parser.
+                    raise PermissionError(
+                        f"serena cannot read the folder '{abs_path}': macOS is blocking access to it. "
+                        f"Desktop, Documents, and Downloads are protected by the system's privacy "
+                        f"settings, and serena does not have permission to open them."
+                    ) from ex
+                # A subdirectory below the root is unreadable: skip it (mirror scan_directory).
+                log.debug(f"Skipping directory due to permission error: {abs_path}", exc_info=ex)
+                return
 
         while queue:
             next_abs_path = queue.pop(0)

@@ -2,6 +2,9 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
+from unittest import mock
+
+import pytest
 
 # Assuming the gitignore parser code is in a module named 'gitignore_parser'
 from pathspec import PathSpec
@@ -715,3 +718,56 @@ src/*.o
 
         # foo.txt in other/ should NOT be ignored (outside foo/ subtree)
         assert not parser.should_ignore("other/foo.txt"), "other/foo.txt should NOT be ignored by foo/.gitignore"
+
+    def test_unreadable_subdirectory_is_skipped_not_fatal(self):
+        """A subdirectory whose os.scandir raises PermissionError is skipped rather than
+        crashing the parser, mirroring scan_directory's guard.
+
+        Regression for the ~/Desktop EPERM crash: an unreadable directory encountered while
+        discovering .gitignore files must not abort the whole scan.
+        """
+        test_dir = self.repo_path / "test_perm_subtree"
+        test_dir.mkdir()
+        (test_dir / ".gitignore").write_text("*.log\n")
+        secret = test_dir / "secret"
+        secret.mkdir()
+        (secret / ".gitignore").write_text("*.tmp\n")  # would be discovered if the dir were readable
+
+        real_scandir = os.scandir
+        secret_abs = str(secret.absolute())
+
+        def guarded_scandir(path, *args, **kwargs):
+            if os.path.abspath(path) == secret_abs:
+                raise PermissionError(1, "Operation not permitted")
+            return real_scandir(path, *args, **kwargs)
+
+        with mock.patch("serena.util.file_system.os.scandir", side_effect=guarded_scandir):
+            parser = GitignoreParser(str(test_dir))  # must NOT raise
+
+        rel_paths = [os.path.relpath(spec.file_path, test_dir) for spec in parser.get_ignore_specs()]
+        assert ".gitignore" in rel_paths  # root .gitignore still discovered
+        assert os.path.join("secret", ".gitignore") not in rel_paths  # unreadable subtree skipped
+
+    def test_unreadable_root_raises_actionable_error(self):
+        """When the repository ROOT itself is unreadable (e.g. a macOS privacy-protected folder
+        such as ~/Desktop), the parser raises a clear, actionable error that names the folder —
+        not an opaque, path-less crash.
+        """
+        test_dir = self.repo_path / "test_perm_root"
+        test_dir.mkdir()
+        root_abs = str(test_dir.absolute())
+
+        real_scandir = os.scandir
+
+        def guarded_scandir(path, *args, **kwargs):
+            if os.path.abspath(path) == root_abs:
+                raise PermissionError(1, "Operation not permitted")
+            return real_scandir(path, *args, **kwargs)
+
+        with mock.patch("serena.util.file_system.os.scandir", side_effect=guarded_scandir):
+            with pytest.raises(PermissionError) as excinfo:
+                GitignoreParser(str(test_dir))
+
+        message = str(excinfo.value)
+        assert root_abs in message  # names the offending folder
+        assert "permission" in message.lower() or "protected" in message.lower()
