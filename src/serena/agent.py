@@ -321,6 +321,12 @@ class SerenaAgent:
         # _PIPE_SESSION_ID_VAR and the project-root-as-session-id contract in
         # plan://Serena:serena/serena-pipe-session-id-is-the-session-id).
         self._active_projects_by_session: dict[str | int, Project] = {}
+        # the absolute project_root each session EXPLICITLY activated (via activate_project, startup,
+        # or an operator action), kept distinct from the multiplexer-forwarded cwd. On a self-heal
+        # (Tool.apply_ex, empty per-session slot) this is the root restored -- NEVER the forwarded
+        # origin -- so a session that ever explicitly activated a project is never silently rebound to
+        # a different one. Keyed identically to _active_projects_by_session and evicted alongside it.
+        self._explicit_project_roots_by_session: dict[str | int, str] = {}
         # fallback active project for non-MCP callers (CLI, dashboard, scripts, tests) that have no session
         # in scope; the property setter writes here when _SESSION_KEY_VAR is unset.
         self._legacy_active_project: Project | None = None
@@ -892,6 +898,7 @@ class SerenaAgent:
         :meth:`on_shutdown`).
         """
         self._active_projects_by_session.pop(session_key, None)
+        self._explicit_project_roots_by_session.pop(session_key, None)
         self._cursor_managers_by_session.pop(session_key, None)
         self._warned_missing_forwarded_session_keys.discard(session_key)
         with self._session_finalizers_lock:
@@ -953,6 +960,7 @@ class SerenaAgent:
         for an unknown ``session_id`` is a no-op.
         """
         self._active_projects_by_session.pop(session_id, None)
+        self._explicit_project_roots_by_session.pop(session_id, None)
         self._cursor_managers_by_session.pop(session_id, None)
         # tear down the pipe session's per-session executor so its worker thread does not idle
         # past the forwarder's life; pending tasks have their futures cancelled.
@@ -1205,8 +1213,18 @@ class SerenaAgent:
         """
         return self._language_backend == LanguageBackend.LSP
 
-    def _activate_project(self, project: Project, update_active_modes: bool = True, update_active_tools: bool = True) -> bool:
+    def _activate_project(
+        self,
+        project: Project,
+        update_active_modes: bool = True,
+        update_active_tools: bool = True,
+        record_explicit: bool = True,
+    ) -> bool:
         """
+        :param record_explicit: when True (the default for user/startup activations) and a session is
+            in scope, record ``project.project_root`` in :attr:`_explicit_project_roots_by_session` so a
+            later self-heal restores exactly this project. The self-heal restore and the forwarded
+            fallback pass False so the map stays a record of genuine activations only.
         :return: True if the project was newly activated, False if it was already active for the calling context
         """
         # check if the project is already active for the calling context (per session if one is in scope,
@@ -1245,6 +1263,11 @@ class SerenaAgent:
         session_key = _SESSION_KEY_VAR.get(None)
         if session_key is not None:
             self._cursor_managers_by_session.pop(session_key, None)
+            if record_explicit:
+                # remember the root THIS session explicitly activated so a later self-heal
+                # (Tool.apply_ex) restores exactly this project after a per-session slot loss,
+                # rather than silently rebinding to the multiplexer-forwarded origin cwd.
+                self._explicit_project_roots_by_session[session_key] = project.project_root
         else:
             self._legacy_cursor_manager = None
         project.set_agent(self)
@@ -1275,7 +1298,11 @@ class SerenaAgent:
         return True
 
     def activate_project_from_path_or_name(
-        self, project_root_or_name: str, update_active_modes: bool = True, update_active_tools: bool = True
+        self,
+        project_root_or_name: str,
+        update_active_modes: bool = True,
+        update_active_tools: bool = True,
+        record_explicit: bool = True,
     ) -> bool:
         """
         Activate a project from a path or a name.
@@ -1320,7 +1347,12 @@ class SerenaAgent:
                 f"Existing project names: {self.serena_config.project_names}"
             )
 
-        return self._activate_project(project_instance, update_active_modes=update_active_modes, update_active_tools=update_active_tools)
+        return self._activate_project(
+            project_instance,
+            update_active_modes=update_active_modes,
+            update_active_tools=update_active_tools,
+            record_explicit=record_explicit,
+        )
 
     def get_active_tool_names(self) -> list[str]:
         """
@@ -1460,6 +1492,7 @@ class SerenaAgent:
             project.shutdown(timeout=timeout)
 
         self._active_projects_by_session.clear()
+        self._explicit_project_roots_by_session.clear()
         self._legacy_active_project = None
         # the cursor managers reference the projects we just shut down; drop them so they cannot be re-used
         self._cursor_managers_by_session.clear()

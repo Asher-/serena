@@ -419,34 +419,53 @@ class Tool(Component):
                 # check whether the tool requires an active project and language server
                 if not isinstance(self, ToolMarkerDoesNotRequireActiveProject):
                     if self.agent.get_active_project() is None:
-                        # self-heal a stranded session: when this session has no per-session
-                        # active-project slot but the multiplexer forwarded the inbound CC
-                        # client's project root (X-Forwarded-Project-Dir, captured into
-                        # forwarded_project_root on the main thread above), re-activate that
-                        # project for *this* session -- keyed via _SESSION_KEY_VAR set on this
-                        # worker so concurrent sessions never cross-bind -- instead of erroring.
-                        # Recovers a session whose slot was never established or was lost (e.g.
-                        # across a serena daemon restart) on its very next tool call.
-                        # the per-session slot is re-read here unlocked -- it was snapshotted on the
-                        # main thread into persisted_project above -- so a concurrent activation of the
-                        # same session_key can race this re-check. entering the heal branch twice is
-                        # benign: activate_project_from_path_or_name re-registers the same root
-                        # idempotently, so the redundant re-activation cannot corrupt the slot. the
-                        # re-entrancy is intentional and needs no lock.
+                        # self-heal a stranded session whose per-session active-project slot is
+                        # empty. Order matters and encodes the mis-root guarantee:
+                        #  (1) if this session EXPLICITLY activated a project earlier
+                        #      (_explicit_project_roots_by_session), restore THAT root, or fail
+                        #      loud -- NEVER silently rebind it to the forwarded origin cwd. Silently
+                        #      switching an explicitly-activated session to the forwarded root is the
+                        #      mis-root defect (bug-bin cluster 1) this branch guards against.
+                        #  (2) else, if the multiplexer forwarded the inbound CC client's project
+                        #      root (X-Forwarded-Project-Dir, captured into forwarded_project_root on
+                        #      the main thread above), activate it -- the original self-reclaim (plan
+                        #      serena-session-state-self-reclaim-impl, commit 5febf634) for genuinely
+                        #      never-activated sessions.
+                        # Keyed via _SESSION_KEY_VAR set on this worker so concurrent sessions never
+                        # cross-bind. The per-session slot is re-read here unlocked -- snapshotted on
+                        # the main thread into persisted_project above -- so a concurrent activation
+                        # of the same session_key can race this re-check. Entering the heal branch
+                        # twice is benign: activate_project_from_path_or_name re-registers the same
+                        # root idempotently, so the redundant re-activation cannot corrupt the slot.
                         healed = False
-                        if (
-                            session_key is not None
-                            and forwarded_project_root
-                            and self.agent._active_projects_by_session.get(session_key) is None
-                        ):
-                            try:
-                                self.agent.activate_project_from_path_or_name(forwarded_project_root)
-                                healed = self.agent.get_active_project() is not None
-                            except Exception as e:
-                                log.info(
-                                    f"Self-heal activation from forwarded project root "
-                                    f"{forwarded_project_root!r} failed: {e}."
-                                )
+                        if session_key is not None and self.agent._active_projects_by_session.get(session_key) is None:
+                            explicit_root = self.agent._explicit_project_roots_by_session.get(session_key)
+                            if explicit_root is not None:
+                                try:
+                                    self.agent.activate_project_from_path_or_name(explicit_root, record_explicit=False)
+                                    healed = self.agent.get_active_project() is not None
+                                except Exception as e:
+                                    log.error(
+                                        f"Self-heal restore of explicitly-activated project root "
+                                        f"{explicit_root!r} failed: {e}."
+                                    )
+                                if not healed:
+                                    # fail loud: never fall through to the forwarded origin here.
+                                    return (
+                                        f"Error: this MCP session's active project could not be restored. "
+                                        f"It had activated {explicit_root!r}, but re-activation failed and the "
+                                        f"daemon will NOT silently switch you to a different project. "
+                                        f"Call `activate_project({explicit_root!r})` to continue."
+                                    )
+                            elif forwarded_project_root:
+                                try:
+                                    self.agent.activate_project_from_path_or_name(forwarded_project_root, record_explicit=False)
+                                    healed = self.agent.get_active_project() is not None
+                                except Exception as e:
+                                    log.info(
+                                        f"Self-heal activation from forwarded project root "
+                                        f"{forwarded_project_root!r} failed: {e}."
+                                    )
                         if not healed:
                             return (
                                 "Error: No active project for this MCP session. "

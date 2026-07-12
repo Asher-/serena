@@ -514,3 +514,146 @@ class TestActiveProjectSelfHeal:
             assert agent._active_projects_by_session.get(cc_b) is proj_b
         finally:
             _PIPE_SESSION_ID_VAR.reset(token)
+
+    # --- explicit-root restore vs. silent forwarded rebind (bug-bin cluster 1) ---
+    # A session that EXPLICITLY activated project W and then lost its per-session
+    # slot must be restored to W, never silently rebound to the multiplexer-
+    # forwarded origin cwd O. The forwarded self-reclaim survives only for sessions
+    # with NO explicit record (genuinely stranded / never-activated).
+
+    def test_missing_slot_restores_explicit_root_not_forwarded(
+        self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Explicit root W recorded + slot emptied + forwarded root O (≠ W) ->
+        apply_ex restores W and never activates O. This is the mis-root
+        guarantee: an explicitly-activated session is never silently switched to
+        the forwarded cwd.
+        """
+        token = _reset_pipe_var()
+        try:
+            tool = self._requires_project_tool(agent, monkeypatch)
+            cc_session_id = "cc-session-explicit-restore"
+            explicit_root = "/tmp/serena-explicit-W"  # what the session chose
+            forwarded_root = "/tmp/serena-forwarded-O"  # the origin cwd the mux forwards
+            healed_project = MagicMock(name="restored-W")
+            activated_with: list[str] = []
+
+            def fake_activate(root: str, **kwargs: Any) -> bool:
+                activated_with.append(root)
+                agent._active_project = healed_project
+                return True
+
+            monkeypatch.setattr(agent, "activate_project_from_path_or_name", fake_activate)
+
+            # seed the explicit-activation record (as a real activate_project would),
+            # then strand the session: no per-session active-project slot.
+            agent._explicit_project_roots_by_session[cc_session_id] = explicit_root
+
+            ctx = _make_mcp_ctx(
+                forwarded_header=cc_session_id,
+                header_attr_path="request_context.request.headers",
+            )
+            ctx.request_context.request.headers["x-forwarded-project-dir"] = forwarded_root
+
+            result = tool.apply_ex(mcp_ctx=ctx, log_call=False)
+
+            assert activated_with == [explicit_root], (
+                "self-heal must restore the session's explicitly-activated root, not the "
+                f"forwarded origin; observed activations: {activated_with!r}"
+            )
+            assert forwarded_root not in activated_with, (
+                "an explicitly-activated session must NEVER be silently rebound to the forwarded root"
+            )
+            assert result == _RequiresProjectTool.RAN
+            assert agent._active_projects_by_session.get(cc_session_id) is healed_project
+        finally:
+            _PIPE_SESSION_ID_VAR.reset(token)
+
+    def test_missing_slot_explicit_restore_failure_fails_loud_not_forwarded(
+        self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Explicit root recorded but its restore raises -> apply_ex FAILS LOUD
+        (returns an error naming the project) and must NOT fall back to
+        activating the forwarded origin. Silent substitution is the defect.
+        """
+        token = _reset_pipe_var()
+        try:
+            tool = self._requires_project_tool(agent, monkeypatch)
+            cc_session_id = "cc-session-restore-fails"
+            explicit_root = "/tmp/serena-explicit-gone"
+            forwarded_root = "/tmp/serena-forwarded-O"
+            activated_with: list[str] = []
+
+            def fake_activate(root: str, **kwargs: Any) -> bool:
+                activated_with.append(root)
+                raise RuntimeError(f"cannot activate {root}")
+
+            monkeypatch.setattr(agent, "activate_project_from_path_or_name", fake_activate)
+            agent._explicit_project_roots_by_session[cc_session_id] = explicit_root
+
+            ctx = _make_mcp_ctx(
+                forwarded_header=cc_session_id,
+                header_attr_path="request_context.request.headers",
+            )
+            ctx.request_context.request.headers["x-forwarded-project-dir"] = forwarded_root
+
+            result = tool.apply_ex(mcp_ctx=ctx, log_call=False)
+
+            assert result != _RequiresProjectTool.RAN, "the tool must NOT run when restore failed"
+            assert "Error" in result and explicit_root in result, (
+                f"a fail-loud error naming the un-restorable project is required; got: {result!r}"
+            )
+            assert activated_with == [explicit_root], (
+                "exactly one activation attempt (the explicit-root restore) may occur; the "
+                f"forwarded origin must NOT be attempted. observed: {activated_with!r}"
+            )
+            assert forwarded_root not in activated_with
+        finally:
+            _PIPE_SESSION_ID_VAR.reset(token)
+
+    def test_session_bound_activation_records_explicit_root(
+        self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A session-bound activation records its root in
+        ``_explicit_project_roots_by_session`` so a later self-heal can restore
+        exactly that project. ``record_explicit=False`` (used by the self-heal
+        restore itself and the forwarded fallback) must NOT write a record.
+        """
+        # neutralise the background language-server launch; we exercise only the
+        # per-session bookkeeping of _activate_project.
+        monkeypatch.setattr(agent, "issue_task", lambda *a, **kw: None)
+
+        def activate(session_key: str, project: Any, record_explicit: bool) -> None:
+            def _inner() -> None:
+                _SESSION_KEY_VAR.set(session_key)
+                agent._activate_project(
+                    project,
+                    update_active_modes=False,
+                    update_active_tools=False,
+                    record_explicit=record_explicit,
+                )
+
+            # isolate ContextVar writes (_SESSION_KEY_VAR / _ACTIVE_PROJECT_VAR) to an
+            # ephemeral context so they do not bleed into other tests; the agent-dict
+            # writes we assert on persist on the shared agent.
+            contextvars.copy_context().run(_inner)
+
+        recorded_project = MagicMock(name="recorded")
+        recorded_project.project_root = "/tmp/serena-recorded-root"
+        recorded_project.project_name = "recorded"
+        recorded_project.project_config.language_backend = None
+
+        activate("cc-session-record", recorded_project, record_explicit=True)
+        assert agent._explicit_project_roots_by_session.get("cc-session-record") == "/tmp/serena-recorded-root", (
+            "a session-bound activation must record its explicit root for later self-heal"
+        )
+
+        heal_project = MagicMock(name="heal")
+        heal_project.project_root = "/tmp/serena-heal-root"
+        heal_project.project_name = "heal"
+        heal_project.project_config.language_backend = None
+
+        activate("cc-session-norecord", heal_project, record_explicit=False)
+        assert "cc-session-norecord" not in agent._explicit_project_roots_by_session, (
+            "record_explicit=False (the self-heal restore / forwarded fallback) must NOT record"
+        )
