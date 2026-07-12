@@ -47,6 +47,28 @@ class TestGoLanguageServer:
         refs = language_server.request_references(file_path, sel_start["line"], sel_start["character"])
         assert any("main.go" in ref.get("uri", "") for ref in refs), "Expected at least one reference result to point at main.go"
 
+    @pytest.mark.parametrize("language_server", [Language.GO], indirect=True)
+    def test_find_resolves_every_symbol_overview_lists(self, language_server: SolidLanguageServer) -> None:
+        """find-vs-overview parity: every top-level symbol ``request_overview`` reports for a Go
+        file must be resolvable by ``LanguageServerSymbol.find`` under its bare name.
+
+        Regression for bug://brain/serena-cursor-find-misses-go-symbols-overview-lists (and the
+        find-half of serena-go-lsp-cursor-find-misses-symbols-and-body-render-empty): cursor_overview
+        goes through ``get_symbol_overview`` -> ``request_overview``; cursor_find goes through
+        ``find_symbols`` -> ``request_full_symbol_tree`` + ``LanguageServerSymbol.find``. The two use
+        different LS entry points, so this asserts they agree — a bare name overview lists is one
+        cursor_find must resolve. (Verified against the real cmd/brain-mcp-multiplexer/server.go, 61
+        top-level symbols, all resolved.)
+        """
+        rel = "main.go"
+        overview_names = [s["name"] for s in language_server.request_overview(rel)[rel]]
+        assert overview_names, "overview must list top-level symbols for main.go"
+
+        roots = language_server.request_full_symbol_tree(within_relative_path=rel)
+        for name in overview_names:
+            hits = [match for root in roots for match in LanguageServerSymbol(root).find(name)]
+            assert hits, f"cursor_find must resolve bare name '{name}' that cursor_overview lists (find-vs-overview parity)"
+
 
 def _filter_symbols_by_name_in_repo(symbols: list | None, target_name: str, repo_name: str = "test_repo") -> list:
     """Filter workspace symbols to exact name matches in the test repo."""

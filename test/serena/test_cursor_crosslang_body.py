@@ -173,6 +173,42 @@ def test_go_multiline_slice_literal_body(go_serena_agent: SerenaAgent) -> None:
             pass
 
 
+@pytest.mark.go
+def test_go_method_body_window_renders(go_serena_agent: SerenaAgent) -> None:
+    """A Go method cursor with ``include_body`` must project a ``--- body ---`` window, not anchor-only.
+
+    Regression for bug://serena/cursor-look-no-body-window-for-go-method: a method whose LSP range
+    resolves must render its source through the cursor surface rather than only the anchor line.
+    (Verified against the real platform/claude/server/pool.go ServeHTTP — its 665-char body renders.)
+    """
+    start_tool = go_serena_agent.get_tool(CursorStartTool)
+    configure_tool = go_serena_agent.get_tool(CursorConfigureTool)
+
+    project_root = Path(go_serena_agent.get_active_project_or_raise().project_root)
+    rel_path = "cursor_go_method_body_sandbox.go"
+    abs_path = project_root / rel_path
+    abs_path.write_text("package main\n\ntype handler struct {\n\tn int\n}\n\nfunc (h *handler) Serve(x int) int {\n\ty := x + h.n\n\treturn y\n}\n")
+
+    try:
+        go_serena_agent.reset_language_server_manager()
+        start_tool.apply(
+            because="regression: a Go method cursor must render a body window",
+            name_path="Serve",
+            relative_path=rel_path,
+            cursor_id="go-method-body",
+        )
+        view = configure_tool.apply(cursor_id="go-method-body", include_body=True)
+        assert "--- body ---" in view, f"Go method cursor rendered anchor-only (no body window):\n{view}"
+        assert "return y" in view, f"method body line missing from body window:\n{view}"
+    finally:
+        if abs_path.exists():
+            abs_path.unlink()
+        try:
+            go_serena_agent.reset_language_server_manager()
+        except Exception:
+            pass
+
+
 # --- Swift --------------------------------------------------------------------
 
 
