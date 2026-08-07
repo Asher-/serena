@@ -55,14 +55,21 @@ class TestConftestIsolationGuardIsInEffect:
 
     def test_a_store_built_the_way_the_agent_builds_it_writes_inside_the_sandbox(self) -> None:
         """Proves the redirect is live, not merely a different-looking string."""
-        path = Path(SerenaPaths().explicit_project_roots_file)
+        path = Path(SerenaPaths().explicit_project_roots_file).resolve()
+        # Check BEFORE writing. In the very scenario this class exists to catch,
+        # ``path`` IS the real ~/.serena store, and writing would both pollute it
+        # and -- because _write re-serialises the whole file through _read -- drop
+        # every entry older than the prune window. discard() would not put those
+        # back. So the guard must refuse to write, not clean up after itself.
+        assert (Path.home() / ".serena").resolve() not in path.parents, (
+            f"refusing to write: the suite's activation store resolves under the real user store: {path}"
+        )
         store = ExplicitProjectRootStore(str(path))
         key = "conftest-isolation-guard-probe"
         try:
             store.set(key, "/tmp/isolation-guard-probe-root")
             assert path.is_file(), "the redirected store path was not written through"
             assert ExplicitProjectRootStore(str(path)).get(key) == "/tmp/isolation-guard-probe-root"
-            assert Path.home() / ".serena" not in path.parents, f"the suite wrote an activation record under the real user store: {path}"
         finally:
             store.discard(key)
 
