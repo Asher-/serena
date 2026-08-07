@@ -420,21 +420,21 @@ class Tool(Component):
                 if not isinstance(self, ToolMarkerDoesNotRequireActiveProject):
                     if self.agent.get_active_project() is None:
                         # self-heal a stranded session whose per-session active-project slot is
-                        # empty. Order matters and encodes the mis-root guarantee:
-                        #  (1) if this session EXPLICITLY activated a project earlier -- in
+                        # empty. Exactly two outcomes, and neither of them is a guess:
+                        #  (1) this session EXPLICITLY activated a project earlier -- recorded in
                         #      _explicit_project_roots_by_session, or, when the daemon has restarted
-                        #      since and wiped that map, in the durable store backing it -- restore
-                        #      THAT root, or fail loud. NEVER silently rebind it to the forwarded
-                        #      origin cwd. Silently switching an explicitly-activated session to the
-                        #      forwarded root is the mis-root defect (bug-bin cluster 1) this branch
-                        #      guards against, and consulting only the in-memory map made every
+                        #      since and wiped that map, in the durable store backing it. Restore
+                        #      THAT root, or fail loud. Consulting only the in-memory map made every
                         #      daemon restart look like "this session never activated anything"
                         #      (bug://serena/agent/session/activation/persistence).
-                        #  (2) else, if the multiplexer forwarded the inbound CC client's project
-                        #      root (X-Forwarded-Project-Dir, captured into forwarded_project_root on
-                        #      the main thread above), activate it -- the original self-reclaim (plan
-                        #      serena-session-state-self-reclaim-impl, commit 5febf634) for genuinely
-                        #      never-activated sessions.
+                        #  (2) no record at all: FAIL. The multiplexer forwards the inbound CC
+                        #      client's cwd as X-Forwarded-Project-Dir and serena used to activate it
+                        #      here (the self-reclaim of plan serena-session-state-self-reclaim-impl,
+                        #      commit 5febf634). That convenience IS the reported defect: a caller who
+                        #      meant to work in a worktree gets silently bound to the main checkout
+                        #      and only finds out from the damage. The forwarded root is now offered
+                        #      in the error text as a suggestion the caller may pass deliberately;
+                        #      serena never binds a root it merely inferred.
                         # Keyed via _SESSION_KEY_VAR set on this worker so concurrent sessions never
                         # cross-bind. The per-session slot is re-read here unlocked -- snapshotted on
                         # the main thread into persisted_project above -- so a concurrent activation
@@ -466,21 +466,19 @@ class Tool(Component):
                                         f"daemon will NOT silently switch you to a different project. "
                                         f"Call `activate_project({explicit_root!r})` to continue."
                                     )
-                            elif forwarded_project_root:
-                                try:
-                                    self.agent.activate_project_from_path_or_name(forwarded_project_root, record_explicit=False)
-                                    healed = self.agent.get_active_project() is not None
-                                except Exception as e:
-                                    log.info(
-                                        f"Self-heal activation from forwarded project root "
-                                        f"{forwarded_project_root!r} failed: {e}."
-                                    )
                         if not healed:
+                            suggestion = (
+                                f" Your client's working directory is {forwarded_project_root!r} -- "
+                                f"pass that if it is the project you want."
+                                if forwarded_project_root
+                                else ""
+                            )
                             return (
                                 "Error: No active project for this MCP session. "
                                 "Call `activate_project(<absolute path of your project root>)` "
-                                "before any other Serena tool. If you do not know the project root, "
-                                "use your current working directory; the daemon auto-registers it if unknown."
+                                "before any other Serena tool. Serena will not pick a project root "
+                                "for you: binding one it merely inferred is how a session silently "
+                                "ends up operating on the wrong checkout." + suggestion
                             )
 
                 # apply the actual tool

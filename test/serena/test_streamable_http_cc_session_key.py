@@ -387,12 +387,19 @@ class _RequiresProjectTool(Tool):
 
 
 class TestActiveProjectSelfHeal:
-    """t2: when a session's per-session active-project slot is missing but the
-    multiplexer forwarded the inbound CC client's project root
-    (``X-Forwarded-Project-Dir``), :meth:`Tool.apply_ex` re-activates that
-    project for *this* session before the no-project gate, so a stranded
-    session (e.g. after a serena daemon restart) recovers transparently on its
-    next tool call rather than erroring.
+    """When a session's per-session active-project slot is empty,
+    :meth:`Tool.apply_ex` has exactly two outcomes and neither is a guess:
+
+      1. the session has a record of explicitly activating a project (the
+         in-memory map, or the durable store when a restart wiped it) --
+         restore THAT root, or fail loud;
+      2. no record at all -- FAIL.
+
+    Outcome 2 used to activate the multiplexer-forwarded
+    ``X-Forwarded-Project-Dir`` instead, which is convenient right up until a
+    caller who meant to work in a worktree is silently bound to the main
+    checkout. That branch is deleted; the forwarded cwd survives only as a
+    suggestion in the error text, which the caller may pass deliberately.
     """
 
     @staticmethod
@@ -402,26 +409,26 @@ class TestActiveProjectSelfHeal:
         monkeypatch.setattr(agent, "record_tool_usage", lambda *a, **kw: None)
         return t
 
-    def test_missing_slot_with_forwarded_root_self_heals_and_runs(
+    def test_missing_slot_with_forwarded_root_fails_and_never_binds_it(
         self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Missing slot + ``X-Forwarded-Project-Dir`` present -> apply_ex calls
-        ``activate_project_from_path_or_name(root)`` and the tool then runs.
+        """No record + ``X-Forwarded-Project-Dir`` present -> apply_ex FAILS and
+        activates nothing. Serena does not pick a project root on the caller's
+        behalf; the forwarded cwd is offered in the error, not bound.
+
+        This test asserted the opposite until 2026-08-06. Auto-binding the
+        forwarded root is what silently moved sessions onto the main checkout.
         """
         token = _reset_pipe_var()
         try:
             tool = self._requires_project_tool(agent, monkeypatch)
-            cc_session_id = "cc-session-self-heal"
-            project_root = "/tmp/serena-self-heal-root"
-            fake_project = MagicMock(name="healed-project")
+            cc_session_id = "cc-session-no-record"
+            forwarded_root = "/tmp/serena-forwarded-root"
             activated_with: list[str] = []
 
             def fake_activate(root: str, **kwargs: Any) -> bool:
-                # mimic the real activation's per-session binding: assigning the
-                # _active_project property routes to _active_projects_by_session
-                # [session_key] because _SESSION_KEY_VAR is bound in the worker.
                 activated_with.append(root)
-                agent._active_project = fake_project
+                agent._active_project = MagicMock(name="should-never-be-bound")
                 return True
 
             monkeypatch.setattr(agent, "activate_project_from_path_or_name", fake_activate)
@@ -430,19 +437,19 @@ class TestActiveProjectSelfHeal:
                 forwarded_header=cc_session_id,
                 header_attr_path="request_context.request.headers",
             )
-            ctx.request_context.request.headers["x-forwarded-project-dir"] = project_root
+            ctx.request_context.request.headers["x-forwarded-project-dir"] = forwarded_root
 
             result = tool.apply_ex(mcp_ctx=ctx, log_call=False)
 
-            assert activated_with == [project_root], (
-                "self-heal must call activate_project_from_path_or_name with the forwarded "
-                f"root; observed calls: {activated_with!r}"
+            assert activated_with == [], (
+                "a session with no activation record must NOT be bound to the forwarded cwd; "
+                f"observed activations: {activated_with!r}"
             )
-            assert result == _RequiresProjectTool.RAN, (
-                f"after self-heal the project-requiring tool must run; got: {result!r}"
+            assert "No active project" in result, f"the caller must be told, not silently rebound; got: {result!r}"
+            assert forwarded_root in result, (
+                "the forwarded cwd should still be offered as a suggestion the caller can pass deliberately"
             )
-            # the re-bind persisted to THIS session's slot, not the legacy slot
-            assert agent._active_projects_by_session.get(cc_session_id) is fake_project
+            assert agent._active_projects_by_session.get(cc_session_id) is None
             assert agent._legacy_active_project is None
         finally:
             _PIPE_SESSION_ID_VAR.reset(token)
@@ -480,12 +487,17 @@ class TestActiveProjectSelfHeal:
         finally:
             _PIPE_SESSION_ID_VAR.reset(token)
 
-    def test_two_distinct_sessions_self_heal_without_cross_binding(
-        self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch
+    def test_two_distinct_sessions_restore_without_cross_binding(
+        self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Two concurrent CC sessions multiplexed onto one transport session,
-        each with its own forwarded root, self-heal into their OWN per-session
-        slots -- never cross-binding one session's project onto the other.
+        each with its own DURABLE activation record, restore into their OWN
+        per-session slots -- never cross-binding one session's project onto the
+        other.
+
+        Re-based off the deleted forwarded-root path on 2026-08-06; the property
+        under test (no cross-binding across a shared transport session) is
+        unchanged, only the route into the restore branch is.
         """
         token = _reset_pipe_var()
         try:
@@ -496,6 +508,10 @@ class TestActiveProjectSelfHeal:
             proj_b = MagicMock(name="project-B")
             by_root = {root_a: proj_a, root_b: proj_b}
 
+            agent._explicit_project_root_store = ExplicitProjectRootStore(str(tmp_path / "roots.json"))
+            agent._explicit_project_root_store.set(cc_a, root_a)
+            agent._explicit_project_root_store.set(cc_b, root_b)
+
             def fake_activate(root: str, **kwargs: Any) -> bool:
                 agent._active_project = by_root[root]
                 return True
@@ -504,9 +520,7 @@ class TestActiveProjectSelfHeal:
 
             shared_session = _FakeSession()
             ctx_a = _make_mcp_ctx(forwarded_header=cc_a, session=shared_session)
-            ctx_a.request_context.request.headers["x-forwarded-project-dir"] = root_a
             ctx_b = _make_mcp_ctx(forwarded_header=cc_b, session=shared_session)
-            ctx_b.request_context.request.headers["x-forwarded-project-dir"] = root_b
 
             assert tool.apply_ex(mcp_ctx=ctx_a, log_call=False) == _RequiresProjectTool.RAN
             assert tool.apply_ex(mcp_ctx=ctx_b, log_call=False) == _RequiresProjectTool.RAN
