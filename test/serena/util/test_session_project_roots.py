@@ -13,11 +13,58 @@ import json
 import time
 from pathlib import Path
 
+from serena.config.serena_config import SerenaPaths
 from serena.util.session_project_roots import ExplicitProjectRootStore
 
 
 def _store(tmp_path: Path, **kwargs: float) -> ExplicitProjectRootStore:
     return ExplicitProjectRootStore(str(tmp_path / "state" / "session_project_roots.json"), **kwargs)
+
+
+class TestConftestIsolationGuardIsInEffect:
+    """The blanket guard in ``test/serena/conftest.py`` has a silent failure mode.
+
+    ``_isolate_explicit_project_root_store`` redirects the store by patching the
+    :class:`SerenaPaths` *singleton*, and :class:`SerenaAgent` binds its own store
+    from ``SerenaPaths().explicit_project_roots_file`` at construction. Drop the
+    ``@singleton`` decorator and the patch lands on a throwaway instance, so the
+    agent silently resumes writing into the developer's real ``~/.serena`` -- the
+    exact defect the fixture exists to prevent -- with nothing turning red.
+
+    Every other test in this package binds its own store explicitly, so none of
+    them exercises the fixture: delete it and they all still pass. That is why
+    these two tests are here, and why they deliberately assert on the *resolved
+    path* rather than on the real file's contents. The fixture's own docstring
+    declines the latter as flaky, and it is right to -- a serena daemon running
+    on the same machine writes that file legitimately.
+
+    Not covered, and stated rather than implied: if ``SerenaAgent`` ever stops
+    reading its path from ``SerenaPaths()``, these assertions still pass while
+    the agent pollutes. Catching that needs a constructed agent, which is far
+    heavier than this module's scope.
+    """
+
+    def test_the_path_an_agent_would_bind_is_not_the_real_user_store(self) -> None:
+        bound = Path(SerenaPaths().explicit_project_roots_file).resolve()
+        real = (Path.home() / ".serena" / "session_project_roots.json").resolve()
+        assert bound != real, (
+            "the conftest fixture is not covering SerenaPaths -- a SerenaAgent built in this "
+            "suite would write the developer's real activation store. Most likely cause: "
+            "SerenaPaths lost its @singleton decorator, so the fixture patched a throwaway instance"
+        )
+
+    def test_a_store_built_the_way_the_agent_builds_it_writes_inside_the_sandbox(self) -> None:
+        """Proves the redirect is live, not merely a different-looking string."""
+        path = Path(SerenaPaths().explicit_project_roots_file)
+        store = ExplicitProjectRootStore(str(path))
+        key = "conftest-isolation-guard-probe"
+        try:
+            store.set(key, "/tmp/isolation-guard-probe-root")
+            assert path.is_file(), "the redirected store path was not written through"
+            assert ExplicitProjectRootStore(str(path)).get(key) == "/tmp/isolation-guard-probe-root"
+            assert Path.home() / ".serena" not in path.parents, f"the suite wrote an activation record under the real user store: {path}"
+        finally:
+            store.discard(key)
 
 
 class TestRoundTrip:
