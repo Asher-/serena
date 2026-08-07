@@ -628,16 +628,26 @@ class TestActiveProjectSelfHeal:
             _PIPE_SESSION_ID_VAR.reset(token)
 
     def test_session_bound_activation_records_explicit_root(
-        self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch
+        self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """A session-bound activation records its root in
         ``_explicit_project_roots_by_session`` so a later self-heal can restore
         exactly that project. ``record_explicit=False`` (used by the self-heal
-        restore itself and the forwarded fallback) must NOT write a record.
+        restore) must NOT write a record.
+
+        The activation also writes the durable store, so this test binds its own
+        store under ``tmp_path``. Before the store existed the same call touched
+        only an in-memory dict; once it landed, an un-redirected run of this test
+        wrote ``{"cc-session-record": "/tmp/serena-recorded-root"}`` into a real
+        ``~/.serena``. ``_isolate_explicit_project_root_store`` in conftest is the
+        blanket guard; the explicit binding here keeps the assertions below
+        readable about which store they are reading.
         """
         # neutralise the background language-server launch; we exercise only the
         # per-session bookkeeping of _activate_project.
         monkeypatch.setattr(agent, "issue_task", lambda *a, **kw: None)
+        store_path = str(tmp_path / "session_project_roots.json")
+        agent._explicit_project_root_store = ExplicitProjectRootStore(store_path)
 
         def activate(session_key: str, project: Any, record_explicit: bool) -> None:
             def _inner() -> None:
@@ -663,6 +673,9 @@ class TestActiveProjectSelfHeal:
         assert agent._explicit_project_roots_by_session.get("cc-session-record") == "/tmp/serena-recorded-root", (
             "a session-bound activation must record its explicit root for later self-heal"
         )
+        assert ExplicitProjectRootStore(store_path).get("cc-session-record") == "/tmp/serena-recorded-root", (
+            "the same activation must reach the durable store, read back through a fresh instance"
+        )
 
         heal_project = MagicMock(name="heal")
         heal_project.project_root = "/tmp/serena-heal-root"
@@ -671,7 +684,10 @@ class TestActiveProjectSelfHeal:
 
         activate("cc-session-norecord", heal_project, record_explicit=False)
         assert "cc-session-norecord" not in agent._explicit_project_roots_by_session, (
-            "record_explicit=False (the self-heal restore / forwarded fallback) must NOT record"
+            "record_explicit=False (the self-heal restore) must NOT record"
+        )
+        assert ExplicitProjectRootStore(store_path).get("cc-session-norecord") is None, (
+            "record_explicit=False must not reach the durable store either"
         )
 
 
