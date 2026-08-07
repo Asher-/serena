@@ -421,11 +421,15 @@ class Tool(Component):
                     if self.agent.get_active_project() is None:
                         # self-heal a stranded session whose per-session active-project slot is
                         # empty. Order matters and encodes the mis-root guarantee:
-                        #  (1) if this session EXPLICITLY activated a project earlier
-                        #      (_explicit_project_roots_by_session), restore THAT root, or fail
-                        #      loud -- NEVER silently rebind it to the forwarded origin cwd. Silently
-                        #      switching an explicitly-activated session to the forwarded root is the
-                        #      mis-root defect (bug-bin cluster 1) this branch guards against.
+                        #  (1) if this session EXPLICITLY activated a project earlier -- in
+                        #      _explicit_project_roots_by_session, or, when the daemon has restarted
+                        #      since and wiped that map, in the durable store backing it -- restore
+                        #      THAT root, or fail loud. NEVER silently rebind it to the forwarded
+                        #      origin cwd. Silently switching an explicitly-activated session to the
+                        #      forwarded root is the mis-root defect (bug-bin cluster 1) this branch
+                        #      guards against, and consulting only the in-memory map made every
+                        #      daemon restart look like "this session never activated anything"
+                        #      (bug://serena/agent/session/activation/persistence).
                         #  (2) else, if the multiplexer forwarded the inbound CC client's project
                         #      root (X-Forwarded-Project-Dir, captured into forwarded_project_root on
                         #      the main thread above), activate it -- the original self-reclaim (plan
@@ -440,6 +444,11 @@ class Tool(Component):
                         healed = False
                         if session_key is not None and self.agent._active_projects_by_session.get(session_key) is None:
                             explicit_root = self.agent._explicit_project_roots_by_session.get(session_key)
+                            if explicit_root is None:
+                                # the in-memory map died with the previous process; the durable store
+                                # is what lets a restarted session still be recognised as one that
+                                # chose its own project.
+                                explicit_root = self.agent._explicit_project_root_store.get(session_key)
                             if explicit_root is not None:
                                 try:
                                     self.agent.activate_project_from_path_or_name(explicit_root, record_explicit=False)

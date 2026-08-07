@@ -105,6 +105,12 @@ class SerenaPaths:
         """
         directory where global memories are stored, i.e. memories that are available across all projects
         """
+        self.explicit_project_roots_file: str = os.path.join(self.serena_user_home_dir, "session_project_roots.json")
+        """
+        file recording the project root each MCP session explicitly activated. Backs
+        SerenaAgent._explicit_project_roots_by_session so the record outlives the daemon process and a
+        session that activated a project is restored to it after a restart rather than being stranded.
+        """
         self.last_returned_log_file_path: str | None = None
         """
         the path to the last log file returned by `get_next_log_file_path`. If this is not None, the logs

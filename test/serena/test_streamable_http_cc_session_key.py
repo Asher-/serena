@@ -30,6 +30,7 @@ from __future__ import annotations
 import contextvars
 import logging
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -38,6 +39,7 @@ import pytest
 from serena.agent import _PIPE_SESSION_ID_VAR, _SESSION_KEY_VAR, SerenaAgent
 from serena.config.serena_config import SerenaConfig
 from serena.tools.tools_base import Tool, ToolMarkerDoesNotRequireActiveProject
+from serena.util.session_project_roots import ExplicitProjectRootStore
 
 # --- test infrastructure --------------------------------------------------
 
@@ -657,3 +659,167 @@ class TestActiveProjectSelfHeal:
         assert "cc-session-norecord" not in agent._explicit_project_roots_by_session, (
             "record_explicit=False (the self-heal restore / forwarded fallback) must NOT record"
         )
+
+
+class TestExplicitRootSurvivesDaemonRestart:
+    """bug://serena/agent/session/activation/persistence.
+
+    ``_explicit_project_roots_by_session`` is the only evidence that a session
+    chose a project, and it used to live purely in process memory. A daemon
+    restart wiped it, which made a session that had explicitly activated a
+    worktree indistinguishable from one that never activated anything -- so the
+    self-heal in :meth:`Tool.apply_ex` skipped the restore branch entirely and
+    the session was silently rebound to the multiplexer-forwarded origin cwd
+    (the user's main checkout). These tests pin the durable record that closes
+    that gap: the restart is simulated with a genuinely second
+    :class:`SerenaAgent` over the same on-disk store, because an assertion made
+    against the same agent instance would pass even if nothing reached the disk.
+    """
+
+    @staticmethod
+    def _fresh_agent() -> SerenaAgent:
+        return SerenaAgent(serena_config=SerenaConfig(gui_log_window=False, web_dashboard=False))
+
+    @staticmethod
+    def _activate_as_session(agent: SerenaAgent, session_key: str, project: Any, record_explicit: bool = True) -> None:
+        """Run a session-bound activation with ContextVar writes confined to an
+        ephemeral context, mirroring TestActiveProjectSelfHeal's helper.
+        """
+
+        def _inner() -> None:
+            _SESSION_KEY_VAR.set(session_key)
+            agent._activate_project(
+                project,
+                update_active_modes=False,
+                update_active_tools=False,
+                record_explicit=record_explicit,
+            )
+
+        contextvars.copy_context().run(_inner)
+
+    @staticmethod
+    def _project(root: str, name: str) -> MagicMock:
+        project = MagicMock(name=name)
+        project.project_root = root
+        project.project_name = name
+        project.project_config.language_backend = None
+        return project
+
+    def test_restarted_daemon_restores_the_explicit_root_not_the_forwarded_one(
+        self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """THE regression. Session activates W, the daemon restarts, the session's
+        next call arrives with ``X-Forwarded-Project-Dir`` = O (its CC cwd, the
+        main checkout). The restarted daemon must restore W and never touch O.
+        """
+        store_path = str(tmp_path / "session_project_roots.json")
+        cc_session_id = "cc-session-across-restart"
+        explicit_root = "/tmp/serena-explicit-W"
+        forwarded_root = "/tmp/serena-forwarded-O"
+
+        # --- before the restart -------------------------------------------
+        agent._explicit_project_root_store = ExplicitProjectRootStore(store_path)
+        monkeypatch.setattr(agent, "issue_task", lambda *a, **kw: None)
+        self._activate_as_session(agent, cc_session_id, self._project(explicit_root, "W"))
+
+        assert ExplicitProjectRootStore(store_path).get(cc_session_id) == explicit_root, (
+            "the explicit activation must reach the disk; nothing downstream can survive a restart otherwise"
+        )
+
+        # --- the restart: a genuinely new agent, empty maps, same store ----
+        restarted = self._fresh_agent()
+        try:
+            restarted._explicit_project_root_store = ExplicitProjectRootStore(store_path)
+            assert restarted._explicit_project_roots_by_session == {}, (
+                "a restarted daemon starts with no in-memory record; that is the condition under test"
+            )
+
+            tool = TestActiveProjectSelfHeal._requires_project_tool(restarted, monkeypatch)
+            activated_with: list[str] = []
+            healed_project = MagicMock(name="restored-W")
+
+            def fake_activate(root: str, **kwargs: Any) -> bool:
+                activated_with.append(root)
+                restarted._active_project = healed_project
+                return True
+
+            monkeypatch.setattr(restarted, "activate_project_from_path_or_name", fake_activate)
+
+            token = _reset_pipe_var()
+            try:
+                ctx = _make_mcp_ctx(
+                    forwarded_header=cc_session_id,
+                    header_attr_path="request_context.request.headers",
+                )
+                ctx.request_context.request.headers["x-forwarded-project-dir"] = forwarded_root
+                result = tool.apply_ex(mcp_ctx=ctx, log_call=False)
+            finally:
+                _PIPE_SESSION_ID_VAR.reset(token)
+
+            assert activated_with == [explicit_root], (
+                "after a daemon restart the session must be restored to the root it explicitly "
+                f"activated, not rebound to the forwarded origin; observed activations: {activated_with!r}"
+            )
+            assert forwarded_root not in activated_with, (
+                "a restart must never silently switch a session to the Claude Code client's cwd"
+            )
+            assert result == _RequiresProjectTool.RAN
+            assert restarted._active_projects_by_session.get(cc_session_id) is healed_project
+        finally:
+            restarted.on_shutdown(timeout=0.5)
+
+    def test_shutdown_preserves_the_durable_record(self, tmp_path: Path) -> None:
+        """Shutdown is precisely the event the record exists to survive, so
+        ``on_shutdown`` must clear the in-memory map and leave the store alone.
+        """
+        store_path = str(tmp_path / "session_project_roots.json")
+        agent = self._fresh_agent()
+        agent._explicit_project_root_store = ExplicitProjectRootStore(store_path)
+        agent._explicit_project_root_store.set("cc-session-shutdown", "/tmp/serena-kept")
+
+        agent.on_shutdown(timeout=0.5)
+
+        assert agent._explicit_project_roots_by_session == {}
+        assert ExplicitProjectRootStore(store_path).get("cc-session-shutdown") == "/tmp/serena-kept", (
+            "on_shutdown must not delete the durable record; doing so restores the pre-fix behaviour"
+        )
+
+    def test_evicting_a_session_drops_its_durable_record(self, agent: SerenaAgent, tmp_path: Path) -> None:
+        """An evicted session is genuinely gone. Leaving its record behind would
+        let a future session reusing the key inherit this one's project.
+        """
+        store_path = str(tmp_path / "session_project_roots.json")
+        agent._explicit_project_root_store = ExplicitProjectRootStore(store_path)
+        agent._explicit_project_root_store.set("cc-session-evict", "/tmp/serena-evicted")
+
+        agent._evict_session_state("cc-session-evict")
+
+        assert ExplicitProjectRootStore(store_path).get("cc-session-evict") is None
+
+    def test_evicting_a_pipe_session_drops_its_durable_record(self, agent: SerenaAgent, tmp_path: Path) -> None:
+        store_path = str(tmp_path / "session_project_roots.json")
+        agent._explicit_project_root_store = ExplicitProjectRootStore(store_path)
+        agent._explicit_project_root_store.set("/tmp/serena-pipe-root", "/tmp/serena-pipe-root")
+
+        agent.evict_pipe_session("/tmp/serena-pipe-root")
+
+        assert ExplicitProjectRootStore(store_path).get("/tmp/serena-pipe-root") is None
+
+    def test_record_explicit_false_writes_no_durable_record(
+        self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The self-heal restore itself passes ``record_explicit=False``. It must
+        not write, or the store would accumulate roots nobody explicitly chose.
+        """
+        store_path = str(tmp_path / "session_project_roots.json")
+        agent._explicit_project_root_store = ExplicitProjectRootStore(store_path)
+        monkeypatch.setattr(agent, "issue_task", lambda *a, **kw: None)
+
+        self._activate_as_session(
+            agent,
+            "cc-session-norecord",
+            self._project("/tmp/serena-heal-root", "heal"),
+            record_explicit=False,
+        )
+
+        assert ExplicitProjectRootStore(store_path).get("cc-session-norecord") is None

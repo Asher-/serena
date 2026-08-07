@@ -54,6 +54,7 @@ from serena.tools import (
 from serena.util.gui import system_has_usable_display
 from serena.util.inspection import iter_subclasses
 from serena.util.logging import MemoryLogHandler
+from serena.util.session_project_roots import ExplicitProjectRootStore
 from solidlsp.ls_config import Language
 
 if TYPE_CHECKING:
@@ -327,6 +328,13 @@ class SerenaAgent:
         # origin -- so a session that ever explicitly activated a project is never silently rebound to
         # a different one. Keyed identically to _active_projects_by_session and evicted alongside it.
         self._explicit_project_roots_by_session: dict[str | int, str] = {}
+        # the on-disk backing for the map above. The map alone survives an evicted per-session slot but
+        # not a daemon restart, and losing it makes a session that explicitly activated a worktree
+        # indistinguishable from one that never activated anything -- the self-heal then has nothing to
+        # restore and the session is stranded. Written on every session-bound explicit activation and
+        # consulted by the self-heal when the in-memory record misses, so the binding outlives the
+        # process. Swap this attribute to redirect the store (tests).
+        self._explicit_project_root_store = ExplicitProjectRootStore(SerenaPaths().explicit_project_roots_file)
         # fallback active project for non-MCP callers (CLI, dashboard, scripts, tests) that have no session
         # in scope; the property setter writes here when _SESSION_KEY_VAR is unset.
         self._legacy_active_project: Project | None = None
@@ -899,6 +907,9 @@ class SerenaAgent:
         """
         self._active_projects_by_session.pop(session_key, None)
         self._explicit_project_roots_by_session.pop(session_key, None)
+        # the session is genuinely gone, so drop its durable record too; leaving it would let a future
+        # session that reuses the key inherit this one's project.
+        self._explicit_project_root_store.discard(session_key)
         self._cursor_managers_by_session.pop(session_key, None)
         self._warned_missing_forwarded_session_keys.discard(session_key)
         with self._session_finalizers_lock:
@@ -961,6 +972,7 @@ class SerenaAgent:
         """
         self._active_projects_by_session.pop(session_id, None)
         self._explicit_project_roots_by_session.pop(session_id, None)
+        self._explicit_project_root_store.discard(session_id)
         self._cursor_managers_by_session.pop(session_id, None)
         # tear down the pipe session's per-session executor so its worker thread does not idle
         # past the forwarder's life; pending tasks have their futures cancelled.
@@ -1268,6 +1280,9 @@ class SerenaAgent:
                 # (Tool.apply_ex) restores exactly this project after a per-session slot loss,
                 # rather than silently rebinding to the multiplexer-forwarded origin cwd.
                 self._explicit_project_roots_by_session[session_key] = project.project_root
+                # and durably, so the restore also survives a daemon restart -- which wipes the map
+                # above and is the failure the in-memory record alone never covered.
+                self._explicit_project_root_store.set(session_key, project.project_root)
         else:
             self._legacy_cursor_manager = None
         project.set_agent(self)
@@ -1493,6 +1508,9 @@ class SerenaAgent:
 
         self._active_projects_by_session.clear()
         self._explicit_project_roots_by_session.clear()
+        # deliberately NOT clearing _explicit_project_root_store: shutdown is the event the durable
+        # record exists to survive. Clearing it here would restore the pre-fix behaviour where a
+        # restarted daemon cannot tell a session that chose a project from one that never did.
         self._legacy_active_project = None
         # the cursor managers reference the projects we just shut down; drop them so they cannot be re-used
         self._cursor_managers_by_session.clear()
