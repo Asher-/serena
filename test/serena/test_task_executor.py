@@ -1,3 +1,4 @@
+import concurrent.futures
 import contextvars
 import threading
 import time
@@ -265,3 +266,40 @@ def test_task_executor_base_exception_completes_future_and_next_task_runs(execut
         first.result()
     assert second.result() == "second"
     assert second_ran.is_set()
+
+
+@pytest.mark.parametrize("outcome", ["returns", "raises"])
+def test_task_executor_cancelled_running_task_stays_cancelled_and_next_task_runs(executor, monkeypatch, outcome: str) -> None:
+    """
+    A task cancelled while its function runs stays cancelled whether the function then returns or raises a
+    BaseException that is not an Exception: the result or exception is discarded, nothing escapes the task's
+    thread unhandled, and the task queued behind it runs to completion.
+    Ordering is fixed by gates, never by the clock: the task is cancelled while its function holds on
+    ``release``, and its thread is joined before anything is read.
+    """
+    escaped: list[BaseException | None] = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: escaped.append(args.exc_value))
+    started = threading.Event()
+    release = threading.Event()
+    running_threads: list[threading.Thread] = []
+
+    def cancelled_task() -> str:
+        running_threads.append(threading.current_thread())
+        started.set()
+        release.wait()
+        if outcome == "raises":
+            raise _TaskThreadDied("raised after the task was cancelled")
+        return "discarded"
+
+    first = executor.issue_task(cancelled_task, name="cancelled-while-running")
+    started.wait()
+    second = executor.issue_task(lambda: "second", name="second")
+    first.cancel()
+    release.set()
+    running_threads[0].join()
+
+    assert first.future.cancelled()
+    assert escaped == [], "the task's function raised out of its thread unhandled"
+    with pytest.raises(concurrent.futures.CancelledError):
+        first.result()
+    assert second.result() == "second"

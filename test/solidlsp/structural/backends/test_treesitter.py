@@ -16,6 +16,7 @@ import threading
 
 import pytest
 
+from solidlsp.structural.backends import treesitter as treesitter_module
 from solidlsp.structural.backends.python import PythonStructuralLanguage
 from solidlsp.structural.backends.treesitter import (
     TreeSitterLanguage,
@@ -187,3 +188,54 @@ class TestThreadAffinity:
 
         for label in ("first", "second"):
             assert outcomes[label] == (_TreeSitterTree, False, _SH), f"the {label} thread's parse returned {outcomes[label]!r}"
+
+    def test_each_thread_builds_one_parser_and_uses_it_only_there(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # get_parser is spied, not stubbed: each parser it builds is the pack's real parser behind a
+        # wrapper that records the thread of every parse. The records hold a serial, never the wrapper,
+        # so each native parser is released on the thread that built it.
+        real_get_parser = treesitter_module.get_parser
+        builds: list[tuple[threading.Thread, int]] = []
+        uses: list[tuple[threading.Thread, int]] = []
+
+        class _RecordingParser:
+            def __init__(self, parser: object, serial: int) -> None:
+                self._parser = parser
+                self._serial = serial
+
+            def parse(self, source: str) -> object:
+                uses.append((threading.current_thread(), self._serial))
+                return self._parser.parse(source)  # type: ignore[attr-defined]
+
+        def recording_get_parser(name: str) -> _RecordingParser:
+            serial = len(builds)
+            builds.append((threading.current_thread(), serial))
+            return _RecordingParser(real_get_parser(name), serial)
+
+        monkeypatch.setattr(treesitter_module, "get_parser", recording_get_parser)
+        backend = TreeSitterLanguage("bash")
+        threads: dict[str, threading.Thread] = {}
+        outcomes: dict[str, list[object]] = {}
+
+        def parse_twice_on(label: str) -> None:
+            outcomes[label] = []
+            for _ in range(2):
+                try:
+                    tree = backend.parse(_SH)
+                except BaseException as e:  # pyo3's PanicException is a BaseException, not an Exception
+                    outcomes[label].append(e)
+                    continue
+                outcomes[label].append((type(tree), tree.has_error))
+
+        # sequential by join: the second thread starts only after both of the first thread's parses returned
+        for label in ("first", "second"):
+            threads[label] = threading.Thread(target=parse_twice_on, args=(label,), name=f"treesitter-parse-{label}")
+            threads[label].start()
+            threads[label].join()
+
+        assert outcomes == {"first": [(_TreeSitterTree, False)] * 2, "second": [(_TreeSitterTree, False)] * 2}
+        # one parser built per thread, on that thread, however many parses the thread runs
+        assert [thread for thread, _ in builds] == [threads["first"], threads["second"]]
+        built_on = {serial: thread for thread, serial in builds}
+        # every parse ran on the thread that built its parser
+        assert len(uses) == 4
+        assert all(built_on[serial] is thread for thread, serial in uses), f"builds={builds} uses={uses}"
