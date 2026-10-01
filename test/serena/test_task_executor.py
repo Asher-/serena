@@ -1,4 +1,5 @@
 import contextvars
+import threading
 import time
 
 import pytest
@@ -219,3 +220,48 @@ def test_keepalive_ordering_preserved_across_revival() -> None:
         t.result()
     assert order == [0, 1, 2, 3, 4]
     ex.shutdown()
+
+
+class _TaskThreadDied(BaseException):
+    """A BaseException that is not an Exception -- the class pyo3's PanicException belongs to."""
+
+
+def test_task_executor_base_exception_completes_future_and_next_task_runs(executor) -> None:
+    """
+    A task whose function raises a BaseException that is not an Exception completes its future with
+    that exception, and the task queued behind it then runs to completion.
+    Ordering is fixed by gates, never by the clock: the dying task holds on ``release`` until the second
+    task is queued behind it, and its thread is joined before its future is read, so a future the dead
+    thread never completed is observed as not done rather than waited on.
+    """
+    died = _TaskThreadDied("task thread died")
+    assert not isinstance(died, Exception)
+    started = threading.Event()
+    release = threading.Event()
+    second_ran = threading.Event()
+    dying_threads: list[threading.Thread] = []
+
+    def dying_task() -> None:
+        dying_threads.append(threading.current_thread())
+        started.set()
+        release.wait()
+        raise died
+
+    def second_task() -> str:
+        second_ran.set()
+        return "second"
+
+    first = executor.issue_task(dying_task, name="dying")
+    started.wait()
+    second = executor.issue_task(second_task, name="second")
+    # the executor is occupied by the in-flight dying task, so the second task is queued, not run
+    assert not second_ran.is_set()
+    release.set()
+    dying_threads[0].join()
+
+    assert first.is_done(), "the dying task's thread has exited without completing its future"
+    assert first.future.exception() is died
+    with pytest.raises(_TaskThreadDied):
+        first.result()
+    assert second.result() == "second"
+    assert second_ran.is_set()

@@ -25,6 +25,7 @@ failure is surfaced as :attr:`_TreeSitterTree.has_error`, never an exception.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -181,7 +182,8 @@ class TreeSitterLanguage(StructuralLanguage):
 
     def __init__(self, language_name: str) -> None:
         self._name = language_name
-        self._parser: Any = None  # built lazily on first parse
+        # one parser per thread, each built lazily on its thread's first parse (see _get_parser)
+        self._thread_parsers = threading.local()
         self._name_resolver = _TreeSitterNameResolver(language_name)
 
     # ---- identity ----------------------------------------------------------
@@ -203,9 +205,14 @@ class TreeSitterLanguage(StructuralLanguage):
     # ---- parse / serialize -------------------------------------------------
 
     def _get_parser(self) -> Any:
-        if self._parser is None:
-            self._parser = get_parser(self._name)
-        return self._parser
+        # the pack's native Parser is a pyo3 *unsendable* class: using it on a thread other than the
+        # one that built it panics, and Serena runs each task on a fresh thread -- so each thread
+        # parses with a parser of its own, built lazily on that thread's first parse
+        parser = getattr(self._thread_parsers, "parser", None)
+        if parser is None:
+            parser = get_parser(self._name)
+            self._thread_parsers.parser = parser
+        return parser
 
     def parse(self, source: str) -> _TreeSitterTree:
         # the pack binding takes ONE str arg and NEVER raises on malformed input

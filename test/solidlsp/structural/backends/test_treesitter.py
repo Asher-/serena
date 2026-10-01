@@ -12,11 +12,14 @@ the raw slice (the ERROR-fallthrough guarantee).
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from solidlsp.structural.backends.python import PythonStructuralLanguage
 from solidlsp.structural.backends.treesitter import (
     TreeSitterLanguage,
+    _TreeSitterTree,
     tree_sitter_fallback_resolver,
 )
 from solidlsp.structural.base import StructuralLanguage
@@ -158,3 +161,29 @@ class TestRegistryRouting:
         registry = default_structural_backend_registry()
         # no explicit backend and no tree-sitter language -> None -> plaintext floor
         assert registry.structural_backend_for("notes.unknownext") is None
+
+
+class TestThreadAffinity:
+    """The pack's native parser is unsendable: a parse on a thread uses a parser built on that thread."""
+
+    def test_parse_on_a_second_thread_after_a_first_returns_a_tree(self) -> None:
+        backend = TreeSitterLanguage("bash")
+        outcomes: dict[str, object] = {}
+
+        def parse_on(label: str) -> None:
+            try:
+                tree = backend.parse(_SH)
+            except BaseException as e:  # pyo3's PanicException is a BaseException, not an Exception
+                outcomes[label] = e
+                return
+            # the native tree is unsendable too, so it is inspected and released on the thread that parsed it
+            outcomes[label] = (type(tree), tree.has_error, backend.serialize(tree))
+
+        # sequential by join: the second thread starts only after the first thread's parse has returned
+        for label in ("first", "second"):
+            thread = threading.Thread(target=parse_on, args=(label,), name=f"treesitter-parse-{label}")
+            thread.start()
+            thread.join()
+
+        for label in ("first", "second"):
+            assert outcomes[label] == (_TreeSitterTree, False, _SH), f"the {label} thread's parse returned {outcomes[label]!r}"

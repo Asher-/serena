@@ -88,7 +88,10 @@ class TaskExecutor:
                         result = self._function()
                         if not self.future.done():
                             self.future.set_result(result)
-                except Exception as e:
+                except BaseException as e:
+                    # BaseException, not Exception: a task thread that dies on anything (e.g. pyo3's
+                    # PanicException) without completing its future would hold the queue worker, which
+                    # waits on that future before it starts the next task
                     if not self.future.done():
                         log.error(f"Error during execution of {self.name}: {e}", exc_info=e)
                         self.future.set_exception(e)
