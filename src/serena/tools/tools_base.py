@@ -573,7 +573,14 @@ class Tool(Component):
             return await asyncio.wait_for(asyncio.wrap_future(task_exec.future), timeout=deadline)
         except TimeoutError:
             return self._timeout_result(task_exec, deadline)
-        except Exception as e:  # cancellation; exceptions of the tool itself are caught in the task
+        except asyncio.CancelledError as e:
+            # the call's task was cancelled (its session's queue was shut down) while the request awaiting it was not:
+            # answered as apply_ex answers it. A cancellation of the request itself is passed on to the request.
+            current_task = asyncio.current_task()
+            if current_task is not None and current_task.cancelling() > 0:
+                raise
+            return self._error_result(e)
+        except Exception as e:  # the task's exception, under catch_exceptions=False
             return self._error_result(e)
 
     @staticmethod

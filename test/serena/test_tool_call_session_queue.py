@@ -24,6 +24,7 @@ from serena.agent import SerenaAgent
 from serena.config.serena_config import ProjectConfig, SerenaConfig
 from serena.mcp import SerenaMCPFactory
 from serena.project import Project
+from serena.task_executor import TaskExecutor
 from serena.tools.cursor_tools import CursorFindTool
 from serena.tools.file_tools import StatTool
 from serena.tools.tools_base import Tool, ToolMarkerDoesNotRequireActiveProject
@@ -81,6 +82,25 @@ class _ForwardedMcpContext:
         return cls(_ForwardedRequestContext(_ForwardedRequest({"x-forwarded-mcp-session-id": session_id})))
 
 
+class _OutsideRequestMcpContext:
+    """
+    An ``mcp_ctx`` double for a call made outside any request, as FastMCP's ``Context`` is when no request is in
+    flight: reading its request context or its session raises, so no session key can be derived for the call.
+    """
+
+    @property
+    def request_context(self) -> Any:
+        raise ValueError("Context is not available outside of a request")
+
+    @property
+    def session(self) -> Any:
+        raise ValueError("Context is not available outside of a request")
+
+
+_ZERO_CROSSOVER_REFUSAL = "Error: RuntimeError - Internal error: MCP call is in flight but _SESSION_KEY_VAR is unset."
+"""The error state of an MCP call refused because no session is bound to it (``SerenaAgent.issue_task``)."""
+
+
 class _GatedProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
     """A tool whose call holds on a gate until the test releases it."""
 
@@ -108,6 +128,18 @@ class _ImmediateProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
         :return: a fixed marker
         """
         return "ran"
+
+
+class _FailingProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
+    """A tool whose call raises."""
+
+    def apply(self) -> str:
+        """
+        Raises at once.
+
+        :return: nothing; the call raises a ``ValueError``
+        """
+        raise ValueError("boom")
 
 
 class _ActivatingProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
@@ -156,6 +188,36 @@ class _SingleLanguageServerManager:
 
     def stop_all(self, save_cache: bool = False, timeout: float = 2.0) -> None:
         pass
+
+
+@dataclass
+class _IssueSignal:
+    """
+    A signal that a given number of tasks have been issued through an agent's ``issue_task``: a task issued on a
+    session's queue behind a held task of that session is queued, not running, once the signal is set.
+    """
+
+    count: int
+    issued: threading.Event = field(default_factory=threading.Event)
+    _issued_count: int = 0
+
+    def install(self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch) -> None:
+        """
+        Replaces the agent's ``issue_task`` by one that issues the task and then counts it.
+
+        :param agent: the agent whose issued tasks to count
+        :param monkeypatch: the fixture that restores the agent's ``issue_task`` at teardown
+        """
+        issue_task = agent.issue_task
+
+        def issue_task_and_count(*args: Any, **kwargs: Any) -> Any:
+            task = issue_task(*args, **kwargs)
+            self._issued_count += 1
+            if self._issued_count == self.count:
+                self.issued.set()
+            return task
+
+        monkeypatch.setattr(agent, "issue_task", issue_task_and_count)
 
 
 @pytest.fixture
@@ -349,3 +411,185 @@ def test_an_activation_within_a_session_call_does_not_queue_language_server_star
     result = activating.apply_ex(mcp_ctx=_ForwardedMcpContext.for_session("session-a"))
 
     assert result == "language server ready"
+
+
+def test_an_activation_outside_any_session_queues_language_server_startup_on_the_daemon_wide_queue(
+    agent: SerenaAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    An activation made outside any session (the CLI, the dashboard, a startup activation) starts the project's
+    language server manager as a task of the daemon-wide queue; only an activation inside a call of a session starts it
+    on a thread of its own. The name of the thread the start runs on tells the two apart.
+    """
+    project = _project(tmp_path, agent)
+    started_on: list[str] = []
+
+    def create_language_server_manager() -> None:
+        started_on.append(threading.current_thread().name)
+        project._lsm_ready_event.set()
+
+    monkeypatch.setattr(project, "create_language_server_manager", create_language_server_manager)
+
+    agent._activate_project(project, update_active_modes=False, update_active_tools=False, record_explicit=False)
+    project._lsm_ready_event.wait()
+
+    assert len(started_on) == 1 and started_on[0].endswith(":init_language_server_manager"), started_on
+
+
+def test_an_mcp_call_with_no_derivable_session_is_refused_rather_than_run_on_the_daemon_wide_queue(
+    agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    An MCP call whose session key cannot be derived is answered with the zero-crossover refusal, raised when the call
+    is issued, rather than run on the daemon-wide queue that the calls of every session would share.
+    """
+    agent.serena_config.tool_timeout = 10.0
+    immediate = _activated(_ImmediateProbeTool(agent), monkeypatch)
+
+    result = immediate.apply_ex(mcp_ctx=_OutsideRequestMcpContext())  # type: ignore[arg-type]
+
+    assert result.startswith(_ZERO_CROSSOVER_REFUSAL), result
+
+
+def test_an_awaited_mcp_call_with_no_derivable_session_is_refused_rather_than_run_on_the_daemon_wide_queue(
+    agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same refusal through ``Tool.apply_ex_async``."""
+    agent.serena_config.tool_timeout = 10.0
+    immediate = _activated(_ImmediateProbeTool(agent), monkeypatch)
+
+    result = asyncio.run(immediate.apply_ex_async(mcp_ctx=_OutsideRequestMcpContext()))  # type: ignore[arg-type]
+
+    assert result.startswith(_ZERO_CROSSOVER_REFUSAL), result
+
+
+def test_a_queued_call_of_an_evicted_session_is_answered_with_the_cancellation(
+    agent: SerenaAgent, gate: _Gate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A call of session A queued behind A's held call is answered with the cancellation error state once session A is
+    evicted, which shuts down A's queue and cancels the tasks still queued on it, while the held call is still held:
+    the queued call does not wait out its deadline. The calls are made through ``Tool.apply_ex`` on threads.
+    """
+    agent.serena_config.tool_timeout = 10.0
+    held = _activated(_GatedProbeTool(agent, gate), monkeypatch)
+    queued = _activated(_ImmediateProbeTool(agent), monkeypatch)
+    issue_signal = _IssueSignal(count=2)
+    issue_signal.install(agent, monkeypatch)
+    session_a = _ForwardedMcpContext.for_session("session-a")
+
+    held_results: list[str] = []
+    held_call = threading.Thread(target=lambda: held_results.append(held.apply_ex(mcp_ctx=session_a)))  # type: ignore[arg-type]
+    held_call.start()
+    gate.entered.wait()
+    queued_results: list[str] = []
+    queued_call = threading.Thread(target=lambda: queued_results.append(queued.apply_ex(mcp_ctx=session_a)))  # type: ignore[arg-type]
+    queued_call.start()
+    issue_signal.issued.wait()
+
+    agent._evict_session_state("session-a")
+    queued_call.join()
+    released_before_queued_answered = gate.release.is_set()
+    gate.release.set()
+    held_call.join()
+
+    assert not released_before_queued_answered
+    assert queued_results == ["Error: CancelledError - "]
+    assert held_results == ["released"]
+
+
+def test_an_awaited_call_queued_for_an_evicted_session_is_answered_with_the_cancellation(
+    agent: SerenaAgent, gate: _Gate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The same eviction through ``Tool.apply_ex_async`` on one event loop. The cancellation of the queued task's future
+    reaches the loop as the loop's own ``CancelledError``; the failing shape lets it escape the call as though the
+    request itself had been cancelled, so the call is never answered.
+    """
+    agent.serena_config.tool_timeout = 10.0
+    held = _activated(_GatedProbeTool(agent, gate), monkeypatch)
+    queued = _activated(_ImmediateProbeTool(agent), monkeypatch)
+    issue_signal = _IssueSignal(count=2)
+    issue_signal.install(agent, monkeypatch)
+
+    async def scenario() -> tuple[str, bool, str]:
+        held_call = asyncio.create_task(held.apply_ex_async(mcp_ctx=_ForwardedMcpContext.for_session("session-a")))  # type: ignore[arg-type]
+        await asyncio.to_thread(gate.entered.wait)
+        queued_call = asyncio.create_task(queued.apply_ex_async(mcp_ctx=_ForwardedMcpContext.for_session("session-a")))  # type: ignore[arg-type]
+        await asyncio.to_thread(issue_signal.issued.wait)
+        agent._evict_session_state("session-a")
+        queued_result = await queued_call
+        released_before_queued_answered = gate.release.is_set()
+        gate.release.set()
+        return queued_result, released_before_queued_answered, await held_call
+
+    queued_result, released_before_queued_answered, held_result = asyncio.run(scenario())
+
+    assert not released_before_queued_answered
+    assert queued_result == "Error: CancelledError - "
+    assert held_result == "released"
+
+
+def test_an_awaited_call_whose_request_is_cancelled_propagates_the_cancellation_and_frees_its_session_queue(
+    agent: SerenaAgent, gate: _Gate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A call awaited through ``Tool.apply_ex_async`` whose request is cancelled while its task holds on the gate passes
+    the cancellation on to the request rather than answering it, and cancels its task, so the next call of its session
+    runs while the first is still held.
+    """
+    agent.serena_config.tool_timeout = 10.0
+    held = _activated(_GatedProbeTool(agent, gate), monkeypatch)
+    immediate = _activated(_ImmediateProbeTool(agent), monkeypatch)
+
+    async def scenario() -> tuple[bool, str, bool]:
+        held_call = asyncio.create_task(held.apply_ex_async(mcp_ctx=_ForwardedMcpContext.for_session("session-a")))  # type: ignore[arg-type]
+        await asyncio.to_thread(gate.entered.wait)
+        held_call.cancel()
+        await asyncio.wait([held_call])
+        next_result = await immediate.apply_ex_async(mcp_ctx=_ForwardedMcpContext.for_session("session-a"))  # type: ignore[arg-type]
+        return held_call.cancelled(), next_result, gate.release.is_set()
+
+    request_cancelled, next_result, released_before_next_answered = asyncio.run(scenario())
+
+    assert request_cancelled
+    assert next_result == "ran"
+    assert not released_before_next_answered
+
+
+def test_an_awaited_call_whose_task_raises_is_answered_with_the_error_state(agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    A call awaited through ``Tool.apply_ex_async`` with ``catch_exceptions=False``, whose tool raises, is answered with
+    the error state naming the exception the call's task completed with.
+    """
+    agent.serena_config.tool_timeout = 10.0
+    failing = _activated(_FailingProbeTool(agent), monkeypatch)
+
+    result = asyncio.run(failing.apply_ex_async(catch_exceptions=False, mcp_ctx=_ForwardedMcpContext.for_session("session-a")))  # type: ignore[arg-type]
+
+    assert result == "Error: ValueError - boom"
+
+
+def test_a_call_abandoned_at_its_deadline_is_answered_with_the_timeout_unless_its_task_completed_in_the_meantime(
+    agent: SerenaAgent,
+) -> None:
+    """
+    ``Tool._timeout_result`` abandons a call whose task has not completed: it cancels the task's future, which frees
+    the session's queue, and answers with the typed timeout state. A task that completed between the deadline passing
+    and its abandonment cannot be cancelled, and the call is answered with the outcome it completed with: its result,
+    or the error state of its exception. The race is fixed by completing the future before the abandonment, never by a
+    clock.
+    """
+    tool = _ImmediateProbeTool(agent)
+    pending: TaskExecutor.Task[str] = TaskExecutor.Task(lambda: "unused", name="pending")
+    returned: TaskExecutor.Task[str] = TaskExecutor.Task(lambda: "unused", name="returned")
+    returned.future.set_result("ran")
+    raised: TaskExecutor.Task[str] = TaskExecutor.Task(lambda: "unused", name="raised")
+    raised.future.set_exception(ValueError("boom"))
+
+    abandoned = tool._timeout_result(pending, 2.0)
+
+    assert abandoned == "Error: tool 'immediate_probe' timed out: it did not complete within its deadline of 2 s."
+    assert pending.future.cancelled()
+    assert tool._timeout_result(returned, 2.0) == "ran"
+    assert tool._timeout_result(raised, 2.0) == "Error: ValueError - boom"
