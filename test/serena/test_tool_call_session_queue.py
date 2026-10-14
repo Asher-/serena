@@ -216,9 +216,7 @@ def test_a_call_of_one_session_is_answered_while_a_task_of_another_session_is_he
     _bind_project(agent, "session-b", tmp_path)
 
     held_results: list[str] = []
-    held_call = threading.Thread(
-        target=lambda: held_results.append(held.apply_ex(mcp_ctx=_ForwardedMcpContext.for_session("session-a")))
-    )
+    held_call = threading.Thread(target=lambda: held_results.append(held.apply_ex(mcp_ctx=_ForwardedMcpContext.for_session("session-a"))))
     held_call.start()
     gate.entered.wait()
 
