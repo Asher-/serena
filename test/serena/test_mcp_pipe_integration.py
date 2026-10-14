@@ -179,6 +179,10 @@ class TestApplyExSessionKeyDerivation:
         mock_ctx = MagicMock()
         mock_ctx.session = mock_session
         mock_ctx.session.client_params = None
+        # the request carries no X-Forwarded-Mcp-Session-Id header, as on the legacy paths this tier serves; a bare
+        # MagicMock would answer the header lookup with a truthy mock, which the forwarded tier takes as the session id
+        mock_ctx.request_context.request.headers = {}
+        mock_ctx.request.headers = {}
 
         ctx = contextvars.copy_context()
 
