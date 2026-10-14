@@ -3,6 +3,7 @@ The Serena Model Context Protocol (MCP) Server
 """
 
 import dataclasses
+import hashlib
 import os
 import re
 import shutil
@@ -1061,6 +1062,12 @@ class SerenaConfig(SharedConfig):
                     f"Project with path {project_root} was already added with name '{already_registered_project.project_name}'."
                 )
 
+        # place the data folder of a directory holding none of its own in the serena home directory, so that
+        # activating the directory writes nothing inside it
+        in_project_folder = os.path.join(str(project_root), SERENA_MANAGED_DIR_NAME)
+        if self.project_serena_folder_location == DEFAULT_PROJECT_SERENA_FOLDER_LOCATION and not os.path.isdir(in_project_folder):
+            os.makedirs(self.get_home_project_serena_folder(project_root), exist_ok=True)
+
         project_config = ProjectConfig.load(project_root, serena_config=self, autogenerate=True)
 
         new_project = Project(
@@ -1164,7 +1171,8 @@ class SerenaConfig(SharedConfig):
 
         1. If the folder exists at the configured path (``project_serena_folder_location``), use it.
         2. Otherwise, if it exists at the default location inside the project root, use that.
-        3. If neither exists, return the configured path (for creation).
+        3. Otherwise, if it exists in the serena home directory (:meth:`get_home_project_serena_folder`), use that.
+        4. If none exists, return the configured path (for creation).
 
         :param project_root: the absolute path to the project root directory
         :return: the resolved absolute path to the .serena data folder
@@ -1176,7 +1184,24 @@ class SerenaConfig(SharedConfig):
         default_path = os.path.join(str(project_root), SERENA_MANAGED_DIR_NAME)
         if configured_path != default_path and os.path.isdir(default_path):
             return default_path
+        home_path = self.get_home_project_serena_folder(project_root)
+        if os.path.isdir(home_path):
+            return home_path
         return configured_path
+
+    @staticmethod
+    def get_home_project_serena_folder(project_root: str | Path) -> str:
+        """
+        Returns the location in the serena home directory of the data folder of a project whose directory holds
+        none of its own. The folder is named after the project directory and a digest of its absolute path, so that
+        two directories of the same name never share one.
+
+        :param project_root: the absolute path to the project root directory
+        :return: the absolute path of the project's data folder in the serena home directory
+        """
+        resolved_root = str(Path(project_root).resolve())
+        digest = hashlib.sha256(resolved_root.encode("utf-8")).hexdigest()[:16]
+        return os.path.join(SerenaPaths().serena_user_home_dir, "projects", f"{Path(resolved_root).name}-{digest}")
 
     def get_project_yml_location(self, project_root: str | Path) -> str:
         """
