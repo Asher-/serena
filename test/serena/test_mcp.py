@@ -1,5 +1,7 @@
 """Tests for the mcp.py module in serena."""
 
+import asyncio
+
 import pytest
 from mcp.server.fastmcp.tools.base import Tool as MCPTool
 
@@ -49,6 +51,15 @@ class BasicTool(BaseMockTool):
         """Mock implementation of apply_ex."""
         return self.apply(**kwargs)
 
+    async def apply_ex_async(
+        self,
+        log_call: bool = True,
+        catch_exceptions: bool = True,
+        **kwargs,
+    ) -> str:
+        """Mock implementation of apply_ex_async."""
+        return self.apply(**kwargs)
+
 
 def test_make_tool_basic() -> None:
     """Test that make_tool correctly creates an MCP tool from a Tool object."""
@@ -75,8 +86,8 @@ def test_make_tool_execution() -> None:
     mock_tool = BasicTool()
     mcp_tool = make_tool(mock_tool)
 
-    # Execute the MCP tool function
-    result = mcp_tool.fn(name="Alice", age=30)
+    # Execute the MCP tool function, a coroutine function the server awaits on its event loop
+    result = asyncio.run(mcp_tool.fn(name="Alice", age=30))
 
     assert result == "Hello Alice, you are 30 years old!"
 

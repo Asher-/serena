@@ -1,3 +1,5 @@
+import asyncio
+import contextvars
 import inspect
 import json
 from abc import ABC
@@ -23,6 +25,7 @@ if TYPE_CHECKING:
     from serena.agent import SerenaAgent
     from serena.code_editor import CodeEditor, LanguageServerCodeEditor
     from serena.symbol import LanguageServerSymbolRetriever
+    from serena.task_executor import TaskExecutor
 
 log = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -121,6 +124,23 @@ class ApplyMethodProtocol(Protocol):
 
     def __call__(self, *args: Any, **kwargs: Any) -> str:
         pass
+
+
+@dataclass(frozen=True)
+class ToolCallTimeout:
+    """
+    The typed result of a tool call that did not complete within its deadline.
+
+    :ivar tool_name: the name of the tool whose call exceeded the deadline.
+    :ivar deadline_seconds: the deadline, in seconds, the call was allowed.
+    """
+
+    tool_name: str
+    deadline_seconds: float
+
+    def render(self) -> str:
+        """Render the agent-facing timeout state."""
+        return f"Error: tool '{self.tool_name}' timed out: it did not complete within its deadline of {self.deadline_seconds:g} s."
 
 
 class Tool(Component):
@@ -280,9 +300,11 @@ class Tool(Component):
     def is_symbolic(self) -> bool:
         return issubclass(self.__class__, ToolMarkerSymbolicRead) or issubclass(self.__class__, ToolMarkerSymbolicEdit)
 
-    def apply_ex(self, log_call: bool = True, catch_exceptions: bool = True, mcp_ctx: Context | None = None, **kwargs) -> str:  # type: ignore
+    def _issue_call(self, log_call: bool, catch_exceptions: bool, mcp_ctx: Context | None, **kwargs) -> "TaskExecutor.Task[str]":  # type: ignore
         """
-        Applies the tool with logging and exception handling, using the given keyword arguments
+        Issues a call of the tool, with logging and exception handling, as a task on the executor of the calling session.
+
+        :return: the issued task, whose future completes with the call's result
         """
         # derive a per-session key in three tiers, each with its own eviction trigger:
         #   1. pipe transport (src/serena/pipe.py) supplies the project_root via
@@ -380,32 +402,13 @@ class Tool(Component):
             except BaseException as e:
                 log.info(f"Failed to get client info: {e}.")
 
-        # snapshot the persisted active project for this session BEFORE entering the worker thread,
-        # so we can pin the in-flight ContextVar inside the task closure (the executor spawns a fresh
-        # threading.Thread which does not inherit the caller's ContextVars).
+        # snapshot the persisted active project for this session; issue() below pins it into the context the
+        # task is issued from, which the task body runs in
         persisted_project = (
             self.agent._active_projects_by_session.get(session_key) if session_key is not None else None
         )
 
         def task() -> str:
-            # bind per-session state into this worker thread's ContextVar context so every reader
-            # of the active project (the _active_project property, get_active_project, etc.) sees
-            # the project for *this* session rather than whichever session most recently activated.
-            # mark this call as MCP-bound so the IRONCLAD zero-crossover guard in the getter blocks
-            # any silent fallback to the legacy single-slot field while we are inside this call.
-            if mcp_ctx is not None or pipe_session_id is not None:
-                _MCP_CALL_IN_FLIGHT.set(True)
-            if session_key is not None:
-                _SESSION_KEY_VAR.set(session_key)
-            if pipe_session_id is not None:
-                # propagate into the worker thread so any nested apply_ex re-derives the same
-                # session_key from this var rather than from id(mcp_ctx.session) (which would be
-                # absent or stale here, since nested calls inherit the closure-captured locals
-                # only through the outer call's bookkeeping).
-                _PIPE_SESSION_ID_VAR.set(pipe_session_id)
-            if persisted_project is not None:
-                _ACTIVE_PROJECT_VAR.set(persisted_project)
-
             apply_fn = self.get_apply_fn()
             try:
                 if not self.is_active():
@@ -523,14 +526,80 @@ class Tool(Component):
 
             return result
 
-        # execute the tool in the agent's task executor, with timeout
+        # bind this call's session into the context the task is issued from: issue_task routes the task to the
+        # executor of the bound session, and the task body runs in a copy of this context (see TaskExecutor.Task),
+        # so every reader of the active project inside the call sees the project of *this* session. Marking the
+        # call MCP-bound arms the zero-crossover guards, which refuse any fall-through to the daemon-wide executor
+        # or the legacy single slots while it is in flight.
+        def issue() -> "TaskExecutor.Task[str]":
+            if mcp_ctx is not None or pipe_session_id is not None:
+                _MCP_CALL_IN_FLIGHT.set(True)
+            if session_key is not None:
+                _SESSION_KEY_VAR.set(session_key)
+            if persisted_project is not None:
+                _ACTIVE_PROJECT_VAR.set(persisted_project)
+            return self.agent.issue_task(task, name=self.__class__.__name__, timeout=self.agent.serena_config.tool_timeout)
+
+        return contextvars.copy_context().run(issue)
+
+    def apply_ex(self, log_call: bool = True, catch_exceptions: bool = True, mcp_ctx: Context | None = None, **kwargs) -> str:  # type: ignore
+        """
+        Applies the tool with logging and exception handling, using the given keyword arguments, blocking the calling
+        thread until the call's task completes or the tool timeout passes.
+        """
         try:
-            task_exec = self.agent.issue_task(task, name=self.__class__.__name__)
-            return task_exec.result(timeout=self.agent.serena_config.tool_timeout)
-        except Exception as e:  # typically TimeoutError (other exceptions caught in task)
-            msg = f"Error: {e.__class__.__name__} - {e}"
-            log.error(msg)
-            return msg
+            deadline = self.agent.serena_config.tool_timeout
+            task_exec = self._issue_call(log_call, catch_exceptions, mcp_ctx, **kwargs)
+        except Exception as e:
+            return self._error_result(e)
+        try:
+            return task_exec.result(timeout=deadline)
+        except TimeoutError:
+            return self._timeout_result(task_exec, deadline)
+        except Exception as e:  # cancellation; exceptions of the tool itself are caught in the task
+            return self._error_result(e)
+
+    async def apply_ex_async(self, log_call: bool = True, catch_exceptions: bool = True, mcp_ctx: Context | None = None, **kwargs) -> str:  # type: ignore
+        """
+        Applies the tool like :meth:`apply_ex`, awaiting the call's task without blocking the event loop, so that the
+        calls of other sessions are served while it runs.
+        """
+        try:
+            deadline = self.agent.serena_config.tool_timeout
+            task_exec = self._issue_call(log_call, catch_exceptions, mcp_ctx, **kwargs)
+        except Exception as e:
+            return self._error_result(e)
+        try:
+            return await asyncio.wait_for(asyncio.wrap_future(task_exec.future), timeout=deadline)
+        except TimeoutError:
+            return self._timeout_result(task_exec, deadline)
+        except Exception as e:  # cancellation; exceptions of the tool itself are caught in the task
+            return self._error_result(e)
+
+    @staticmethod
+    def _error_result(e: BaseException) -> str:
+        msg = f"Error: {e.__class__.__name__} - {e}"
+        log.error(msg)
+        return msg
+
+    def _timeout_result(self, task_exec: "TaskExecutor.Task[str]", deadline: float) -> str:
+        """
+        Abandons a call at its deadline.
+
+        The task's future is cancelled, which frees the session's queue for its next task; the task's thread cannot be
+        stopped and runs on, but its result is discarded. A task that completed in the meantime cannot be cancelled,
+        and its outcome stands.
+
+        :param task_exec: the call's task
+        :param deadline: the deadline, in seconds, the call was allowed
+        :return: the typed timeout state, or the outcome of a task that completed at the deadline
+        """
+        if not task_exec.future.cancel():
+            exception = task_exec.future.exception()
+            return task_exec.future.result() if exception is None else self._error_result(exception)
+        timeout = ToolCallTimeout(tool_name=self.get_name_from_cls(), deadline_seconds=deadline)
+        log.error(timeout.render())
+        return timeout.render()
 
     @staticmethod
     def _to_json(x: Any) -> str:

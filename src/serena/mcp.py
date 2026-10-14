@@ -191,7 +191,7 @@ class SerenaMCPFactory:
         func_name = tool.get_name()
         func_doc = tool.get_apply_docstring() or ""
         func_arg_metadata = tool.get_apply_fn_metadata()
-        is_async = False
+        is_async = True
         parameters = func_arg_metadata.arg_model.model_json_schema()
         if openai_tool_compatible:
             parameters = SerenaMCPFactory._sanitize_for_openai_tools(parameters)
@@ -225,8 +225,10 @@ class SerenaMCPFactory:
                 param_desc = f"{param_doc.description.strip().strip('.') + '.'}"
                 properties["description"] = param_desc[0].upper() + param_desc[1:]
 
-        def execute_fn(**kwargs) -> str:  # type: ignore
-            return tool.apply_ex(log_call=True, catch_exceptions=True, **kwargs)
+        # awaited on the server's event loop: the call's task runs on its session's queue while the loop goes on
+        # serving the requests of other sessions
+        async def execute_fn(**kwargs) -> str:  # type: ignore
+            return await tool.apply_ex_async(log_call=True, catch_exceptions=True, **kwargs)
 
         # Generate human-readable title from snake_case tool name
         tool_title = " ".join(word.capitalize() for word in func_name.split("_"))

@@ -1303,9 +1303,14 @@ class SerenaAgent:
         # the activation-message path and downstream tool-call read paths
         # (:meth:`Project.get_language_server_manager_or_raise`) wait on. The signal lives on
         # the project rather than on a per-agent task handle so concurrent activations in
-        # other sessions cannot overwrite it.
+        # other sessions cannot overwrite it. With a session in scope, this activation runs inside
+        # a task of the session's own queue that goes on to wait for that signal, so the
+        # initialization is started on a thread of its own rather than queued behind that task.
         if self.get_language_backend().is_lsp():
-            self.issue_task(init_language_server_manager)
+            if _SESSION_KEY_VAR.get(None) is None:
+                self.issue_task(init_language_server_manager)
+            else:
+                TaskExecutor.Task(init_language_server_manager, name=f"InitLanguageServerManager[{project.project_name}]").start()
 
         if self._project_activation_callback is not None:
             self._project_activation_callback()
