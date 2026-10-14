@@ -285,6 +285,32 @@ def test_a_call_past_its_deadline_returns_the_typed_timeout_and_the_next_call_of
     assert not released_before_next_answered
 
 
+def test_an_mcp_call_past_its_deadline_returns_the_typed_timeout_and_the_next_call_of_its_session_runs(
+    agent: SerenaAgent, gate: _Gate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The same deadline through the MCP tools on one event loop: the held call is answered with the typed timeout state
+    while its gate is still held, and the next call of its session is answered on the same loop.
+    """
+    held = SerenaMCPFactory.make_mcp_tool(_activated(_GatedProbeTool(agent, gate), monkeypatch))
+    immediate = SerenaMCPFactory.make_mcp_tool(_activated(_ImmediateProbeTool(agent), monkeypatch))
+
+    async def scenario() -> tuple[str, bool, str, bool]:
+        agent.serena_config.tool_timeout = 2.0
+        timed_out = await held.run({}, context=_ForwardedMcpContext.for_session("session-a"))  # type: ignore[arg-type]
+        held_at_deadline = gate.entered.is_set() and not gate.release.is_set()
+        agent.serena_config.tool_timeout = 10.0
+        next_result = await immediate.run({}, context=_ForwardedMcpContext.for_session("session-a"))  # type: ignore[arg-type]
+        return timed_out, held_at_deadline, next_result, gate.release.is_set()
+
+    timed_out, held_at_deadline, next_result, released_before_next_answered = asyncio.run(scenario())
+
+    assert held_at_deadline
+    assert timed_out == "Error: tool 'gated_probe' timed out: it did not complete within its deadline of 2 s."
+    assert next_result == "ran"
+    assert not released_before_next_answered
+
+
 def test_cursor_find_without_a_relative_path_returns_the_typed_timeout_while_the_language_server_is_held(
     agent: SerenaAgent, gate: _Gate, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
