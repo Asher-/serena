@@ -142,6 +142,18 @@ class _FailingProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
         raise ValueError("boom")
 
 
+class _DaemonWideQueueProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
+    """A tool whose call reports the tasks the agent's daemon-wide executor is running."""
+
+    def apply(self) -> str:
+        """
+        Reads the daemon-wide executor's running tasks from inside the call.
+
+        :return: the names of those tasks, comma-separated
+        """
+        return ",".join(task.name for task in self.agent._task_executor.get_current_tasks())
+
+
 class _ActivatingProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
     """
     A tool whose call activates a project for its session, as ``activate_project`` and the self-heal do, and then waits
@@ -461,6 +473,22 @@ def test_an_awaited_mcp_call_with_no_derivable_session_is_refused_rather_than_ru
     result = asyncio.run(immediate.apply_ex_async(mcp_ctx=_OutsideRequestMcpContext()))  # type: ignore[arg-type]
 
     assert result.startswith(_ZERO_CROSSOVER_REFUSAL), result
+
+
+def test_a_call_outside_any_session_is_issued_on_the_daemon_wide_queue(agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    A call made outside any session, as the CLI and the dashboard make it (no ``mcp_ctx`` and no pipe session), binds
+    neither the session key nor the MCP marker in the context it is issued from, so it runs on the daemon-wide queue and
+    no queue of a session is created for it. The daemon-wide executor records its running task before starting it, so
+    the call's own body observes itself there.
+    """
+    agent.serena_config.tool_timeout = 10.0
+    probe = _activated(_DaemonWideQueueProbeTool(agent), monkeypatch)
+
+    result = probe.apply_ex()
+
+    assert result.endswith(":_DaemonWideQueueProbeTool"), result
+    assert agent._task_executors_by_session == {}
 
 
 def test_a_queued_call_of_an_evicted_session_is_answered_with_the_cancellation(
