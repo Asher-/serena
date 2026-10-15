@@ -362,6 +362,27 @@ def test_queue_worker_runs_an_unlogged_task_without_recording_it(executor) -> No
     assert recorded.logged
 
 
+def test_queue_workers_of_two_executors_stamp_the_task_recorded_later_with_the_higher_completion_index() -> None:
+    """
+    The queue workers of two executors stamp each logged task they record with a completion index drawn from one
+    counter shared by every executor, so the task recorded later carries the higher index, whichever executor recorded
+    it. Ordering is fixed by the queues, never by the clock: each record is read by a task its worker starts only after
+    recording the task before it, and the second executor's task is issued only once the first record has been read.
+    """
+    first_executor = TaskExecutor("FirstExecutor")
+    second_executor = TaskExecutor("SecondExecutor")
+
+    first_executor.issue_task(lambda: None, name="first").result()
+    first_recorded = first_executor.issue_task(first_executor.get_last_executed_task, name="first-reader", logged=False).result()
+    second_executor.issue_task(lambda: None, name="second").result()
+    second_recorded = second_executor.issue_task(second_executor.get_last_executed_task, name="second-reader", logged=False).result()
+
+    assert first_recorded is not None and first_recorded.name.endswith(":first")
+    assert second_recorded is not None and second_recorded.name.endswith(":second")
+    assert first_recorded.completion_index is not None and second_recorded.completion_index is not None
+    assert second_recorded.completion_index > first_recorded.completion_index
+
+
 def test_queue_worker_exits_once_the_executor_is_shut_down() -> None:
     """
     Shutting the executor down ends its queue worker's loop: the worker, idle inside a keepalive window that cannot

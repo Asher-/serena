@@ -12,6 +12,7 @@ that the fix makes immediate.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -20,7 +21,7 @@ from typing import Any, TypeVar
 
 import pytest
 
-from serena.agent import SerenaAgent
+from serena.agent import _SESSION_KEY_VAR, SerenaAgent
 from serena.config.serena_config import ProjectConfig, SerenaConfig
 from serena.mcp import SerenaMCPFactory
 from serena.project import Project
@@ -747,3 +748,43 @@ def test_the_report_of_the_last_executed_task_names_a_session_call_that_finished
 
     assert last_executed is not None
     assert last_executed.name.endswith(":_ImmediateProbeTool"), last_executed.name
+
+
+def test_a_language_addition_outside_any_session_runs_as_the_running_task_of_the_daemon_wide_queue(
+    agent: SerenaAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A language addition requested outside any session, as the dashboard and the CLI request one, runs as the running
+    task of the daemon-wide queue and has completed when ``add_language`` returns: the addition reads the daemon-wide
+    queue's running tasks while it runs, and that reading is present once ``add_language`` has returned.
+    """
+    project = _project(tmp_path, agent)
+    agent._active_project = project
+    running_during_addition: list[list[str]] = []
+
+    def add_language(language: Language) -> None:
+        running = [task.name.split(":", 1)[1] for task in agent._task_executor.get_current_tasks() if task.is_running]
+        running_during_addition.append(running)
+
+    monkeypatch.setattr(project, "add_language", add_language)
+
+    agent.add_language(Language.TYPESCRIPT)
+
+    assert running_during_addition == [["AddLanguage:typescript"]], running_during_addition
+
+
+def test_the_report_of_the_last_executed_task_names_none_while_no_queue_has_recorded_a_logged_task(agent: SerenaAgent) -> None:
+    """
+    While neither the daemon-wide queue nor the queue of a session has recorded a logged task, the report of the last
+    executed task names none: each queue has run an unlogged task only, which a queue does not record.
+    """
+    agent.issue_task(lambda: None, name="DaemonWideUnlogged", logged=False).result()
+
+    def issue_unlogged_session_task() -> None:
+        _SESSION_KEY_VAR.set(1001)
+        agent.issue_task(lambda: None, name="SessionUnlogged", logged=False).result()
+
+    contextvars.copy_context().run(issue_unlogged_session_task)
+
+    assert list(agent._task_executors_by_session) == [1001]
+    assert agent.get_last_executed_task() is None
