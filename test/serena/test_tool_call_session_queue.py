@@ -175,6 +175,40 @@ class _ActivatingProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
         return "language server ready"
 
 
+class _LanguageAddingProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
+    """A tool whose call adds a language to the active project of its session."""
+
+    def apply(self) -> str:
+        """
+        Adds TypeScript to the active project.
+
+        :return: a fixed marker, once the addition has returned
+        """
+        self.agent.add_language(Language.TYPESCRIPT)
+        return "added"
+
+
+class _LanguageRemovingProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
+    """A tool whose call removes a language from the active project of its session and reports whether the removal ran."""
+
+    def __init__(self, agent: SerenaAgent, removals: list[Language]) -> None:
+        """
+        :param agent: the agent
+        :param removals: the languages the active project has removed, in removal order
+        """
+        super().__init__(agent)
+        self._removals = removals
+
+    def apply(self) -> str:
+        """
+        Removes Python from the active project, then reads the removals made so far, still inside the call.
+
+        :return: ``removed`` if the removal ran before ``remove_language`` returned, ``pending`` otherwise
+        """
+        self.agent.remove_language(Language.PYTHON)
+        return "removed" if self._removals == [Language.PYTHON] else "pending"
+
+
 class _GatedLanguageServer:
     """A language-server double whose symbol-tree request holds on a gate, as a server that never answers does."""
 
@@ -621,3 +655,95 @@ def test_a_call_abandoned_at_its_deadline_is_answered_with_the_timeout_unless_it
     assert pending.future.cancelled()
     assert tool._timeout_result(returned, 2.0) == "ran"
     assert tool._timeout_result(raised, 2.0) == "Error: ValueError - boom"
+
+
+def test_a_language_addition_within_a_session_call_completes_while_the_daemon_wide_queue_is_held(
+    agent: SerenaAgent, gate: _Gate, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A language addition requested inside a call of session A completes while a task of the daemon-wide queue holds on
+    its gate, so the call is answered with the addition made and the gate still closed. The failing shape runs the
+    addition on the daemon-wide queue: it waits behind the held task there, and the call is answered with a timeout.
+    """
+    agent.serena_config.tool_timeout = 10.0
+    project = _bind_project(agent, "session-a", tmp_path)
+    additions: list[Language] = []
+    monkeypatch.setattr(project, "add_language", additions.append)
+    adding = _activated(_LanguageAddingProbeTool(agent), monkeypatch)
+    agent.issue_task(gate.hold, name="DaemonWideHold")
+    gate.entered.wait()
+
+    result = adding.apply_ex(mcp_ctx=_ForwardedMcpContext.for_session("session-a"))
+
+    assert result == "added", result
+    assert additions == [Language.TYPESCRIPT]
+    assert not gate.release.is_set()
+
+
+def test_a_language_removal_within_a_session_call_has_completed_when_the_request_returns(
+    agent: SerenaAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A language removal requested inside a call of session A has completed when ``remove_language`` returns, while that
+    call still runs. The failing shape issues the removal on session A's own queue, behind the very call that requested
+    it, so the call reads the removal as pending.
+    """
+    agent.serena_config.tool_timeout = 10.0
+    project = _bind_project(agent, "session-a", tmp_path)
+    removals: list[Language] = []
+    monkeypatch.setattr(project, "remove_language", removals.append)
+    removing = _activated(_LanguageRemovingProbeTool(agent, removals), monkeypatch)
+
+    result = removing.apply_ex(mcp_ctx=_ForwardedMcpContext.for_session("session-a"))
+
+    assert result == "removed", result
+
+
+def test_the_report_of_current_tasks_lists_a_held_daemon_wide_task_and_then_a_held_session_call(
+    agent: SerenaAgent, gate: _Gate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    While a task of the daemon-wide queue and a call of session A both hold on their gates, the report of current
+    tasks lists the daemon-wide task and then the call, each as running. The failing shape reports the daemon-wide
+    queue alone, so a held call of a session, which nearly every MCP call is, is absent from the report.
+    """
+    agent.serena_config.tool_timeout = 10.0
+    held = _activated(_GatedProbeTool(agent, gate), monkeypatch)
+    daemon_wide_gate = _Gate()
+    held_call = threading.Thread(target=lambda: held.apply_ex(mcp_ctx=_ForwardedMcpContext.for_session("session-a")))
+    try:
+        agent.issue_task(daemon_wide_gate.hold, name="DaemonWideHold")
+        daemon_wide_gate.entered.wait()
+        held_call.start()
+        gate.entered.wait()
+
+        reported = [(task.name.split(":", 1)[1], task.is_running) for task in agent.get_current_tasks()]
+    finally:
+        daemon_wide_gate.release.set()
+        gate.release.set()
+    held_call.join()
+
+    assert reported == [("DaemonWideHold", True), ("_GatedProbeTool", True)], reported
+
+
+def test_the_report_of_the_last_executed_task_names_a_session_call_that_finished_after_a_daemon_wide_task(
+    agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    After a logged task finishes on the daemon-wide queue and then a call of session A finishes on A's queue, the report
+    of the last executed task names the call. The failing shape reports the daemon-wide queue alone and names the
+    daemon-wide task. An unlogged task issued behind each fixes the order, because a queue records the task it ran
+    before it starts the next one.
+    """
+    agent.serena_config.tool_timeout = 10.0
+    immediate = _activated(_ImmediateProbeTool(agent), monkeypatch)
+
+    agent.issue_task(lambda: None, name="DaemonWideTask").result()
+    agent.issue_task(lambda: None, name="DaemonWideRecordBarrier", logged=False).result()
+    immediate.apply_ex(mcp_ctx=_ForwardedMcpContext.for_session("session-a"))
+    agent._task_executors_by_session["session-a"].issue_task(lambda: None, name="SessionRecordBarrier", logged=False).result()
+
+    last_executed = agent.get_last_executed_task()
+
+    assert last_executed is not None
+    assert last_executed.name.endswith(":_ImmediateProbeTool"), last_executed.name
