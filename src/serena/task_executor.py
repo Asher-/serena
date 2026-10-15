@@ -1,8 +1,9 @@
 import concurrent.futures
 import contextvars
+import itertools
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Thread
@@ -21,6 +22,10 @@ class TaskExecutor:
     # issue_task revives it. This bounds a per-session worker to its active life instead of
     # the daemon's lifetime, without any separate sweeper. Overridable per instance for tests.
     IDLE_KEEPALIVE_SECONDS: float = 300.0
+
+    # completion indices shared by every executor, so that among the tasks several executors recorded as executed,
+    # the one recorded last carries the highest index
+    _completion_indices: Iterator[int] = itertools.count(1)
 
     def __init__(self, name: str, idle_keepalive_seconds: float | None = None):
         self._name = name
@@ -173,7 +178,9 @@ class TaskExecutor:
             with self._task_executor_lock:
                 self._task_executor_current_task = None
                 if task.logged:
-                    self._task_executor_last_executed_task_info = self.TaskInfo.from_task(task, is_running=False)
+                    self._task_executor_last_executed_task_info = self.TaskInfo.from_task(
+                        task, is_running=False, completion_index=next(TaskExecutor._completion_indices)
+                    )
 
     @dataclass
     class TaskInfo:
@@ -188,13 +195,25 @@ class TaskExecutor:
         unique identifier of the task
         """
         logged: bool
+        completion_index: int | None = None
+        """
+        position of the task in the order in which the queues of all executors recorded their tasks as executed;
+        None for a task that no queue has recorded as executed
+        """
 
         def finished_successfully(self) -> bool:
             return self.future.done() and not self.future.cancelled() and self.future.exception() is None
 
         @staticmethod
-        def from_task(task: "TaskExecutor.Task", is_running: bool) -> "TaskExecutor.TaskInfo":
-            return TaskExecutor.TaskInfo(name=task.name, is_running=is_running, future=task.future, task_id=id(task), logged=task.logged)
+        def from_task(task: "TaskExecutor.Task", is_running: bool, completion_index: int | None = None) -> "TaskExecutor.TaskInfo":
+            return TaskExecutor.TaskInfo(
+                name=task.name,
+                is_running=is_running,
+                future=task.future,
+                task_id=id(task),
+                logged=task.logged,
+                completion_index=completion_index,
+            )
 
         def cancel(self) -> None:
             self.future.cancel()

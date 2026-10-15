@@ -620,20 +620,44 @@ class SerenaAgent:
 
     def get_current_tasks(self) -> list[TaskExecutor.TaskInfo]:
         """
-        Gets the list of tasks currently running or queued for execution.
+        Gets the list of tasks currently running or queued for execution on the daemon-wide executor and on the
+        executor of every session.
         The function returns a list of thread-safe TaskInfo objects (specifically created for the caller).
 
-        :return: the list of tasks in the execution order (running task first)
+        :return: the tasks of the daemon-wide executor followed by those of each session's executor, each executor's
+            tasks in its execution order (running task first)
         """
-        return self._task_executor.get_current_tasks()
+        tasks = self._task_executor.get_current_tasks()
+        for executor in self._get_session_task_executors():
+            tasks.extend(executor.get_current_tasks())
+        return tasks
 
     def get_last_executed_task(self) -> TaskExecutor.TaskInfo | None:
         """
-        Gets the last executed task.
+        Gets the logged task that finished most recently on the daemon-wide executor or on the executor of any session.
 
         :return: the last executed task info or None if no task has been executed yet
         """
-        return self._task_executor.get_last_executed_task()
+        # collect the last executed task of every executor
+        last_executed_tasks = []
+        for executor in [self._task_executor, *self._get_session_task_executors()]:
+            last_executed_task = executor.get_last_executed_task()
+            if last_executed_task is not None:
+                last_executed_tasks.append(last_executed_task)
+
+        # select the one recorded last across all executors
+        return max(
+            last_executed_tasks,
+            key=lambda task_info: -1 if task_info.completion_index is None else task_info.completion_index,
+            default=None,
+        )
+
+    def _get_session_task_executors(self) -> list[TaskExecutor]:
+        """
+        :return: a snapshot of the executors of the sessions, in the order in which they were created
+        """
+        with self._task_executors_by_session_lock:
+            return list(self._task_executors_by_session.values())
 
     def get_language_server_manager(self) -> LanguageServerManager | None:
         if self._active_project is not None:
@@ -1208,8 +1232,12 @@ class SerenaAgent:
 
     def execute_task(self, task: Callable[[], T], name: str | None = None, logged: bool = True, timeout: float | None = None) -> T:
         """
-        Executes the given task synchronously via the agent's task executor.
+        Executes the given task synchronously.
         This is useful for tasks that need to be executed immediately and whose results are needed right away.
+
+        Outside any session, the task runs on the daemon-wide executor. Within a session, it runs on a thread of its
+        own: the calling task holds its session's queue for as long as it waits, so a task queued there would wait on
+        its own caller, and the daemon-wide queue serves the callers outside any session.
 
         :param task: the task to execute
         :param name: the name of the task for logging purposes; if None, use the task function's name
@@ -1217,6 +1245,12 @@ class SerenaAgent:
         :param timeout: the maximum time to wait for task completion in seconds, or None to wait indefinitely
         :return: the result of the task execution
         """
+        # within a session, run on a thread of its own rather than on any queue
+        if _SESSION_KEY_VAR.get(None) is not None:
+            own_thread_task = TaskExecutor.Task(task, name=name or task.__name__, logged=logged, timeout=timeout)
+            own_thread_task.start()
+            return own_thread_task.result()
+
         return self._task_executor.execute_task(task, name=name, logged=logged, timeout=timeout)
 
     def is_using_language_server(self) -> bool:
@@ -1456,8 +1490,7 @@ class SerenaAgent:
     def add_language(self, language: Language) -> None:
         """
         Adds a new language to the active project, spawning the respective language server and updating the project configuration.
-        The addition is scheduled via the agent's task executor and executed synchronously, i.e. the method returns
-        when the addition is complete.
+        The addition is executed synchronously via :meth:`execute_task`, i.e. the method returns when the addition is complete.
 
         :param language: the language to add
         """
@@ -1466,11 +1499,11 @@ class SerenaAgent:
     def remove_language(self, language: Language) -> None:
         """
         Removes a language from the active project, shutting down the respective language server and updating the project configuration.
-        The removal is scheduled via the agent's task executor and executed asynchronously.
+        The removal is executed synchronously via :meth:`execute_task`, i.e. the method returns when the removal is complete.
 
         :param language: the language to remove
         """
-        self.issue_task(lambda: self.get_active_project_or_raise().remove_language(language), name=f"RemoveLanguage:{language.value}")
+        self.execute_task(lambda: self.get_active_project_or_raise().remove_language(language), name=f"RemoveLanguage:{language.value}")
 
     def get_tool(self, tool_class: type[TTool]) -> TTool:
         return self._all_tools[tool_class]  # type: ignore
