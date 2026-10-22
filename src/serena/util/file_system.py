@@ -25,6 +25,7 @@ def scan_directory(
     relative_to: str | None = None,
     is_ignored_dir: Callable[[str], bool] | None = None,
     is_ignored_file: Callable[[str], bool] | None = None,
+    skipped_links: list[str] | None = None,
 ) -> ScanResult:
     """
     :param path: the path to scan
@@ -32,6 +33,8 @@ def scan_directory(
     :param relative_to: the path to which the results should be relative to; if None, provide absolute paths
     :param is_ignored_dir: a function with which to determine whether the given directory (abs. path) shall be ignored
     :param is_ignored_file: a function with which to determine whether the given file (abs. path) shall be ignored
+    :param skipped_links: a list to which the path (in the form of the results) of every non-ignored symbolic link to a
+        directory is appended; such a link is never entered, so a link to an ancestor cannot make the scan repeat the tree
     :return: the list of directories and files
     """
     if is_ignored_file is None:
@@ -63,7 +66,7 @@ def scan_directory(
                     if entry.is_file():
                         if not is_ignored_file(entry_path):
                             files.append(result_path)
-                    elif entry.is_dir():
+                    elif entry.is_dir(follow_symlinks=False):
                         if not is_ignored_dir(entry_path):
                             directories.append(result_path)
                             if recursive:
@@ -73,9 +76,14 @@ def scan_directory(
                                     relative_to=relative_to,
                                     is_ignored_dir=is_ignored_dir,
                                     is_ignored_file=is_ignored_file,
+                                    skipped_links=skipped_links,
                                 )
                                 files.extend(sub_result.files)
                                 directories.extend(sub_result.directories)
+                    elif entry.is_dir():
+                        # a symbolic link to a directory: reported, never entered
+                        if skipped_links is not None and not is_ignored_dir(entry_path):
+                            skipped_links.append(result_path)
                 except PermissionError as ex:
                     # Skip files/directories that cannot be accessed due to permission issues
                     log.debug(f"Skipping entry due to permission error: {entry.path}", exc_info=ex)
