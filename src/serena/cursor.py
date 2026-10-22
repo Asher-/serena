@@ -1824,6 +1824,7 @@ class CursorManager:
         restrict_to_code_files: bool = True,
         context_lines_before: int = 0,
         context_lines_after: int = 0,
+        skipped_links: list[str] | None = None,
     ) -> tuple[list[tuple[LanguageServerSymbol, list[str]]], list[tuple[str, list[str]]]]:
         """Find regex matches grouped by their enclosing LSP symbol.
 
@@ -1852,6 +1853,9 @@ class CursorManager:
             hit's matched line in the returned display strings.
         :param context_lines_after: extra lines rendered alongside each
             hit's matched line in the returned display strings.
+        :param skipped_links: a list to which the project-relative path of
+            every symbolic link to a directory the search did not enter is
+            appended.
         :return: a 2-tuple ``(groups, unsymboled)``. ``groups`` is a list
             of ``(enclosing_symbol, hit_display_strings)`` tuples in
             discovery order -- one tuple per unique enclosing symbol (each
@@ -1879,6 +1883,7 @@ class CursorManager:
                 context_lines_after=context_lines_after,
                 paths_include_glob=paths_include_glob.strip() or None,
                 paths_exclude_glob=paths_exclude_glob.strip() or None,
+                skipped_links=skipped_links,
             )
         else:
             from serena.util.file_system import scan_directory
@@ -1893,6 +1898,7 @@ class CursorManager:
                     is_ignored_dir=self._project.is_ignored_path,
                     is_ignored_file=self._project.is_ignored_path,
                     relative_to=self._project.project_root,
+                    skipped_links=skipped_links,
                 )
             matches = search_files(
                 rel_paths_to_search,

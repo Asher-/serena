@@ -622,6 +622,7 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
 
         """
         manager = self.agent.get_cursor_manager()
+        skipped_links: list[str] = []
         groups, unsymboled = manager.find_pattern_with_enclosing_symbols(
             substring_pattern=substring_pattern,
             relative_path=relative_path or None,
@@ -630,14 +631,17 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
             restrict_to_code_files=restrict_to_code_files,
             context_lines_before=context_lines_before,
             context_lines_after=context_lines_after,
+            skipped_links=skipped_links,
         )
 
         n_symboled = sum(len(hits) for _, hits in groups)
         n_unsymboled = sum(len(hits) for _, hits in unsymboled)
+        # the walk enters no symbolic link to a directory; name each one so the agent knows what was not searched
+        links_note = f"Symbolic links to directories not entered: {', '.join(skipped_links)}." if skipped_links else ""
 
         # no hits at all -- clean message rather than an empty header
         if not groups and not unsymboled:
-            return f"why: {because}\n\nNo matches for {substring_pattern!r}."
+            return f"why: {because}\n\nNo matches for {substring_pattern!r}." + (f" {links_note}" if links_note else "")
 
         # cap cursor creation at max_matches; the remainder are listed
         # without cursors so the agent can decide whether to widen
@@ -662,6 +666,8 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
             f"Found {n_symboled + n_unsymboled} match(es): {n_symboled} in {len(groups)} symbol(s), {n_unsymboled} on non-symbol lines.",
             f"Started {len(opened_cursors)} cursor(s)" + (f"; {len(deferred)} symbol(s) deferred." if deferred else "."),
         ]
+        if links_note:
+            header_parts.append(links_note)
         lines: list[str] = [f"why: {because}", "", " ".join(header_parts), ""]
 
         # per-cursor anchor + indented hit display strings
