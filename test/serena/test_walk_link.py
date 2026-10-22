@@ -1,8 +1,8 @@
 """unit tests for the walks serena makes of a project's directory tree, over a tree holding a symbolic link to a directory.
 
 a walk must enter no symbolic link to a directory, so that a link to the directory holding it, or to any ancestor of
-it, adds no path to the walk and opens no directory beneath the link; and search_for_pattern must name each such link
-it did not enter. Every test builds a tree whose ``pkg/loop`` links to the tree's own root.
+it, adds no path to the walk and opens no directory beneath the link; and search_for_pattern and cursor_grep must name
+each such link they did not enter. Every test builds a tree whose ``pkg/loop`` links to the tree's own root.
 """
 
 from __future__ import annotations
@@ -14,10 +14,13 @@ from pathlib import Path
 import pytest
 
 from serena.config.serena_config import LanguageBackend, ProjectConfig, SerenaConfig
+from serena.cursor import CursorManager
 from serena.project import Project
+from serena.tools.cursor_tools import CursorGrepTool
 from serena.tools.file_tools import SearchForPatternTool
 from serena.util.file_system import find_all_non_ignored_files, scan_directory
 from solidlsp.ls_config import Language
+from solidlsp.structural.registry import StructuralBackendRegistry
 
 _SOURCE_FILE = os.path.join("pkg", "module.py")
 _LINK = os.path.join("pkg", "loop")
@@ -74,6 +77,25 @@ class _AgentStub:
         return _NonLspBackend()
 
 
+class _NoLanguageServerManager:
+    """a language-server manager with no server suitable for any file, so cursor_grep anchors no hit to a symbol."""
+
+    def has_suitable_ls_for_file(self, relative_file_path: str) -> bool:
+        return False
+
+
+class _CursorAgentStub(_AgentStub):
+    """the agent surface :class:`CursorGrepTool` reads: a cursor manager over the project, and the answer bound."""
+
+    def __init__(self, project: Project) -> None:
+        super().__init__(project)
+        project.language_server_manager = _NoLanguageServerManager()  # type: ignore[assignment]
+        self._cursor_manager = CursorManager(project, structural_registry=StructuralBackendRegistry())
+
+    def get_cursor_manager(self) -> CursorManager:
+        return self._cursor_manager
+
+
 def _is_beneath_link(relative_path: str) -> bool:
     """
     :param relative_path: a path relative to the tree's root
@@ -116,3 +138,27 @@ class TestSearchForPatternNamesTheLink:
         assert _SOURCE_FILE in result
         assert _LINK in result
         assert os.path.join(_LINK, "pkg") not in result
+
+
+class TestCursorGrepNamesTheLink:
+    """verifies that cursor_grep returns the one match and names the link its walk did not enter."""
+
+    @pytest.mark.parametrize("restrict_to_code_files", [False, True])
+    def test_match_is_returned_once_and_link_is_named(self, linked_tree: Path, restrict_to_code_files: bool) -> None:
+        tool = CursorGrepTool(agent=_CursorAgentStub(_project(linked_tree)))  # type: ignore[arg-type]
+
+        result = tool.apply("NEEDLE", because="test", restrict_to_code_files=restrict_to_code_files)
+
+        assert "Found 1 match(es): 0 in 0 symbol(s), 1 on non-symbol lines." in result
+        assert _SOURCE_FILE in result
+        assert _LINK in result
+        assert os.path.join(_LINK, "pkg") not in result
+
+    @pytest.mark.parametrize("restrict_to_code_files", [False, True])
+    def test_link_is_named_when_nothing_matches(self, linked_tree: Path, restrict_to_code_files: bool) -> None:
+        tool = CursorGrepTool(agent=_CursorAgentStub(_project(linked_tree)))  # type: ignore[arg-type]
+
+        result = tool.apply("ABSENT", because="test", restrict_to_code_files=restrict_to_code_files)
+
+        assert "No matches for 'ABSENT'." in result
+        assert _LINK in result
