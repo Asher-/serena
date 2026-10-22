@@ -565,10 +565,12 @@ class Project(ToStringMixin):
             if self.is_ignored_path(relative_path):
                 raise ValueError(f"Path {relative_path} is ignored; cannot access for safety reasons")
 
-    def gather_source_files(self, relative_path: str = "") -> list[str]:
+    def gather_source_files(self, relative_path: str = "", skipped_links: list[str] | None = None) -> list[str]:
         """Retrieves relative paths of all source files, optionally limited to the given path
 
         :param relative_path: if provided, restrict search to this path
+        :param skipped_links: a list to which the relative path of every non-ignored symbolic link to a directory is
+            appended; such a link is never entered, so a link to an ancestor cannot make the walk repeat the tree
         """
         rel_file_paths = []
         start_path = os.path.join(self.project_root, relative_path)
@@ -577,9 +579,19 @@ class Project(ToStringMixin):
         if os.path.isfile(start_path):
             return [relative_path]
         else:
-            for root, dirs, files in os.walk(start_path, followlinks=True):
-                # prevent recursion into ignored directories
-                dirs[:] = [d for d in dirs if not self.is_ignored_path(os.path.join(root, d))]
+            for root, dirs, files in os.walk(start_path):
+                # prevent recursion into ignored directories and into symbolic links to directories, reporting the links
+                entered_dirs = []
+                for d in dirs:
+                    abs_dir_path = os.path.join(root, d)
+                    if self.is_ignored_path(abs_dir_path):
+                        continue
+                    if os.path.islink(abs_dir_path):
+                        if skipped_links is not None:
+                            skipped_links.append(os.path.relpath(abs_dir_path, start=self.project_root))
+                        continue
+                    entered_dirs.append(d)
+                dirs[:] = entered_dirs
 
                 # collect non-ignored files
                 for file in files:
@@ -610,6 +622,7 @@ class Project(ToStringMixin):
         context_lines_after: int = 0,
         paths_include_glob: str | None = None,
         paths_exclude_glob: str | None = None,
+        skipped_links: list[str] | None = None,
     ) -> list[MatchedConsecutiveLines]:
         """
         Search for a pattern across all (non-ignored) source files
@@ -620,9 +633,11 @@ class Project(ToStringMixin):
         :param context_lines_after: Number of lines of context to include after each match
         :param paths_include_glob: Glob pattern to filter which files to include in the search
         :param paths_exclude_glob: Glob pattern to filter which files to exclude from the search. Takes precedence over paths_include_glob.
+        :param skipped_links: a list to which the relative path of every symbolic link to a directory the search did not
+            enter is appended
         :return: List of matched consecutive lines with context
         """
-        relative_file_paths = self.gather_source_files(relative_path=relative_path)
+        relative_file_paths = self.gather_source_files(relative_path=relative_path, skipped_links=skipped_links)
         return search_files(
             relative_file_paths,
             pattern,

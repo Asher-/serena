@@ -92,7 +92,8 @@ class SearchForPatternTool(Tool):
         if not os.path.exists(abs_path):
             raise FileNotFoundError(f"Relative path {relative_path} does not exist.")
 
-        # run the regex pass via either the source-restricted or whole-tree path
+        # run the regex pass via either the source-restricted or whole-tree path, collecting the links not entered
+        skipped_links: list[str] = []
         if restrict_search_to_code_files:
             matches = self.project.search_source_files_for_pattern(
                 pattern=substring_pattern,
@@ -101,6 +102,7 @@ class SearchForPatternTool(Tool):
                 context_lines_after=context_lines_after,
                 paths_include_glob=paths_include_glob.strip(),
                 paths_exclude_glob=paths_exclude_glob.strip(),
+                skipped_links=skipped_links,
             )
         else:
             if os.path.isfile(abs_path):
@@ -112,6 +114,7 @@ class SearchForPatternTool(Tool):
                     is_ignored_dir=self.project.is_ignored_path,
                     is_ignored_file=self.project.is_ignored_path,
                     relative_to=self.get_project_root(),
+                    skipped_links=skipped_links,
                 )
             matches = search_files(
                 rel_paths_to_search,
@@ -165,6 +168,8 @@ class SearchForPatternTool(Tool):
         n_symbols = sum(1 for k in grouped if k[1] is not None)
         n_files = len(file_order)
         header = f"Found {n_matches} matches across {n_symbols} symbols in {n_files} files."
+        if skipped_links:
+            header += f" Symbolic links to directories not entered: {', '.join(skipped_links)}."
 
         def render_hit(hit: str) -> list[str]:
             # indent every line of the hit so multi-line context blocks stay readable
