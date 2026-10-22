@@ -162,3 +162,20 @@ class TestCursorGrepNamesTheLink:
 
         assert "No matches for 'ABSENT'." in result
         assert _LINK in result
+
+
+class TestFindPatternReportsTheLink:
+    """verifies that the cursor manager's pattern search finds the one match and reports the link its walk did not enter."""
+
+    @pytest.mark.parametrize("restrict_to_code_files", [False, True])
+    def test_match_is_found_once_and_link_is_reported(self, linked_tree: Path, restrict_to_code_files: bool) -> None:
+        cursor_manager = _CursorAgentStub(_project(linked_tree)).get_cursor_manager()
+        skipped_links: list[str] = []
+
+        groups, unsymboled = cursor_manager.find_pattern_with_enclosing_symbols(
+            "NEEDLE", restrict_to_code_files=restrict_to_code_files, skipped_links=skipped_links
+        )
+
+        assert groups == []
+        assert [path for path, _hits in unsymboled] == [_SOURCE_FILE]
+        assert skipped_links == [_LINK]

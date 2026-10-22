@@ -14,7 +14,7 @@ import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -119,3 +119,70 @@ class TestEvictionStopsAProjectNoSessionHolds:
 
         assert project_a.manager.stopped.wait(timeout=_GATE_TIMEOUT), "A's manager was never stopped"
         project_a.manager.stop_all.assert_called_once()
+
+    def test_eviction_of_a_pipe_session_shuts_down_its_executor(self, agent: SerenaAgent, project_a: _HeldProject) -> None:
+        _activate(agent, "session-1", project_a)
+        executor = MagicMock()
+        agent._task_executors_by_session["session-1"] = executor
+
+        agent.evict_pipe_session("session-1")
+
+        # the session's executor was shut down and dropped, and the project it held was still released
+        executor.shutdown.assert_called_once()
+        assert "session-1" not in agent._task_executors_by_session
+        assert project_a.manager.stopped.wait(timeout=_GATE_TIMEOUT), "A's manager was never stopped"
+
+
+class TestReleaseOfAProject:
+    """verifies that releasing a project stops its language servers only if no session holds it."""
+
+    def test_releasing_no_project_stops_nothing(self, agent: SerenaAgent, project_a: _HeldProject) -> None:
+        _activate(agent, "session-1", project_a)
+
+        agent._release_project_if_unheld(None)
+
+        project_a.manager.stop_all.assert_not_called()
+        assert project_a.project.language_server_manager is project_a.manager
+
+    def test_releasing_a_project_a_session_holds_leaves_it_running(self, agent: SerenaAgent, project_a: _HeldProject) -> None:
+        _activate(agent, "session-1", project_a)
+
+        agent._release_project_if_unheld(project_a.project)
+
+        project_a.manager.stop_all.assert_not_called()
+        assert project_a.project.language_server_manager is project_a.manager
+
+    def test_releasing_a_project_no_session_holds_stops_and_detaches_its_manager(
+        self, agent: SerenaAgent, project_a: _HeldProject
+    ) -> None:
+        agent._release_project_if_unheld(project_a.project)
+
+        project_a.manager.stop_all.assert_called_once()
+        assert project_a.project.language_server_manager is None
+
+
+class TestBackgroundReleaseOfAProject:
+    """verifies that a background release runs the release on a thread of its own, and starts no thread for no project."""
+
+    def test_a_project_is_released_on_a_thread_of_its_own(
+        self, agent: SerenaAgent, project_a: _HeldProject, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        releasing_threads: list[str] = []
+        released = threading.Event()
+
+        def record_release(project: Project) -> None:
+            releasing_threads.append(threading.current_thread().name)
+            released.set()
+
+        monkeypatch.setattr(agent, "_release_project_if_unheld", record_release)
+
+        agent._release_project_if_unheld_in_background(project_a.project)
+
+        assert released.wait(timeout=_GATE_TIMEOUT), "the project was never released"
+        assert releasing_threads == [f"ReleaseProject[{project_a.project.project_name}]"]
+
+    def test_no_project_starts_no_thread(self, agent: SerenaAgent) -> None:
+        with patch.object(threading, "Thread") as thread_cls:
+            agent._release_project_if_unheld_in_background(None)
+
+        thread_cls.assert_not_called()
