@@ -697,14 +697,9 @@ class Project(ToStringMixin):
             one. Default False (idempotent get-or-create).
         :return: the language server manager, also stored in ``self.language_server_manager``.
         """
-        import threading
-
         # serialise concurrent calls on this Project so two activations cannot race through
-        # the create path and leak managers; the lock is created lazily because Project's
-        # existing initialiser does not own a dedicated slot for it
-        lock = self.__dict__.setdefault("_lsm_lock", threading.RLock())
-
-        with lock:
+        # the create path and leak managers
+        with self.language_server_manager_lock():
             # idempotent get-or-create: a non-None manager satisfies the same contract as
             # :meth:`get_language_server_manager_or_raise` (the read path), so return early
             if self.language_server_manager is not None and not force_recreate:
@@ -760,6 +755,26 @@ class Project(ToStringMixin):
                 # atomic swap above guarantees readers always observe a non-None manager
                 # during the recreate window)
                 self._lsm_ready_event.set()
+
+    def language_server_manager_lock(self) -> threading.RLock:
+        """
+        :return: the lock that serialises the creation of this project's language server manager with its release;
+            it is created lazily because Project's existing initialiser does not own a dedicated slot for it
+        """
+        return self.__dict__.setdefault("_lsm_lock", threading.RLock())
+
+    def detach_language_server_manager(self) -> LanguageServerManager | None:
+        """
+        Removes this project's language server manager without stopping it, so that the caller can stop it, and
+        re-arms the readiness signal first, so that a reader arriving after the removal waits for a new manager
+        rather than failing on the absent one.
+
+        :return: the removed manager, or None if the project had none
+        """
+        self._lsm_ready_event.clear()
+        manager = self.language_server_manager
+        self.language_server_manager = None
+        return manager
 
     def get_language_server_manager_or_raise(self) -> LanguageServerManager:
         # block on the in-flight construction signalled by :meth:`create_language_server_manager`.

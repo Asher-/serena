@@ -338,6 +338,9 @@ class SerenaAgent:
         # fallback active project for non-MCP callers (CLI, dashboard, scripts, tests) that have no session
         # in scope; the property setter writes here when _SESSION_KEY_VAR is unset.
         self._legacy_active_project: Project | None = None
+        # guards every write of a project into a session's slot together with the release of a project no session
+        # holds (see _release_project_if_unheld), so a session taking a project cannot interleave with its release
+        self._project_holders_lock = threading.Lock()
         self._active_project = None  # routed through the _active_project property to the per-session map or legacy slot
         # per-session cursor managers, keyed identically to _active_projects_by_session. Each entry is
         # bound to that session's active project at the moment the manager was constructed; a per-session
@@ -878,13 +881,14 @@ class SerenaAgent:
         so any reads within the current call observe the new project immediately.
         """
         session_key = _SESSION_KEY_VAR.get(None)
-        if session_key is not None:
-            if project is None:
-                self._active_projects_by_session.pop(session_key, None)
+        with self._project_holders_lock:
+            if session_key is not None:
+                if project is None:
+                    self._active_projects_by_session.pop(session_key, None)
+                else:
+                    self._active_projects_by_session[session_key] = project
             else:
-                self._active_projects_by_session[session_key] = project
-        else:
-            self._legacy_active_project = project
+                self._legacy_active_project = project
         # update the in-flight var only if it has been set on this call's context; otherwise leave the
         # default unset so callers without contextvar scoping (CLI/dashboard) keep falling through to
         # the per-session / legacy lookup in the getter.
@@ -919,17 +923,70 @@ class SerenaAgent:
                 return
             self._session_finalizers[session_key] = finalizer
 
+    def _is_project_held(self, project: Project) -> bool:
+        """
+        Must be called with :attr:`_project_holders_lock` held.
+
+        :param project: a project
+        :return: whether any session's slot or cursor manager, or the legacy slot or cursor manager, holds this
+            project instance
+        """
+        holders: list[Project | None] = [*self._active_projects_by_session.values(), self._legacy_active_project]
+        holders.extend(cursor_manager.project for cursor_manager in list(self._cursor_managers_by_session.values()))
+        if self._legacy_cursor_manager is not None:
+            holders.append(self._legacy_cursor_manager.project)
+        return any(holder is project for holder in holders)
+
+    def _release_project_if_unheld(self, project: Project | None, timeout: float = 2.0) -> None:
+        """
+        Stops the language servers of ``project`` if no session holds it, and leaves them running if any session does.
+
+        Runs under the project's language-server-manager lock, so it cannot interleave with an initialisation of that
+        project's manager, and decides and detaches under :attr:`_project_holders_lock`, so a session that takes the
+        project afterwards finds it without a manager and initialises a new one.
+
+        :param project: the project a session stopped holding, or None
+        :param timeout: the timeout for the shutdown of each language server
+        """
+        if project is None:
+            return
+        with project.language_server_manager_lock():
+            with self._project_holders_lock:
+                if self._is_project_held(project):
+                    return
+                manager = project.detach_language_server_manager()
+            if manager is None:
+                return
+            log.info(f"No session holds project '{project.project_name}' any longer; stopping its language servers ...")
+            try:
+                manager.stop_all(save_cache=True, timeout=timeout)
+            except Exception as e:
+                log.warning(f"Error stopping the language servers of project '{project.project_name}': {e}", exc_info=e)
+
+    def _release_project_if_unheld_in_background(self, project: Project | None) -> None:
+        """
+        Runs :meth:`_release_project_if_unheld` on a thread of its own, for callers such as a garbage-collection
+        finalizer that must not wait for language servers to stop.
+
+        :param project: the project a session stopped holding, or None
+        """
+        if project is None:
+            return
+        threading.Thread(
+            target=self._release_project_if_unheld, args=(project,), name=f"ReleaseProject[{project.project_name}]", daemon=True
+        ).start()
+
     def _evict_session_state(self, session_key: str | int) -> None:
         """
         Pop ``session_key`` out of every per-session map so its entries cannot leak.
 
         Called by the per-session weakref finalizer registered in
         :meth:`_register_session_finalizer` (tier-3) and by any explicit eviction
-        path that hands us a session key directly. Idempotent. Does not shut down
-        language servers or projects (those are agent-wide resources owned by
-        :meth:`on_shutdown`).
+        path that hands us a session key directly. Idempotent. Stops the language
+        servers of the session's project, off the calling thread, if no other
+        session holds that project.
         """
-        self._active_projects_by_session.pop(session_key, None)
+        evicted_project = self._active_projects_by_session.pop(session_key, None)
         self._explicit_project_roots_by_session.pop(session_key, None)
         # the session is genuinely gone, so drop its durable record too; leaving it would let a future
         # session that reuses the key inherit this one's project.
@@ -945,6 +1002,7 @@ class SerenaAgent:
             executor = self._task_executors_by_session.pop(session_key, None)
         if executor is not None:
             executor.shutdown()
+        self._release_project_if_unheld_in_background(evicted_project)
 
     
 
@@ -992,9 +1050,11 @@ class SerenaAgent:
         operator-driven eviction (daemon shutdown, an ``activate_project`` to a
         different project from a session that previously held this entry, or
         future operator-issued unregister flows). It is idempotent: calling it
-        for an unknown ``session_id`` is a no-op.
+        for an unknown ``session_id`` is a no-op. Stops the language servers of
+        the session's project, off the calling thread, if no other session holds
+        that project.
         """
-        self._active_projects_by_session.pop(session_id, None)
+        evicted_project = self._active_projects_by_session.pop(session_id, None)
         self._explicit_project_roots_by_session.pop(session_id, None)
         self._explicit_project_root_store.discard(session_id)
         self._cursor_managers_by_session.pop(session_id, None)
@@ -1004,6 +1064,7 @@ class SerenaAgent:
             executor = self._task_executors_by_session.pop(session_id, None)
         if executor is not None:
             executor.shutdown()
+        self._release_project_if_unheld_in_background(evicted_project)
         log.debug(f"Evicted pipe session state for session_id={session_id}")
 
     def get_active_project(self) -> Project | None:
@@ -1291,12 +1352,14 @@ class SerenaAgent:
                 f"(2) Configure one MCP server per backend in your client."
             )
 
-        # Note: the previous "shut down the previously active project" step has been removed.
         # In a multi-session MCP daemon, "switching" is per-session: other concurrent sessions may
         # still hold the previous project as their active one, and tearing down its language servers
-        # here would break them (the same regression class addressed at process-exit-only teardown
-        # in SerenaMCPFactory; see mcp.py around create_mcp_server). Projects now live until
-        # process exit (on_shutdown) or an explicit configuration-changed reload.
+        # would break them (the same regression class addressed at process-exit-only teardown
+        # in SerenaMCPFactory; see mcp.py around create_mcp_server). So the project this session held
+        # is read from the session's own slot (not an in-flight override) and released below only if
+        # no session holds it once this session has switched.
+        session_key = _SESSION_KEY_VAR.get(None)
+        previous_project = self._active_projects_by_session.get(session_key) if session_key is not None else self._legacy_active_project
 
         # update via the property setter, which routes to the per-session slot (or the legacy fallback)
         self._active_project = project
@@ -1306,7 +1369,6 @@ class SerenaAgent:
         # invalidate the cursor manager for *this* calling context only — per-session if a session is in scope,
         # otherwise the legacy slot. A previous implementation cleared a single agent-wide attribute here, which
         # under multi-session use wiped concurrent sessions' cursors whenever any session switched projects.
-        session_key = _SESSION_KEY_VAR.get(None)
         if session_key is not None:
             self._cursor_managers_by_session.pop(session_key, None)
             if record_explicit:
@@ -1319,6 +1381,9 @@ class SerenaAgent:
                 self._explicit_project_root_store.set(session_key, project.project_root)
         else:
             self._legacy_cursor_manager = None
+        # this session no longer holds the previous project; stop its language servers unless another session does
+        if previous_project is not project:
+            self._release_project_if_unheld(previous_project)
         project.set_agent(self)
 
         if update_active_modes:
@@ -1328,9 +1393,15 @@ class SerenaAgent:
             self._update_active_tools()
 
         def init_language_server_manager() -> None:
-            # start the language server
-            with LogTime("Language server initialization", logger=log):
-                project.create_language_server_manager()
+            with project.language_server_manager_lock():
+                # a session that switched away before this ran has released the project; starting its language
+                # servers now would leave servers running that no session holds
+                with self._project_holders_lock:
+                    if not self._is_project_held(project):
+                        return
+                # start the language server
+                with LogTime("Language server initialization", logger=log):
+                    project.create_language_server_manager()
 
         # initialize the language server in the background (if in language server mode);
         # readiness is signalled on the project's :attr:`Project._lsm_ready_event`, which both
