@@ -328,6 +328,11 @@ class SerenaAgent:
         # origin -- so a session that ever explicitly activated a project is never silently rebound to
         # a different one. Keyed identically to _active_projects_by_session and evicted alongside it.
         self._explicit_project_roots_by_session: dict[str | int, str] = {}
+        # the active modes and tools of each session, derived from the Serena configuration and that session's own
+        # project (see _update_active_modes / _update_active_tools); keyed like _active_projects_by_session and
+        # evicted alongside it, so no session's project enables or disables a tool for another session
+        self._active_modes_by_session: dict[str | int, ActiveModes] = {}
+        self._active_tools_by_session: dict[str | int, AvailableTools] = {}
         # the on-disk backing for the map above. The map alone survives an evicted per-session slot but
         # not a daemon restart, and losing it makes a session that explicitly activated a worktree
         # indistinguishable from one that never activated anything -- the self-heal then has nothing to
@@ -494,6 +499,10 @@ class SerenaAgent:
         # update the active tools (considering the active project, if any)
         self._active_tools: AvailableTools
         self._update_active_tools()
+
+        # the active modes and tools of a session that has activated no project: those of the Serena configuration alone
+        self._config_active_modes = self._derive_active_modes(None)
+        self._config_active_tools = self._derive_active_tools(self._config_active_modes, None)
 
         # start the dashboard (web frontend), registering its log handler
         # should be the last thing to happen in the initialization since the dashboard
@@ -987,6 +996,8 @@ class SerenaAgent:
         session holds that project.
         """
         evicted_project = self._active_projects_by_session.pop(session_key, None)
+        self._active_modes_by_session.pop(session_key, None)
+        self._active_tools_by_session.pop(session_key, None)
         self._explicit_project_roots_by_session.pop(session_key, None)
         # the session is genuinely gone, so drop its durable record too; leaving it would let a future
         # session that reuses the key inherit this one's project.
@@ -1055,6 +1066,8 @@ class SerenaAgent:
         that project.
         """
         evicted_project = self._active_projects_by_session.pop(session_id, None)
+        self._active_modes_by_session.pop(session_id, None)
+        self._active_tools_by_session.pop(session_id, None)
         self._explicit_project_roots_by_session.pop(session_id, None)
         self._explicit_project_root_store.discard(session_id)
         self._cursor_managers_by_session.pop(session_id, None)
@@ -1110,14 +1123,14 @@ class SerenaAgent:
         """
         :return: the list of active modes
         """
-        return list(self._active_modes.get_modes())
+        return list(self._calling_active_modes().get_modes())
 
     def _format_prompt(self, prompt_template: str) -> str:
         template = JinjaTemplate(prompt_template)
         return template.render(available_tools=self._exposed_tools.tool_names, available_markers=self._exposed_tools.tool_marker_names)
 
     def create_system_prompt(self) -> str:
-        available_tools = self._active_tools
+        available_tools = self._calling_active_tools()
         available_markers = available_tools.tool_marker_names
         global_memories = MemoriesManager(
             serena_data_folder=None, read_only_memory_patterns=self.serena_config.read_only_memory_patterns
@@ -1193,7 +1206,7 @@ class SerenaAgent:
                     )
         msg += f"File encoding: {proj.project_config.encoding}."
 
-        include_memories = self._active_tools.contains_tool_class(ReadMemoryTool)
+        include_memories = self._calling_active_tools().contains_tool_class(ReadMemoryTool)
         if include_memories:
             project_memories = proj.memories_manager.list_project_memories()
             if project_memories:
@@ -1205,38 +1218,86 @@ class SerenaAgent:
             msg += f"\nAdditional project-specific instructions:\n {proj.project_config.initial_prompt}"
         return msg
 
+    def _derive_active_modes(self, project: Project | None) -> ActiveModes:
+        """
+        :param project: the project whose configuration applies, or None
+        :return: the active modes derived from the Serena configuration, the given project's configuration (if any),
+            and mode overrides (if any)
+        """
+        active_modes = ActiveModes()
+        active_modes.apply(self.serena_config)
+        if project is not None:
+            active_modes.apply(project.project_config)
+        if self._mode_overrides:
+            active_modes.apply(self._mode_overrides)
+        return active_modes
+
+    def _derive_active_tools(self, active_modes: ActiveModes, project: Project | None) -> AvailableTools:
+        """
+        :param active_modes: the active modes that apply
+        :param project: the project whose configuration applies, or None
+        :return: the active tools derived from the base tool set, which already takes the Serena configuration and the
+            context into account (as well as many other aspects, such as JetBrains mode), the given modes, and the
+            given project's configuration (if any)
+        """
+        # apply modes
+        tool_set = self._base_toolset.apply(*active_modes.get_modes())
+
+        # apply the project configuration (if any)
+        if project is not None:
+            tool_set = tool_set.apply(project.project_config)
+            if project.project_config.read_only:
+                tool_set = tool_set.without_editing_tools()
+
+        return tool_set.to_available_tools(self._all_tools)
+
+    def _calling_active_modes(self) -> ActiveModes:
+        """
+        :return: the active modes of the calling session, derived from that session's own project; a session that has
+            activated no project has the modes of the Serena configuration alone. Outside any session, the single slot.
+        """
+        session_key = _SESSION_KEY_VAR.get(None)
+        if session_key is None:
+            return self._active_modes
+        return self._active_modes_by_session.get(session_key, self._config_active_modes)
+
+    def _calling_active_tools(self) -> AvailableTools:
+        """
+        :return: the active tools of the calling session, derived from that session's own project; a session that has
+            activated no project has the tools of the Serena configuration alone. Outside any session, the single slot.
+        """
+        session_key = _SESSION_KEY_VAR.get(None)
+        if session_key is None:
+            return self._active_tools
+        return self._active_tools_by_session.get(session_key, self._config_active_tools)
+
     def _update_active_modes(self) -> None:
         """
-        Updates the active modes based on the Serena configuration, the active project configuration (if any),
-        and mode overrides (if any).
+        Updates the active modes of the calling session (or of the single slot outside any session) from the Serena
+        configuration, that session's active project configuration (if any), and mode overrides (if any).
         """
-        self._active_modes = ActiveModes()
-        self._active_modes.apply(self.serena_config)
-        if self._active_project:
-            self._active_modes.apply(self._active_project.project_config)
-        if self._mode_overrides:
-            self._active_modes.apply(self._mode_overrides)
+        active_modes = self._derive_active_modes(self._active_project)
+        session_key = _SESSION_KEY_VAR.get(None)
+        if session_key is not None:
+            self._active_modes_by_session[session_key] = active_modes
+        else:
+            self._active_modes = active_modes
 
     def _update_active_tools(self) -> None:
         """
-        Updates the active tools based on the active modes and the active project.
-        The base tool set already takes the Serena configuration and the context into account
-        (as well as many other aspects, such as JetBrains mode).
+        Updates the active tools of the calling session (or of the single slot outside any session) from its active
+        modes and its active project (if any).
         """
-        # apply modes
-        tool_set = self._base_toolset.apply(*self._active_modes.get_modes())
-
-        # apply active project configuration (if any)
-        if self._active_project is not None:
-            tool_set = tool_set.apply(self._active_project.project_config)
-            if self._active_project.project_config.read_only:
-                tool_set = tool_set.without_editing_tools()
-
-        self._active_tools = tool_set.to_available_tools(self._all_tools)
-        log.info(f"Active tools ({len(self._active_tools)}): {', '.join(self._active_tools.tool_names)}")
+        active_tools = self._derive_active_tools(self._calling_active_modes(), self._active_project)
+        session_key = _SESSION_KEY_VAR.get(None)
+        if session_key is not None:
+            self._active_tools_by_session[session_key] = active_tools
+        else:
+            self._active_tools = active_tools
+        log.info(f"Active tools ({len(active_tools)}): {', '.join(active_tools.tool_names)}")
 
         # check if a tool was activated that is not in the exposed tool set and issue a warning if so
-        active_tools_not_exposed = set(self._active_tools.tool_names) - set(self._exposed_tools.tool_names)
+        active_tools_not_exposed = set(active_tools.tool_names) - set(self._exposed_tools.tool_names)
         if active_tools_not_exposed:
             log.warning(
                 "The following active tools are not in the exposed tool set and thus won't be available to clients:\n"
@@ -1483,14 +1544,14 @@ class SerenaAgent:
         """
         :return: the list of names of the active tools for the current project, sorted alphabetically
         """
-        return self._active_tools.tool_names
+        return self._calling_active_tools().tool_names
 
     def tool_is_active(self, tool_name: str) -> bool:
         """
         :param tool_class: the name of the tool to check
         :return: True if the tool is active, False otherwise
         """
-        return self._active_tools.contains_tool_name(tool_name)
+        return self._calling_active_tools().contains_tool_name(tool_name)
 
     def tool_is_exposed(self, tool_name: str) -> bool:
         """
@@ -1580,7 +1641,7 @@ class SerenaAgent:
         return self._all_tools[tool_class]  # type: ignore
 
     def print_tool_overview(self) -> None:
-        ToolRegistry().print_tool_overview(self._active_tools.tools)
+        ToolRegistry().print_tool_overview(self._calling_active_tools().tools)
 
     def __del__(self) -> None:
         self.on_shutdown()
