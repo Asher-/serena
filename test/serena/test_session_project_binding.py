@@ -83,15 +83,6 @@ class _GatedActivationTool(Tool, ToolMarkerDoesNotRequireActiveProject):
         return "activated"
 
 
-class _ActiveRootTool(Tool):
-    """A tool that needs an active project and answers with the root of the project its call runs against."""
-
-    def apply(self) -> str:
-        project = self.agent.get_active_project()
-        assert project is not None
-        return project.project_root
-
-
 class _RelativeWriteTool(Tool):
     """A tool that needs an active project and writes a file at a path relative to that project's root."""
 
@@ -145,34 +136,38 @@ class TestCallRunsAgainstProjectHeldWhenItStarts:
     """pg://serena/session/project/order"""
 
     def test_call_queued_behind_activation_runs_against_activated_project(
-        self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch
+        self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """
-        A session holding X issues activate_project(A) and, while that activation is in flight, a call that
-        resolves its project: the call runs after the activation on the session's executor and must run against
-        A, the project its session holds when it starts -- not X, the project held when it arrived.
+        A session holding X issues activate_project(A) and, while that activation is in flight, a relative-path
+        write: the write runs after the activation on the session's executor and must land under A, the project its
+        session holds when it starts -- not under X, the project held when it arrived.
         """
         session = "cc-session-order"
-        project_x = _project_at("/tmp/serena-order-X", "project-X")
-        project_a = _project_at("/tmp/serena-order-A", "project-A")
+        root_x, root_a = tmp_path / "X", tmp_path / "A"
+        root_x.mkdir()
+        root_a.mkdir()
+        project_x, project_a = _project_at(root_x, "project-X"), _project_at(root_a, "project-A")
         agent._active_projects_by_session[session] = project_x
         gate = _Gate.closed()
         activation = _active(_GatedActivationTool(agent, project_a, gate), monkeypatch)
-        probe = _active(_ActiveRootTool(agent), monkeypatch)
+        write = _active(_RelativeWriteTool(agent), monkeypatch)
 
-        # hold the session's activation in flight, then issue the session's next call behind it
+        # hold the session's activation in flight, then issue the session's relative-path write behind it
         activation_task = activation._issue_call(False, True, _make_mcp_ctx(forwarded_header=session))
         gate.await_entry()
-        probe_task = probe._issue_call(False, True, _make_mcp_ctx(forwarded_header=session))
+        write_task = write._issue_call(False, True, _make_mcp_ctx(forwarded_header=session), relative_path="out.txt")
 
-        # let the activation finish; the queued call then starts
+        # let the activation finish; the queued write then starts
         gate.release.set()
         assert activation_task.result(timeout=_HANG_GUARD_SECONDS) == "activated"
-        root = probe_task.result(timeout=_HANG_GUARD_SECONDS)
+        root = write_task.result(timeout=_HANG_GUARD_SECONDS)
 
-        assert root == project_a.project_root, (
-            f"a call issued after its session's activate_project ran against {root!r}, not the activated project {project_a.project_root!r}"
+        assert root == str(root_a), (
+            f"a write issued after its session's activate_project ran against {root!r}, not the activated project {str(root_a)!r}"
         )
+        assert (root_a / "out.txt").is_file(), "the write did not land under the activated project A"
+        assert not (root_x / "out.txt").exists(), "the write landed under X, the project held before the activation"
 
 
 class TestCallOfOneSessionIgnoresAnotherSessionsActivation:
