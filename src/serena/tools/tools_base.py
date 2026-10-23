@@ -402,13 +402,16 @@ class Tool(Component):
             except BaseException as e:
                 log.info(f"Failed to get client info: {e}.")
 
-        # snapshot the persisted active project for this session; issue() below pins it into the context the
-        # task is issued from, which the task body runs in
-        persisted_project = (
-            self.agent._active_projects_by_session.get(session_key) if session_key is not None else None
-        )
-
         def task() -> str:
+            # pin the project this session holds as the session's executor starts the call, not the one it held when
+            # the call arrived: the executor runs one session's calls one at a time in arrival order, so a call issued
+            # after its session's activate_project runs against the project that activation bound, and every reader
+            # of the active project inside the call sees that one project (pg://serena/session/project/order)
+            if session_key is not None:
+                held_project = self.agent._active_projects_by_session.get(session_key)
+                if held_project is not None:
+                    _ACTIVE_PROJECT_VAR.set(held_project)
+
             apply_fn = self.get_apply_fn()
             try:
                 if not self.is_active():
@@ -439,11 +442,10 @@ class Tool(Component):
                         #      in the error text as a suggestion the caller may pass deliberately;
                         #      serena never binds a root it merely inferred.
                         # Keyed via _SESSION_KEY_VAR set on this worker so concurrent sessions never
-                        # cross-bind. The per-session slot is re-read here unlocked -- snapshotted on
-                        # the main thread into persisted_project above -- so a concurrent activation
-                        # of the same session_key can race this re-check. Entering the heal branch
-                        # twice is benign: activate_project_from_path_or_name re-registers the same
-                        # root idempotently, so the redundant re-activation cannot corrupt the slot.
+                        # cross-bind. The per-session slot is re-read here unlocked, as it was when this
+                        # task started. Entering the heal branch twice is benign:
+                        # activate_project_from_path_or_name re-registers the same root idempotently, so
+                        # a redundant re-activation cannot corrupt the slot.
                         healed = False
                         if session_key is not None and self.agent._active_projects_by_session.get(session_key) is None:
                             explicit_root = self.agent._explicit_project_roots_by_session.get(session_key)
@@ -536,8 +538,6 @@ class Tool(Component):
                 _MCP_CALL_IN_FLIGHT.set(True)
             if session_key is not None:
                 _SESSION_KEY_VAR.set(session_key)
-            if persisted_project is not None:
-                _ACTIVE_PROJECT_VAR.set(persisted_project)
             return self.agent.issue_task(task, name=self.__class__.__name__, timeout=self.agent.serena_config.tool_timeout)
 
         return contextvars.copy_context().run(issue)
