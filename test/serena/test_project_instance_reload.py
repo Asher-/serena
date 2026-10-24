@@ -144,6 +144,32 @@ class _Sessions:
         return self.run(session, lambda: self._agent.tool_is_active(tool_name))
 
 
+class _WaitCountingEvent(threading.Event):
+    """
+    An event that counts the waits begun on it, so a test can await the moment a given number of threads are waiting on it.
+    Set, cleared and waited on, it behaves as :class:`threading.Event` does.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._waits_changed = threading.Condition()
+        self._waits_begun = 0
+
+    def wait(self, timeout: float | None = None) -> bool:
+        with self._waits_changed:
+            self._waits_begun += 1
+            self._waits_changed.notify_all()
+        return super().wait(timeout)
+
+    def await_waiters(self, count: int) -> bool:
+        """
+        :param count: the number of waits to await
+        :return: whether ``count`` waits were begun on this event before the hang guard ran out
+        """
+        with self._waits_changed:
+            return self._waits_changed.wait_for(lambda: self._waits_begun >= count, timeout=_HANG_GUARD_SECONDS)
+
+
 class _GatedCallTool(Tool):
     """A tool needing an active project that holds its call in flight on a gate and reports the project it ran against."""
 
@@ -387,6 +413,44 @@ class TestOneLanguageServerManagerPerRoot:
         assert not new_manager.overlapped, "a manager of R's new instance was built while the replaced instance's manager ran"
         assert new_manager.position > released_at, "a manager of R's new instance was built while a call held the replaced instance"
 
+    def test_instance_of_a_second_reload_starts_its_manager_only_after_the_first_replaced_one_stops(
+        self, agent: SerenaAgent, managers: _ManagerFactory, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """
+        Session 2 holds R with a call held in flight on a gate, session 1 holds P, and R's project.yml changes twice, session 1
+        activating R after each change: the instance of the second reload waits for the first replaced instance, whose
+        manager still runs, and not only for the instance of the first reload, which never built one; no manager of R is
+        built while the first one runs, and one is built once the gate is released.
+        """
+        root_r, root_p = _write_project(tmp_path / "R"), _write_project(tmp_path / "P")
+        sessions = _Sessions(agent)
+        sessions.activate(_SESSION_2, root_r)
+        managers.await_managers(root_r, 1)
+        sessions.activate(_SESSION_1, root_p)
+        managers.await_managers(root_p, 1)
+        first_instance = sessions.held(_SESSION_2)
+        assert first_instance is not None
+        first_instance_stopped = _WaitCountingEvent()
+        first_instance._language_servers_stopped = first_instance_stopped
+        gate = _Gate.closed()
+        call_result = _issue_gated_call(agent, _SESSION_2, gate, monkeypatch)
+
+        _change_project_yml(agent, root_r, initial_prompt="changed")
+        sessions.activate(_SESSION_1, root_r)
+        _change_project_yml(agent, root_r, initial_prompt="changed again")
+        sessions.activate(_SESSION_1, root_r)
+
+        assert first_instance_stopped.await_waiters(2), (
+            "the instance of the second reload did not wait for the first replaced instance, whose manager still runs"
+        )
+        released_at = managers.mark()
+        gate.release.set()
+        assert call_result() == str(root_r)
+
+        new_manager = managers.await_managers(root_r, 2)[1]
+        assert not new_manager.overlapped, "a manager of R was built while the first replaced instance's manager ran"
+        assert new_manager.position > released_at, "a manager of R was built while a call held the first replaced instance"
+
 
 class TestReloadThroughTheActivationTool:
     """pg://serena/session/project/instance/shutdown, pg://serena/session/project/instance/uniqueness"""
@@ -435,6 +499,7 @@ class TestCursorCallAcrossAReload:
         tool = _GatedCursorTool(agent, gate)
         monkeypatch.setattr(tool, "is_active", lambda: True)
         task = tool._issue_call(False, True, _make_mcp_ctx(forwarded_header=_SESSION_2))
+        gate.await_entry()
 
         _change_project_yml(agent, root, initial_prompt="changed")
         sessions.activate(_SESSION_1, root)

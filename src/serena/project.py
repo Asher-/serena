@@ -796,13 +796,21 @@ class Project(ToStringMixin):
     def wait_for_replaced_project(self) -> None:
         """
         Waits until the language servers of the instance this instance replaces (see :attr:`replaced_project`) have
-        stopped, if it replaces one, and then forgets that instance. Called before :meth:`language_server_manager_lock` is
-        taken, so the wait never blocks a release of this instance's language servers.
+        stopped, if it replaces one, and then forgets that instance. An instance replaced before it started language servers
+        of its own still waits for the one it replaces, so the wait follows that chain until it reaches an instance whose
+        servers have stopped and which waits for none. Called before :meth:`language_server_manager_lock` is taken, so the
+        wait never blocks a release of this instance's language servers.
         """
         replaced_project = self._replaced_project
         if replaced_project is not None:
             log.info(f"Waiting for the language servers of the replaced instance of {self.project_root} to stop ...")
-            replaced_project._language_servers_stopped.wait()
+
+            # the replaced instances, back to the last one that started language servers; each stops its own, and one
+            # still waiting for the instance it replaces never started any
+            while replaced_project is not None:
+                replaced_project._language_servers_stopped.wait()
+                replaced_project = replaced_project._replaced_project
+
             self._replaced_project = None
 
     def mark_language_servers_stopped(self) -> None:
