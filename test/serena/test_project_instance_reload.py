@@ -26,7 +26,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from serena.agent import _PIPE_SESSION_ID_VAR, _SESSION_KEY_VAR, SerenaAgent
+from serena.agent import _PIPE_SESSION_ID_VAR, _SESSION_KEY_VAR, ProjectNotFoundError, SerenaAgent
 from serena.config.serena_config import ProjectConfig, SerenaConfig
 from serena.constants import SERENA_MANAGED_DIR_NAME
 from serena.ls_manager import LanguageServerFactory, LanguageServerManager
@@ -555,3 +555,12 @@ class TestCreatingAnExistingManager:
 
         assert sessions.held(_SESSION_1).create_language_server_manager() is built.manager
         assert len(managers._built_for(root)) == 1, "a second language-server manager was built for an instance that had one"
+
+
+class TestActivatingAnUnknownProject:
+    """sg://serena/agent/fn/activate/project/from/path/or/name, route not found"""
+
+    def test_path_that_is_neither_registered_nor_a_directory_is_refused(self, agent: SerenaAgent, tmp_path: Path) -> None:
+        """A path that names no registered project and no directory is refused with ProjectNotFoundError."""
+        with pytest.raises(ProjectNotFoundError):
+            agent.activate_project_from_path_or_name(str(tmp_path / "absent"))
