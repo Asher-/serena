@@ -622,6 +622,9 @@ class RegisteredProject(ToStringMixin):
         self.project_root = Path(project_root).resolve()
         self.project_config = project_config
         self._project_instance = project_instance
+        # the instance a change to the project configuration dropped (see reload_if_changed), handed to the instance
+        # get_project_instance builds in its place
+        self._replaced_project_instance: Optional["Project"] = None
 
     def _tostring_exclude_private(self) -> bool:
         return True
@@ -664,6 +667,7 @@ class RegisteredProject(ToStringMixin):
     def get_project_instance(self, serena_config: "SerenaConfig") -> "Project":
         """
         Returns the project instance for this registered project, loading it if necessary.
+        An instance loaded after :meth:`reload_if_changed` dropped one is handed the dropped instance as the one it replaces.
         """
         if self._project_instance is None:
             from ..project import Project
@@ -673,7 +677,9 @@ class RegisteredProject(ToStringMixin):
                     project_root=str(self.project_root),
                     project_config=self.project_config,
                     serena_config=serena_config,
+                    replaced_project=self._replaced_project_instance,
                 )
+            self._replaced_project_instance = None
         return self._project_instance
 
     def reload_if_changed(self, serena_config: "SerenaConfig") -> bool:
@@ -681,7 +687,7 @@ class RegisteredProject(ToStringMixin):
         Reloads the project configuration from disk (``project.yml``, including the ``project.local.yml`` override)
         and, if it differs from the cached configuration, replaces the cached configuration and drops any
         memoized project instance so that the next :meth:`get_project_instance` call builds a fresh
-        :class:`Project` reflecting the on-disk state.
+        :class:`Project` reflecting the on-disk state, handing it the dropped instance as the one it replaces.
 
         :param serena_config: the global Serena configuration (used to resolve the project.yml path)
         :return: True if the on-disk configuration differed from the cached one and the cache was updated;
@@ -704,6 +710,8 @@ class RegisteredProject(ToStringMixin):
             self.project_root,
         )
         self.project_config = new_config
+        if self._project_instance is not None:
+            self._replaced_project_instance = self._project_instance
         self._project_instance = None
         return True
 

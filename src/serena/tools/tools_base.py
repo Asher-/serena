@@ -402,16 +402,7 @@ class Tool(Component):
             except BaseException as e:
                 log.info(f"Failed to get client info: {e}.")
 
-        def task() -> str:
-            # pin the project this session holds as the session's executor starts the call, not the one it held when
-            # the call arrived: the executor runs one session's calls one at a time in arrival order, so a call issued
-            # after its session's activate_project runs against the project that activation bound, and every reader
-            # of the active project inside the call sees that one project (pg://serena/session/project/order)
-            if session_key is not None:
-                held_project = self.agent._active_projects_by_session.get(session_key)
-                if held_project is not None:
-                    _ACTIVE_PROJECT_VAR.set(held_project)
-
+        def apply_call() -> str:
             apply_fn = self.get_apply_fn()
             try:
                 if not self.is_active():
@@ -527,6 +518,22 @@ class Tool(Component):
                 log.error(f"Error saving language server cache: {e}")
 
             return result
+
+        def task() -> str:
+            # pin the project this session holds as the session's executor starts the call, not the one it held when
+            # the call arrived: the executor runs one session's calls one at a time in arrival order, so a call issued
+            # after its session's activate_project runs against the project that activation bound, and every reader
+            # of the active project inside the call sees that one project (pg://serena/session/project/order). The call
+            # holds that project until it ends, so no release stops its language servers under the call
+            # (pg://serena/session/project/instance/shutdown)
+            pinned_project = self.agent._pin_session_project_for_call(session_key) if session_key is not None else None
+            if pinned_project is not None:
+                _ACTIVE_PROJECT_VAR.set(pinned_project)
+            try:
+                return apply_call()
+            finally:
+                if pinned_project is not None:
+                    self.agent._unpin_project_for_call(pinned_project)
 
         # bind this call's session into the context the task is issued from: issue_task routes the task to the
         # executor of the bound session, and the task body runs in a copy of this context (see TaskExecutor.Task),

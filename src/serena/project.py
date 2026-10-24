@@ -305,7 +305,13 @@ class Project(ToStringMixin):
         project_config: ProjectConfig,
         serena_config: SerenaConfig,
         is_newly_created: bool = False,
+        replaced_project: Optional["Project"] = None,
     ):
+        """
+        :param replaced_project: the instance of the same root that this instance replaces after a change to the project
+            configuration, if any; this instance creates no language server manager until that one has stopped its
+            language servers
+        """
         assert serena_config is not None
         self.project_root = project_root
         self.project_config = project_config
@@ -334,6 +340,13 @@ class Project(ToStringMixin):
         # lives on Project (not SerenaAgent) so multi-session daemons share one event
         # per project across all activating sessions.
         self._lsm_ready_event = threading.Event()
+        # the instance of the same root this instance replaces, dropped once its language servers have stopped; until
+        # then this instance creates no language server manager, so that two instances of one root never both run
+        # language servers over its tree (pg://serena/session/project/instance/uniqueness)
+        self._replaced_project = replaced_project
+        # set once this instance's language servers have been stopped for want of any holder (see
+        # mark_language_servers_stopped), cleared when it creates a language server manager
+        self._language_servers_stopped = threading.Event()
         self.is_newly_created = is_newly_created
         self._agent: Optional["SerenaAgent"] = None
 
@@ -705,6 +718,13 @@ class Project(ToStringMixin):
             if self.language_server_manager is not None and not force_recreate:
                 return self.language_server_manager
 
+            # an instance replacing another of the same root starts no language servers while that one still runs its own
+            replaced_project = self._replaced_project
+            if replaced_project is not None:
+                log.info(f"Waiting for the language servers of the replaced instance of {self.project_root} to stop ...")
+                replaced_project._language_servers_stopped.wait()
+                self._replaced_project = None
+
             try:
                 # determine timeout to use for LS calls
                 tool_timeout = self.serena_config.tool_timeout
@@ -738,6 +758,7 @@ class Project(ToStringMixin):
                 # without ever being ``None``
                 previous_manager = self.language_server_manager
                 self.language_server_manager = new_manager
+                self._language_servers_stopped.clear()
                 if previous_manager is not None:
                     log.info("Stopping previous language server manager (post-swap) ...")
                     try:
@@ -775,6 +796,22 @@ class Project(ToStringMixin):
         manager = self.language_server_manager
         self.language_server_manager = None
         return manager
+
+    def mark_language_servers_stopped(self) -> None:
+        """
+        Records that this instance's language servers have been stopped because nothing holds it any longer, which lets
+        an instance replacing it start its own (see :attr:`replaced_project`).
+        """
+        self._language_servers_stopped.set()
+
+    @property
+    def replaced_project(self) -> Optional["Project"]:
+        """
+        :return: the instance of the same root that this instance replaces after a change to the project configuration,
+            until that instance's language servers have stopped and this instance has gone on to create its own manager;
+            None otherwise
+        """
+        return self._replaced_project
 
     def get_language_server_manager_or_raise(self) -> LanguageServerManager:
         # block on the in-flight construction signalled by :meth:`create_language_server_manager`.

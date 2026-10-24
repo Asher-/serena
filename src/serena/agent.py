@@ -346,6 +346,9 @@ class SerenaAgent:
         # guards every write of a project into a session's slot together with the release of a project no session
         # holds (see _release_project_if_unheld), so a session taking a project cannot interleave with its release
         self._project_holders_lock = threading.Lock()
+        # the project pinned for each tool call in flight, one entry per call (see _pin_session_project_for_call); a
+        # call holds its project like a session's slot does, so no release stops that project's servers under it
+        self._projects_held_by_calls: list[Project] = []
         self._active_project = None  # routed through the _active_project property to the per-session map or legacy slot
         # per-session cursor managers, keyed identically to _active_projects_by_session. Each entry is
         # bound to that session's active project at the moment the manager was constructed; a per-session
@@ -937,24 +940,96 @@ class SerenaAgent:
         Must be called with :attr:`_project_holders_lock` held.
 
         :param project: a project
-        :return: whether any session's slot or cursor manager, or the legacy slot or cursor manager, holds this
-            project instance
+        :return: whether any session's slot or cursor manager, the legacy slot or cursor manager, or a tool call in
+            flight holds this project instance
         """
         holders: list[Project | None] = [*self._active_projects_by_session.values(), self._legacy_active_project]
         holders.extend(cursor_manager.project for cursor_manager in list(self._cursor_managers_by_session.values()))
         if self._legacy_cursor_manager is not None:
             holders.append(self._legacy_cursor_manager.project)
+        holders.extend(self._projects_held_by_calls)
         return any(holder is project for holder in holders)
+
+    def _pin_session_project_for_call(self, session_key: str | int) -> Project | None:
+        """
+        Reads the project a session holds as a tool call of that session starts, and counts the call as a holder of that
+        project until :meth:`_unpin_project_for_call`, so that no release stops the project's language servers while the
+        call runs on it (pg://serena/session/project/instance/shutdown).
+
+        :param session_key: the key of the calling session
+        :return: the project the session holds, or None if it holds none
+        """
+        with self._project_holders_lock:
+            project = self._active_projects_by_session.get(session_key)
+            if project is not None:
+                self._projects_held_by_calls.append(project)
+        return project
+
+    def _unpin_project_for_call(self, project: Project) -> None:
+        """
+        Ends a tool call's hold on the project :meth:`_pin_session_project_for_call` pinned for it, and stops that
+        project's language servers if this was its last holder.
+
+        :param project: the project pinned for the call
+        """
+        with self._project_holders_lock:
+            for index, held_project in enumerate(self._projects_held_by_calls):
+                if held_project is project:
+                    del self._projects_held_by_calls[index]
+                    break
+            held_elsewhere = self._is_project_held(project)
+        if not held_elsewhere:
+            self._release_project_if_unheld(project)
+
+    def _move_holders_onto_replacement(self, replaced_project: Project, replacement: Project) -> None:
+        """
+        Moves every holder of ``replaced_project`` other than the calling context onto ``replacement``, the instance built
+        in its place from a changed project configuration, and stops the language servers of ``replaced_project`` if
+        nothing holds it any longer.
+
+        The calling context is left to :meth:`_activate_project`, which binds it to ``replacement`` and starts the latter's
+        language server manager. Each session moved gets the active modes and tools derived from ``replacement``, every
+        cursor manager built over ``replaced_project`` is dropped, and a tool call in flight keeps holding
+        ``replaced_project`` until it ends.
+
+        :param replaced_project: the instance the changed configuration replaced
+        :param replacement: the instance built from the changed configuration
+        """
+        calling_session_key = _SESSION_KEY_VAR.get(None)
+        with self._project_holders_lock:
+            # the sessions holding the replaced instance, with the modes and tools of the replacement
+            for session_key, held_project in list(self._active_projects_by_session.items()):
+                if held_project is replaced_project and session_key != calling_session_key:
+                    self._active_projects_by_session[session_key] = replacement
+                    active_modes = self._derive_active_modes(replacement)
+                    self._active_modes_by_session[session_key] = active_modes
+                    self._active_tools_by_session[session_key] = self._derive_active_tools(active_modes, replacement)
+
+            # the legacy slot, unless it is the calling context's own
+            if calling_session_key is not None and self._legacy_active_project is replaced_project:
+                self._legacy_active_project = replacement
+                self._active_modes = self._derive_active_modes(replacement)
+                self._active_tools = self._derive_active_tools(self._active_modes, replacement)
+
+            # the cursor managers built over the replaced instance
+            for session_key, cursor_manager in list(self._cursor_managers_by_session.items()):
+                if cursor_manager.project is replaced_project:
+                    del self._cursor_managers_by_session[session_key]
+            if self._legacy_cursor_manager is not None and self._legacy_cursor_manager.project is replaced_project:
+                self._legacy_cursor_manager = None
+
+        self._release_project_if_unheld(replaced_project)
 
     def _release_project_if_unheld(self, project: Project | None, timeout: float = 2.0) -> None:
         """
-        Stops the language servers of ``project`` if no session holds it, and leaves them running if any session does.
+        Stops the language servers of ``project`` if nothing holds it, and leaves them running if anything does.
 
         Runs under the project's language-server-manager lock, so it cannot interleave with an initialisation of that
         project's manager, and decides and detaches under :attr:`_project_holders_lock`, so a session that takes the
-        project afterwards finds it without a manager and initialises a new one.
+        project afterwards finds it without a manager and initialises a new one. Once the servers have stopped, an
+        instance replacing ``project`` may start its own (see :meth:`Project.mark_language_servers_stopped`).
 
-        :param project: the project a session stopped holding, or None
+        :param project: the project a holder stopped holding, or None
         :param timeout: the timeout for the shutdown of each language server
         """
         if project is None:
@@ -964,13 +1039,13 @@ class SerenaAgent:
                 if self._is_project_held(project):
                     return
                 manager = project.detach_language_server_manager()
-            if manager is None:
-                return
-            log.info(f"No session holds project '{project.project_name}' any longer; stopping its language servers ...")
-            try:
-                manager.stop_all(save_cache=True, timeout=timeout)
-            except Exception as e:
-                log.warning(f"Error stopping the language servers of project '{project.project_name}': {e}", exc_info=e)
+            if manager is not None:
+                log.info(f"No session holds project '{project.project_name}' any longer; stopping its language servers ...")
+                try:
+                    manager.stop_all(save_cache=True, timeout=timeout)
+                except Exception as e:
+                    log.warning(f"Error stopping the language servers of project '{project.project_name}': {e}", exc_info=e)
+            project.mark_language_servers_stopped()
 
     def _release_project_if_unheld_in_background(self, project: Project | None) -> None:
         """
@@ -1396,9 +1471,10 @@ class SerenaAgent:
         :return: True if the project was newly activated, False if it was already active for the calling context
         """
         # check if the project is already active for the calling context (per session if one is in scope,
-        # otherwise the legacy slot — see the _active_project property)
+        # otherwise the legacy slot — see the _active_project property); an instance of the same root built from an
+        # older configuration is not the project (pg://serena/session/project/instance/currency)
         current = self._active_project
-        if current is not None and current.project_root == project.project_root:
+        if current is project:
             return False
 
         log.info(f"Activating {project.project_name} at {project.project_root}")
@@ -1495,9 +1571,10 @@ class SerenaAgent:
         If the project was already registered, it will just be activated. Any change to its ``project.yml``
         on disk since the MCP process started (or since the project was last activated) is picked up here:
         the on-disk configuration is re-read and, if it differs from the cached one, any memoized project
-        instance is dropped and rebuilt. If the project with the changed configuration happens to be the
-        currently active one, it is shut down first so that the activation fully re-initialises the language
-        server manager with the updated language list.
+        instance is dropped and rebuilt. Every other session holding the replaced instance is moved onto the
+        new one, the replaced instance stops its language servers once no session, cursor manager or tool call
+        holds it, and the new instance starts its language server manager only after that, with the updated
+        language list.
         If the argument is a path at which no Serena project previously existed, the project will be created beforehand.
         Raises ProjectNotFoundError if the project could neither be found nor created.
 
@@ -1510,19 +1587,17 @@ class SerenaAgent:
         if registered_project is not None:
             # pick up any edits to project.yml made since the process started or the project was last activated
             config_changed = registered_project.reload_if_changed(self.serena_config)
-            if (
-                config_changed
-                and self._active_project is not None
-                and self._active_project.project_root == str(registered_project.project_root)
-            ):
-                log.info(
-                    "Configuration changed for currently active project '%s'; shutting it down to re-initialise.",
-                    registered_project.project_name,
-                )
-                self._active_project.shutdown()
-                self._active_project = None
             project_instance = registered_project.get_project_instance(serena_config=self.serena_config)
             log.info(f"Found registered project '{project_instance.project_name}' at path {project_instance.project_root}")
+            # the changed configuration replaced the project's instance: move the holders of the replaced instance onto
+            # the new one rather than shutting it down under them (pg://serena/session/project/instance/shutdown)
+            replaced_project = project_instance.replaced_project
+            if config_changed and replaced_project is not None:
+                log.info(
+                    "Configuration changed for project '%s'; moving the sessions holding it onto a new instance.",
+                    registered_project.project_name,
+                )
+                self._move_holders_onto_replacement(replaced_project, project_instance)
         elif os.path.isdir(project_root_or_name):
             project_instance = self.serena_config.add_project_from_path(project_root_or_name)
             log.info(f"Added new project {project_instance.project_name} for path {project_instance.project_root}")
