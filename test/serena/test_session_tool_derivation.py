@@ -17,6 +17,7 @@ import pytest
 
 from serena.agent import _PIPE_SESSION_ID_VAR, _SESSION_KEY_VAR, SerenaAgent
 from serena.config.serena_config import ProjectConfig, SerenaConfig
+from serena.constants import SERENA_MANAGED_DIR_NAME
 from serena.project import Project
 from serena.tools.config_tools import OpenDashboardTool
 from serena.tools.file_tools import CreateTextFileTool
@@ -82,6 +83,21 @@ def _project(root: Path, name: str, read_only: bool = False, excluded_tools: lis
     return Project(project_root=str(root), project_config=config, serena_config=SerenaConfig(gui_log_window=False, web_dashboard=False))
 
 
+def _write_project_yml(root: Path, name: str, read_only: bool) -> Path:
+    """
+    :param root: the project root, created here
+    :param name: the project name
+    :param read_only: the value of the project.yml's ``read_only`` key
+    :return: ``root``, holding a project.yml of a project with no languages, so activating it starts no language server
+    """
+    serena_dir = root / SERENA_MANAGED_DIR_NAME
+    serena_dir.mkdir(parents=True)
+    (serena_dir / ProjectConfig.SERENA_PROJECT_FILE).write_text(
+        f"project_name: {name}\nlanguages: []\nread_only: {str(read_only).lower()}\n", encoding="utf-8"
+    )
+    return root
+
+
 @pytest.fixture
 def agent() -> Iterator[SerenaAgent]:
     """A minimal agent holding no project."""
@@ -109,6 +125,20 @@ class TestToolsDeriveFromOwnSessionProject:
 
         assert sessions.tool_is_active("cc-session-1", _EDITING_TOOL), "session 2's read_only project disabled editing for session 1"
         assert not sessions.tool_is_active("cc-session-2", _EDITING_TOOL), "session 2's read_only project left editing active for it"
+
+    def test_read_only_in_project_yml_disables_editing_for_its_session_alone(self, agent: SerenaAgent, tmp_path: Path) -> None:
+        """
+        Session 1 activates a project whose project.yml leaves it writable, and session 2 one whose project.yml sets read_only:
+        editing stays active for session 1 and is inactive for session 2.
+        """
+        sessions = _Sessions(agent)
+        writable = _write_project_yml(tmp_path / "writable", "writable", read_only=False)
+        read_only = _write_project_yml(tmp_path / "read-only", "read-only", read_only=True)
+        sessions.run("cc-session-1", lambda: agent.activate_project_from_path_or_name(str(writable)))
+        sessions.run("cc-session-2", lambda: agent.activate_project_from_path_or_name(str(read_only)))
+
+        assert sessions.tool_is_active("cc-session-1", _EDITING_TOOL), "session 2's project.yml read_only disabled editing for session 1"
+        assert not sessions.tool_is_active("cc-session-2", _EDITING_TOOL), "session 2's project.yml read_only left editing active for it"
 
     def test_writable_project_of_another_session_leaves_read_only_session_without_editing(self, agent: SerenaAgent, tmp_path: Path) -> None:
         """Session 1 holds a read_only project; session 2's writable project enables editing for session 2 alone."""
