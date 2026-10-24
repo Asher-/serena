@@ -564,3 +564,25 @@ class TestActivatingAnUnknownProject:
         """A path that names no registered project and no directory is refused with ProjectNotFoundError."""
         with pytest.raises(ProjectNotFoundError):
             agent.activate_project_from_path_or_name(str(tmp_path / "absent"))
+
+
+class TestTheSingleSlotsCursorManagerHoldsItsInstance:
+    """sg://serena/agent/fn/is/project/held, route legacy cursor manager"""
+
+    def test_instance_the_single_slots_cursor_manager_alone_holds_keeps_running(
+        self, agent: SerenaAgent, managers: _ManagerFactory, tmp_path: Path
+    ) -> None:
+        """
+        Session 1 holds R and the single slot's cursor manager is built over R's instance; session 1 then activates another
+        project: R's instance, which that cursor manager alone holds, keeps its language servers running.
+        """
+        root = _write_project(tmp_path / "R")
+        other = _write_project(tmp_path / "S")
+        sessions = _Sessions(agent)
+        sessions.activate(_SESSION_1, root)
+        (manager,) = managers.await_managers(root, 1)
+        agent._legacy_cursor_manager = MagicMock(project=sessions.held(_SESSION_1))
+
+        sessions.activate(_SESSION_1, other)
+
+        assert not manager.stopped.is_set(), "the language servers of the instance the single slot's cursor manager holds were stopped"

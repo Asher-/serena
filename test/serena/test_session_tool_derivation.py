@@ -8,6 +8,7 @@ its tool exclusions -- never enables or disables a tool for it (bug://serena/age
 from __future__ import annotations
 
 import contextvars
+import logging
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TypeVar
@@ -17,6 +18,7 @@ import pytest
 from serena.agent import _PIPE_SESSION_ID_VAR, _SESSION_KEY_VAR, SerenaAgent
 from serena.config.serena_config import ProjectConfig, SerenaConfig
 from serena.project import Project
+from serena.tools.config_tools import OpenDashboardTool
 from serena.tools.file_tools import CreateTextFileTool
 from test.serena.test_session_project_binding import _HANG_GUARD_SECONDS
 from test.serena.test_streamable_http_cc_session_key import _make_mcp_ctx
@@ -193,3 +195,29 @@ class TestToolCallsAnsweredFromOwnSessionTools:
         refused_result = refused.result(timeout=_HANG_GUARD_SECONDS)
         assert refused_result.startswith(f"Error: Tool '{_EDITING_TOOL}' is not active"), refused_result
         assert not (Path(read_only.project_root) / "new.txt").exists(), "session 2's refused call wrote into its read_only project"
+
+
+class TestActiveToolsOutsideTheExposedSet:
+    """sg://serena/agent/fn/update/active/tools, route unexposed"""
+
+    def test_project_including_an_unexposed_optional_tool_is_warned_of(
+        self, agent: SerenaAgent, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """
+        Session 1 activates a project whose configuration includes an optional tool the exposed tool set leaves out: the tool
+        is active for session 1, and a warning names it.
+        """
+        unexposed = OpenDashboardTool.get_name_from_cls()
+        assert unexposed not in agent._exposed_tools.tool_names, f"{unexposed} is exposed, so including it leaves no active tool unexposed"
+        root = tmp_path / "including"
+        root.mkdir()
+        config = ProjectConfig(project_name="including", languages=[], included_optional_tools=[unexposed])
+        project = Project(project_root=str(root), project_config=config, serena_config=agent.serena_config)
+        sessions = _Sessions(agent)
+
+        with caplog.at_level(logging.WARNING, logger="serena.agent"):
+            sessions.activate("cc-session-1", project)
+
+        assert sessions.tool_is_active("cc-session-1", unexposed), f"the project's inclusion left {unexposed} inactive for session 1"
+        warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+        assert any(unexposed in message for message in warnings), f"no warning named the unexposed active tool: {warnings}"
