@@ -136,7 +136,9 @@ class TestToolsDeriveFromOwnSessionProject:
         sessions.activate("cc-session-1", _project(tmp_path / "plain-2", "plain-2"))
 
         assert sessions.run("cc-session-2", agent.get_active_tool_names) != tools_before, "session 2's modes left its own tools unchanged"
-        assert sessions.run("cc-session-1", agent.get_active_tool_names) == tools_before, "session 2's modes changed the tools session 1 derives"
+        assert sessions.run("cc-session-1", agent.get_active_tool_names) == tools_before, (
+            "session 2's modes changed the tools session 1 derives"
+        )
 
     def test_session_holding_no_project_is_answered_from_the_configuration(self, agent: SerenaAgent, tmp_path: Path) -> None:
         """Session 1 holds a read_only project; session 2, holding none, has the editing tools the Serena configuration gives."""
@@ -144,6 +146,19 @@ class TestToolsDeriveFromOwnSessionProject:
         sessions.activate("cc-session-1", _project(tmp_path / "read-only", "read-only", read_only=True))
 
         assert sessions.tool_is_active("cc-session-2", _EDITING_TOOL), "a session holding no project was answered from another's"
+
+    def test_session_holding_no_project_is_answered_with_the_modes_of_the_configuration(self, agent: SerenaAgent) -> None:
+        """Session 1 sets its modes; session 2, which has activated nothing, has the modes the Serena configuration gives."""
+        sessions = _Sessions(agent)
+        configured = sorted(mode.name for mode in agent._config_active_modes.get_modes())
+        sessions.run("cc-session-1", lambda: agent.set_modes(["no-memories"]))
+
+        assert sessions.run("cc-session-1", lambda: sorted(mode.name for mode in agent.get_active_modes())) != configured, (
+            "session 1's set_modes left its own modes unchanged"
+        )
+        assert sessions.run("cc-session-2", lambda: sorted(mode.name for mode in agent.get_active_modes())) == configured, (
+            "a session holding no project was answered with another session's modes"
+        )
 
     def test_caller_outside_any_session_is_answered_from_the_single_slot(self, agent: SerenaAgent, tmp_path: Path) -> None:
         """A caller outside any session activates a read_only project; a session holding a writable project keeps editing."""

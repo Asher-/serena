@@ -392,7 +392,7 @@ class TestReloadThroughTheActivationTool:
     """pg://serena/session/project/instance/shutdown, pg://serena/session/project/instance/uniqueness"""
 
     def test_session_reactivating_its_own_changed_project_is_not_held_up_by_its_own_call(
-        self, agent: SerenaAgent, managers: _ManagerFactory, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self, agent: SerenaAgent, managers: _ManagerFactory, tmp_path: Path
     ) -> None:
         """
         Session 1 holds R; R's project.yml changes and session 1 calls activate_project(R) through the tool-call path,
@@ -408,7 +408,6 @@ class TestReloadThroughTheActivationTool:
 
         _change_project_yml(agent, root, initial_prompt="changed")
         tool = ActivateProjectTool(agent)
-        monkeypatch.setattr(tool, "is_active", lambda: True)
         task = tool._issue_call(False, True, _make_mcp_ctx(forwarded_header=_SESSION_1), project=str(root))
 
         task.result(timeout=_HANG_GUARD_SECONDS)
@@ -480,7 +479,9 @@ class TestReloadMovesTheSingleSlot:
 class TestCreatingAnExistingManager:
     """pg://serena/session/project/instance/uniqueness"""
 
-    def test_instance_with_a_manager_is_handed_that_manager_again(self, agent: SerenaAgent, managers: _ManagerFactory, tmp_path: Path) -> None:
+    def test_instance_with_a_manager_is_handed_that_manager_again(
+        self, agent: SerenaAgent, managers: _ManagerFactory, tmp_path: Path
+    ) -> None:
         """An instance whose language-server manager exists is handed that manager again, and no second one is built for it."""
         root = _write_project(tmp_path / "R")
         sessions = _Sessions(agent)

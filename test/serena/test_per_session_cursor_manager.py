@@ -54,6 +54,7 @@ def agent() -> SerenaAgent:
     a._legacy_cursor_manager = None
     a._session_finalizers = {}
     a._session_finalizers_lock = threading.Lock()
+    a._project_holders_lock = threading.Lock()
     return a
 
 
