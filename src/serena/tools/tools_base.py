@@ -326,7 +326,7 @@ class Tool(Component):
         #      to id(mcp_ctx.session) and emits a one-time warning per session. Eviction
         #      is driven by mcp_ctx.session GC via weakref.finalize, which is the correct
         #      trigger here because the SDK session IS the CC session boundary on this path.
-        from serena.agent import _ACTIVE_PROJECT_VAR, _MCP_CALL_IN_FLIGHT, _PIPE_SESSION_ID_VAR, _SESSION_KEY_VAR
+        from serena.agent import _ACTIVE_PROJECT_VAR, _CALL_HOLD_VAR, _MCP_CALL_IN_FLIGHT, _PIPE_SESSION_ID_VAR, _SESSION_KEY_VAR
 
         pipe_session_id = _PIPE_SESSION_ID_VAR.get()
 
@@ -526,14 +526,16 @@ class Tool(Component):
             # of the active project inside the call sees that one project (pg://serena/session/project/order). The call
             # holds that project until it ends, so no release stops its language servers under the call
             # (pg://serena/session/project/instance/shutdown)
-            pinned_project = self.agent._pin_session_project_for_call(session_key) if session_key is not None else None
-            if pinned_project is not None:
-                _ACTIVE_PROJECT_VAR.set(pinned_project)
+            call_hold = self.agent._pin_session_project_for_call(session_key) if session_key is not None else None
+            if call_hold is not None:
+                _CALL_HOLD_VAR.set(call_hold)
+                if call_hold.project is not None:
+                    _ACTIVE_PROJECT_VAR.set(call_hold.project)
             try:
                 return apply_call()
             finally:
-                if pinned_project is not None:
-                    self.agent._unpin_project_for_call(pinned_project)
+                if call_hold is not None:
+                    self.agent._unpin_project_for_call(call_hold)
 
         # bind this call's session into the context the task is issued from: issue_task routes the task to the
         # executor of the bound session, and the task body runs in a copy of this context (see TaskExecutor.Task),

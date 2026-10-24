@@ -158,6 +158,14 @@ class _GatedCallTool(Tool):
         return project.project_root
 
 
+class _GatedCursorTool(_GatedCallTool):
+    """A tool needing an active project that holds its call in flight on a gate, then takes its session's cursor manager."""
+
+    def apply(self) -> str:
+        self._gate.pass_through()
+        return self.agent.get_cursor_manager().project.project_root
+
+
 def _write_project(root: Path) -> Path:
     """
     :param root: the project root, created here
@@ -189,6 +197,13 @@ def agent() -> Iterator[SerenaAgent]:
     serena_agent = SerenaAgent(serena_config=SerenaConfig(gui_log_window=False, web_dashboard=False, log_level=logging.ERROR))
     serena_agent.record_tool_usage = lambda *args, **kwargs: None  # type: ignore[method-assign]
     yield serena_agent
+
+    # release every replaced instance a failing test left held, so no language-server-manager initialisation stays blocked
+    # on it in a non-daemon thread that would keep the test process from exiting
+    for registered_project in serena_agent.serena_config.projects:
+        instance = registered_project._project_instance
+        if instance is not None and instance._replaced_project is not None:
+            instance._replaced_project.mark_language_servers_stopped()
     serena_agent.on_shutdown(timeout=0.1)
 
 
@@ -371,3 +386,106 @@ class TestOneLanguageServerManagerPerRoot:
         new_manager = managers.await_managers(root_r, 2)[1]
         assert not new_manager.overlapped, "a manager of R's new instance was built while the replaced instance's manager ran"
         assert new_manager.position > released_at, "a manager of R's new instance was built while a call held the replaced instance"
+
+
+class TestReloadThroughTheActivationTool:
+    """pg://serena/session/project/instance/shutdown, pg://serena/session/project/instance/uniqueness"""
+
+    def test_session_reactivating_its_own_changed_project_is_not_held_up_by_its_own_call(
+        self, agent: SerenaAgent, managers: _ManagerFactory, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """
+        Session 1 holds R; R's project.yml changes and session 1 calls activate_project(R) through the tool-call path,
+        whose call starts holding R's instance: the call returns, the replaced instance's language servers are stopped
+        and the new instance's are built.
+        """
+        from serena.tools.config_tools import ActivateProjectTool
+
+        root = _write_project(tmp_path / "R")
+        sessions = _Sessions(agent)
+        sessions.activate(_SESSION_1, root)
+        (old_manager,) = managers.await_managers(root, 1)
+
+        _change_project_yml(agent, root, initial_prompt="changed")
+        tool = ActivateProjectTool(agent)
+        monkeypatch.setattr(tool, "is_active", lambda: True)
+        task = tool._issue_call(False, True, _make_mcp_ctx(forwarded_header=_SESSION_1), project=str(root))
+
+        task.result(timeout=_HANG_GUARD_SECONDS)
+        assert old_manager.stopped.is_set(), "the replaced instance kept its language servers running past the activation"
+        managers.await_managers(root, 2)
+
+
+class TestCursorCallAcrossAReload:
+    """pg://serena/session/project/instance/shutdown, pg://serena/session/project/instance/currency"""
+
+    def test_cursor_manager_a_call_builds_over_the_replaced_instance_does_not_hold_it(
+        self, agent: SerenaAgent, managers: _ManagerFactory, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """
+        Sessions 1 and 2 hold R and a cursor call of session 2 is held in flight on a gate while R's project.yml changes and
+        session 1 activates R; the call then takes its cursor manager: once the call ends the replaced instance's language
+        servers are stopped, the new instance's are built, and session 2 keeps no cursor manager over the replaced instance.
+        """
+        root = _write_project(tmp_path / "R")
+        sessions = _Sessions(agent)
+        sessions.activate(_SESSION_1, root)
+        sessions.activate(_SESSION_2, root)
+        (old_manager,) = managers.await_managers(root, 1)
+        gate = _Gate.closed()
+        tool = _GatedCursorTool(agent, gate)
+        monkeypatch.setattr(tool, "is_active", lambda: True)
+        task = tool._issue_call(False, True, _make_mcp_ctx(forwarded_header=_SESSION_2))
+
+        _change_project_yml(agent, root, initial_prompt="changed")
+        sessions.activate(_SESSION_1, root)
+        gate.release.set()
+        assert task.result(timeout=_HANG_GUARD_SECONDS) == str(root)
+
+        assert old_manager.stopped.wait(_HANG_GUARD_SECONDS), (
+            "a cursor manager the call built over the replaced instance kept its language servers running"
+        )
+        managers.await_managers(root, 2)
+        cursor_manager = agent._cursor_managers_by_session.get(_SESSION_2)
+        assert cursor_manager is None or cursor_manager.project is sessions.held(_SESSION_2), (
+            "session 2 kept a cursor manager over the replaced instance"
+        )
+
+
+class TestReloadMovesTheSingleSlot:
+    """pg://serena/session/project/instance/shutdown"""
+
+    def test_reload_by_a_session_moves_the_single_slot_onto_the_new_instance(
+        self, agent: SerenaAgent, managers: _ManagerFactory, tmp_path: Path
+    ) -> None:
+        """
+        A caller outside any session and session 1 hold R; R's project.yml changes and session 1 activates R: the single slot
+        holds the instance session 1 holds, and the replaced instance's language servers are stopped.
+        """
+        root = _write_project(tmp_path / "R")
+        sessions = _Sessions(agent)
+        agent.activate_project_from_path_or_name(str(root))
+        sessions.activate(_SESSION_1, root)
+        (old_manager,) = managers.await_managers(root, 1)
+
+        _change_project_yml(agent, root, initial_prompt="changed")
+        sessions.activate(_SESSION_1, root)
+
+        assert agent._legacy_active_project is sessions.held(_SESSION_1), "the single slot was left holding the replaced instance"
+        assert old_manager.stopped.wait(_HANG_GUARD_SECONDS), (
+            "the replaced instance's language servers were not stopped once nothing held it"
+        )
+
+
+class TestCreatingAnExistingManager:
+    """pg://serena/session/project/instance/uniqueness"""
+
+    def test_instance_with_a_manager_is_handed_that_manager_again(self, agent: SerenaAgent, managers: _ManagerFactory, tmp_path: Path) -> None:
+        """An instance whose language-server manager exists is handed that manager again, and no second one is built for it."""
+        root = _write_project(tmp_path / "R")
+        sessions = _Sessions(agent)
+        sessions.activate(_SESSION_1, root)
+        (built,) = managers.await_managers(root, 1)
+
+        assert sessions.held(_SESSION_1).create_language_server_manager() is built.manager
+        assert len(managers._built_for(root)) == 1, "a second language-server manager was built for an instance that had one"

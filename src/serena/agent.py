@@ -100,6 +100,10 @@ _MCP_CALL_IN_FLIGHT: "_contextvars.ContextVar[bool]" = _contextvars.ContextVar(
 _PIPE_SESSION_ID_VAR: "_contextvars.ContextVar[str | None]" = _contextvars.ContextVar(
     "serena_pipe_session_id", default=None
 )
+# The hold of the tool call running in this context, set by Tool._issue_call's task for every call of a session (see
+# SerenaAgent._pin_session_project_for_call). It follows the session's slot while the call runs: a rebinding of the slot
+# by the call itself moves the hold onto the newly bound project (see the _active_project setter).
+_CALL_HOLD_VAR: "_contextvars.ContextVar[_CallHold | None]" = _contextvars.ContextVar("serena_call_hold", default=None)
 
 
 log = logging.getLogger(__name__)
@@ -107,6 +111,19 @@ log = logging.getLogger(__name__)
 TTool = TypeVar("TTool", bound="Tool")
 T = TypeVar("T")
 SUCCESS_RESULT = "OK"
+
+
+class _CallHold:
+    """
+    The hold of one tool call in flight on the project it runs on, counted by :meth:`SerenaAgent._is_project_held` like a
+    session's slot, so no release stops that project's language servers while the call runs.
+    """
+
+    def __init__(self, project: Project | None) -> None:
+        """
+        :param project: the project the call holds, or None while its session holds none
+        """
+        self.project = project
 
 
 class ProjectNotFoundError(Exception):
@@ -333,6 +350,9 @@ class SerenaAgent:
         # evicted alongside it, so no session's project enables or disables a tool for another session
         self._active_modes_by_session: dict[str | int, ActiveModes] = {}
         self._active_tools_by_session: dict[str | int, AvailableTools] = {}
+        # the mode overrides each session set through set_modes, keyed and evicted like the maps above; a session that set
+        # none has the modes the agent was started with
+        self._mode_overrides_by_session: dict[str | int, ModeSelectionDefinition] = {}
         # the on-disk backing for the map above. The map alone survives an evicted per-session slot but
         # not a daemon restart, and losing it makes a session that explicitly activated a worktree
         # indistinguishable from one that never activated anything -- the self-heal then has nothing to
@@ -346,9 +366,9 @@ class SerenaAgent:
         # guards every write of a project into a session's slot together with the release of a project no session
         # holds (see _release_project_if_unheld), so a session taking a project cannot interleave with its release
         self._project_holders_lock = threading.Lock()
-        # the project pinned for each tool call in flight, one entry per call (see _pin_session_project_for_call); a
-        # call holds its project like a session's slot does, so no release stops that project's servers under it
-        self._projects_held_by_calls: list[Project] = []
+        # the hold of each tool call in flight, one entry per call (see _pin_session_project_for_call); a call holds the
+        # project its hold is on like a session's slot does, so no release stops that project's servers under it
+        self._projects_held_by_calls: list[_CallHold] = []
         self._active_project = None  # routed through the _active_project property to the per-session map or legacy slot
         # per-session cursor managers, keyed identically to _active_projects_by_session. Each entry is
         # bound to that session's active project at the moment the manager was constructed; a per-session
@@ -481,6 +501,9 @@ class SerenaAgent:
         # Note: We cannot update the active tools yet, because the base toolset has not been computed yet
         #       (and its computation depends on the active project)
         self._active_modes: ActiveModes
+        # the modes the agent was started with, which apply to every session that set none, and the mode overrides of the
+        # single slot outside any session
+        self._configured_mode_overrides = modes
         self._mode_overrides = modes
         if project is not None:
             try:
@@ -504,7 +527,7 @@ class SerenaAgent:
         self._update_active_tools()
 
         # the active modes and tools of a session that has activated no project: those of the Serena configuration alone
-        self._config_active_modes = self._derive_active_modes(None)
+        self._config_active_modes = self._derive_active_modes(None, self._configured_mode_overrides)
         self._config_active_tools = self._derive_active_tools(self._config_active_modes, None)
 
         # start the dashboard (web frontend), registering its log handler
@@ -693,11 +716,14 @@ class SerenaAgent:
         (``_MCP_CALL_IN_FLIGHT`` is True) the legacy single-slot field
         :attr:`_legacy_cursor_manager` is unreachable — IRONCLAD zero-crossover guard, mirroring
         the rule on :attr:`_active_project`. For non-MCP callers (CLI, dashboard, scripts, tests)
-        the legacy slot applies as before. The manager is rebuilt when absent or when its bound
-        project no longer matches the caller's active project — a per-session project switch
-        invalidates only that session's manager.
+        the legacy slot applies as before. The manager is rebuilt when absent or when it is bound to
+        another instance than the one the call runs on — a per-session project switch invalidates only
+        that session's manager. A rebuilt manager is stored only when the instance the call runs on is
+        the one the caller's slot holds: a call pinned to an instance a project.yml reload replaced gets a
+        manager it alone uses, which therefore holds that instance no longer than the call does
+        (pg://serena/session/project/instance/shutdown).
 
-        :return: a manager whose ``project`` matches the caller's active project.
+        :return: a manager whose ``project`` is the instance the call runs on.
         """
         from serena.cursor import CursorManager
 
@@ -721,14 +747,17 @@ class SerenaAgent:
             # Non-MCP path (CLI/dashboard/tests). _MCP_CALL_IN_FLIGHT is False here by the guard above.
             existing = self._legacy_cursor_manager
 
-        # rebuild when absent, or when bound to a stale project (the caller switched projects)
-        if existing is None or existing.project.project_root != project.project_root:
+        # rebuild when absent, or when bound to another instance (the caller switched projects, or the call runs on an
+        # instance a project.yml reload replaced)
+        if existing is None or existing.project is not project:
             project.get_language_server_manager_or_raise()  # validate LSP is available
             new_mgr = CursorManager(project)
-            if session_key is not None:
-                self._cursor_managers_by_session[session_key] = new_mgr
-            else:
-                self._legacy_cursor_manager = new_mgr
+            with self._project_holders_lock:
+                if session_key is not None:
+                    if self._active_projects_by_session.get(session_key) is project:
+                        self._cursor_managers_by_session[session_key] = new_mgr
+                elif self._legacy_active_project is project:
+                    self._legacy_cursor_manager = new_mgr
             return new_mgr
         return existing
 
@@ -890,9 +919,12 @@ class SerenaAgent:
 
         Within a session-bound call (Tool.apply_ex sets _SESSION_KEY_VAR), the per-session dict is updated;
         outside any session, the legacy fallback slot is updated. The in-flight ContextVar is also updated
-        so any reads within the current call observe the new project immediately.
+        so any reads within the current call observe the new project immediately. Within a tool call, the call's hold
+        moves onto the new project, and the project it leaves is released if nothing else holds it.
         """
         session_key = _SESSION_KEY_VAR.get(None)
+        call_hold = _CALL_HOLD_VAR.get()
+        left_project: Project | None = None
         with self._project_holders_lock:
             if session_key is not None:
                 if project is None:
@@ -901,6 +933,12 @@ class SerenaAgent:
                     self._active_projects_by_session[session_key] = project
             else:
                 self._legacy_active_project = project
+            # the calling tool call holds the project it binds, not the one it held before, so it cannot keep the latter
+            # from being released (pg://serena/session/project/instance/shutdown)
+            if call_hold is not None and call_hold.project is not project:
+                left_project = call_hold.project
+                call_hold.project = project
+        self._release_project_if_unheld(left_project)
         # update the in-flight var only if it has been set on this call's context; otherwise leave the
         # default unset so callers without contextvar scoping (CLI/dashboard) keep falling through to
         # the per-session / legacy lookup in the getter.
@@ -947,38 +985,40 @@ class SerenaAgent:
         holders.extend(cursor_manager.project for cursor_manager in list(self._cursor_managers_by_session.values()))
         if self._legacy_cursor_manager is not None:
             holders.append(self._legacy_cursor_manager.project)
-        holders.extend(self._projects_held_by_calls)
+        holders.extend(call_hold.project for call_hold in self._projects_held_by_calls)
         return any(holder is project for holder in holders)
 
-    def _pin_session_project_for_call(self, session_key: str | int) -> Project | None:
+    def _pin_session_project_for_call(self, session_key: str | int) -> _CallHold:
         """
-        Reads the project a session holds as a tool call of that session starts, and counts the call as a holder of that
-        project until :meth:`_unpin_project_for_call`, so that no release stops the project's language servers while the
-        call runs on it (pg://serena/session/project/instance/shutdown).
+        Creates the hold of a tool call of a session as the call starts, on the project the session holds, and counts the
+        call as a holder of that project until :meth:`_unpin_project_for_call`, so that no release stops the project's
+        language servers while the call runs on it (pg://serena/session/project/instance/shutdown). While the call runs,
+        its hold follows the session's slot: a rebinding of the slot by the call moves the hold (see the
+        :attr:`_active_project` setter).
 
         :param session_key: the key of the calling session
-        :return: the project the session holds, or None if it holds none
+        :return: the call's hold, on the project the session holds, or on none if it holds none
         """
         with self._project_holders_lock:
-            project = self._active_projects_by_session.get(session_key)
-            if project is not None:
-                self._projects_held_by_calls.append(project)
-        return project
+            call_hold = _CallHold(self._active_projects_by_session.get(session_key))
+            self._projects_held_by_calls.append(call_hold)
+        return call_hold
 
-    def _unpin_project_for_call(self, project: Project) -> None:
+    def _unpin_project_for_call(self, call_hold: _CallHold) -> None:
         """
-        Ends a tool call's hold on the project :meth:`_pin_session_project_for_call` pinned for it, and stops that
-        project's language servers if this was its last holder.
+        Ends the hold :meth:`_pin_session_project_for_call` created for a tool call, and stops the language servers of the
+        project the hold is on at the call's end if this was its last holder.
 
-        :param project: the project pinned for the call
+        :param call_hold: the call's hold
         """
         with self._project_holders_lock:
-            for index, held_project in enumerate(self._projects_held_by_calls):
-                if held_project is project:
+            for index, held in enumerate(self._projects_held_by_calls):
+                if held is call_hold:
                     del self._projects_held_by_calls[index]
                     break
-            held_elsewhere = self._is_project_held(project)
-        if not held_elsewhere:
+            project = call_hold.project
+            release = project is not None and not self._is_project_held(project)
+        if release:
             self._release_project_if_unheld(project)
 
     def _move_holders_onto_replacement(self, replaced_project: Project, replacement: Project) -> None:
@@ -1001,14 +1041,14 @@ class SerenaAgent:
             for session_key, held_project in list(self._active_projects_by_session.items()):
                 if held_project is replaced_project and session_key != calling_session_key:
                     self._active_projects_by_session[session_key] = replacement
-                    active_modes = self._derive_active_modes(replacement)
+                    active_modes = self._derive_active_modes(replacement, self._mode_overrides_of(session_key))
                     self._active_modes_by_session[session_key] = active_modes
                     self._active_tools_by_session[session_key] = self._derive_active_tools(active_modes, replacement)
 
             # the legacy slot, unless it is the calling context's own
             if calling_session_key is not None and self._legacy_active_project is replaced_project:
                 self._legacy_active_project = replacement
-                self._active_modes = self._derive_active_modes(replacement)
+                self._active_modes = self._derive_active_modes(replacement, self._mode_overrides)
                 self._active_tools = self._derive_active_tools(self._active_modes, replacement)
 
             # the cursor managers built over the replaced instance
@@ -1073,6 +1113,7 @@ class SerenaAgent:
         evicted_project = self._active_projects_by_session.pop(session_key, None)
         self._active_modes_by_session.pop(session_key, None)
         self._active_tools_by_session.pop(session_key, None)
+        self._mode_overrides_by_session.pop(session_key, None)
         self._explicit_project_roots_by_session.pop(session_key, None)
         # the session is genuinely gone, so drop its durable record too; leaving it would let a future
         # session that reuses the key inherit this one's project.
@@ -1143,6 +1184,7 @@ class SerenaAgent:
         evicted_project = self._active_projects_by_session.pop(session_id, None)
         self._active_modes_by_session.pop(session_id, None)
         self._active_tools_by_session.pop(session_id, None)
+        self._mode_overrides_by_session.pop(session_id, None)
         self._explicit_project_roots_by_session.pop(session_id, None)
         self._explicit_project_root_store.discard(session_id)
         self._cursor_managers_by_session.pop(session_id, None)
@@ -1184,11 +1226,17 @@ class SerenaAgent:
 
     def set_modes(self, mode_names: list[str]) -> None:
         """
-        Set the current mode configurations.
+        Set the mode configurations of the calling session (or of the single slot outside any session); no other
+        session's modes or tools change.
 
         :param mode_names: List of mode names or paths to use
         """
-        self._mode_overrides = ModeSelectionDefinition(default_modes=mode_names)
+        mode_overrides = ModeSelectionDefinition(default_modes=mode_names)
+        session_key = _SESSION_KEY_VAR.get(None)
+        if session_key is not None:
+            self._mode_overrides_by_session[session_key] = mode_overrides
+        else:
+            self._mode_overrides = mode_overrides
         self._update_active_modes()
         self._update_active_tools()
 
@@ -1293,18 +1341,29 @@ class SerenaAgent:
             msg += f"\nAdditional project-specific instructions:\n {proj.project_config.initial_prompt}"
         return msg
 
-    def _derive_active_modes(self, project: Project | None) -> ActiveModes:
+    def _mode_overrides_of(self, session_key: str | int | None) -> ModeSelectionDefinition | None:
+        """
+        :param session_key: the key of a session, or None for the single slot outside any session
+        :return: the mode overrides that apply to that session: those it set, or else those the agent was started with;
+            for the single slot, those set for it
+        """
+        if session_key is None:
+            return self._mode_overrides
+        return self._mode_overrides_by_session.get(session_key, self._configured_mode_overrides)
+
+    def _derive_active_modes(self, project: Project | None, mode_overrides: ModeSelectionDefinition | None) -> ActiveModes:
         """
         :param project: the project whose configuration applies, or None
+        :param mode_overrides: the mode overrides that apply, or None
         :return: the active modes derived from the Serena configuration, the given project's configuration (if any),
-            and mode overrides (if any)
+            and the given mode overrides (if any)
         """
         active_modes = ActiveModes()
         active_modes.apply(self.serena_config)
         if project is not None:
             active_modes.apply(project.project_config)
-        if self._mode_overrides:
-            active_modes.apply(self._mode_overrides)
+        if mode_overrides:
+            active_modes.apply(mode_overrides)
         return active_modes
 
     def _derive_active_tools(self, active_modes: ActiveModes, project: Project | None) -> AvailableTools:
@@ -1351,8 +1410,8 @@ class SerenaAgent:
         Updates the active modes of the calling session (or of the single slot outside any session) from the Serena
         configuration, that session's active project configuration (if any), and mode overrides (if any).
         """
-        active_modes = self._derive_active_modes(self._active_project)
         session_key = _SESSION_KEY_VAR.get(None)
+        active_modes = self._derive_active_modes(self._active_project, self._mode_overrides_of(session_key))
         if session_key is not None:
             self._active_modes_by_session[session_key] = active_modes
         else:
@@ -1473,7 +1532,15 @@ class SerenaAgent:
         # check if the project is already active for the calling context (per session if one is in scope,
         # otherwise the legacy slot — see the _active_project property); an instance of the same root built from an
         # older configuration is not the project (pg://serena/session/project/instance/currency)
-        current = self._active_project
+        # an in-flight pin is the instance the calling tool call runs on; otherwise the calling context's own slot, never
+        # the single slot that a session with an empty slot falls through to outside an in-flight call
+        in_flight = _ACTIVE_PROJECT_VAR.get(_UNSET)
+        if in_flight is not _UNSET:
+            current = in_flight
+        elif _SESSION_KEY_VAR.get(None) is not None:
+            current = self._active_projects_by_session.get(_SESSION_KEY_VAR.get(None))
+        else:
+            current = self._legacy_active_project
         if current is project:
             return False
 
@@ -1530,6 +1597,9 @@ class SerenaAgent:
             self._update_active_tools()
 
         def init_language_server_manager() -> None:
+            # wait for the replaced instance (if any) before taking the lock, so the wait never blocks a release of this
+            # instance (pg://serena/session/project/instance/uniqueness)
+            project.wait_for_replaced_project()
             with project.language_server_manager_lock():
                 # a session that switched away before this ran has released the project; starting its language
                 # servers now would leave servers running that no session holds

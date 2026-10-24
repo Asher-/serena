@@ -17,6 +17,9 @@ import pytest
 from serena.agent import _PIPE_SESSION_ID_VAR, _SESSION_KEY_VAR, SerenaAgent
 from serena.config.serena_config import ProjectConfig, SerenaConfig
 from serena.project import Project
+from serena.tools.file_tools import CreateTextFileTool
+from test.serena.test_session_project_binding import _HANG_GUARD_SECONDS
+from test.serena.test_streamable_http_cc_session_key import _make_mcp_ctx
 
 T = TypeVar("T")
 
@@ -122,3 +125,56 @@ class TestToolsDeriveFromOwnSessionProject:
 
         assert sessions.tool_is_active("cc-session-1", _EXCLUDABLE_TOOL), "session 2's tool exclusion disabled the tool for session 1"
         assert not sessions.tool_is_active("cc-session-2", _EXCLUDABLE_TOOL), "session 2's tool exclusion left the tool active for it"
+
+    def test_modes_set_by_another_session_leave_the_tools_a_session_derives_unchanged(self, agent: SerenaAgent, tmp_path: Path) -> None:
+        """Session 2 sets its modes; session 1, activating a project afterwards, derives its tools without session 2's modes."""
+        sessions = _Sessions(agent)
+        sessions.activate("cc-session-1", _project(tmp_path / "plain", "plain"))
+        tools_before = sessions.run("cc-session-1", agent.get_active_tool_names)
+
+        sessions.run("cc-session-2", lambda: agent.set_modes(["no-memories"]))
+        sessions.activate("cc-session-1", _project(tmp_path / "plain-2", "plain-2"))
+
+        assert sessions.run("cc-session-2", agent.get_active_tool_names) != tools_before, "session 2's modes left its own tools unchanged"
+        assert sessions.run("cc-session-1", agent.get_active_tool_names) == tools_before, "session 2's modes changed the tools session 1 derives"
+
+    def test_session_holding_no_project_is_answered_from_the_configuration(self, agent: SerenaAgent, tmp_path: Path) -> None:
+        """Session 1 holds a read_only project; session 2, holding none, has the editing tools the Serena configuration gives."""
+        sessions = _Sessions(agent)
+        sessions.activate("cc-session-1", _project(tmp_path / "read-only", "read-only", read_only=True))
+
+        assert sessions.tool_is_active("cc-session-2", _EDITING_TOOL), "a session holding no project was answered from another's"
+
+    def test_caller_outside_any_session_is_answered_from_the_single_slot(self, agent: SerenaAgent, tmp_path: Path) -> None:
+        """A caller outside any session activates a read_only project; a session holding a writable project keeps editing."""
+        sessions = _Sessions(agent)
+        sessions.activate("cc-session-1", _project(tmp_path / "writable", "writable"))
+        agent._activate_project(_project(tmp_path / "read-only", "read-only", read_only=True))
+
+        assert not agent.tool_is_active(_EDITING_TOOL), "the caller outside any session was not answered from its own read_only project"
+        assert sessions.tool_is_active("cc-session-1", _EDITING_TOOL), "the single slot's read_only project disabled editing for session 1"
+
+
+class TestToolCallsAnsweredFromOwnSessionTools:
+    """pg://serena/session/tool/derivation"""
+
+    def test_editing_call_of_each_session_is_admitted_by_its_own_project(self, agent: SerenaAgent, tmp_path: Path) -> None:
+        """
+        Through the tool-call path, session 1's create_text_file call writes into its writable project, while session 2's,
+        whose project is read_only, is refused as inactive and writes nothing.
+        """
+        writable = _project(tmp_path / "writable", "writable")
+        read_only = _project(tmp_path / "read-only", "read-only", read_only=True)
+        sessions = _Sessions(agent)
+        sessions.activate("cc-session-1", writable)
+        sessions.activate("cc-session-2", read_only)
+        tool = CreateTextFileTool(agent)
+
+        written = tool._issue_call(False, True, _make_mcp_ctx(forwarded_header="cc-session-1"), relative_path="new.txt", content="x")
+        refused = tool._issue_call(False, True, _make_mcp_ctx(forwarded_header="cc-session-2"), relative_path="new.txt", content="x")
+
+        written_result = written.result(timeout=_HANG_GUARD_SECONDS)
+        assert (Path(writable.project_root) / "new.txt").read_text() == "x", written_result
+        refused_result = refused.result(timeout=_HANG_GUARD_SECONDS)
+        assert refused_result.startswith(f"Error: Tool '{_EDITING_TOOL}' is not active"), refused_result
+        assert not (Path(read_only.project_root) / "new.txt").exists(), "session 2's refused call wrote into its read_only project"
