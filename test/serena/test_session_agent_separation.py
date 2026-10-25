@@ -31,9 +31,14 @@ from test.serena.test_session_project_binding import (
     _no_pipe_session,  # noqa: F401 -- autouse fixture, imported so it applies to this module
     _project_at,
     _RelativeWriteTool,
-    agent,  # noqa: F401 -- fixture
+)
+from test.serena.test_session_project_binding import (
+    agent as _agent_fixture,
 )
 from test.serena.test_streamable_http_cc_session_key import _make_mcp_ctx
+
+agent = _agent_fixture
+"""the fixture of the binding tests, bound here under its own name so pytest serves it to this module's tests"""
 
 _AGENT_ID_ARGUMENT = "_serena_agent_id"
 """the reserved argument that carries the calling subagent's agent id"""
@@ -98,7 +103,9 @@ class TestCallOfOneAgentIgnoresAnotherAgentsActivation:
         # agent A1 activates P1, then agent A2 activates P2, both under the client's one forwarded session id
         for agent_id, project in (("A1", project_1), ("A2", project_2)):
             activation = _active(_GatedActivationTool(agent, project, _Gate.open()), monkeypatch)
-            result = activation.apply_ex(mcp_ctx=_make_mcp_ctx(forwarded_header=_CLIENT_SESSION), log_call=False, **{_AGENT_ID_ARGUMENT: agent_id})
+            result = activation.apply_ex(
+                mcp_ctx=_make_mcp_ctx(forwarded_header=_CLIENT_SESSION), log_call=False, **{_AGENT_ID_ARGUMENT: agent_id}
+            )
             assert result == "activated", f"agent {agent_id}'s activation answered {result!r}"
 
         # agent A1 writes by relative path
@@ -121,13 +128,17 @@ class TestCallOfOneAgentIgnoresAnotherAgentsActivation:
         root_1, root_2 = _make_roots(tmp_path, "P1", "P2")
         project_1, project_2 = _project_at(root_1, "project-P1"), _project_at(root_2, "project-P2")
         activation_1 = _active(_GatedActivationTool(agent, project_1, _Gate.open()), monkeypatch)
-        result = activation_1.apply_ex(mcp_ctx=_make_mcp_ctx(forwarded_header=_CLIENT_SESSION), log_call=False, **{_AGENT_ID_ARGUMENT: "A1"})
+        result = activation_1.apply_ex(
+            mcp_ctx=_make_mcp_ctx(forwarded_header=_CLIENT_SESSION), log_call=False, **{_AGENT_ID_ARGUMENT: "A1"}
+        )
         assert result == "activated", f"agent A1's activation answered {result!r}"
 
         # hold agent A2's activation of P2 in flight
         gate = _Gate.closed()
         activation_2 = _active(_GatedActivationTool(agent, project_2, gate), monkeypatch)
-        activation_2_task = activation_2._issue_call(False, True, _make_mcp_ctx(forwarded_header=_CLIENT_SESSION), **{_AGENT_ID_ARGUMENT: "A2"})
+        activation_2_task = activation_2._issue_call(
+            False, True, _make_mcp_ctx(forwarded_header=_CLIENT_SESSION), **{_AGENT_ID_ARGUMENT: "A2"}
+        )
         gate.await_entry()
 
         # agent A1 writes by relative path while agent A2's activation is in flight
@@ -157,7 +168,11 @@ class TestCallWithoutAgentIdIsTheClientSession:
         projects = [_project_at(root, f"project-{root.name}") for root in (root_0, root_1, root_2)]
 
         # the main conversation activates P0, then agents A1 and A2 activate P1 and P2
-        for agent_arguments, project in (({}, projects[0]), ({_AGENT_ID_ARGUMENT: "A1"}, projects[1]), ({_AGENT_ID_ARGUMENT: "A2"}, projects[2])):
+        for agent_arguments, project in (
+            ({}, projects[0]),
+            ({_AGENT_ID_ARGUMENT: "A1"}, projects[1]),
+            ({_AGENT_ID_ARGUMENT: "A2"}, projects[2]),
+        ):
             activation = _active(_GatedActivationTool(agent, project, _Gate.open()), monkeypatch)
             result = activation.apply_ex(mcp_ctx=_make_mcp_ctx(forwarded_header=_CLIENT_SESSION), log_call=False, **agent_arguments)
             assert result == "activated", f"the activation of {project.project_name} answered {result!r}"
@@ -168,7 +183,9 @@ class TestCallWithoutAgentIdIsTheClientSession:
 
         assert result == str(root_0), f"the main conversation's write ran against {result!r}"
         assert (root_0 / "out.txt").is_file(), "the main conversation's write did not land under its own project P0"
-        assert not (root_1 / "out.txt").exists() and not (root_2 / "out.txt").exists(), "the main conversation's write landed under a subagent's project"
+        assert not (root_1 / "out.txt").exists() and not (root_2 / "out.txt").exists(), (
+            "the main conversation's write landed under a subagent's project"
+        )
         assert {_CLIENT_SESSION, f"{_CLIENT_SESSION}/agent/A1", f"{_CLIENT_SESSION}/agent/A2"} <= set(agent._active_projects_by_session)
 
 
@@ -179,7 +196,9 @@ class TestAgentIdArgumentIsReserved:
         """A call carrying the agent id runs the tool's apply without it, and the tool's published schema does not list it."""
         tool = _active(_ArgumentRecordingTool(agent), monkeypatch)
 
-        result = tool.apply_ex(mcp_ctx=_make_mcp_ctx(forwarded_header=_CLIENT_SESSION), log_call=False, relative_path="x", **{_AGENT_ID_ARGUMENT: "A1"})
+        result = tool.apply_ex(
+            mcp_ctx=_make_mcp_ctx(forwarded_header=_CLIENT_SESSION), log_call=False, relative_path="x", **{_AGENT_ID_ARGUMENT: "A1"}
+        )
 
         assert result == "recorded", f"the call answered {result!r}"
         assert tool.received == {"relative_path": "x"}, f"apply received {tool.received!r}"
@@ -200,7 +219,9 @@ class TestAgentIdThroughTheMcpTool:
         project_1, project_2 = _project_at(root_1, "project-P1"), _project_at(root_2, "project-P2")
         for agent_id, project in (("A1", project_1), ("A2", project_2)):
             activation = _active(_GatedActivationTool(agent, project, _Gate.open()), monkeypatch)
-            result = activation.apply_ex(mcp_ctx=_make_mcp_ctx(forwarded_header=_CLIENT_SESSION), log_call=False, **{_AGENT_ID_ARGUMENT: agent_id})
+            result = activation.apply_ex(
+                mcp_ctx=_make_mcp_ctx(forwarded_header=_CLIENT_SESSION), log_call=False, **{_AGENT_ID_ARGUMENT: agent_id}
+            )
             assert result == "activated", f"agent {agent_id}'s activation answered {result!r}"
 
         # agent A1 writes through the published MCP tool, the agent id among the raw arguments
