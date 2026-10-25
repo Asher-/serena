@@ -30,6 +30,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 T = TypeVar("T")
 SUCCESS_RESULT = "OK"
+AGENT_ID_ARGUMENT = "_serena_agent_id"
+"""the reserved tool-call argument carrying the calling subagent's agent id, which a PreToolUse hook adds"""
 
 
 class Component(ABC):
@@ -330,6 +332,10 @@ class Tool(Component):
 
         pipe_session_id = _PIPE_SESSION_ID_VAR.get()
 
+        # the calling subagent's agent id, which a PreToolUse hook adds as a reserved argument; it is part of the
+        # session key and never an argument of the tool's apply
+        agent_id: str | None = kwargs.pop(AGENT_ID_ARGUMENT, None) or None
+
         session_key: str | int | None = None
         # X-Forwarded-Project-Dir captured on the main thread for the no-project self-heal
         # inside the worker (the task() closure reads it; it is never reassigned there, so no
@@ -378,7 +384,9 @@ class Tool(Component):
                             forwarded_project_root = None
                         break
                 if forwarded_cc_session_id:
-                    session_key = forwarded_cc_session_id
+                    # each agent of the client holds its own session under the client's forwarded session id
+                    # (pg://serena/session/project/agent); the main conversation's calls carry no agent id
+                    session_key = forwarded_cc_session_id if agent_id is None else f"{forwarded_cc_session_id}/agent/{agent_id}"
                 else:
                     # tier 3: legacy direct-stdio / streamable-http without the multiplexer.
                     # id(mcp_ctx.session) is unique for the lifetime of a Session but unstable
