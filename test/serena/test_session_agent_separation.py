@@ -14,6 +14,7 @@ guards the suite against a hang and fails the test if the guarded event never ha
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,20 @@ class _ArgumentRecordingTool(Tool, ToolMarkerDoesNotRequireActiveProject):
         """
         self.received = {"relative_path": relative_path, **kwargs}
         return "recorded"
+
+
+class _PublishedRelativeWriteTool(_RelativeWriteTool):
+    """
+    A relative-path write tool documented as a published MCP tool must be.
+    """
+
+    def apply(self, relative_path: str) -> str:
+        """
+        Writes a file at a path relative to the calling session's project.
+
+        :param relative_path: the path of the file to write
+        """
+        return super().apply(relative_path)
 
 
 def _make_roots(tmp_path: Path, *names: str) -> list[Path]:
@@ -169,3 +184,31 @@ class TestAgentIdArgumentIsReserved:
         assert result == "recorded", f"the call answered {result!r}"
         assert tool.received == {"relative_path": "x"}, f"apply received {tool.received!r}"
         assert _AGENT_ID_ARGUMENT not in SerenaMCPFactory.make_mcp_tool(tool).parameters["properties"]
+
+
+class TestAgentIdThroughTheMcpTool:
+    """pg://serena/session/project/agent through the MCP tool serena publishes, whose arguments FastMCP validates"""
+
+    def test_write_through_the_mcp_tool_lands_under_own_agents_project(
+        self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """
+        Agents A1 and A2 activate P1 and P2, and A1's relative-path write issued through the published MCP tool, with
+        the agent id among its raw arguments, lands under P1.
+        """
+        root_1, root_2 = _make_roots(tmp_path, "P1", "P2")
+        project_1, project_2 = _project_at(root_1, "project-P1"), _project_at(root_2, "project-P2")
+        for agent_id, project in (("A1", project_1), ("A2", project_2)):
+            activation = _active(_GatedActivationTool(agent, project, _Gate.open()), monkeypatch)
+            result = activation.apply_ex(mcp_ctx=_make_mcp_ctx(forwarded_header=_CLIENT_SESSION), log_call=False, **{_AGENT_ID_ARGUMENT: agent_id})
+            assert result == "activated", f"agent {agent_id}'s activation answered {result!r}"
+
+        # agent A1 writes through the published MCP tool, the agent id among the raw arguments
+        mcp_tool = SerenaMCPFactory.make_mcp_tool(_active(_PublishedRelativeWriteTool(agent), monkeypatch))
+        result = asyncio.run(
+            mcp_tool.run({"relative_path": "out.txt", _AGENT_ID_ARGUMENT: "A1"}, context=_make_mcp_ctx(forwarded_header=_CLIENT_SESSION))
+        )
+
+        assert result == str(root_1), f"agent A1's write through the MCP tool ran against {result!r}"
+        assert (root_1 / "out.txt").is_file(), "agent A1's write through the MCP tool did not land under its own project P1"
+        assert not (root_2 / "out.txt").exists(), "agent A1's write through the MCP tool landed under agent A2's project P2"
