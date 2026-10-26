@@ -1,6 +1,7 @@
 """Tests for the mcp.py module in serena."""
 
 import asyncio
+import dataclasses
 
 import pytest
 from mcp.server.fastmcp.tools.base import Tool as MCPTool
@@ -271,6 +272,37 @@ def test_make_tool_descriptions(docstring, expected_description) -> None:
 
     assert mcp_tool.name == "test"
     assert mcp_tool.description == expected_description
+
+
+def test_make_tool_without_openai_sanitizing() -> None:
+    """Test that make_tool publishes the argument model's schema unsanitized when OpenAI compatibility is off."""
+    sanitized = make_tool(BasicTool())
+    unsanitized = make_tool(BasicTool(), openai_tool_compatible=False)
+
+    # the OpenAI sanitizing turns an integer into a number restricted to multiples of 1; without it the int parameter
+    # keeps the type the argument model emits
+    assert sanitized.parameters["properties"]["age"]["type"] == "number"
+    assert unsanitized.parameters["properties"]["age"]["type"] == "integer"
+    assert "multipleOf" not in unsanitized.parameters["properties"]["age"]
+
+
+def test_make_tool_description_override() -> None:
+    """Test that make_tool publishes the context's description override for a tool in place of its docstring's description."""
+
+    class OverridingAgent(MockAgent):
+        @staticmethod
+        def get_context() -> SerenaAgentContext:
+            return dataclasses.replace(
+                SerenaAgentContext.load_default(), tool_description_overrides={"basic": "The overriding description"}
+            )
+
+    tool = BasicTool()
+    tool.agent = OverridingAgent()  # type: ignore
+
+    mcp_tool = make_tool(tool)
+
+    assert mcp_tool.description == "The overriding description. Returns A greeting message."
+    assert "This is a test function" not in mcp_tool.description
 
 
 def is_test_mock_class(tool_class: type) -> bool:
