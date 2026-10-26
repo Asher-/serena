@@ -108,7 +108,9 @@ class TestHookCarriesAgentIdIntoPublishedTool:
         # agent A1 writes by relative path, its call answered by the hook before it reaches serena
         write = SerenaMCPFactory.make_mcp_tool(_active(_PublishedRelativeWriteTool(agent), monkeypatch))
         arguments, printed = _through_hook(_TOOL_NAME.format(write.name), {"relative_path": "out.txt"}, "A1")
-        assert arguments == {"relative_path": "out.txt", "_serena_agent_id": "A1"}, f"the hook answered {printed!r}"
+        assert arguments == {"relative_path": "out.txt", "_serena_session_id": "cc-hook-session", "_serena_agent_id": "A1"}, (
+            f"the hook answered {printed!r}"
+        )
         result = asyncio.run(write.run(arguments, context=_make_mcp_ctx(forwarded_header=_CLIENT_SESSION)))
 
         assert result == str(root_1), f"agent A1's write through the hook ran against {result!r}"
@@ -120,18 +122,24 @@ class TestHookCarriesAgentIdIntoPublishedTool:
     ) -> None:
         """
         The main conversation activates P0 and agent A1 then activates P1, both through the hook; the main
-        conversation's write gets no hook output and lands under P0, from the forwarded session id's own slot.
+        conversation's write gets the hook's session id alone and lands under P0, from the slot of
+        ``<forwarded session id>/session/<session_id>``.
         """
         root_0, root_1 = _make_roots(tmp_path, "P0", "P1")
         for agent_id, root in ((None, root_0), ("A1", root_1)):
             _activate_through_hook(agent, monkeypatch, root, agent_id)
 
-        # the main conversation writes by relative path; the hook leaves its input unchanged
+        # the main conversation writes by relative path; the hook adds its session id alone
         write = SerenaMCPFactory.make_mcp_tool(_active(_PublishedRelativeWriteTool(agent), monkeypatch))
         arguments, printed = _through_hook(_TOOL_NAME.format(write.name), {"relative_path": "out.txt"}, None)
-        assert printed == "", f"the hook answered the main conversation's call with {printed!r}"
+        assert arguments == {"relative_path": "out.txt", "_serena_session_id": "cc-hook-session"}, (
+            f"the hook answered the main conversation's call with {printed!r}"
+        )
         result = asyncio.run(write.run(arguments, context=_make_mcp_ctx(forwarded_header=_CLIENT_SESSION)))
 
         assert result == str(root_0), f"the main conversation's write through the hook ran against {result!r}"
         assert (root_0 / "out.txt").is_file(), "the main conversation's write did not land under its own project P0"
         assert not (root_1 / "out.txt").exists(), "the main conversation's write landed under agent A1's project P1"
+        assert agent._active_projects_by_session[f"{_CLIENT_SESSION}/session/cc-hook-session"].project_root == str(root_0), (
+            "the main conversation's call was not answered from the slot of its session id"
+        )
