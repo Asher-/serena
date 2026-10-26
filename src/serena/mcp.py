@@ -32,7 +32,7 @@ from serena.config.serena_config import LanguageBackend, ModeSelectionDefinition
 from serena.constants import DEFAULT_CONTEXT, SERENA_LOG_FORMAT
 from serena.daemon_pipe import CatalogProvider, FrameHandler, PipeListener
 from serena.tools import Tool
-from serena.tools.tools_base import AGENT_ID_ARGUMENT
+from serena.tools.tools_base import AGENT_ID_ARGUMENT, SESSION_ID_ARGUMENT
 from serena.util.exception import show_fatal_exception_safe
 from serena.util.logging import MemoryLogHandler
 
@@ -55,27 +55,34 @@ class SerenaMCPRequestContext:
     agent: SerenaAgent
 
 
+_CALL_SESSION_ID_VAR: contextvars.ContextVar[str | None] = contextvars.ContextVar("serena_call_session_id", default=None)
+"""the session id of the tool call being run, taken out of its raw arguments by :class:`_AgentAwareMCPTool`"""
+
 _CALL_AGENT_ID_VAR: contextvars.ContextVar[str | None] = contextvars.ContextVar("serena_call_agent_id", default=None)
 """the agent id of the tool call being run, taken out of its raw arguments by :class:`_AgentAwareMCPTool`"""
 
 
 class _AgentAwareMCPTool(MCPTool):
     """
-    A published tool that takes the reserved agent-id argument out of a call's raw arguments before FastMCP validates
-    them, whose argument model would otherwise drop the undeclared key, and hands it to the call through
-    ``_CALL_AGENT_ID_VAR`` (pg://serena/session/project/agent).
+    A published tool that takes the reserved session-id and agent-id arguments out of a call's raw arguments before
+    FastMCP validates them, whose argument model would otherwise drop the undeclared keys, and hands them to the call
+    through ``_CALL_SESSION_ID_VAR`` and ``_CALL_AGENT_ID_VAR`` (pg://serena/session/project/separation,
+    pg://serena/session/project/agent).
     """
 
     async def run(self, arguments: dict[str, Any], context: Any = None, convert_result: bool = False) -> Any:
-        # the agent id, out of the arguments the tool validates
+        # the session id and agent id, out of the arguments the tool validates
         arguments = dict(arguments)
+        session_id = arguments.pop(SESSION_ID_ARGUMENT, None) or None
         agent_id = arguments.pop(AGENT_ID_ARGUMENT, None) or None
 
-        token = _CALL_AGENT_ID_VAR.set(agent_id)
+        session_token = _CALL_SESSION_ID_VAR.set(session_id)
+        agent_token = _CALL_AGENT_ID_VAR.set(agent_id)
         try:
             return await super().run(arguments, context=context, convert_result=convert_result)
         finally:
-            _CALL_AGENT_ID_VAR.reset(token)
+            _CALL_AGENT_ID_VAR.reset(agent_token)
+            _CALL_SESSION_ID_VAR.reset(session_token)
 
 
 class SerenaMCPFactory:
@@ -252,7 +259,10 @@ class SerenaMCPFactory:
         # awaited on the server's event loop: the call's task runs on its session's queue while the loop goes on
         # serving the requests of other sessions
         async def execute_fn(**kwargs) -> str:  # type: ignore
-            # the agent id the published tool took out of the raw arguments before validating them
+            # the session id and agent id the published tool took out of the raw arguments before validating them
+            session_id = _CALL_SESSION_ID_VAR.get()
+            if session_id is not None:
+                kwargs[SESSION_ID_ARGUMENT] = session_id
             agent_id = _CALL_AGENT_ID_VAR.get()
             if agent_id is not None:
                 kwargs[AGENT_ID_ARGUMENT] = agent_id

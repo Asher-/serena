@@ -33,6 +33,9 @@ SUCCESS_RESULT = "OK"
 AGENT_ID_ARGUMENT = "_serena_agent_id"
 """the reserved tool-call argument carrying the calling subagent's agent id, which a PreToolUse hook adds"""
 
+SESSION_ID_ARGUMENT = "_serena_session_id"
+"""the reserved tool-call argument carrying the calling Claude Code session's session id, which a PreToolUse hook adds"""
+
 
 class Component(ABC):
     def __init__(self, agent: "SerenaAgent"):
@@ -332,8 +335,9 @@ class Tool(Component):
 
         pipe_session_id = _PIPE_SESSION_ID_VAR.get()
 
-        # the calling subagent's agent id, which a PreToolUse hook adds as a reserved argument; it is part of the
-        # session key and never an argument of the tool's apply
+        # the calling Claude Code session's session id and the calling subagent's agent id, which a PreToolUse hook adds
+        # as reserved arguments; they are part of the session key and never arguments of the tool's apply
+        session_id: str | None = kwargs.pop(SESSION_ID_ARGUMENT, None) or None
         agent_id: str | None = kwargs.pop(AGENT_ID_ARGUMENT, None) or None
 
         session_key: str | int | None = None
@@ -384,9 +388,15 @@ class Tool(Component):
                             forwarded_project_root = None
                         break
                 if forwarded_cc_session_id:
-                    # each agent of the client holds its own session under the client's forwarded session id
-                    # (pg://serena/session/project/agent); the main conversation's calls carry no agent id
-                    session_key = forwarded_cc_session_id if agent_id is None else f"{forwarded_cc_session_id}/agent/{agent_id}"
+                    # each Claude Code session reaching serena through the client's connection holds its own session
+                    # under the client's forwarded session id (pg://serena/session/project/separation), and each agent
+                    # of it its own session within that (pg://serena/session/project/agent); a call carrying neither
+                    # identifier is keyed on the forwarded session id alone
+                    session_key = forwarded_cc_session_id
+                    if session_id is not None:
+                        session_key = f"{session_key}/session/{session_id}"
+                    if agent_id is not None:
+                        session_key = f"{session_key}/agent/{agent_id}"
                 else:
                     # tier 3: legacy direct-stdio / streamable-http without the multiplexer.
                     # id(mcp_ctx.session) is unique for the lifetime of a Session but unstable
