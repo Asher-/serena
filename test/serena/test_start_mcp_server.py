@@ -246,9 +246,7 @@ class TestPipeListener:
         ("transport", "serve"),
         [("stdio", "run_stdio_async"), ("sse", "run_sse_async"), ("streamable-http", "run_streamable_http_async")],
     )
-    def test_the_transport_is_served_beside_a_pipe_listener(
-        self, daemon: _Daemon, tmp_path: Path, transport: str, serve: str
-    ) -> None:
+    def test_the_transport_is_served_beside_a_pipe_listener(self, daemon: _Daemon, tmp_path: Path, transport: str, serve: str) -> None:
         socket_path = str(tmp_path / "daemon.sock")
 
         result = daemon.invoke("--transport", transport, "--pipe-socket-path", socket_path)
