@@ -21,6 +21,8 @@ from mcp.types import Tool as WireTool
 from mcp.types import ToolAnnotations
 from pydantic_settings import SettingsConfigDict
 from sensai.util import logging
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
 
 from serena import serena_version
 from serena.agent import (
@@ -682,3 +684,55 @@ def build_pipe_listener(agent: SerenaAgent, *, openai_tool_compatible: bool = Fa
         frame_handler=SerenaPipeFrameHandler(agent),
         catalog_provider=SerenaCatalogProvider(agent, openai_tool_compatible=openai_tool_compatible),
     )
+
+
+class SessionEndRoute:
+    """
+    The HTTP route by which the multiplexer reports that a forwarded session has ended (pg://serena/session/eviction).
+
+    A POST to :attr:`PATH` whose JSON body ``{"forwarded_session_id": "<id>"}`` names a forwarded session id evicts every
+    per-session slot under that id through :meth:`SerenaAgent.evict_forwarded_session`; a body that names no id is
+    answered 400 and evicts nothing.
+    """
+
+    PATH = "/sessions/end"
+    """the path of the route on the server's HTTP listener"""
+
+    FORWARDED_SESSION_ID_FIELD = "forwarded_session_id"
+    """the field of the request body that names the ended forwarded session id"""
+
+    def __init__(self, agent: SerenaAgent):
+        """
+        :param agent: the agent whose per-session slots the route evicts
+        """
+        self._agent = agent
+
+    def register(self, server: FastMCP) -> None:
+        """
+        Adds the route to the HTTP listener ``server`` serves.
+
+        :param server: the server whose streamable-http listener serves the route
+        """
+        server.custom_route(self.PATH, methods=["POST"])(self.handle)
+
+    async def handle(self, request: Request) -> Response:
+        """
+        Answers a session-end notification.
+
+        :param request: the POST to :attr:`PATH`
+        :return: 200 with the evicted session keys, or 400 when the body names no forwarded session id
+        """
+        # the forwarded session id the body names
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        forwarded_session_id = body.get(self.FORWARDED_SESSION_ID_FIELD) if isinstance(body, dict) else None
+        if not isinstance(forwarded_session_id, str) or not forwarded_session_id:
+            log.warning(f"Refused a session-end notification whose body names no {self.FORWARDED_SESSION_ID_FIELD}")
+            return JSONResponse({"error": f"the body must name a non-empty string {self.FORWARDED_SESSION_ID_FIELD}"}, status_code=400)
+
+        # the slots under that id, evicted off the event loop since dropping a cursor manager waits for its bridges to exit
+        evicted = sorted(await asyncio.to_thread(self._agent.evict_forwarded_session, forwarded_session_id))
+        log.info(f"Session end of forwarded session {forwarded_session_id} evicted {len(evicted)} slot(s): {evicted}")
+        return JSONResponse({"evicted": evicted})

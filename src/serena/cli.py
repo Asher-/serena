@@ -39,7 +39,7 @@ from serena.constants import (
     SERENAS_OWN_CONTEXT_YAMLS_DIR,
     SERENAS_OWN_MODE_YAMLS_DIR,
 )
-from serena.mcp import SerenaMCPFactory
+from serena.mcp import SerenaMCPFactory, SessionEndRoute
 from serena.project import Project
 from serena.tools import FindReferencingSymbolsTool, FindSymbolTool, GetSymbolsOverviewTool, SearchForPatternTool, ToolRegistry
 from serena.util.cli_util import AutoRegisteringGroup
@@ -447,6 +447,9 @@ class TopLevelCommands(AutoRegisteringGroup):
             trace_lsp_communication=trace_lsp_communication,
             tool_timeout=tool_timeout,
         )
+        # the multiplexer reports each ended forwarded session on this server's HTTP listener (pg://serena/session/eviction)
+        assert factory.agent is not None, "create_mcp_server must populate factory.agent"
+        SessionEndRoute(factory.agent).register(server)
         if project_file_arg:
             log.warning(
                 "Positional project arg is deprecated; use --project instead. Used: %s",

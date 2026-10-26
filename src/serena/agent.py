@@ -1100,7 +1100,7 @@ class SerenaAgent:
             target=self._release_project_if_unheld, args=(project,), name=f"ReleaseProject[{project.project_name}]", daemon=True
         ).start()
 
-    def _evict_session_state(self, session_key: str | int) -> None:
+    def _evict_session_state(self, session_key: str | int, keep_durable_record: bool = False) -> None:
         """
         Pop ``session_key`` out of every per-session map so its entries cannot leak.
 
@@ -1109,15 +1109,21 @@ class SerenaAgent:
         path that hands us a session key directly. Idempotent. Stops the language
         servers of the session's project, off the calling thread, if no other
         session holds that project.
+
+        :param session_key: the key of the session to evict
+        :param keep_durable_record: whether to keep the key's durable explicit-activation record, so a call that
+            later arrives under the key restores its project; the default discards it
         """
         evicted_project = self._active_projects_by_session.pop(session_key, None)
         self._active_modes_by_session.pop(session_key, None)
         self._active_tools_by_session.pop(session_key, None)
         self._mode_overrides_by_session.pop(session_key, None)
         self._explicit_project_roots_by_session.pop(session_key, None)
-        # the session is genuinely gone, so drop its durable record too; leaving it would let a future
-        # session that reuses the key inherit this one's project.
-        self._explicit_project_root_store.discard(session_key)
+        # a session that is genuinely gone drops its durable record too; leaving it would let a future
+        # session that reuses the key inherit this one's project. An eviction that keeps the record leaves
+        # the key restorable from the store.
+        if not keep_durable_record:
+            self._explicit_project_root_store.discard(session_key)
         self._cursor_managers_by_session.pop(session_key, None)
         self._warned_missing_forwarded_session_keys.discard(session_key)
         with self._session_finalizers_lock:
@@ -1130,6 +1136,36 @@ class SerenaAgent:
         if executor is not None:
             executor.shutdown()
         self._release_project_if_unheld_in_background(evicted_project)
+
+    def evict_forwarded_session(self, forwarded_session_id: str) -> list[str]:
+        """
+        Evicts every per-session slot that lies under an ended forwarded session (pg://serena/session/eviction).
+
+        A slot lies under ``forwarded_session_id`` when its key equals that id or begins with that id followed by
+        ``/``, the separator of a tier-2 key's ``/session/<id>`` and ``/agent/<id>`` suffixes. Each such slot is evicted
+        through :meth:`_evict_session_state`, keeping its durable explicit-activation record, so a call that later
+        arrives under the key restores its explicitly activated project.
+
+        :param forwarded_session_id: the forwarded session id the multiplexer reports ended
+        :return: the evicted session keys
+        """
+        # the keys of every per-session map, so a slot holding only an executor or a cursor manager is found too
+        with self._task_executors_by_session_lock:
+            executor_keys = list(self._task_executors_by_session)
+        candidate_keys = {
+            *list(self._active_projects_by_session),
+            *list(self._active_modes_by_session),
+            *list(self._active_tools_by_session),
+            *list(self._cursor_managers_by_session),
+            *executor_keys,
+        }
+
+        # the slots under the forwarded id, never a key that merely shares its leading characters
+        prefix = forwarded_session_id + "/"
+        evicted = [key for key in candidate_keys if isinstance(key, str) and (key == forwarded_session_id or key.startswith(prefix))]
+        for key in evicted:
+            self._evict_session_state(key, keep_durable_record=True)
+        return evicted
 
     
 
