@@ -256,6 +256,15 @@ class SerenaMCPFactory:
                 param_desc = f"{param_doc.description.strip().strip('.') + '.'}"
                 properties["description"] = param_desc[0].upper() + param_desc[1:]
 
+        # the reserved session-id argument, declared so that a client which keeps only the arguments a schema declares
+        # still sends it; the published tool takes it out before validation, so no apply receives it, and "" is no
+        # session id (pg://serena/session/project/separation)
+        parameters_properties[SESSION_ID_ARGUMENT] = {
+            "type": "string",
+            "default": "",
+            "description": "Reserved: set by the client's hook to the calling session's id. Never set it yourself.",
+        }
+
         # awaited on the server's event loop: the call's task runs on its session's queue while the loop goes on
         # serving the requests of other sessions
         async def execute_fn(**kwargs) -> str:  # type: ignore

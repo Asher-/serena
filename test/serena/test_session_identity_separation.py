@@ -195,12 +195,13 @@ class TestCallWithoutIdentifiersIsTheClientSession:
 
 
 class TestSessionIdArgumentIsReserved:
-    """the reserved argument is published by no tool and reaches no tool's apply"""
+    """the reserved argument is published by every tool as an optional string defaulting to "" and reaches no tool's apply"""
 
-    def test_session_id_reaches_no_apply_and_no_schema(self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_session_id_reaches_no_apply_and_every_schema_declares_it(self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch) -> None:
         """
-        A call carrying the session id runs the tool's apply without it, and no tool serena can publish lists it in its
-        schema.
+        A call carrying the session id runs the tool's apply without it, and every tool serena can publish lists it in its
+        schema as an optional string defaulting to "", so a client that keeps only the arguments a schema declares still
+        sends it.
         """
         tool = _active(_ArgumentRecordingTool(agent), monkeypatch)
 
@@ -211,13 +212,17 @@ class TestSessionIdArgumentIsReserved:
         assert result == "recorded", f"the call answered {result!r}"
         assert tool.received == {"relative_path": "x"}, f"apply received {tool.received!r}"
 
-        # no tool serena can publish lists the reserved argument in its schema
-        publishing = [
-            published.get_name_from_cls()
-            for published in agent._all_tools.values()
-            if _SESSION_ID_ARGUMENT in SerenaMCPFactory.make_mcp_tool(published).parameters["properties"]
-        ]
-        assert publishing == [], f"tools whose published schema lists the reserved argument: {publishing}"
+        # every tool serena can publish lists the reserved argument in its schema, optional, a string defaulting to ""
+        undeclaring = []
+        for published in agent._all_tools.values():
+            parameters = SerenaMCPFactory.make_mcp_tool(published).parameters
+            declared = parameters["properties"].get(_SESSION_ID_ARGUMENT) or {}
+            optional = _SESSION_ID_ARGUMENT not in parameters.get("required", [])
+            if declared.get("type") != "string" or declared.get("default") != "" or not optional:
+                undeclaring.append(published.get_name_from_cls())
+        assert undeclaring == [], (
+            f'tools whose published schema does not declare the reserved argument as an optional string defaulting to "": {undeclaring}'
+        )
 
 
 class TestSessionIdThroughTheMcpTool:
@@ -243,6 +248,48 @@ class TestSessionIdThroughTheMcpTool:
         assert result == str(root_1), f"session S1's write through the MCP tool ran against {result!r}"
         assert (root_1 / "out.txt").is_file(), "session S1's write through the MCP tool did not land under its own project P1"
         assert not (root_2 / "out.txt").exists(), "session S1's write through the MCP tool landed under session S2's project P2"
+
+    def test_write_lands_under_own_sessions_project_when_the_client_keeps_only_declared_arguments(
+        self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """
+        Sessions S1 and S2 activate P1 and P2, and S1's relative-path write reaches the published MCP tool with only the
+        arguments its schema declares, as a client that re-parses a call against the published schema sends it, and lands
+        under P1.
+        """
+        root_1, root_2 = _make_roots(tmp_path, "P1", "P2")
+        _activate(agent, monkeypatch, _project_at(root_1, "project-P1"), **{_SESSION_ID_ARGUMENT: "S1"})
+        _activate(agent, monkeypatch, _project_at(root_2, "project-P2"), **{_SESSION_ID_ARGUMENT: "S2"})
+
+        # session S1's call, keeping only the arguments the published schema declares
+        mcp_tool = SerenaMCPFactory.make_mcp_tool(_active(_PublishedRelativeWriteTool(agent), monkeypatch))
+        sent = {"relative_path": "out.txt", _SESSION_ID_ARGUMENT: "S1"}
+        declared = {name: value for name, value in sent.items() if name in mcp_tool.parameters["properties"]}
+        result = asyncio.run(mcp_tool.run(declared, context=_make_mcp_ctx(forwarded_header=_CLIENT_SESSION)))
+
+        assert result == str(root_1), f"session S1's write, reduced to its declared arguments, ran against {result!r}"
+        assert (root_1 / "out.txt").is_file(), "session S1's write, reduced to its declared arguments, did not land under P1"
+        assert not (root_2 / "out.txt").exists(), "session S1's write, reduced to its declared arguments, landed under P2"
+
+    def test_empty_session_id_is_answered_from_the_forwarded_session_slot(
+        self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """
+        A caller without identifiers activates P1 and session S1 activates P2, and a write through the published MCP tool
+        carrying the session id "", the default a client fills in for an argument it was not given, lands under P1.
+        """
+        root_1, root_2 = _make_roots(tmp_path, "P1", "P2")
+        _activate(agent, monkeypatch, _project_at(root_1, "project-P1"))
+        _activate(agent, monkeypatch, _project_at(root_2, "project-P2"), **{_SESSION_ID_ARGUMENT: "S1"})
+
+        mcp_tool = SerenaMCPFactory.make_mcp_tool(_active(_PublishedRelativeWriteTool(agent), monkeypatch))
+        result = asyncio.run(
+            mcp_tool.run({"relative_path": "out.txt", _SESSION_ID_ARGUMENT: ""}, context=_make_mcp_ctx(forwarded_header=_CLIENT_SESSION))
+        )
+
+        assert result == str(root_1), f'a write carrying the session id "" ran against {result!r}'
+        assert (root_1 / "out.txt").is_file(), 'a write carrying the session id "" did not land under the forwarded slot\'s P1'
+        assert not (root_2 / "out.txt").exists(), 'a write carrying the session id "" landed under session S1\'s P2'
 
 
 class TestSessionRootSurvivesDaemonRestart:
