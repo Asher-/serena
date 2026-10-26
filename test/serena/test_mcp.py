@@ -111,7 +111,8 @@ def test_make_tool_no_params() -> None:
 
     assert mcp_tool.name == "no_params"
     assert "This is a test function with no parameters. Returns A simple result." in mcp_tool.description
-    assert mcp_tool.parameters["properties"] == {}
+    # a tool with no parameters publishes only the reserved session-id argument (task://session_identity.5)
+    assert list(mcp_tool.parameters["properties"]) == ["_serena_session_id"]
 
 
 def test_make_tool_no_return_description() -> None:
