@@ -83,12 +83,12 @@ class _Daemon:
 
 
 @pytest.fixture
-def daemon(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Daemon]:
+def daemon(work_dir: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Daemon]:
     """
-    :return: the doubles of the daemon, in place for the duration of the test, with ``HOME`` under ``tmp_path``
+    :return: the doubles of the daemon, in place for the duration of the test, with ``HOME`` under ``work_dir``
     """
     # the home the operator log is opened under, and the log-path record the command sets, restored after the test
-    home = tmp_path / "home"
+    home = work_dir / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(SerenaPaths(), "last_returned_log_file_path", SerenaPaths().last_returned_log_file_path)
@@ -176,9 +176,9 @@ class TestProjectFromCwd:
     """verifies the project start-mcp-server activates when asked to find it from the working directory."""
 
     def test_the_project_found_from_the_working_directory_is_activated(
-        self, daemon: _Daemon, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, daemon: _Daemon, work_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        project_dir = tmp_path / "found"
+        project_dir = work_dir / "found"
         (project_dir / ".serena").mkdir(parents=True)
         (project_dir / ".serena" / "project.yml").write_text("", encoding="utf-8")
         monkeypatch.chdir(project_dir)
@@ -199,8 +199,8 @@ class TestProjectFromCwd:
 class TestPipeForwarder:
     """verifies the refusal of a pipe forwarder whose project is not a directory."""
 
-    def test_a_pipe_project_that_is_not_a_directory_is_refused(self, daemon: _Daemon, tmp_path: Path) -> None:
-        not_a_directory = tmp_path / "project.txt"
+    def test_a_pipe_project_that_is_not_a_directory_is_refused(self, daemon: _Daemon, work_dir: Path) -> None:
+        not_a_directory = work_dir / "project.txt"
         not_a_directory.write_text("", encoding="utf-8")
 
         result = daemon.invoke("--transport", "pipe", "--project", str(not_a_directory))
@@ -226,9 +226,9 @@ class TestDaemonServer:
         daemon.build_pipe_listener.assert_not_called()
 
     def test_a_positional_project_argument_is_activated_with_a_deprecation_warning(
-        self, daemon: _Daemon, tmp_path: Path, caplog: pytest.LogCaptureFixture
+        self, daemon: _Daemon, work_dir: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        project_dir = tmp_path / "positional"
+        project_dir = work_dir / "positional"
         project_dir.mkdir()
 
         with caplog.at_level(logging.WARNING):
@@ -246,8 +246,8 @@ class TestPipeListener:
         ("transport", "serve"),
         [("stdio", "run_stdio_async"), ("sse", "run_sse_async"), ("streamable-http", "run_streamable_http_async")],
     )
-    def test_the_transport_is_served_beside_a_pipe_listener(self, daemon: _Daemon, tmp_path: Path, transport: str, serve: str) -> None:
-        socket_path = str(tmp_path / "daemon.sock")
+    def test_the_transport_is_served_beside_a_pipe_listener(self, daemon: _Daemon, work_dir: Path, transport: str, serve: str) -> None:
+        socket_path = str(work_dir / "daemon.sock")
 
         result = daemon.invoke("--transport", transport, "--pipe-socket-path", socket_path)
 
@@ -259,9 +259,9 @@ class TestPipeListener:
         daemon.server.run.assert_not_called()
 
     def test_a_transport_the_pipe_listener_cannot_serve_beside_is_refused_and_the_listener_stopped(
-        self, daemon: _Daemon, tmp_path: Path
+        self, daemon: _Daemon, work_dir: Path
     ) -> None:
-        socket_path = str(tmp_path / "daemon.sock")
+        socket_path = str(work_dir / "daemon.sock")
 
         # the command's own function, past the click choice that admits no such transport; outside click's runner stderr
         # may have a descriptor, so the fault handler is patched out rather than registered in the test process
@@ -277,7 +277,7 @@ class TestPipeListener:
                 modes=(),
                 language_backend=None,
                 transport="websocket",
-                daemon_url="unix:///tmp/serena-daemon.sock",
+                daemon_url=f"unix://{work_dir / 'serena-daemon.sock'}",
                 pipe_socket_path=socket_path,
                 host="127.0.0.1",
                 port=8000,

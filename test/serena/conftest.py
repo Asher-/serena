@@ -1,6 +1,10 @@
 """Shared pytest fixtures for the ``test/serena`` package."""
 
+import re
+import shutil
+import tempfile
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -36,6 +40,26 @@ def _isolate_explicit_project_root_store(tmp_path_factory: pytest.TempPathFactor
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(SerenaPaths(), "explicit_project_roots_file", str(store))
         yield
+
+
+_WORK_DIR_ROOT = Path(__file__).resolve().parents[2] / "build" / "test"
+"""the root of the tests' own directories, under the repository's ``build/``, which ``.gitignore`` excludes"""
+
+
+@pytest.fixture
+def work_dir(request: pytest.FixtureRequest) -> Iterator[Path]:
+    """
+    :return: a directory of the requesting test's own under the repository's ignored ``build/test/``, unique to this run
+        so that concurrent runs never collide, and removed when the test ends. It stands in for ``tmp_path``, whose
+        directory lies under the system temp directory that convention://global/organization/script/project/temp forbids.
+    """
+    # the test's own directory, named after the test so that a leftover one can be traced to it
+    _WORK_DIR_ROOT.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix=re.sub(r"[^\w.-]", "_", request.node.name) + "-", dir=_WORK_DIR_ROOT))
+    yield directory
+
+    # the directory, with everything the test left in it
+    shutil.rmtree(directory)
 
 
 @pytest.fixture(scope="module")

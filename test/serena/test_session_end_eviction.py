@@ -77,14 +77,14 @@ def agent() -> Iterator[SerenaAgent]:
 
 
 @pytest.fixture
-def make_go_project(agent: SerenaAgent, tmp_path: Path) -> Callable[[str], Project]:
+def make_go_project(agent: SerenaAgent, work_dir: Path) -> Callable[[str], Project]:
     """
     :return: a factory building, under its own directory, a project holding ``hello.go`` and a language-server manager
         double, so the project never starts a language server; the double's ``stopped`` event is set when it is stopped
     """
 
     def make(name: str) -> Project:
-        root = tmp_path / name
+        root = work_dir / name
         root.mkdir()
         (root / _GO_FILE).write_text("package main\n\nfunc Hello() {}\n", encoding="utf-8")
         project_config = ProjectConfig(project_name=name, languages=[Language.GO], language_backend=LanguageBackend.LSP)
