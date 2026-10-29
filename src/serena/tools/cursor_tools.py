@@ -63,6 +63,31 @@ def _refuse_if_stale(tool: Tool, relative_path: str, expect_version: str) -> str
     return stale.render() if stale is not None else None
 
 
+def _reply_after_landed_edit(manager: CursorManager, cursor_id: str, applied: str, name_path: str | None = None) -> str:
+    """Re-anchor the cursor after an edit that has already landed, and render the tool's reply.
+
+    No failure of the re-anchor may surface as an exception: the caller would read it as an edit that never happened,
+    and a :class:`~solidlsp.ls_exceptions.SolidLSPException` reporting a terminated language server would reach the
+    retry of ``Tool._issue_call``, which runs the whole tool again and applies the edit a second time. Any exception the
+    re-anchor raises is therefore answered with the applied report and a note that the cursor could not re-anchor
+    (pg://serena/edit/report).
+
+    :param manager: the cursor manager owning ``cursor_id``.
+    :param cursor_id: the cursor to re-anchor and render.
+    :param applied: the reply's report of the applied edit, e.g. the success marker followed by a diff summary.
+    :param name_path: the name path to re-anchor the cursor on; ``None`` re-anchors it on its current name path.
+    :return: the applied report followed by the cursor view, or by a re-anchor note when re-anchoring fails.
+    """
+    try:
+        if name_path is None:
+            manager.reanchor_cursor(cursor_id)
+        else:
+            manager.reanchor_cursor(cursor_id, name_path=name_path)
+    except Exception as e:
+        return f"{applied}\n\n(edit applied; cursor {cursor_id} could not re-anchor afterward: {e})"
+    return f"{applied}\n\n" + manager.format_cursor_view(cursor_id)
+
+
 class CursorStartTool(Tool, ToolMarkerSymbolicRead):
     """
     Start a navigation cursor at a symbol for incremental code exploration.
@@ -800,7 +825,7 @@ class CursorReplaceBodyTool(Tool, ToolMarkerSymbolicEdit):
         no-op. That was the non-atomic-corruption bug: the file was mutated but the caller
         saw only ``No symbol matching ...`` and treated it as "nothing happened". Instead,
         report success with the diff and a re-anchor note so the caller knows the edit
-        landed.
+        landed. See :func:`_reply_after_landed_edit`.
 
         :param manager: the cursor manager owning ``cursor_id``.
         :param cursor_id: the cursor to re-anchor and render.
@@ -808,11 +833,7 @@ class CursorReplaceBodyTool(Tool, ToolMarkerSymbolicEdit):
         :return: a success message with the cursor view, or a success message with a
             re-anchor note when re-anchoring fails.
         """
-        try:
-            manager.reanchor_cursor(cursor_id)
-        except ValueError as e:
-            return f"{SUCCESS_RESULT}\n{diff_summary}\n\n(edit applied; cursor {cursor_id} could not re-anchor afterward: {e})"
-        return f"{SUCCESS_RESULT}\n{diff_summary}\n\n" + manager.format_cursor_view(cursor_id)
+        return _reply_after_landed_edit(manager, cursor_id, f"{SUCCESS_RESULT}\n{diff_summary}")
 
     @staticmethod
     def _count_diff_lines(before: str, after: str) -> tuple[int, int]:
@@ -874,8 +895,7 @@ class CursorInsertBeforeTool(Tool, ToolMarkerSymbolicEdit):
             if stale is not None:
                 return stale
             manager.apply_container_edit(cursor_id, "insert_before", body)
-            manager.reanchor_cursor(cursor_id)
-            return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
+            return _reply_after_landed_edit(manager, cursor_id, SUCCESS_RESULT)
 
         if isinstance(state, PlaintextCursorState):
             raise TypeError(
@@ -891,8 +911,7 @@ class CursorInsertBeforeTool(Tool, ToolMarkerSymbolicEdit):
             return stale
         code_editor = self.create_code_editor()
         code_editor.insert_before_symbol(name_path, relative_file_path=relative_path, body=body)
-        manager.reanchor_cursor(cursor_id)
-        return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
+        return _reply_after_landed_edit(manager, cursor_id, SUCCESS_RESULT)
 
 
 class CursorInsertAfterTool(Tool, ToolMarkerSymbolicEdit):
@@ -932,8 +951,7 @@ class CursorInsertAfterTool(Tool, ToolMarkerSymbolicEdit):
             if stale is not None:
                 return stale
             manager.apply_container_edit(cursor_id, "insert_after", body)
-            manager.reanchor_cursor(cursor_id)
-            return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
+            return _reply_after_landed_edit(manager, cursor_id, SUCCESS_RESULT)
 
         if isinstance(state, PlaintextCursorState):
             raise TypeError(
@@ -949,8 +967,7 @@ class CursorInsertAfterTool(Tool, ToolMarkerSymbolicEdit):
             return stale
         code_editor = self.create_code_editor()
         code_editor.insert_after_symbol(name_path, relative_file_path=relative_path, body=body)
-        manager.reanchor_cursor(cursor_id)
-        return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
+        return _reply_after_landed_edit(manager, cursor_id, SUCCESS_RESULT)
 
 
 class CursorInsertAtStartTool(Tool, ToolMarkerSymbolicEdit):
@@ -988,8 +1005,7 @@ class CursorInsertAtStartTool(Tool, ToolMarkerSymbolicEdit):
         if stale is not None:
             return stale
         manager.apply_container_edit(cursor_id, "insert_start", body)
-        manager.reanchor_cursor(cursor_id)
-        return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
+        return _reply_after_landed_edit(manager, cursor_id, SUCCESS_RESULT)
 
 
 class CursorInsertAtEndTool(Tool, ToolMarkerSymbolicEdit):
@@ -1021,8 +1037,7 @@ class CursorInsertAtEndTool(Tool, ToolMarkerSymbolicEdit):
         if stale is not None:
             return stale
         manager.apply_container_edit(cursor_id, "insert_end", body)
-        manager.reanchor_cursor(cursor_id)
-        return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
+        return _reply_after_landed_edit(manager, cursor_id, SUCCESS_RESULT)
 
 
 class CursorRemoveMemberTool(Tool, ToolMarkerSymbolicEdit):
@@ -1080,8 +1095,7 @@ class CursorRemoveMemberTool(Tool, ToolMarkerSymbolicEdit):
             # close the cursor rather than carry a dangling path forward
             manager.close_cursor(cursor_id)
             return f"{SUCCESS_RESULT}\n\nCursor {cursor_id} closed: removed top-level member had no parent to re-anchor on."
-        manager.reanchor_cursor(cursor_id, name_path=parent_path)
-        return f"{SUCCESS_RESULT}\n\n" + manager.format_cursor_view(cursor_id)
+        return _reply_after_landed_edit(manager, cursor_id, SUCCESS_RESULT, name_path=parent_path)
 
 
 class CursorReplaceRangeTool(Tool, ToolMarkerSymbolicEdit):
@@ -1454,7 +1468,7 @@ class CursorRenameTool(Tool, ToolMarkerSymbolicEdit):
             manager.reanchor_cursor(cursor_id, name_path=new_name_path, relative_path=relative_path)
             view = manager.format_cursor_view(cursor_id)
             return f"{status_message}\n\n{view}"
-        except ValueError as e:
+        except Exception as e:
             return f"{status_message}\n\n(Cursor could not re-anchor to renamed symbol: {e})"
 
 
