@@ -15,6 +15,7 @@ from typing import Any
 
 from serena.project import Project
 from serena.symbol import LanguageServerSymbol, LanguageServerSymbolLocation, LanguageServerSymbolRetriever
+from serena.util.file_lifecycle import AtomicFileWriter
 from serena.util.line_numbers import format_line_range, to_display_line, to_internal_line
 from serena.util.staleness import check_stale, read_file_version
 from serena.util.windowing import InvalidContinuation, WindowRequest, decode_continuation, window_body
@@ -2294,13 +2295,13 @@ class CursorManager:
         integration at all, and Python structural edits are semantic so the
         LSP will pick them up on the next open). We honor the project's
         configured encoding and newline so the file round-trips cleanly with
-        other tools.
+        other tools. The write is atomic: contents the encoding cannot
+        represent, or a failed write, leave the file as it was.
         """
         abs_path = os.path.join(self._project.project_root, relative_path)
         encoding = self._project.project_config.encoding
         newline = self._project.line_ending.newline_str
-        with open(abs_path, "w", encoding=encoding, newline=newline) as f:
-            f.write(contents)
+        AtomicFileWriter().write_text(abs_path, contents, encoding, newline)
 
     def reanchor_cursor(
         self,

@@ -8,6 +8,7 @@ from typing import Generic, TypeVar, cast
 
 from serena.jetbrains.jetbrains_plugin_client import JetBrainsPluginClient
 from serena.symbol import JetBrainsSymbol, LanguageServerSymbol, LanguageServerSymbolRetriever, PositionInFile, Symbol
+from serena.util.file_lifecycle import AtomicFileWriter
 from solidlsp import SolidLanguageServer, ls_types
 from solidlsp.ls import LSPFileBuffer
 from solidlsp.ls_utils import PathUtils, TextUtils
@@ -40,6 +41,15 @@ class CodeEditor(Generic[TSymbol], ABC):
             Fully resets the contents of the file.
 
             :param contents: the new contents
+            """
+
+        def discard_unsaved_contents(self) -> None:
+            """
+            Discards the in-memory contents the file has not saved, bringing it back in line with the file on disk.
+
+            Called when saving the file failed, which leaves the file on disk as it was before the edit. An edited
+            file whose contents live only for the duration of the edit holds nothing to discard; one backed by a
+            longer-lived buffer must reload that buffer.
             """
 
         @abstractmethod
@@ -86,17 +96,24 @@ class CodeEditor(Generic[TSymbol], ABC):
     def edited_file_context(self, relative_path: str) -> Iterator["CodeEditor.EditedFile"]:
         """
         Context manager for editing a file.
+
+        The edited file is saved when the context exits. A failed save leaves the file on disk as it was, and the
+        edited file's unsaved contents are discarded before the error propagates.
         """
         with self._open_file_context(relative_path) as edited_file:
             yield edited_file
-            # save the file
-            self._save_edited_file(edited_file)
+            # save the file; on failure, bring the edited file back in line with the unchanged file on disk
+            try:
+                self._save_edited_file(edited_file)
+            except Exception:
+                edited_file.discard_unsaved_contents()
+                raise
 
     def _save_edited_file(self, edited_file: "CodeEditor.EditedFile") -> None:
+        # write atomically: contents the encoding cannot represent, or a failed write, leave the file as it was
         abs_path = os.path.join(self.project_root, edited_file.relative_path)
         new_contents = edited_file.get_contents()
-        with open(abs_path, "w", encoding=self.encoding, newline=self.newline) as f:
-            f.write(new_contents)
+        AtomicFileWriter().write_text(abs_path, new_contents, self.encoding, self.newline)
 
     @abstractmethod
     def _find_unique_symbol(self, name_path: str, relative_file_path: str) -> TSymbol:
@@ -420,6 +437,11 @@ class LanguageServerCodeEditor(CodeEditor[LanguageServerSymbol]):
 
         def set_contents(self, contents: str) -> None:
             self._file_buffer.contents = contents
+
+        def discard_unsaved_contents(self) -> None:
+            # the buffer outlives the edit and the language server holds its edited copy, so both are reloaded
+            # from the file on disk even though the file's modification time has not advanced
+            self._file_buffer.reload_from_disk(force=True)
 
         def delete_text_between_positions(self, start_pos: PositionInFile, end_pos: PositionInFile) -> None:
             self._lang_server.delete_text_between_positions(self.relative_path, start_pos.to_lsp_position(), end_pos.to_lsp_position())

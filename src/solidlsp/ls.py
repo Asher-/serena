@@ -131,7 +131,7 @@ class LSPFileBuffer:
         """Ensure that the file is opened in the language server."""
         self._open_in_ls()
 
-    def reload_from_disk(self) -> bool:
+    def reload_from_disk(self, force: bool = False) -> bool:
         """
         Reloads the buffer from disk and notifies the language server of the full
         new contents (via didChange) when the file on disk has been modified since
@@ -142,6 +142,9 @@ class LSPFileBuffer:
         but leaves the language server serving stale document symbols until the
         next explicit LSP edit.
 
+        :param force: whether to reload even though the file on disk has not been
+            modified since the last read -- the case of an edit applied to the buffer
+            whose save failed, leaving the file on disk as it was
         :return: True if a reload was performed, False if the buffer was already
             in sync with disk
         """
@@ -151,7 +154,7 @@ class LSPFileBuffer:
             return False
 
         file_modified_date = self.abs_path.stat().st_mtime
-        if file_modified_date <= self._read_file_modified_date:
+        if not force and file_modified_date <= self._read_file_modified_date:
             return False
 
         # refresh the in-memory buffer from disk

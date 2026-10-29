@@ -205,6 +205,99 @@ class MutationResult:
         return self.message
 
 
+class AtomicFileWriter:
+    """
+    The writer that replaces a file's bytes atomically: the new bytes go to a temporary file created in the target's
+    directory, which is then renamed over the target with ``os.replace``. A failure before the rename leaves the target's
+    bytes intact and removes the temporary file, so no write leaves a half-written target or litter beside it.
+    """
+
+    TEMP_FILE_PREFIX = ".serena-tmp-"
+    """the name prefix of the temporary file a write creates beside its target"""
+
+    def write_bytes(self, abs_path: str, data: bytes) -> None:
+        """
+        Replace the bytes of the file at ``abs_path`` with ``data``, creating the file and its parent directories when absent.
+
+        :param abs_path: the absolute path of the file to write.
+        :param data: the file's new bytes.
+        :raises OSError: when the temporary file cannot be created, written or renamed over the target; the target then
+            holds the bytes it held before the call.
+        """
+        # capture the target's prior mode on an OVERWRITE: mkstemp creates the temp at 0o600, so
+        # replacing an existing file would silently strip its permission bits (notably +x)
+        parent = os.path.dirname(abs_path)
+        prior_mode = self._prior_mode(abs_path)
+
+        # the temporary file, in the target's directory so that the rename never crosses a filesystem
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=parent or None, prefix=self.TEMP_FILE_PREFIX)
+
+        # write, flush and sync the new bytes, then swap them in; any failure removes the temporary file
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            # restore the overwritten file's mode (mkstemp reset it to 0o600); a brand-new file
+            # keeps the default mode
+            if prior_mode is not None:
+                os.chmod(tmp_path, prior_mode)
+            os.replace(tmp_path, abs_path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    def write_text(self, abs_path: str, contents: str, encoding: str, newline: str | None) -> None:
+        """
+        Replace the contents of the file at ``abs_path`` with ``contents``, encoded as a text-mode
+        ``open(abs_path, "w", encoding=encoding, newline=newline)`` encodes them.
+
+        The contents are encoded before any file is created, so contents the encoding cannot represent raise without
+        touching the target or its directory.
+
+        :param abs_path: the absolute path of the file to write.
+        :param contents: the file's new contents, with LF line endings.
+        :param encoding: the encoding to write the contents in.
+        :param newline: the line ending each LF is written as, with the meaning :func:`open` gives it.
+        :raises UnicodeEncodeError: when ``encoding`` cannot represent ``contents``.
+        :raises OSError: as :meth:`write_bytes` raises it.
+        """
+        self.write_bytes(abs_path, self.encode_text(contents, encoding, newline))
+
+    @staticmethod
+    def encode_text(contents: str, encoding: str, newline: str | None) -> bytes:
+        """
+        Encode ``contents`` as a text-mode write with the given ``encoding`` and ``newline`` encodes them.
+
+        :param contents: the text to encode, with LF line endings.
+        :param encoding: the encoding to encode the text in, under strict error handling.
+        :param newline: the line ending each LF is written as: ``None`` writes ``os.linesep``, the empty string and LF
+            write LF, and any other value is written in its place.
+        :return: the encoded bytes.
+        :raises UnicodeEncodeError: when ``encoding`` cannot represent ``contents``.
+        """
+        # the line ending each "\n" is written as, translated as a text-mode write translates it
+        line_ending = os.linesep if newline is None else newline
+        if line_ending not in ("", "\n"):
+            contents = contents.replace("\n", line_ending)
+        return contents.encode(encoding)
+
+    @staticmethod
+    def _prior_mode(abs_path: str) -> int | None:
+        # the permission bits of an existing regular file, which an overwrite keeps; a missing or unreadable
+        # target, or one that is not a regular file, has none to keep
+        try:
+            existing = os.lstat(abs_path)
+        except OSError:
+            return None
+        return stat_module.S_IMODE(existing.st_mode) if stat_module.S_ISREG(existing.st_mode) else None
+
+
 class FilesystemLifecycle:
     """Object-oriented filesystem lifecycle service bound to a single project root (spec-v2 §5.4).
 
@@ -454,41 +547,14 @@ class FilesystemLifecycle:
         return None
 
     def _atomic_write(self, abs_path: str, data: bytes) -> str | None:
-        # write via a temp file in the target directory, then os.replace: the swap is atomic and
-        # crash-safe (a failure before replace leaves the original intact and never litters a temp).
-        parent = os.path.dirname(abs_path)
-        # capture the target's prior mode on an OVERWRITE: mkstemp creates the temp at 0o600, so
-        # replacing an existing file would silently strip its permission bits (notably +x)
-        existing = self._lstat(abs_path)
-        prior_mode = (
-            stat_module.S_IMODE(existing.st_mode)
-            if existing is not None and stat_module.S_ISREG(existing.st_mode)
-            else None
-        )
+        # write via the shared temp-file-and-rename writer: the swap is atomic and crash-safe (a failure
+        # before the replace leaves the original intact and never litters a temp); a failure is reported
+        # as its text
         try:
-            if parent:
-                os.makedirs(parent, exist_ok=True)
-            fd, tmp_path = tempfile.mkstemp(dir=parent or None, prefix=".serena-tmp-")
-        except OSError as error:
-            return str(error)
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            # restore the overwritten file's mode (mkstemp reset it to 0o600); a brand-new file
-            # keeps the default mode
-            if prior_mode is not None:
-                os.chmod(tmp_path, prior_mode)
-            os.replace(tmp_path, abs_path)
-            return None
+            AtomicFileWriter().write_bytes(abs_path, data)
         except BaseException as error:
-            # clean up the temp so a failed write never leaves litter beside the target
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
             return str(error)
+        return None
 
     # --- create ---
 
@@ -584,6 +650,7 @@ class FilesystemLifecycle:
 
 
 __all__ = [
+    "AtomicFileWriter",
     "DirEntry",
     "DirListing",
     "EntryKind",
