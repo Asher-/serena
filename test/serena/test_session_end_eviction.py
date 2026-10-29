@@ -366,3 +366,159 @@ class TestSessionEndRoute:
         answer = tool.apply_ex(log_call=False, mcp_ctx=_forwarded_call_context(_FORWARDED), **{SESSION_ID_ARGUMENT: "S1"})
 
         assert answer == project.project_root
+
+
+_CLAUDE_SESSION = "S1"
+"""the Claude Code session id whose end the brain SessionEnd hook reports"""
+
+_CARRYING_CLAUDE_SESSION = (
+    f"{_FORWARDED}/session/{_CLAUDE_SESSION}",
+    f"{_FORWARDED}/session/{_CLAUDE_SESSION}/agent/A1",
+    f"{_OTHER_FORWARDED}/session/{_CLAUDE_SESSION}",
+)
+"""the slot keys that carry the ended Claude Code session id after ``/session/``, under either forwarded session id"""
+
+_NOT_CARRYING_CLAUDE_SESSION = (f"{_FORWARDED}/session/S2", f"{_FORWARDED}/session/S10", _FORWARDED)
+"""slot keys that do not carry the ended Claude Code session id: another session's, one whose session id begins with the
+ended id's characters, and the bare forwarded session id"""
+
+
+class TestEvictionOfAClaudeSession:
+    """verifies that ending a Claude Code session evicts exactly the slots whose keys carry its id after ``/session/``."""
+
+    def test_slots_carrying_the_ended_id_are_evicted_and_their_bridges_stop(
+        self, agent: SerenaAgent, make_go_project: Callable[[str], Project]
+    ) -> None:
+        ended_bridges: set[int] = set()
+        for index, key in enumerate(_CARRYING_CLAUDE_SESSION):
+            ended_bridges |= _open_go_cursor(agent, key, make_go_project(f"ended_{index}"))
+        kept_bridges: set[int] = set()
+        for index, key in enumerate(_NOT_CARRYING_CLAUDE_SESSION):
+            kept_bridges |= _open_go_cursor(agent, key, make_go_project(f"kept_{index}"))
+
+        # the bridge processes are taken before eviction, since one that has already exited can no longer be looked up
+        ended = [psutil.Process(pid) for pid in ended_bridges]
+        evicted = agent.evict_claude_session(_CLAUDE_SESSION)
+
+        assert sorted(evicted) == sorted(_CARRYING_CLAUDE_SESSION)
+        for key in _CARRYING_CLAUDE_SESSION:
+            assert key not in agent._cursor_managers_by_session
+            assert key not in agent._active_projects_by_session
+        _gone, alive = psutil.wait_procs(ended, timeout=_GATE_TIMEOUT)
+        assert alive == [], f"serena-go-bridge processes still running after their slots were evicted: {[p.pid for p in alive]}"
+        for key in _NOT_CARRYING_CLAUDE_SESSION:
+            assert key in agent._cursor_managers_by_session
+            assert key in agent._active_projects_by_session
+        assert all(psutil.pid_exists(pid) for pid in kept_bridges)
+
+    def test_ending_a_claude_session_that_holds_no_slot_evicts_nothing(
+        self, agent: SerenaAgent, make_go_project: Callable[[str], Project]
+    ) -> None:
+        live_bridges = _open_go_cursor(agent, _LIVE_KEY, make_go_project("live"))
+
+        evicted = agent.evict_claude_session(_CLAUDE_SESSION)
+
+        assert evicted == []
+        assert _LIVE_KEY in agent._cursor_managers_by_session
+        assert _LIVE_KEY in agent._active_projects_by_session
+        assert all(psutil.pid_exists(pid) for pid in live_bridges)
+
+    def test_the_durable_record_of_an_evicted_key_is_kept(self, agent: SerenaAgent, make_go_project: Callable[[str], Project]) -> None:
+        key = _CARRYING_CLAUDE_SESSION[0]
+        project = make_go_project("recorded")
+        _open_go_cursor(agent, key, project)
+        agent._explicit_project_root_store.set(key, project.project_root)
+
+        agent.evict_claude_session(_CLAUDE_SESSION)
+
+        assert key not in agent._active_projects_by_session
+        assert agent._explicit_project_root_store.get(key) == project.project_root
+
+
+class TestSessionEndRouteForAClaudeSession:
+    """verifies the answer of the /sessions/end route to a body naming a Claude Code session id."""
+
+    def test_ending_a_claude_session_evicts_its_slots_and_releases_their_resources(
+        self, agent: SerenaAgent, listener: FastMCP, make_go_project: Callable[[str], Project]
+    ) -> None:
+        ended_projects = [make_go_project(f"ended_{index}") for index in range(len(_CARRYING_CLAUDE_SESSION))]
+        ended_bridges: set[int] = set()
+        for key, project in zip(_CARRYING_CLAUDE_SESSION, ended_projects, strict=True):
+            ended_bridges |= _open_go_cursor(agent, key, project)
+        kept_projects = [make_go_project(f"kept_{index}") for index in range(len(_NOT_CARRYING_CLAUDE_SESSION))]
+        kept_bridges: set[int] = set()
+        for key, project in zip(_NOT_CARRYING_CLAUDE_SESSION, kept_projects, strict=True):
+            kept_bridges |= _open_go_cursor(agent, key, project)
+
+        # the managers and bridge processes are taken before eviction, which detaches the one and ends the other
+        ended_managers = [_manager_double(project) for project in ended_projects]
+        kept_managers = [_manager_double(project) for project in kept_projects]
+        ended = [psutil.Process(pid) for pid in ended_bridges]
+        response = _client(listener).post(_SESSION_END_PATH, json={"claude_session_id": _CLAUDE_SESSION})
+
+        assert response.status_code == 200, response.text
+        assert response.json() == {"evicted": sorted(_CARRYING_CLAUDE_SESSION)}
+        for key in _CARRYING_CLAUDE_SESSION:
+            assert key not in agent._cursor_managers_by_session
+            assert key not in agent._active_projects_by_session
+        _gone, alive = psutil.wait_procs(ended, timeout=_GATE_TIMEOUT)
+        assert alive == [], f"serena-go-bridge processes still running after their slots were evicted: {[p.pid for p in alive]}"
+        for manager in ended_managers:
+            assert manager.stopped.wait(timeout=_GATE_TIMEOUT), "the manager of a project no remaining slot holds was never stopped"
+        for key, project in zip(_NOT_CARRYING_CLAUDE_SESSION, kept_projects, strict=True):
+            assert key in agent._cursor_managers_by_session
+            assert agent._active_projects_by_session[key] is project
+        assert all(psutil.pid_exists(pid) for pid in kept_bridges)
+        for manager in kept_managers:
+            manager.stop_all.assert_not_called()
+
+    def test_a_call_under_an_evicted_key_is_answered_from_its_recorded_project(
+        self,
+        agent: SerenaAgent,
+        listener: FastMCP,
+        make_go_project: Callable[[str], Project],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        key = f"{_FORWARDED}/session/{_CLAUDE_SESSION}"
+        project = make_go_project("recorded")
+        _open_go_cursor(agent, key, project)
+        agent._explicit_project_root_store.set(key, project.project_root)
+        manager = _manager_double(project)
+
+        response = _client(listener).post(_SESSION_END_PATH, json={"claude_session_id": _CLAUDE_SESSION})
+        assert response.status_code == 200, response.text
+        assert response.json() == {"evicted": [key]}
+        # the evicted slot's project is released before the call arrives, so the release cannot detach the manager
+        # double the restore attaches
+        assert manager.stopped.wait(timeout=_GATE_TIMEOUT), "the evicted slot's project was never released"
+
+        # activating the recorded root yields the test's project, with a fresh manager double so it starts no language server
+        def activate(root: str, **kwargs: object) -> bool:
+            recorded = {project.project_root: project}[root]
+            recorded.language_server_manager = MagicMock(spec=LanguageServerManager)
+            return agent._activate_project(recorded, update_active_modes=False, update_active_tools=False, record_explicit=False)
+
+        monkeypatch.setattr(agent, "activate_project_from_path_or_name", activate)
+        monkeypatch.setattr(agent, "record_tool_usage", lambda *args, **kwargs: None)
+        tool = _ActiveProjectRootTool(agent)
+        monkeypatch.setattr(tool, "is_active", lambda: True)
+
+        answer = tool.apply_ex(log_call=False, mcp_ctx=_forwarded_call_context(_FORWARDED), **{SESSION_ID_ARGUMENT: _CLAUDE_SESSION})
+
+        assert answer == project.project_root
+
+    def test_a_body_naming_both_a_forwarded_and_a_claude_session_is_refused_and_evicts_nothing(
+        self, agent: SerenaAgent, listener: FastMCP, make_go_project: Callable[[str], Project]
+    ) -> None:
+        # the key lies under the forwarded id and carries the Claude Code session id, so either reading alone would evict it
+        key = f"{_FORWARDED}/session/{_CLAUDE_SESSION}"
+        bridges = _open_go_cursor(agent, key, make_go_project("kept"))
+
+        response = _client(listener).post(
+            _SESSION_END_PATH, json={"forwarded_session_id": _FORWARDED, "claude_session_id": _CLAUDE_SESSION}
+        )
+
+        assert response.status_code == 400, response.text
+        assert key in agent._cursor_managers_by_session
+        assert key in agent._active_projects_by_session
+        assert all(psutil.pid_exists(pid) for pid in bridges)

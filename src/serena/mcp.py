@@ -6,7 +6,7 @@ import asyncio
 import atexit
 import contextvars
 import sys
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass
@@ -688,11 +688,14 @@ def build_pipe_listener(agent: SerenaAgent, *, openai_tool_compatible: bool = Fa
 
 class SessionEndRoute:
     """
-    The HTTP route by which the multiplexer reports that a forwarded session has ended (pg://serena/session/eviction).
+    The HTTP route by which the multiplexer reports that a forwarded session has ended (pg://serena/session/eviction),
+    and the brain SessionEnd hook that a Claude Code session has ended (pg://serena/session/eviction/claude_session).
 
     A POST to :attr:`PATH` whose JSON body ``{"forwarded_session_id": "<id>"}`` names a forwarded session id evicts every
-    per-session slot under that id through :meth:`SerenaAgent.evict_forwarded_session`; a body that names no id is
-    answered 400 and evicts nothing.
+    per-session slot under that id through :meth:`SerenaAgent.evict_forwarded_session`; one whose body
+    ``{"claude_session_id": "<id>"}`` names a Claude Code session id evicts every per-session slot carrying that id after
+    ``/session/`` through :meth:`SerenaAgent.evict_claude_session`. A body that names both, or names no id, is answered
+    400 and evicts nothing.
     """
 
     PATH = "/sessions/end"
@@ -700,6 +703,9 @@ class SessionEndRoute:
 
     FORWARDED_SESSION_ID_FIELD = "forwarded_session_id"
     """the field of the request body that names the ended forwarded session id"""
+
+    CLAUDE_SESSION_ID_FIELD = "claude_session_id"
+    """the field of the request body that names the ended Claude Code session id"""
 
     def __init__(self, agent: SerenaAgent):
         """
@@ -720,19 +726,35 @@ class SessionEndRoute:
         Answers a session-end notification.
 
         :param request: the POST to :attr:`PATH`
-        :return: 200 with the evicted session keys, or 400 when the body names no forwarded session id
+        :return: 200 with the evicted session keys, or 400 when the body names both a forwarded and a Claude Code session
+            id, or names no non-empty string id of the session it reports ended
         """
-        # the forwarded session id the body names
+        # the body, read as a JSON object
         try:
             body = await request.json()
         except ValueError:
             body = None
-        forwarded_session_id = body.get(self.FORWARDED_SESSION_ID_FIELD) if isinstance(body, dict) else None
-        if not isinstance(forwarded_session_id, str) or not forwarded_session_id:
-            log.warning(f"Refused a session-end notification whose body names no {self.FORWARDED_SESSION_ID_FIELD}")
-            return JSONResponse({"error": f"the body must name a non-empty string {self.FORWARDED_SESSION_ID_FIELD}"}, status_code=400)
+        if not isinstance(body, dict):
+            body = {}
 
-        # the slots under that id, evicted off the event loop since dropping a cursor manager waits for its bridges to exit
-        evicted = sorted(await asyncio.to_thread(self._agent.evict_forwarded_session, forwarded_session_id))
-        log.info(f"Session end of forwarded session {forwarded_session_id} evicted {len(evicted)} slot(s): {evicted}")
+        # a body naming both kinds of session is refused, since the two would evict different slots
+        if self.FORWARDED_SESSION_ID_FIELD in body and self.CLAUDE_SESSION_ID_FIELD in body:
+            both = f"{self.FORWARDED_SESSION_ID_FIELD} and {self.CLAUDE_SESSION_ID_FIELD}"
+            log.warning(f"Refused a session-end notification whose body names both {both}")
+            return JSONResponse({"error": f"the body must name one of {both}, not both"}, status_code=400)
+
+        # the ended session the body names, and the eviction its end calls for
+        evict: Callable[[str], list[str]]
+        if self.CLAUDE_SESSION_ID_FIELD in body:
+            field, evict = self.CLAUDE_SESSION_ID_FIELD, self._agent.evict_claude_session
+        else:
+            field, evict = self.FORWARDED_SESSION_ID_FIELD, self._agent.evict_forwarded_session
+        session_id = body.get(field)
+        if not isinstance(session_id, str) or not session_id:
+            log.warning(f"Refused a session-end notification whose body names no {field}")
+            return JSONResponse({"error": f"the body must name a non-empty string {field}"}, status_code=400)
+
+        # the slots that session held, evicted off the event loop since dropping a cursor manager waits for its bridges to exit
+        evicted = sorted(await asyncio.to_thread(evict, session_id))
+        log.info(f"Session end of {field} {session_id} evicted {len(evicted)} slot(s): {evicted}")
         return JSONResponse({"evicted": evicted})

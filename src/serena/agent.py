@@ -6,6 +6,7 @@ import json
 import multiprocessing
 import os
 import platform
+import re
 import signal
 import subprocess
 import sys
@@ -1163,6 +1164,37 @@ class SerenaAgent:
         # the slots under the forwarded id, never a key that merely shares its leading characters
         prefix = forwarded_session_id + "/"
         evicted = [key for key in candidate_keys if isinstance(key, str) and (key == forwarded_session_id or key.startswith(prefix))]
+        for key in evicted:
+            self._evict_session_state(key, keep_durable_record=True)
+        return evicted
+
+    def evict_claude_session(self, claude_session_id: str) -> list[str]:
+        """
+        Evicts every per-session slot that carries an ended Claude Code session (pg://serena/session/eviction/claude_session).
+
+        A slot carries ``claude_session_id`` when its key is ``<F>/session/<claude_session_id>`` or begins with
+        ``<F>/session/<claude_session_id>/``, for any forwarded session id ``F``: the ``/session/<id>`` segment of a tier-2
+        key. A key whose session id merely begins with ``claude_session_id`` is not evicted. Each such slot is evicted
+        through :meth:`_evict_session_state`, keeping its durable explicit-activation record, so a call that later arrives
+        under the key restores its explicitly activated project.
+
+        :param claude_session_id: the Claude Code session id the brain SessionEnd hook reports ended
+        :return: the evicted session keys
+        """
+        # the keys of every per-session map, so a slot holding only an executor or a cursor manager is found too
+        with self._task_executors_by_session_lock:
+            executor_keys = list(self._task_executors_by_session)
+        candidate_keys = {
+            *list(self._active_projects_by_session),
+            *list(self._active_modes_by_session),
+            *list(self._active_tools_by_session),
+            *list(self._cursor_managers_by_session),
+            *executor_keys,
+        }
+
+        # the slots carrying the session id after a forwarded session id, followed by nothing or by "/"
+        carrying = re.compile(r".+/session/" + re.escape(claude_session_id) + r"(/.*)?", re.DOTALL)
+        evicted = [key for key in candidate_keys if isinstance(key, str) and carrying.fullmatch(key)]
         for key in evicted:
             self._evict_session_state(key, keep_durable_record=True)
         return evicted
