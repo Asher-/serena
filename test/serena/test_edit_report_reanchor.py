@@ -29,6 +29,7 @@ from serena.tools.cursor_tools import (
     CursorReplaceBodyTool,
 )
 from serena.tools.tools_base import SUCCESS_RESULT
+from serena.util.file_lifecycle import WritePrecondition
 from solidlsp.ls_config import Language
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_process import LanguageServerTerminatedException
@@ -178,8 +179,8 @@ class _SymbolEditFixture:
         tool.__dict__["create_ls_code_editor"] = self._create_code_editor
         return tool
 
-    def _create_code_editor(self) -> LanguageServerCodeEditor:
-        return LanguageServerCodeEditor(LanguageServerSymbolRetriever(self.project))
+    def _create_code_editor(self, write_precondition: WritePrecondition | None = None) -> LanguageServerCodeEditor:
+        return LanguageServerCodeEditor(LanguageServerSymbolRetriever(self.project), write_precondition=write_precondition)
 
 
 @contextmanager

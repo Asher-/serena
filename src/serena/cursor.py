@@ -15,7 +15,7 @@ from typing import Any
 
 from serena.project import Project
 from serena.symbol import LanguageServerSymbol, LanguageServerSymbolLocation, LanguageServerSymbolRetriever
-from serena.util.file_lifecycle import AtomicFileWriter
+from serena.util.file_lifecycle import AtomicFileWriter, WritePrecondition
 from serena.util.line_numbers import format_line_range, to_display_line, to_internal_line
 from serena.util.staleness import check_stale, read_file_version
 from serena.util.windowing import InvalidContinuation, WindowRequest, decode_continuation, window_body
@@ -2201,6 +2201,7 @@ class CursorManager:
         cursor_id: str,
         operation: str,
         source: str,
+        write_precondition: WritePrecondition | None = None,
     ) -> tuple[str, str]:
         """Apply a container-member edit at the position of a structural cursor.
 
@@ -2225,7 +2226,10 @@ class CursorManager:
             (sequence containers). Ignored for ``"remove"``.
         :return: a tuple ``(before_contents, after_contents)`` letting the
             caller compute a unified-diff summary without re-reading the file.
+        :param write_precondition: the condition the write evaluates immediately before it replaces the file
+            (pg://serena/edit/version); ``None`` writes unconditionally.
         :raises TypeError: if ``cursor_id`` is not a structural cursor.
+        :raises StaleWriteError: when ``write_precondition`` no longer holds; the file is then left as it was.
         :raises ValueError: for unknown operations or when the backend cannot
             service the request (e.g. no backend registered for the file).
         """
@@ -2283,12 +2287,12 @@ class CursorManager:
         # short-circuit writes when the backend round-trip is a no-op; this keeps
         # mtime stable for semantically empty operations and avoids a spurious diff.
         if after_contents != before_contents:
-            self._write_file_contents(state.relative_path, after_contents)
+            self._write_file_contents(state.relative_path, after_contents, write_precondition)
         # invalidate the per-file structural cache so re-anchors see fresh node handles
         self._structural_nodes_cache.pop(state.relative_path, None)
         return before_contents, after_contents
 
-    def _write_file_contents(self, relative_path: str, contents: str) -> None:
+    def _write_file_contents(self, relative_path: str, contents: str, write_precondition: WritePrecondition | None = None) -> None:
         """Write ``contents`` to ``relative_path`` using the project's encoding/line-ending.
 
         Structural edits bypass the LSP buffer (JSON/TOML/YAML have no LSP
@@ -2301,7 +2305,7 @@ class CursorManager:
         abs_path = os.path.join(self._project.project_root, relative_path)
         encoding = self._project.project_config.encoding
         newline = self._project.line_ending.newline_str
-        AtomicFileWriter().write_text(abs_path, contents, encoding, newline)
+        AtomicFileWriter().write_text(abs_path, contents, encoding, newline, write_precondition)
 
     def reanchor_cursor(
         self,

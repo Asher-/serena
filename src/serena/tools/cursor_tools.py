@@ -17,8 +17,9 @@ from serena.cursor import CursorManager, EdgeType, PlaintextCursorState, ReadRun
 from serena.symbol import LanguageServerSymbol
 from serena.tools import SUCCESS_RESULT
 from serena.tools.tools_base import Tool, ToolMarkerSymbolicEdit, ToolMarkerSymbolicRead
+from serena.util.file_lifecycle import StaleWriteError
 from serena.util.line_numbers import to_display_line, to_internal_line
-from serena.util.staleness import UNCONDITIONAL, check_stale, read_file_version
+from serena.util.staleness import UNCONDITIONAL, ExpectedVersion, check_stale, read_file_version
 from solidlsp.ls_types import SymbolKind
 
 
@@ -61,6 +62,25 @@ def _refuse_if_stale(tool: Tool, relative_path: str, expect_version: str) -> str
         return None
     stale = check_stale(tool.project.project_root, relative_path, expect_version)
     return stale.render() if stale is not None else None
+
+
+def _write_precondition(tool: Tool, relative_path: str, expect_version: str) -> ExpectedVersion | None:
+    """The write-time half of the cursor write tools' compare-and-swap gate (pg://serena/edit/version).
+
+    :func:`_refuse_if_stale` checks the version before the edit is computed; this precondition checks it again
+    immediately before the edited file is replaced, so a change another writer makes in between is neither overwritten
+    nor edited on top of. A write it refuses raises :class:`~serena.util.file_lifecycle.StaleWriteError`, whose stale
+    state the tool returns as its reply.
+
+    :param tool: the edit tool, whose ``project.project_root`` roots the version check.
+    :param relative_path: the file about to be mutated.
+    :param expect_version: the file version the caller carried from a read projection or ``stat``.
+    :return: the precondition, or ``None`` for the unconditional ``"*"``.
+    """
+    # short-circuit the unconditional escape BEFORE touching project_root, as _refuse_if_stale does
+    if expect_version == UNCONDITIONAL:
+        return None
+    return ExpectedVersion(tool.project.project_root, relative_path, expect_version)
 
 
 def _reply_after_landed_edit(manager: CursorManager, cursor_id: str, applied: str, name_path: str | None = None) -> str:
@@ -761,7 +781,12 @@ class CursorReplaceBodyTool(Tool, ToolMarkerSymbolicEdit):
             stale = _refuse_if_stale(self, state.relative_path, expect_version)
             if stale is not None:
                 return stale
-            before, after = manager.apply_container_edit(cursor_id, "replace", body)
+            try:
+                before, after = manager.apply_container_edit(
+                    cursor_id, "replace", body, _write_precondition(self, state.relative_path, expect_version)
+                )
+            except StaleWriteError as e:
+                return e.stale.render()
             removed, added = self._count_diff_lines(before, after)
             diff_summary = f"Diff: -{removed} / +{added} lines"
             return self._reanchor_and_format(manager, cursor_id, diff_summary)
@@ -787,8 +812,11 @@ class CursorReplaceBodyTool(Tool, ToolMarkerSymbolicEdit):
         pre_content = self.project.read_file(relative_path)
 
         # execute the edit
-        code_editor = self.create_code_editor()
-        code_editor.replace_body(name_path, relative_file_path=relative_path, body=body)
+        code_editor = self.create_code_editor(_write_precondition(self, relative_path, expect_version))
+        try:
+            code_editor.replace_body(name_path, relative_file_path=relative_path, body=body)
+        except StaleWriteError as e:
+            return e.stale.render()
 
         # post-edit sibling-loss safety net: if the number of lines removed is much larger than
         # the symbol's extent could account for, the extent was likely corrupted and absorbed
@@ -894,7 +922,12 @@ class CursorInsertBeforeTool(Tool, ToolMarkerSymbolicEdit):
             stale = _refuse_if_stale(self, state.relative_path, expect_version)
             if stale is not None:
                 return stale
-            manager.apply_container_edit(cursor_id, "insert_before", body)
+            try:
+                manager.apply_container_edit(
+                    cursor_id, "insert_before", body, _write_precondition(self, state.relative_path, expect_version)
+                )
+            except StaleWriteError as e:
+                return e.stale.render()
             return _reply_after_landed_edit(manager, cursor_id, SUCCESS_RESULT)
 
         if isinstance(state, PlaintextCursorState):
@@ -909,8 +942,11 @@ class CursorInsertBeforeTool(Tool, ToolMarkerSymbolicEdit):
         stale = _refuse_if_stale(self, relative_path, expect_version)
         if stale is not None:
             return stale
-        code_editor = self.create_code_editor()
-        code_editor.insert_before_symbol(name_path, relative_file_path=relative_path, body=body)
+        code_editor = self.create_code_editor(_write_precondition(self, relative_path, expect_version))
+        try:
+            code_editor.insert_before_symbol(name_path, relative_file_path=relative_path, body=body)
+        except StaleWriteError as e:
+            return e.stale.render()
         return _reply_after_landed_edit(manager, cursor_id, SUCCESS_RESULT)
 
 
@@ -950,7 +986,12 @@ class CursorInsertAfterTool(Tool, ToolMarkerSymbolicEdit):
             stale = _refuse_if_stale(self, state.relative_path, expect_version)
             if stale is not None:
                 return stale
-            manager.apply_container_edit(cursor_id, "insert_after", body)
+            try:
+                manager.apply_container_edit(
+                    cursor_id, "insert_after", body, _write_precondition(self, state.relative_path, expect_version)
+                )
+            except StaleWriteError as e:
+                return e.stale.render()
             return _reply_after_landed_edit(manager, cursor_id, SUCCESS_RESULT)
 
         if isinstance(state, PlaintextCursorState):
@@ -965,8 +1006,11 @@ class CursorInsertAfterTool(Tool, ToolMarkerSymbolicEdit):
         stale = _refuse_if_stale(self, relative_path, expect_version)
         if stale is not None:
             return stale
-        code_editor = self.create_code_editor()
-        code_editor.insert_after_symbol(name_path, relative_file_path=relative_path, body=body)
+        code_editor = self.create_code_editor(_write_precondition(self, relative_path, expect_version))
+        try:
+            code_editor.insert_after_symbol(name_path, relative_file_path=relative_path, body=body)
+        except StaleWriteError as e:
+            return e.stale.render()
         return _reply_after_landed_edit(manager, cursor_id, SUCCESS_RESULT)
 
 
@@ -1004,7 +1048,10 @@ class CursorInsertAtStartTool(Tool, ToolMarkerSymbolicEdit):
         stale = _refuse_if_stale(self, state.relative_path, expect_version)
         if stale is not None:
             return stale
-        manager.apply_container_edit(cursor_id, "insert_start", body)
+        try:
+            manager.apply_container_edit(cursor_id, "insert_start", body, _write_precondition(self, state.relative_path, expect_version))
+        except StaleWriteError as e:
+            return e.stale.render()
         return _reply_after_landed_edit(manager, cursor_id, SUCCESS_RESULT)
 
 
@@ -1036,7 +1083,10 @@ class CursorInsertAtEndTool(Tool, ToolMarkerSymbolicEdit):
         stale = _refuse_if_stale(self, state.relative_path, expect_version)
         if stale is not None:
             return stale
-        manager.apply_container_edit(cursor_id, "insert_end", body)
+        try:
+            manager.apply_container_edit(cursor_id, "insert_end", body, _write_precondition(self, state.relative_path, expect_version))
+        except StaleWriteError as e:
+            return e.stale.render()
         return _reply_after_landed_edit(manager, cursor_id, SUCCESS_RESULT)
 
 
@@ -1088,7 +1138,10 @@ class CursorRemoveMemberTool(Tool, ToolMarkerSymbolicEdit):
         segments = _split_name_path_segments(state.name_path)
         parent_path = "/".join(segments[:-1]) if len(segments) > 1 else ""
 
-        manager.apply_container_edit(cursor_id, "remove", "")
+        try:
+            manager.apply_container_edit(cursor_id, "remove", "", _write_precondition(self, state.relative_path, expect_version))
+        except StaleWriteError as e:
+            return e.stale.render()
 
         if not parent_path:
             # top-level member removed: there is no parent to re-anchor on;
@@ -1159,8 +1212,11 @@ class CursorReplaceRangeTool(Tool, ToolMarkerSymbolicEdit):
         # execute the edit via the filesystem-level code editor layer; the operation
         # bypasses the LSP's workspace-edit interface intentionally — workspace edits
         # are rejected for regions the server does not recognize as symbols
-        code_editor = self.create_code_editor()
-        code_editor.replace_lines(relative_path, to_internal_line(start_line), to_internal_line(end_line), body)
+        code_editor = self.create_code_editor(_write_precondition(self, relative_path, expect_version))
+        try:
+            code_editor.replace_lines(relative_path, to_internal_line(start_line), to_internal_line(end_line), body)
+        except StaleWriteError as e:
+            return e.stale.render()
 
         # compute a diff summary for the return value so the caller can verify the edit
         # size against their intent (mirrors cursor_replace_body's diff-summary style)
@@ -1244,8 +1300,11 @@ class CursorReplaceRangeVerifiedTool(Tool, ToolMarkerSymbolicEdit):
 
         # execute the edit via the filesystem-level code editor layer (same path as
         # cursor_replace_range so the two tools share a single mutation implementation)
-        code_editor = self.create_code_editor()
-        code_editor.replace_lines(relative_path, internal_start, internal_end, body)
+        code_editor = self.create_code_editor(_write_precondition(self, relative_path, expect_version))
+        try:
+            code_editor.replace_lines(relative_path, internal_start, internal_end, body)
+        except StaleWriteError as e:
+            return e.stale.render()
 
         # compute a diff summary for the return value so the caller can verify the
         # edit size against their intent (mirrors cursor_replace_range)
@@ -1395,8 +1454,11 @@ class CursorReplaceBetweenTool(Tool, ToolMarkerSymbolicEdit):
             CursorReplaceRangeVerifiedTool._verify_expected(relative_path, pre_content, start_line, end_line, expected_content)
 
         # execute the edit via the filesystem-level code editor layer
-        code_editor = self.create_code_editor()
-        code_editor.replace_lines(relative_path, start_line, end_line, body)
+        code_editor = self.create_code_editor(_write_precondition(self, relative_path, expect_version))
+        try:
+            code_editor.replace_lines(relative_path, start_line, end_line, body)
+        except StaleWriteError as e:
+            return e.stale.render()
 
         # compute a diff summary and include the computed range so the caller can
         # verify the anchors resolved to the lines they expected

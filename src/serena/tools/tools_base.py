@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from serena.code_editor import CodeEditor, LanguageServerCodeEditor
     from serena.symbol import LanguageServerSymbolRetriever
     from serena.task_executor import TaskExecutor
+    from serena.util.file_lifecycle import WritePrecondition
 
 log = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -65,23 +66,28 @@ class Component(ABC):
     def project(self) -> Project:
         return self.agent.get_active_project_or_raise()
 
-    def create_code_editor(self) -> "CodeEditor":
+    def create_code_editor(self, write_precondition: "WritePrecondition | None" = None) -> "CodeEditor":
+        """
+        :param write_precondition: the condition the editor's save of the file it names evaluates immediately before
+            replacing that file; ``None`` saves unconditionally.
+        :return: a code editor for the agent's language backend.
+        """
         from ..code_editor import JetBrainsCodeEditor
 
         match self.agent.get_language_backend():
             case LanguageBackend.LSP:
-                return self.create_ls_code_editor()
+                return self.create_ls_code_editor(write_precondition)
             case LanguageBackend.JETBRAINS:
-                return JetBrainsCodeEditor(project=self.project)
+                return JetBrainsCodeEditor(project=self.project, write_precondition=write_precondition)
             case _:
                 raise ValueError
 
-    def create_ls_code_editor(self) -> "LanguageServerCodeEditor":
+    def create_ls_code_editor(self, write_precondition: "WritePrecondition | None" = None) -> "LanguageServerCodeEditor":
         from ..code_editor import LanguageServerCodeEditor
 
         if not self.agent.is_using_language_server():
             raise Exception("Cannot create LanguageServerCodeEditor; agent is not in language server mode.")
-        return LanguageServerCodeEditor(self.create_language_server_symbol_retriever())
+        return LanguageServerCodeEditor(self.create_language_server_symbol_retriever(), write_precondition=write_precondition)
 
 
 class ToolMarker:

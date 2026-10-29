@@ -16,6 +16,7 @@ import hashlib
 import os
 import stat as stat_module
 import tempfile
+from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -205,6 +206,36 @@ class MutationResult:
         return self.message
 
 
+class WritePrecondition(ABC):
+    """
+    A condition a write evaluates immediately before it replaces its target, refusing the write when the condition no
+    longer holds.
+    """
+
+    def __init__(self, relative_path: str) -> None:
+        """
+        :param relative_path: the path, relative to the project root, of the file whose write the condition guards.
+        """
+        self.relative_path = relative_path
+
+    @abstractmethod
+    def check(self) -> StaleVersion | None:
+        """
+        :return: ``None`` when the write may proceed; the target's stale state when the condition no longer holds.
+        """
+
+
+class StaleWriteError(Exception):
+    """Raised by a write whose precondition no longer held immediately before the replace; the target is left as it was."""
+
+    def __init__(self, stale: StaleVersion) -> None:
+        """
+        :param stale: the target's stale state, which the precondition reported.
+        """
+        super().__init__(stale.render())
+        self.stale = stale
+
+
 class AtomicFileWriter:
     """
     The writer that replaces a file's bytes atomically: the new bytes go to a temporary file created in the target's
@@ -215,12 +246,15 @@ class AtomicFileWriter:
     TEMP_FILE_PREFIX = ".serena-tmp-"
     """the name prefix of the temporary file a write creates beside its target"""
 
-    def write_bytes(self, abs_path: str, data: bytes) -> None:
+    def write_bytes(self, abs_path: str, data: bytes, precondition: WritePrecondition | None = None) -> None:
         """
         Replace the bytes of the file at ``abs_path`` with ``data``, creating the file and its parent directories when absent.
 
         :param abs_path: the absolute path of the file to write.
         :param data: the file's new bytes.
+        :param precondition: the condition evaluated immediately before the replace; ``None`` writes unconditionally.
+        :raises StaleWriteError: when ``precondition`` no longer holds; the target then holds the bytes it held before the
+            call.
         :raises OSError: when the temporary file cannot be created, written or renamed over the target; the target then
             holds the bytes it held before the call.
         """
@@ -244,6 +278,11 @@ class AtomicFileWriter:
             # keeps the default mode
             if prior_mode is not None:
                 os.chmod(tmp_path, prior_mode)
+            # the precondition, evaluated as close to the swap as the write allows
+            if precondition is not None:
+                stale = precondition.check()
+                if stale is not None:
+                    raise StaleWriteError(stale)
             os.replace(tmp_path, abs_path)
         except BaseException:
             try:
@@ -252,7 +291,9 @@ class AtomicFileWriter:
                 pass
             raise
 
-    def write_text(self, abs_path: str, contents: str, encoding: str, newline: str | None) -> None:
+    def write_text(
+        self, abs_path: str, contents: str, encoding: str, newline: str | None, precondition: WritePrecondition | None = None
+    ) -> None:
         """
         Replace the contents of the file at ``abs_path`` with ``contents``, encoded as a text-mode
         ``open(abs_path, "w", encoding=encoding, newline=newline)`` encodes them.
@@ -264,10 +305,12 @@ class AtomicFileWriter:
         :param contents: the file's new contents, with LF line endings.
         :param encoding: the encoding to write the contents in.
         :param newline: the line ending each LF is written as, with the meaning :func:`open` gives it.
+        :param precondition: the condition evaluated immediately before the replace, as :meth:`write_bytes` evaluates it.
         :raises UnicodeEncodeError: when ``encoding`` cannot represent ``contents``.
+        :raises StaleWriteError: as :meth:`write_bytes` raises it.
         :raises OSError: as :meth:`write_bytes` raises it.
         """
-        self.write_bytes(abs_path, self.encode_text(contents, encoding, newline))
+        self.write_bytes(abs_path, self.encode_text(contents, encoding, newline), precondition)
 
     @staticmethod
     def encode_text(contents: str, encoding: str, newline: str | None) -> bytes:
@@ -659,5 +702,7 @@ __all__ = [
     "FilesystemLifecycle",
     "MutationResult",
     "StaleVersion",
+    "StaleWriteError",
+    "WritePrecondition",
     "content_version",
 ]

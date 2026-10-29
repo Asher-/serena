@@ -18,9 +18,9 @@ from __future__ import annotations
 
 import os
 
-from serena.util.file_lifecycle import StaleVersion, content_version
+from serena.util.file_lifecycle import StaleVersion, WritePrecondition, content_version
 
-__all__ = ["UNCONDITIONAL", "StaleVersion", "check_stale", "content_version", "read_file_version"]
+__all__ = ["UNCONDITIONAL", "ExpectedVersion", "StaleVersion", "check_stale", "content_version", "read_file_version"]
 
 # the explicit "write unconditionally" request (spec-v2 §5.5: the default write is
 # conditional; an unconditional overwrite must be asked for by name). A caller passes this
@@ -90,3 +90,20 @@ def check_stale(
     if actual != expect_version:
         return StaleVersion(relative_path, expect_version, actual, current_bytes if current_bytes is not None else raw)
     return None
+
+
+class ExpectedVersion(WritePrecondition):
+    """The write precondition that a file is still at the content version the caller read it at (pg://serena/edit/version)."""
+
+    def __init__(self, project_root: str, relative_path: str, expect_version: str) -> None:
+        """
+        :param project_root: the project root the relative path resolves against.
+        :param relative_path: the file whose write the precondition guards.
+        :param expect_version: the content version the caller read the file at.
+        """
+        super().__init__(relative_path)
+        self._project_root = project_root
+        self._expect_version = expect_version
+
+    def check(self) -> StaleVersion | None:
+        return check_stale(self._project_root, self.relative_path, self._expect_version)

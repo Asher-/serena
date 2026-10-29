@@ -8,7 +8,7 @@ from typing import Generic, TypeVar, cast
 
 from serena.jetbrains.jetbrains_plugin_client import JetBrainsPluginClient
 from serena.symbol import JetBrainsSymbol, LanguageServerSymbol, LanguageServerSymbolRetriever, PositionInFile, Symbol
-from serena.util.file_lifecycle import AtomicFileWriter
+from serena.util.file_lifecycle import AtomicFileWriter, WritePrecondition
 from solidlsp import SolidLanguageServer, ls_types
 from solidlsp.ls import LSPFileBuffer
 from solidlsp.ls_utils import PathUtils, TextUtils
@@ -20,10 +20,16 @@ TSymbol = TypeVar("TSymbol", bound=Symbol)
 
 
 class CodeEditor(Generic[TSymbol], ABC):
-    def __init__(self, project: Project) -> None:
+    def __init__(self, project: Project, write_precondition: WritePrecondition | None = None) -> None:
+        """
+        :param project: the project whose files the editor edits.
+        :param write_precondition: the condition the save of the file it names evaluates immediately before replacing
+            that file (pg://serena/edit/version); ``None`` saves unconditionally.
+        """
         self.project_root = project.project_root
         self.encoding = project.project_config.encoding
         self.newline = project.line_ending.newline_str
+        self._write_precondition = write_precondition
 
     class EditedFile(ABC):
         def __init__(self, relative_path: str) -> None:
@@ -113,7 +119,16 @@ class CodeEditor(Generic[TSymbol], ABC):
         # write atomically: contents the encoding cannot represent, or a failed write, leave the file as it was
         abs_path = os.path.join(self.project_root, edited_file.relative_path)
         new_contents = edited_file.get_contents()
-        AtomicFileWriter().write_text(abs_path, new_contents, self.encoding, self.newline)
+        AtomicFileWriter().write_text(
+            abs_path, new_contents, self.encoding, self.newline, self._write_precondition_for(edited_file.relative_path)
+        )
+
+    def _write_precondition_for(self, relative_path: str) -> WritePrecondition | None:
+        # the editor's precondition guards the save of the one file it names, and no other file an edit saves
+        precondition = self._write_precondition
+        if precondition is not None and os.path.normpath(precondition.relative_path) == os.path.normpath(relative_path):
+            return precondition
+        return None
 
     @abstractmethod
     def _find_unique_symbol(self, name_path: str, relative_file_path: str) -> TSymbol:
@@ -419,8 +434,8 @@ class CodeEditor(Generic[TSymbol], ABC):
 
 
 class LanguageServerCodeEditor(CodeEditor[LanguageServerSymbol]):
-    def __init__(self, symbol_retriever: LanguageServerSymbolRetriever):
-        super().__init__(project=symbol_retriever.project)
+    def __init__(self, symbol_retriever: LanguageServerSymbolRetriever, write_precondition: WritePrecondition | None = None):
+        super().__init__(project=symbol_retriever.project, write_precondition=write_precondition)
         self._symbol_retriever = symbol_retriever
 
     def _get_language_server(self, relative_path: str) -> SolidLanguageServer:
@@ -586,9 +601,9 @@ class LanguageServerCodeEditor(CodeEditor[LanguageServerSymbol]):
 
 
 class JetBrainsCodeEditor(CodeEditor[JetBrainsSymbol]):
-    def __init__(self, project: Project) -> None:
+    def __init__(self, project: Project, write_precondition: WritePrecondition | None = None) -> None:
         self._project = project
-        super().__init__(project)
+        super().__init__(project, write_precondition)
 
     class EditedFile(CodeEditor.EditedFile):
         def __init__(self, relative_path: str, project: Project):
