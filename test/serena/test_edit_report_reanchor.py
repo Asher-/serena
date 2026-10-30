@@ -273,3 +273,24 @@ class TestSymbolEditReanchorFailure:
         assert TERMINATED_MESSAGE in reply
         assert contents.count("renamed_typed_module_var") == occurrences_before
         assert contents.count("renamed_renamed_typed_module_var") == 0
+
+
+class TestStructuralOnlyToolGuards:
+    """The route of the structural-only edit tools that refuses a language-server cursor."""
+
+    @pytest.mark.parametrize(
+        "tool_cls", [CursorInsertAtStartTool, CursorInsertAtEndTool, CursorRemoveMemberTool], ids=lambda value: value.__name__
+    )
+    def test_language_server_cursor_is_refused(self, tool_cls: type, work_dir: Path) -> None:
+        """Regression guard: a structural-only tool given a language-server cursor raises TypeError and leaves the file as it was."""
+        with _symbol_edit_fixture(work_dir) as fixture:
+            # a language-server cursor, which no structural-only tool edits through
+            bytes_before = fixture.edited_path.read_bytes()
+            fixture.manager.start_cursor(name_path="typed_module_var", relative_path=PYTHON_EDITED_FILE, cursor_id="c1")
+            body_kwargs = {} if tool_cls is CursorRemoveMemberTool else {"body": INSERTED_VARIABLE}
+
+            with pytest.raises(TypeError):
+                fixture.bind(tool_cls).apply(cursor_id="c1", expect_version="*", **body_kwargs)
+            bytes_after = fixture.edited_path.read_bytes()
+
+        assert bytes_after == bytes_before
