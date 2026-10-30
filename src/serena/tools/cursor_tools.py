@@ -86,26 +86,27 @@ def _write_precondition(tool: Tool, relative_path: str, expect_version: str) -> 
 def _reply_after_landed_edit(manager: CursorManager, cursor_id: str, applied: str, name_path: str | None = None) -> str:
     """Re-anchor the cursor after an edit that has already landed, and render the tool's reply.
 
-    No failure of the re-anchor may surface as an exception: the caller would read it as an edit that never happened,
-    and a :class:`~solidlsp.ls_exceptions.SolidLSPException` reporting a terminated language server would reach the
-    retry of ``Tool._issue_call``, which runs the whole tool again and applies the edit a second time. Any exception the
-    re-anchor raises is therefore answered with the applied report and a note that the cursor could not re-anchor
-    (pg://serena/edit/report).
+    No failure of the re-anchor, or of rendering the re-anchored cursor's view, may surface as an exception: the caller
+    would read it as an edit that never happened, and a :class:`~solidlsp.ls_exceptions.SolidLSPException` reporting a
+    terminated language server would reach the retry of ``Tool._issue_call``, which runs the whole tool again and applies
+    the edit a second time. Any exception either raises is therefore answered with the applied report and a note that
+    the cursor could not re-anchor (pg://serena/edit/report).
 
     :param manager: the cursor manager owning ``cursor_id``.
     :param cursor_id: the cursor to re-anchor and render.
     :param applied: the reply's report of the applied edit, e.g. the success marker followed by a diff summary.
     :param name_path: the name path to re-anchor the cursor on; ``None`` re-anchors it on its current name path.
-    :return: the applied report followed by the cursor view, or by a re-anchor note when re-anchoring fails.
+    :return: the applied report followed by the cursor view, or by a re-anchor note when re-anchoring or rendering fails.
     """
     try:
         if name_path is None:
             manager.reanchor_cursor(cursor_id)
         else:
             manager.reanchor_cursor(cursor_id, name_path=name_path)
+        view = manager.format_cursor_view(cursor_id)
     except Exception as e:
         return f"{applied}\n\n(edit applied; cursor {cursor_id} could not re-anchor afterward: {e})"
-    return f"{applied}\n\n" + manager.format_cursor_view(cursor_id)
+    return f"{applied}\n\n{view}"
 
 
 class CursorStartTool(Tool, ToolMarkerSymbolicRead):

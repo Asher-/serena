@@ -77,6 +77,20 @@ def _failing_reanchor(manager: CursorManager, failure: Callable[[], Exception]) 
     manager.reanchor_cursor = reanchor_cursor  # type: ignore[method-assign]
 
 
+def _failing_view(manager: CursorManager, failure: Callable[[], Exception]) -> None:
+    """
+    Make the rendering of ``manager``'s cursor views raise the exception ``failure`` builds, after a re-anchor that succeeds.
+
+    :param manager: the cursor manager whose view rendering fails.
+    :param failure: the factory of the exception to raise.
+    """
+
+    def format_cursor_view(*args: Any, **kwargs: Any) -> Any:
+        raise failure()
+
+    manager.format_cursor_view = format_cursor_view  # type: ignore[method-assign]
+
+
 class _AgentStandIn:
     """The agent a cursor edit tool reaches: its cursor manager, and the active project behind the tool's ``project``."""
 
@@ -141,6 +155,23 @@ class TestStructuralEditReanchorFailure:
         assert reply.startswith(SUCCESS_RESULT)
         assert REANCHOR_NOTE in reply
         assert str(failure()) in reply
+        assert edited_path.read_text(encoding="utf-8").count(case.landed_text) == case.landed_text_count
+
+    @pytest.mark.parametrize("case", STRUCTURAL_CASES, ids=str)
+    def test_landed_edit_whose_view_fails_is_reported_applied(self, case: StructuralEditCase, work_dir: Path) -> None:
+        # a JSON document and a structural cursor on it, whose view fails to render after the edit has landed
+        edited_path = work_dir / "doc.json"
+        edited_path.write_text(JSON_SOURCE, encoding="utf-8")
+        manager = _make_manager_via_subclass(work_dir)
+        manager.start_cursor(name_path=case.cursor_path, relative_path="doc.json", cursor_id="c1")
+        _failing_view(manager, _terminated_failure)
+        tool = _bind_tool(case.tool_cls, _ToolHarness(manager, manager._project))  # type: ignore[attr-defined]
+
+        reply = tool.apply(cursor_id="c1", expect_version="*", **case.apply_kwargs)
+
+        assert reply.startswith(SUCCESS_RESULT)
+        assert REANCHOR_NOTE in reply
+        assert str(_terminated_failure()) in reply
         assert edited_path.read_text(encoding="utf-8").count(case.landed_text) == case.landed_text_count
 
 
