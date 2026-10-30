@@ -13,6 +13,7 @@ import pytest
 
 from serena.code_editor import LanguageServerCodeEditor
 from serena.symbol import LanguageServerSymbolRetriever
+from serena.util.file_lifecycle import AtomicFileWriter
 from solidlsp.ls_config import Language
 from test.conftest import get_repo_path, project_with_ls_context
 from test.serena.test_cursor_container_edit import _make_manager_via_subclass
@@ -127,3 +128,16 @@ class TestStructuralEditWrite:
         raw = edited_path.read_bytes()
         assert b'"existing": 42\r\n' in raw
         assert b"\n" not in raw.replace(b"\r\n", b"")
+
+
+class TestAtomicFileWriter:
+    """The writer every edit replaces its file through."""
+
+    def test_write_to_a_path_without_a_directory_component(self, work_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Regression guard: a target named without a directory is written in the working directory, leaving no temporary file."""
+        monkeypatch.chdir(work_dir)
+
+        AtomicFileWriter().write_bytes("doc.json", JSON_SOURCE.encode("utf-8"))
+
+        assert (work_dir / "doc.json").read_bytes() == JSON_SOURCE.encode("utf-8")
+        assert sorted(os.listdir(work_dir)) == ["doc.json"]
