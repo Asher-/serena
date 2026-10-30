@@ -19,6 +19,22 @@ log = logging.getLogger(__name__)
 TSymbol = TypeVar("TSymbol", bound=Symbol)
 
 
+class LandedEditError(Exception):
+    """
+    Raised by an edit whose new contents are in place on disk when a step after its write fails. The edit has been applied,
+    so a caller reports it as applied and never repeats it (pg://serena/edit/report).
+    """
+
+    def __init__(self, relative_path: str, cause: Exception) -> None:
+        """
+        :param relative_path: the relative path of the file whose new contents are in place on disk.
+        :param cause: the failure of the step after the write.
+        """
+        super().__init__(f"The edit of {relative_path} has been applied, but a step after its write failed: {cause!r}")
+        self.relative_path = relative_path
+        self.cause = cause
+
+
 class CodeEditor(Generic[TSymbol], ABC):
     def __init__(self, project: Project, write_precondition: WritePrecondition | None = None) -> None:
         """
@@ -53,9 +69,9 @@ class CodeEditor(Generic[TSymbol], ABC):
             """
             Discards the in-memory contents the file has not saved, bringing it back in line with the file on disk.
 
-            Called when saving the file failed, which leaves the file on disk as it was before the edit. An edited
-            file whose contents live only for the duration of the edit holds nothing to discard; one backed by a
-            longer-lived buffer must reload that buffer.
+            Called when saving the file failed before the save replaced it, which leaves the file on disk as it was
+            before the edit. An edited file whose contents live only for the duration of the edit holds nothing to
+            discard; one backed by a longer-lived buffer must reload that buffer.
             """
 
         @abstractmethod
@@ -103,17 +119,34 @@ class CodeEditor(Generic[TSymbol], ABC):
         """
         Context manager for editing a file.
 
-        The edited file is saved when the context exits. A failed save leaves the file on disk as it was, and the
-        edited file's unsaved contents are discarded before the error propagates.
+        The edited file is saved when the context exits. A save that fails before it replaces the file leaves the file on
+        disk as it was, and the edited file's unsaved contents are discarded before the error propagates. A failure once
+        the save has replaced the file raises :class:`LandedEditError`, since the edit has then been applied
+        (pg://serena/edit/report).
         """
-        with self._open_file_context(relative_path) as edited_file:
-            yield edited_file
-            # save the file; on failure, bring the edited file back in line with the unchanged file on disk
-            try:
-                self._save_edited_file(edited_file)
-            except Exception:
-                edited_file.discard_unsaved_contents()
-                raise
+        saved = False
+        try:
+            with self._open_file_context(relative_path) as edited_file:
+                yield edited_file
+
+                # save the file; on a failure before the replace, bring the edited file back in line with the unchanged file on disk
+                try:
+                    self._save_edited_file(edited_file)
+                except LandedEditError:
+                    raise
+                except Exception as save_error:
+                    try:
+                        edited_file.discard_unsaved_contents()
+                    except Exception as discard_error:
+                        save_error.add_note(f"Discarding the unsaved contents of {relative_path} failed as well: {discard_error!r}")
+                    raise
+                saved = True
+        except Exception as e:
+            # releasing the edited file once its save has landed, e.g. closing it in a terminated language server, fails an
+            # edit that has been applied
+            if saved:
+                raise LandedEditError(relative_path, e) from e
+            raise
 
     def _save_edited_file(self, edited_file: "CodeEditor.EditedFile") -> None:
         # write atomically: contents the encoding cannot represent, or a failed write, leave the file as it was
@@ -633,8 +666,13 @@ class JetBrainsCodeEditor(CodeEditor[JetBrainsSymbol]):
 
     def _save_edited_file(self, edited_file: "CodeEditor.EditedFile") -> None:
         super()._save_edited_file(edited_file)
-        with JetBrainsPluginClient.from_project(self._project) as client:
-            client.refresh_file(edited_file.relative_path)
+
+        # ask the IDE to refresh the file; the save has landed, so a refresh that fails fails an edit that has been applied
+        try:
+            with JetBrainsPluginClient.from_project(self._project) as client:
+                client.refresh_file(edited_file.relative_path)
+        except Exception as e:
+            raise LandedEditError(edited_file.relative_path, e) from e
 
     def _find_unique_symbol(self, name_path: str, relative_file_path: str) -> JetBrainsSymbol:
         with JetBrainsPluginClient.from_project(self._project) as client:

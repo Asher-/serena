@@ -2,7 +2,8 @@
 Tests of the code editor a cursor edit tool builds for the agent's language backend through Component.create_code_editor:
 whichever backend it is built for, the editor saves the edited file under the tool's write precondition
 (pg://serena/edit/version, task://edit_atomicity.3) and atomically (pg://serena/edit/write, task://edit_atomicity.1), and the
-JetBrains editor asks the IDE to refresh a file only once its save has landed.
+JetBrains editor asks the IDE to refresh a file only once its save has landed; a refresh that fails after the save has
+landed is answered with a reply that the edit was applied (pg://serena/edit/report).
 
 The module imports nothing serena main lacks, so each of its tests of new behaviour runs against main's src, where it is
 observed failing.
@@ -19,7 +20,7 @@ import serena.tools.cursor_tools as cursor_tools
 from serena.config.serena_config import LanguageBackend
 from serena.cursor import CursorManager
 from serena.jetbrains.jetbrains_plugin_client import JetBrainsPluginClient
-from serena.tools.cursor_tools import CursorReplaceRangeTool
+from serena.tools.cursor_tools import CursorReplaceRangeTool, CursorReplaceRangeVerifiedTool
 from serena.tools.tools_base import SUCCESS_RESULT
 from serena.util.file_lifecycle import content_version
 from solidlsp.ls_config import Language
@@ -43,6 +44,12 @@ REPLACED_LINE = "# the first line, replaced\n"
 
 UNENCODABLE_LINE = "snowman = '☃'\n"
 """a line holding a snowman, a character the ascii codec cannot encode"""
+
+APPLIED_NOTE = "has been applied"
+"""the phrase a reply carries when a step after an edit's write failed"""
+
+REFRESH_FAILURE_MESSAGE = "the IDE could not be reached"
+"""the message of the failure the JetBrains plugin client raises when asked to refresh a saved file"""
 
 
 class _ChangeAfterVersionCheck:
@@ -129,6 +136,14 @@ class _RecordingPluginClient:
         monkeypatch.setattr(JetBrainsPluginClient, "from_project", staticmethod(lambda project: self))
 
 
+class _FailingRefreshPluginClient(_RecordingPluginClient):
+    """The JetBrains plugin client of an IDE that cannot be reached when asked to refresh a saved file."""
+
+    def refresh_file(self, relative_path: str) -> None:
+        super().refresh_file(relative_path)
+        raise ConnectionError(REFRESH_FAILURE_MESSAGE)
+
+
 def _bind_replace_range(agent: _BackendAgent) -> CursorReplaceRangeTool:
     """
     :param agent: the agent the tool reaches.
@@ -203,6 +218,33 @@ class TestJetBrainsEditorSave:
         assert edited_path.read_bytes() == bytes_before
         assert sorted(os.listdir(work_dir)) == listing_before
         assert plugin_client.refreshed_paths == []
+
+
+class TestJetBrainsEditorRefreshFailure:
+    """A range edit through the code editor built for the JetBrains backend, whose refresh in the IDE fails after the save has landed."""
+
+    @pytest.mark.parametrize(
+        ("tool_cls", "extra_kwargs"),
+        [(CursorReplaceRangeTool, {}), (CursorReplaceRangeVerifiedTool, {"expected_content": "first = 1\n"})],
+        ids=["CursorReplaceRangeTool", "CursorReplaceRangeVerifiedTool"],
+    )
+    def test_landed_save_whose_refresh_fails_is_reported_applied(
+        self, tool_cls: type, extra_kwargs: dict[str, str], work_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        plugin_client = _FailingRefreshPluginClient()
+        plugin_client.install(monkeypatch)
+        tool = tool_cls.__new__(tool_cls)
+        tool.__dict__["agent"] = _jetbrains_tool(work_dir).agent
+        listing_before = sorted(os.listdir(work_dir))
+
+        reply = tool.apply(relative_path=EDITED_FILE, start_line=1, end_line=1, body=REPLACED_LINE, expect_version="*", **extra_kwargs)
+
+        assert reply.startswith(SUCCESS_RESULT)
+        assert APPLIED_NOTE in reply
+        assert REFRESH_FAILURE_MESSAGE in reply
+        assert (work_dir / EDITED_FILE).read_text(encoding="utf-8") == REPLACED_LINE + "second = 2\n"
+        assert sorted(os.listdir(work_dir)) == listing_before
+        assert plugin_client.refreshed_paths == [EDITED_FILE]
 
 
 @pytest.mark.python

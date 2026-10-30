@@ -269,6 +269,8 @@ class TestSymbolEditReanchorFailure:
             reply = fixture.bind(CursorRenameTool).apply(cursor_id="c1", new_name="renamed_typed_module_var")
 
             contents = fixture.edited_path.read_text(encoding="utf-8")
+        assert reply.startswith("Successfully renamed 'typed_module_var' to 'renamed_typed_module_var'")
+        assert "edit applied" in reply
         assert REANCHOR_NOTE in reply
         assert TERMINATED_MESSAGE in reply
         assert contents.count("renamed_typed_module_var") == occurrences_before

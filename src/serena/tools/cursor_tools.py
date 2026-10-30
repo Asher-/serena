@@ -13,6 +13,7 @@ import difflib
 from collections import defaultdict
 from collections.abc import Sequence
 
+from serena.code_editor import LandedEditError
 from serena.cursor import CursorManager, EdgeType, PlaintextCursorState, ReadRung, StructuralCursorState
 from serena.symbol import LanguageServerSymbol
 from serena.tools import SUCCESS_RESULT
@@ -814,10 +815,14 @@ class CursorReplaceBodyTool(Tool, ToolMarkerSymbolicEdit):
 
         # execute the edit
         code_editor = self.create_code_editor(_write_precondition(self, relative_path, expect_version))
+        landed_note = ""
         try:
             code_editor.replace_body(name_path, relative_file_path=relative_path, body=body)
         except StaleWriteError as e:
             return e.stale.render()
+        except LandedEditError as e:
+            # the edit has landed, so the failure after its write is reported with it (pg://serena/edit/report)
+            landed_note = f"\n({e})"
 
         # post-edit sibling-loss safety net: if the number of lines removed is much larger than
         # the symbol's extent could account for, the extent was likely corrupted and absorbed
@@ -838,7 +843,7 @@ class CursorReplaceBodyTool(Tool, ToolMarkerSymbolicEdit):
                 f"has already been applied — inspect the file and run `git checkout` to recover."
             )
 
-        diff_summary = f"Diff: -{removed} / +{added} lines"
+        diff_summary = f"Diff: -{removed} / +{added} lines{landed_note}"
         return self._reanchor_and_format(manager, cursor_id, diff_summary)
 
     @staticmethod
@@ -948,6 +953,9 @@ class CursorInsertBeforeTool(Tool, ToolMarkerSymbolicEdit):
             code_editor.insert_before_symbol(name_path, relative_file_path=relative_path, body=body)
         except StaleWriteError as e:
             return e.stale.render()
+        except LandedEditError as e:
+            # the edit has landed, so the failure after its write is reported with it (pg://serena/edit/report)
+            return _reply_after_landed_edit(manager, cursor_id, f"{SUCCESS_RESULT}\n({e})")
         return _reply_after_landed_edit(manager, cursor_id, SUCCESS_RESULT)
 
 
@@ -1012,6 +1020,9 @@ class CursorInsertAfterTool(Tool, ToolMarkerSymbolicEdit):
             code_editor.insert_after_symbol(name_path, relative_file_path=relative_path, body=body)
         except StaleWriteError as e:
             return e.stale.render()
+        except LandedEditError as e:
+            # the edit has landed, so the failure after its write is reported with it (pg://serena/edit/report)
+            return _reply_after_landed_edit(manager, cursor_id, f"{SUCCESS_RESULT}\n({e})")
         return _reply_after_landed_edit(manager, cursor_id, SUCCESS_RESULT)
 
 
@@ -1209,16 +1220,20 @@ class CursorReplaceRangeTool(Tool, ToolMarkerSymbolicEdit):
         # bypasses the LSP's workspace-edit interface intentionally — workspace edits
         # are rejected for regions the server does not recognize as symbols
         code_editor = self.create_code_editor(_write_precondition(self, relative_path, expect_version))
+        landed_note = ""
         try:
             code_editor.replace_lines(relative_path, to_internal_line(start_line), to_internal_line(end_line), body)
         except StaleWriteError as e:
             return e.stale.render()
+        except LandedEditError as e:
+            # the edit has landed, so the failure after its write is reported with it (pg://serena/edit/report)
+            landed_note = f"\n({e})"
 
         # compute a diff summary for the return value so the caller can verify the edit
         # size against their intent (mirrors cursor_replace_body's diff-summary style)
         post_content = self.project.read_file(relative_path)
         removed, added = CursorReplaceBodyTool._count_diff_lines(pre_content, post_content)
-        diff_summary = f"Diff: -{removed} / +{added} lines"
+        diff_summary = f"Diff: -{removed} / +{added} lines{landed_note}"
         return f"{SUCCESS_RESULT}\n{diff_summary}"
 
 
@@ -1297,16 +1312,20 @@ class CursorReplaceRangeVerifiedTool(Tool, ToolMarkerSymbolicEdit):
         # execute the edit via the filesystem-level code editor layer (same path as
         # cursor_replace_range so the two tools share a single mutation implementation)
         code_editor = self.create_code_editor(_write_precondition(self, relative_path, expect_version))
+        landed_note = ""
         try:
             code_editor.replace_lines(relative_path, internal_start, internal_end, body)
         except StaleWriteError as e:
             return e.stale.render()
+        except LandedEditError as e:
+            # the edit has landed, so the failure after its write is reported with it (pg://serena/edit/report)
+            landed_note = f"\n({e})"
 
         # compute a diff summary for the return value so the caller can verify the
         # edit size against their intent (mirrors cursor_replace_range)
         post_content = self.project.read_file(relative_path)
         removed, added = CursorReplaceBodyTool._count_diff_lines(pre_content, post_content)
-        diff_summary = f"Diff: -{removed} / +{added} lines"
+        diff_summary = f"Diff: -{removed} / +{added} lines{landed_note}"
         return f"{SUCCESS_RESULT}\n{diff_summary}"
 
     @staticmethod
@@ -1451,16 +1470,20 @@ class CursorReplaceBetweenTool(Tool, ToolMarkerSymbolicEdit):
 
         # execute the edit via the filesystem-level code editor layer
         code_editor = self.create_code_editor(_write_precondition(self, relative_path, expect_version))
+        landed_note = ""
         try:
             code_editor.replace_lines(relative_path, start_line, end_line, body)
         except StaleWriteError as e:
             return e.stale.render()
+        except LandedEditError as e:
+            # the edit has landed, so the failure after its write is reported with it (pg://serena/edit/report)
+            landed_note = f"\n({e})"
 
         # compute a diff summary and include the computed range so the caller can
         # verify the anchors resolved to the lines they expected
         post_content = self.project.read_file(relative_path)
         removed, added = CursorReplaceBodyTool._count_diff_lines(pre_content, post_content)
-        diff_summary = f"Diff: -{removed} / +{added} lines"
+        diff_summary = f"Diff: -{removed} / +{added} lines{landed_note}"
         return f"{SUCCESS_RESULT}\n{diff_summary}\n(replaced lines [{to_display_line(start_line)}, {to_display_line(end_line)}] between {before_symbol!r} and {after_symbol!r})"
 
     def _resolve_unique_anchor(self, role: str, name_path: str, relative_path: str) -> "LanguageServerSymbol":
@@ -1527,7 +1550,7 @@ class CursorRenameTool(Tool, ToolMarkerSymbolicEdit):
             view = manager.format_cursor_view(cursor_id)
             return f"{status_message}\n\n{view}"
         except Exception as e:
-            return f"{status_message}\n\n(Cursor could not re-anchor to renamed symbol: {e})"
+            return f"{status_message}\n\n(edit applied; cursor {cursor_id} could not re-anchor afterward to the renamed symbol: {e})"
 
 
 class CursorOverviewTool(Tool, ToolMarkerSymbolicRead):
