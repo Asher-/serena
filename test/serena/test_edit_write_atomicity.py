@@ -8,12 +8,14 @@ import os
 import shutil
 import stat
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from serena.code_editor import LanguageServerCodeEditor
 from serena.symbol import LanguageServerSymbolRetriever
 from serena.util.file_lifecycle import AtomicFileWriter
+from solidlsp.ls import LSPFileBuffer
 from solidlsp.ls_config import Language
 from test.conftest import get_repo_path, project_with_ls_context
 from test.serena.test_cursor_container_edit import _make_manager_via_subclass
@@ -146,6 +148,46 @@ class TestStructuralEditWrite:
         assert stat.S_IMODE(target_path.stat().st_mode) == 0o755
         assert sorted(os.listdir(work_dir)) == ["doc.json", "target.json"]
 
+    def test_edit_that_changes_nothing_writes_nothing(self, work_dir: Path) -> None:
+        """Regression guard: an edit whose new contents equal the file's leaves the file in place, renaming nothing over it."""
+        edited_path = work_dir / "doc.json"
+        edited_path.write_text(JSON_SOURCE, encoding="utf-8")
+        stat_before = edited_path.stat()
+        manager = _make_manager_via_subclass(work_dir)
+        cursor_id, _ = manager.start_cursor(name_path="members/existing", relative_path="doc.json")
+
+        before, after = manager.apply_container_edit(cursor_id, "replace", "1")
+
+        assert after == before
+        assert edited_path.stat().st_ino == stat_before.st_ino
+        assert edited_path.stat().st_mtime_ns == stat_before.st_mtime_ns
+
+    def test_cursor_that_is_not_structural_is_refused(self, work_dir: Path) -> None:
+        """Regression guard: a container edit needs a structural cursor, so a whole-file cursor's edit is refused and its file is left as it was."""
+        edited_path = work_dir / "notes.txt"
+        edited_path.write_text("a note\n", encoding="utf-8")
+        manager = _make_manager_via_subclass(work_dir)
+        cursor_id, _ = manager.start_cursor("notes.txt", relative_path="notes.txt")
+
+        with pytest.raises(TypeError):
+            manager.apply_container_edit(cursor_id, "replace", "1")
+
+        assert edited_path.read_text(encoding="utf-8") == "a note\n"
+
+    def test_file_no_backend_serves_is_refused(self, work_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Regression guard: a structural cursor whose file no registered backend serves any longer dispatches no edit, and its file is left as it was."""
+        edited_path = work_dir / "doc.json"
+        edited_path.write_text(JSON_SOURCE, encoding="utf-8")
+        manager = _make_manager_via_subclass(work_dir)
+        cursor_id, _ = manager.start_cursor(name_path="members/existing", relative_path="doc.json")
+        # the registry the cursor was started under, without the backend serving the cursor's file
+        monkeypatch.setattr(manager._structural_registry, "structural_backend_for", lambda relative_path: None)
+
+        with pytest.raises(ValueError, match="No structural backend"):
+            manager.apply_container_edit(cursor_id, "replace", "42")
+
+        assert edited_path.read_text(encoding="utf-8") == JSON_SOURCE
+
 
 class TestAtomicFileWriter:
     """The writer every edit replaces its file through."""
@@ -158,3 +200,93 @@ class TestAtomicFileWriter:
 
         assert (work_dir / "doc.json").read_bytes() == JSON_SOURCE.encode("utf-8")
         assert sorted(os.listdir(work_dir)) == ["doc.json"]
+
+    def test_directory_target_has_no_mode_to_keep(self, work_dir: Path) -> None:
+        """Regression guard: only a regular file's permission bits are kept by an overwrite, and a directory has none to give."""
+        target_path = work_dir / "target"
+        target_path.mkdir(mode=0o755)
+
+        assert AtomicFileWriter._prior_mode(str(target_path)) is None
+
+    def test_symlink_target_has_no_mode_to_keep(self, work_dir: Path) -> None:
+        """Regression guard: a link is not a regular file, so the mode of the file it points at is not read through it."""
+        linked_path = work_dir / "linked.json"
+        linked_path.write_text(JSON_SOURCE, encoding="utf-8")
+        os.chmod(linked_path, 0o755)
+        target_path = work_dir / "target.json"
+        target_path.symlink_to(linked_path.name)
+
+        assert AtomicFileWriter._prior_mode(str(target_path)) is None
+
+
+class _RecordingNotifier:
+    """The notification channel of a language server stand-in: records each didChange a file buffer sends it."""
+
+    def __init__(self) -> None:
+        self.did_change_params: list[Any] = []
+
+    def did_change_text_document(self, params: Any) -> None:
+        self.did_change_params.append(params)
+
+
+class _RecordingServer:
+    """The server half of a language server stand-in, through which a file buffer sends its notifications."""
+
+    def __init__(self) -> None:
+        self.notify = _RecordingNotifier()
+
+
+class _RecordingLanguageServer:
+    """The language server a file buffer belongs to, reduced to the notification channel the buffer reaches."""
+
+    def __init__(self) -> None:
+        self.server = _RecordingServer()
+
+
+def _unopened_buffer(path: Path, language_server: _RecordingLanguageServer) -> LSPFileBuffer:
+    """
+    :param path: the file the buffer holds.
+    :param language_server: the language server the buffer belongs to.
+    :return: a buffer over ``path`` that the language server has not opened.
+    """
+    return LSPFileBuffer(
+        abs_path=path,
+        uri=path.as_uri(),
+        encoding="utf-8",
+        version=0,
+        language_id="python",
+        ref_count=1,
+        language_server=language_server,  # type: ignore[arg-type]
+        open_in_ls=False,
+    )
+
+
+class TestFileBufferReload:
+    """LSPFileBuffer.reload_from_disk, which a failed save calls to bring the edited file's buffer back in line with the disk."""
+
+    def test_buffer_never_read_reloads_nothing(self, work_dir: Path) -> None:
+        """Regression guard: a buffer that was never read holds nothing to bring back in line with the disk."""
+        path = work_dir / "module.py"
+        path.write_text("value = 1\n", encoding="utf-8")
+        language_server = _RecordingLanguageServer()
+        buffer = _unopened_buffer(path, language_server)
+
+        assert buffer.reload_from_disk() is False
+        assert language_server.server.notify.did_change_params == []
+
+    def test_unopened_buffer_is_reloaded_without_notifying_the_language_server(self, work_dir: Path) -> None:
+        """Regression guard: a buffer the language server has not opened is refreshed from disk, and the language server, holding no copy of the file, is sent nothing."""
+        path = work_dir / "module.py"
+        path.write_text("value = 1\n", encoding="utf-8")
+        language_server = _RecordingLanguageServer()
+        buffer = _unopened_buffer(path, language_server)
+        assert buffer.contents == "value = 1\n"
+
+        # the file rewritten on disk after the buffer read it
+        path.write_text("value = 2\n", encoding="utf-8")
+        modified_at = path.stat().st_mtime + 10
+        os.utime(path, (modified_at, modified_at))
+
+        assert buffer.reload_from_disk() is True
+        assert buffer.contents == "value = 2\n"
+        assert language_server.server.notify.did_change_params == []
