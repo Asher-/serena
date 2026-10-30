@@ -15,13 +15,21 @@ import pytest
 
 import serena.tools.cursor_tools as cursor_tools
 from serena.cursor import CursorManager
-from serena.tools.cursor_tools import CursorInsertAfterTool, CursorInsertAtEndTool, CursorReplaceBodyTool, CursorReplaceRangeTool
+from serena.tools.cursor_tools import (
+    CursorInsertAfterTool,
+    CursorInsertAtEndTool,
+    CursorInsertBeforeTool,
+    CursorReplaceBodyTool,
+    CursorReplaceRangeTool,
+)
 from serena.util.file_lifecycle import content_version
 from test.serena.test_cursor_container_edit import _make_manager_via_subclass
 from test.serena.test_edit_report_reanchor import (
     INSERTED_VARIABLE,
     PYTHON_EDITED_FILE,
     REPLACED_BODY,
+    STRUCTURAL_CASES,
+    StructuralEditCase,
     _AgentStandIn,
     _symbol_edit_fixture,
 )
@@ -121,6 +129,43 @@ class TestStructuralEditVersionAtWrite:
         assert '"existing": 7' in contents
         assert '"new_field": 2' in contents
 
+    @pytest.mark.parametrize("case", STRUCTURAL_CASES, ids=str)
+    def test_every_structural_tool_keeps_a_change_after_its_version_check(
+        self, case: StructuralEditCase, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # a JSON document, the version the caller read it at, and a structural cursor for the tool
+        edited_path = work_dir / "doc.json"
+        edited_path.write_text(JSON_SOURCE, encoding="utf-8")
+        expect_version = content_version(edited_path.read_bytes())
+        listing_before = sorted(os.listdir(work_dir))
+        manager = _make_manager_via_subclass(work_dir)
+        manager.start_cursor(name_path=case.cursor_path, relative_path="doc.json", cursor_id="c1")
+        writer = _ConcurrentWriter(edited_path, _change_json_value)
+        writer.install(monkeypatch)
+
+        reply = _bind_structural(case.tool_cls, manager).apply(cursor_id="c1", expect_version=expect_version, **case.apply_kwargs)
+
+        assert writer.bytes_after_change is not None
+        assert edited_path.read_bytes() == writer.bytes_after_change
+        assert sorted(os.listdir(work_dir)) == listing_before
+        assert STALE_MARKER in reply
+
+    @pytest.mark.parametrize("case", STRUCTURAL_CASES, ids=str)
+    def test_every_structural_tool_refuses_a_stale_version_before_its_edit(self, case: StructuralEditCase, work_dir: Path) -> None:
+        """Regression guard: a version the file no longer has is refused before the edit is computed, leaving the file as it was."""
+        edited_path = work_dir / "doc.json"
+        edited_path.write_text(JSON_SOURCE, encoding="utf-8")
+        bytes_before = edited_path.read_bytes()
+        manager = _make_manager_via_subclass(work_dir)
+        manager.start_cursor(name_path=case.cursor_path, relative_path="doc.json", cursor_id="c1")
+
+        reply = _bind_structural(case.tool_cls, manager).apply(
+            cursor_id="c1", expect_version=content_version(b"other bytes"), **case.apply_kwargs
+        )
+
+        assert edited_path.read_bytes() == bytes_before
+        assert STALE_MARKER in reply
+
 
 @pytest.mark.python
 class TestSymbolAndRangeEditVersionAtWrite:
@@ -130,6 +175,7 @@ class TestSymbolAndRangeEditVersionAtWrite:
         ("tool_cls", "apply_kwargs"),
         [
             (CursorReplaceBodyTool, {"cursor_id": "c1", "body": REPLACED_BODY}),
+            (CursorInsertBeforeTool, {"cursor_id": "c1", "body": INSERTED_VARIABLE}),
             (CursorInsertAfterTool, {"cursor_id": "c1", "body": INSERTED_VARIABLE}),
             (
                 CursorReplaceRangeTool,
@@ -157,4 +203,27 @@ class TestSymbolAndRangeEditVersionAtWrite:
         assert writer.bytes_after_change is not None
         assert bytes_after == writer.bytes_after_change
         assert listing_after == listing_before
+        assert STALE_MARKER in reply
+
+    @pytest.mark.parametrize(
+        ("tool_cls", "apply_kwargs"),
+        [
+            (CursorReplaceBodyTool, {"cursor_id": "c1", "body": REPLACED_BODY}),
+            (CursorInsertBeforeTool, {"cursor_id": "c1", "body": INSERTED_VARIABLE}),
+            (CursorInsertAfterTool, {"cursor_id": "c1", "body": INSERTED_VARIABLE}),
+        ],
+        ids=lambda value: value.__name__ if isinstance(value, type) else "",
+    )
+    def test_stale_version_is_refused_before_the_edit(self, tool_cls: type, apply_kwargs: dict[str, Any], work_dir: Path) -> None:
+        """Regression guard: a version the file no longer has is refused before the edit is computed, leaving the file as it was."""
+        with _symbol_edit_fixture(work_dir) as fixture:
+            # a cursor on the edited symbol, and a version the file does not have
+            bytes_before = fixture.edited_path.read_bytes()
+            name_path = "VariableContainer/modify_instance_var" if tool_cls is CursorReplaceBodyTool else "typed_module_var"
+            fixture.manager.start_cursor(name_path=name_path, relative_path=PYTHON_EDITED_FILE, cursor_id="c1")
+
+            reply = fixture.bind(tool_cls).apply(expect_version=content_version(b"other bytes"), **apply_kwargs)
+            bytes_after = fixture.edited_path.read_bytes()
+
+        assert bytes_after == bytes_before
         assert STALE_MARKER in reply
