@@ -19,8 +19,10 @@ from serena.tools.cursor_tools import (
     CursorInsertAfterTool,
     CursorInsertAtEndTool,
     CursorInsertBeforeTool,
+    CursorReplaceBetweenTool,
     CursorReplaceBodyTool,
     CursorReplaceRangeTool,
+    CursorReplaceRangeVerifiedTool,
 )
 from serena.util.file_lifecycle import content_version
 from test.serena.test_cursor_container_edit import _make_manager_via_subclass
@@ -39,6 +41,23 @@ STALE_MARKER = "changed under you"
 
 JSON_SOURCE = '{\n    "members": {\n        "existing": 1\n    }\n}\n'
 """the JSON document the structural edit is applied to"""
+
+RANGE_VERIFIED_KWARGS: dict[str, Any] = {
+    "relative_path": PYTHON_EDITED_FILE,
+    "start_line": 1,
+    "end_line": 1,
+    "expected_content": '"""',
+    "body": "# the first line, replaced\n",
+}
+"""the arguments of a verified range edit of the edited file's first line, which opens the module docstring"""
+
+BETWEEN_KWARGS: dict[str, Any] = {
+    "relative_path": PYTHON_EDITED_FILE,
+    "before_symbol": "module_var",
+    "after_symbol": "typed_module_var",
+    "body": "# the lines between, replaced\n",
+}
+"""the arguments of an edit of the lines between two module-level variables of the edited file"""
 
 
 @dataclass
@@ -181,6 +200,8 @@ class TestSymbolAndRangeEditVersionAtWrite:
                 CursorReplaceRangeTool,
                 {"relative_path": PYTHON_EDITED_FILE, "start_line": 1, "end_line": 1, "body": "# the first line, replaced\n"},
             ),
+            (CursorReplaceRangeVerifiedTool, RANGE_VERIFIED_KWARGS),
+            (CursorReplaceBetweenTool, BETWEEN_KWARGS),
         ],
         ids=lambda value: value.__name__ if isinstance(value, type) else "",
     )
@@ -211,6 +232,8 @@ class TestSymbolAndRangeEditVersionAtWrite:
             (CursorReplaceBodyTool, {"cursor_id": "c1", "body": REPLACED_BODY}),
             (CursorInsertBeforeTool, {"cursor_id": "c1", "body": INSERTED_VARIABLE}),
             (CursorInsertAfterTool, {"cursor_id": "c1", "body": INSERTED_VARIABLE}),
+            (CursorReplaceRangeVerifiedTool, RANGE_VERIFIED_KWARGS),
+            (CursorReplaceBetweenTool, BETWEEN_KWARGS),
         ],
         ids=lambda value: value.__name__ if isinstance(value, type) else "",
     )
