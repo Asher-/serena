@@ -18,7 +18,7 @@ import pytest
 
 from serena.code_editor import LanguageServerCodeEditor
 from serena.cursor import CursorManager
-from serena.symbol import LanguageServerSymbolRetriever
+from serena.symbol import LanguageServerSymbolLocation, LanguageServerSymbolRetriever
 from serena.tools.cursor_tools import (
     CursorInsertAfterTool,
     CursorInsertAtEndTool,
@@ -294,3 +294,82 @@ class TestStructuralOnlyToolGuards:
             bytes_after = fixture.edited_path.read_bytes()
 
         assert bytes_after == bytes_before
+
+    def test_top_level_member_removal_is_refused(self, work_dir: Path) -> None:
+        """Regression guard: a top-level member has no parent container to be removed from, so its removal is refused and the file is left as it was."""
+        edited_path = work_dir / "doc.json"
+        edited_path.write_text(JSON_SOURCE, encoding="utf-8")
+        bytes_before = edited_path.read_bytes()
+        manager = _make_manager_via_subclass(work_dir)
+        manager.start_cursor(name_path="members", relative_path="doc.json", cursor_id="c1")
+        tool = _bind_tool(CursorRemoveMemberTool, _ToolHarness(manager, manager._project))  # type: ignore[attr-defined]
+
+        with pytest.raises(ValueError, match="no parent container"):
+            tool.apply(cursor_id="c1", expect_version="*")
+
+        assert edited_path.read_bytes() == bytes_before
+
+
+SHRUNK_CLASS_MARKER = "# this class body was replaced exactly once"
+"""the comment the shrinking body replacement leaves in the edited file"""
+
+SHRUNK_CLASS = f"""class VariableContainer:
+    {SHRUNK_CLASS_MARKER}
+    pass
+"""
+"""a body for ``VariableContainer`` that is a small fraction of the class it replaces"""
+
+OUTSIDE_PROJECT_CASES: list[tuple[type, dict[str, str]]] = [
+    (CursorReplaceBodyTool, {"body": REPLACED_BODY, "expect_version": "*"}),
+    (CursorInsertBeforeTool, {"body": INSERTED_VARIABLE, "expect_version": "*"}),
+    (CursorInsertAfterTool, {"body": INSERTED_VARIABLE, "expect_version": "*"}),
+    (CursorRenameTool, {"new_name": "renamed_typed_module_var"}),
+]
+"""every language-server symbol edit tool that refuses a cursor whose symbol has no project-relative path, with its arguments"""
+
+
+@pytest.mark.python
+class TestSymbolEditToolGuards:
+    """The routes of the language-server symbol edit tools that refuse an edit, or report one that landed in a surprising state."""
+
+    @pytest.mark.parametrize(
+        ("tool_cls", "apply_kwargs"), OUTSIDE_PROJECT_CASES, ids=lambda value: value.__name__ if isinstance(value, type) else ""
+    )
+    def test_cursor_on_a_symbol_outside_the_project_is_refused(self, tool_cls: type, apply_kwargs: dict[str, str], work_dir: Path) -> None:
+        """Regression guard: a cursor on a symbol defined outside the project has no project-relative path to edit, so the edit is refused and the file is left as it was."""
+        with _symbol_edit_fixture(work_dir) as fixture:
+            bytes_before = fixture.edited_path.read_bytes()
+            fixture.manager.start_cursor(name_path="typed_module_var", relative_path=PYTHON_EDITED_FILE, cursor_id="c1")
+            state = fixture.manager.get_lsp_cursor("c1")
+            # the cursor's symbol as one defined outside the project, whose location carries no project-relative path
+            state.current_location = LanguageServerSymbolLocation(
+                relative_path=None, line=state.current_location.line, column=state.current_location.column
+            )
+
+            with pytest.raises(ValueError, match="has no relative path"):
+                fixture.bind(tool_cls).apply(cursor_id="c1", **apply_kwargs)
+            bytes_after = fixture.edited_path.read_bytes()
+
+        assert bytes_after == bytes_before
+
+    def test_replacement_removing_far_more_than_its_symbol_spans_raises_as_applied(
+        self, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        Regression guard: a body replacement whose diff removes far more lines than the cursor's symbol spans raises after the
+        edit has landed, with a message that the edit has already been applied, and the edit is applied once. The raise is a
+        ValueError, not the SolidLSPException reporting a terminated language server that the retry of Tool._issue_call
+        answers by running the tool a second time.
+        """
+        with _symbol_edit_fixture(work_dir) as fixture:
+            fixture.manager.start_cursor(name_path="VariableContainer", relative_path=PYTHON_EDITED_FILE, cursor_id="c1")
+            symbol = fixture.manager.get_lsp_cursor("c1").current_symbol
+            # the cursor's record of the symbol's extent reduced to its first line, as when the extent the edit replaces has
+            # grown past the one the cursor holds
+            monkeypatch.setattr(symbol, "get_body_end_position_or_raise", symbol.get_body_start_position_or_raise)
+
+            with pytest.raises(ValueError, match="has already been applied"):
+                fixture.bind(CursorReplaceBodyTool).apply(cursor_id="c1", body=SHRUNK_CLASS, expect_version="*")
+            contents = fixture.edited_path.read_text(encoding="utf-8")
+
+        assert contents.count(SHRUNK_CLASS_MARKER) == 1

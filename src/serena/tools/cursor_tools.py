@@ -1108,16 +1108,16 @@ class CursorRemoveMemberTool(Tool, ToolMarkerSymbolicEdit):
 
         After the removal the cursor is re-anchored at the parent container
         (the member's path is gone from the tree, so re-anchoring at the
-        removed path would fail). Top-level removals close the cursor since
-        no parent remains.
+        removed path would fail). A top-level member has no parent container,
+        and its removal is refused.
 
         :param cursor_id: the structural cursor identifying the member to
             remove.
         :param expect_version: the file's content version from a read/stat; "*" overwrites unconditionally.
-        :return: confirmation and the updated cursor view, or a confirmation
-            and close notice when the removed member was top-level.
+        :return: confirmation and the updated cursor view.
         :raises TypeError: if ``cursor_id`` is an LSP cursor (symbol
             deletion is handled by :class:`SafeDeleteSymbol`).
+        :raises ValueError: if the member is top-level.
         """
         manager = self.agent.get_cursor_manager()
         state = manager.get_cursor(cursor_id)
@@ -1144,11 +1144,6 @@ class CursorRemoveMemberTool(Tool, ToolMarkerSymbolicEdit):
         except StaleWriteError as e:
             return e.stale.render()
 
-        if not parent_path:
-            # top-level member removed: there is no parent to re-anchor on;
-            # close the cursor rather than carry a dangling path forward
-            manager.close_cursor(cursor_id)
-            return f"{SUCCESS_RESULT}\n\nCursor {cursor_id} closed: removed top-level member had no parent to re-anchor on."
         return _reply_after_landed_edit(manager, cursor_id, SUCCESS_RESULT, name_path=parent_path)
 
 
