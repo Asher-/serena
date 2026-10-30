@@ -299,7 +299,8 @@ class AtomicFileWriter:
         ``open(abs_path, "w", encoding=encoding, newline=newline)`` encodes them.
 
         The contents are encoded before any file is created, so contents the encoding cannot represent raise without
-        touching the target or its directory.
+        touching the target or its directory. A target reached through a symlink is written as ``open`` writes it: the
+        file the link points at is replaced, and the link is kept.
 
         :param abs_path: the absolute path of the file to write.
         :param contents: the file's new contents, with LF line endings.
@@ -310,7 +311,10 @@ class AtomicFileWriter:
         :raises StaleWriteError: as :meth:`write_bytes` raises it.
         :raises OSError: as :meth:`write_bytes` raises it.
         """
-        self.write_bytes(abs_path, self.encode_text(contents, encoding, newline), precondition)
+        # the file the write replaces: the one a symlink points at, so that the link survives and its target is written
+        target_path = os.path.realpath(abs_path)
+
+        self.write_bytes(target_path, self.encode_text(contents, encoding, newline), precondition)
 
     @staticmethod
     def encode_text(contents: str, encoding: str, newline: str | None) -> bytes:

@@ -129,6 +129,23 @@ class TestStructuralEditWrite:
         assert b'"existing": 42\r\n' in raw
         assert b"\n" not in raw.replace(b"\r\n", b"")
 
+    def test_edit_through_a_symlink_writes_the_file_it_points_at(self, work_dir: Path) -> None:
+        """Regression guard: an edit of a file reached through a symlink replaces the file the link points at, as the text-mode write did, keeping the link and the file's mode."""
+        target_path = work_dir / "target.json"
+        target_path.write_text(JSON_SOURCE, encoding="utf-8")
+        os.chmod(target_path, 0o755)
+        link_path = work_dir / "doc.json"
+        link_path.symlink_to(target_path.name)
+        manager = _make_manager_via_subclass(work_dir)
+        cursor_id, _ = manager.start_cursor(name_path="members/existing", relative_path="doc.json")
+
+        manager.apply_container_edit(cursor_id, "replace", "42")
+
+        assert link_path.is_symlink()
+        assert '"existing": 42' in target_path.read_text(encoding="utf-8")
+        assert stat.S_IMODE(target_path.stat().st_mode) == 0o755
+        assert sorted(os.listdir(work_dir)) == ["doc.json", "target.json"]
+
 
 class TestAtomicFileWriter:
     """The writer every edit replaces its file through."""
