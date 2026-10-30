@@ -263,10 +263,11 @@ class AtomicFileWriter:
         parent = os.path.dirname(abs_path)
         prior_mode = self._prior_mode(abs_path)
 
-        # the temporary file, in the target's directory so that the rename never crosses a filesystem
+        # the temporary file, in the target's directory so that the rename never crosses a filesystem; a target named
+        # without a directory lies in the working directory
         if parent:
             os.makedirs(parent, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(dir=parent or None, prefix=self.TEMP_FILE_PREFIX)
+        fd, tmp_path = tempfile.mkstemp(dir=parent or os.curdir, prefix=self.TEMP_FILE_PREFIX)
 
         # write, flush and sync the new bytes, then swap them in; any failure removes the temporary file
         try:
@@ -275,7 +276,7 @@ class AtomicFileWriter:
                 handle.flush()
                 os.fsync(handle.fileno())
             # restore the overwritten file's mode (mkstemp reset it to 0o600); a brand-new file
-            # keeps the default mode
+            # keeps mkstemp's 0o600
             if prior_mode is not None:
                 os.chmod(tmp_path, prior_mode)
             # the precondition, evaluated as close to the swap as the write allows
@@ -459,9 +460,7 @@ class FilesystemLifecycle:
             # a real directory is listed and, when recursive, descended into
             if entry.is_dir(follow_symlinks=False):
                 out.append(DirEntry(name, EntryKind.DIR, size, mtime))
-                if recursive and self._walk(
-                    base_abs, entry.path, recursive, max_entries, include_ignored, include_hidden, out
-                ):
+                if recursive and self._walk(base_abs, entry.path, recursive, max_entries, include_ignored, include_hidden, out):
                     return True
                 continue
 
@@ -499,8 +498,7 @@ class FilesystemLifecycle:
             dir_names[:] = [
                 name
                 for name in dir_names
-                if not name.startswith(".")
-                and (include_ignored or not self._is_ignored(os.path.join(current_dir, name)))
+                if not name.startswith(".") and (include_ignored or not self._is_ignored(os.path.join(current_dir, name)))
             ]
             for file_name in sorted(file_names):
                 if file_name.startswith("."):
@@ -561,9 +559,7 @@ class FilesystemLifecycle:
             with open(abs_path, "rb") as handle:
                 raw = handle.read()
         except OSError as error:
-            return FileStat(
-                relative_path, exists=True, kind=EntryKind.FILE, size=st.st_size, permissions=permissions, error=str(error)
-            )
+            return FileStat(relative_path, exists=True, kind=EntryKind.FILE, size=st.st_size, permissions=permissions, error=str(error))
         view = self._floor.render(raw, relative_path)
         return FileStat(
             relative_path,
@@ -605,9 +601,7 @@ class FilesystemLifecycle:
 
     # --- create ---
 
-    def create(
-        self, relative_path: str, content: str = "", overwrite: bool = False, expect_version: str = ""
-    ) -> MutationResult:
+    def create(self, relative_path: str, content: str = "", overwrite: bool = False, expect_version: str = "") -> MutationResult:
         """Create (or, with intent, overwrite) a UTF-8 file atomically (spec-v2 §5.4/§5.5).
 
         Creating a brand-new file needs no ceremony. Overwriting requires explicit ``overwrite=True`` --

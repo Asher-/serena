@@ -14,7 +14,7 @@ import pytest
 
 from serena.code_editor import LanguageServerCodeEditor
 from serena.symbol import LanguageServerSymbolRetriever
-from serena.util.file_lifecycle import AtomicFileWriter
+from serena.util.file_lifecycle import AtomicFileWriter, WritePrecondition
 from solidlsp.ls import LSPFileBuffer
 from solidlsp.ls_config import Language
 from test.conftest import get_repo_path, project_with_ls_context
@@ -189,6 +189,22 @@ class TestStructuralEditWrite:
         assert edited_path.read_text(encoding="utf-8") == JSON_SOURCE
 
 
+class _ListingAtCheck(WritePrecondition):
+    """A precondition that always holds and records a directory's listing when the write evaluates it, before the replace."""
+
+    def __init__(self, directory: Path) -> None:
+        """
+        :param directory: the directory whose listing the check records.
+        """
+        super().__init__("doc.json")
+        self._directory = directory
+        self.listing: list[str] | None = None
+
+    def check(self) -> Any:
+        self.listing = sorted(os.listdir(self._directory))
+        return None
+
+
 class TestAtomicFileWriter:
     """The writer every edit replaces its file through."""
 
@@ -199,6 +215,19 @@ class TestAtomicFileWriter:
         AtomicFileWriter().write_bytes("doc.json", JSON_SOURCE.encode("utf-8"))
 
         assert (work_dir / "doc.json").read_bytes() == JSON_SOURCE.encode("utf-8")
+        assert sorted(os.listdir(work_dir)) == ["doc.json"]
+
+    def test_temporary_file_of_a_target_without_a_directory_component_is_made_in_the_working_directory(
+        self, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The temporary file of a target named without a directory is created beside it, in the working directory."""
+        monkeypatch.chdir(work_dir)
+        precondition = _ListingAtCheck(work_dir)
+
+        AtomicFileWriter().write_bytes("doc.json", JSON_SOURCE.encode("utf-8"), precondition)
+
+        assert precondition.listing is not None
+        assert any(name.startswith(AtomicFileWriter.TEMP_FILE_PREFIX) for name in precondition.listing)
         assert sorted(os.listdir(work_dir)) == ["doc.json"]
 
     def test_directory_target_has_no_mode_to_keep(self, work_dir: Path) -> None:

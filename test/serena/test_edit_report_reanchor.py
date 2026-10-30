@@ -12,7 +12,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -29,12 +29,14 @@ from serena.tools.cursor_tools import (
     CursorReplaceBodyTool,
 )
 from serena.tools.tools_base import SUCCESS_RESULT
-from serena.util.file_lifecycle import WritePrecondition
 from solidlsp.ls_config import Language
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_process import LanguageServerTerminatedException
 from test.conftest import get_repo_path, project_with_ls_context
 from test.serena.test_cursor_container_edit import _bind_tool, _make_manager_via_subclass, _ToolHarness
+
+if TYPE_CHECKING:
+    from serena.util.file_lifecycle import WritePrecondition
 
 REANCHOR_NOTE = "could not re-anchor"
 """the phrase every tool's reply carries when its cursor could not re-anchor after a landed edit"""
@@ -210,7 +212,11 @@ class _SymbolEditFixture:
         tool.__dict__["create_ls_code_editor"] = self._create_code_editor
         return tool
 
-    def _create_code_editor(self, write_precondition: WritePrecondition | None = None) -> LanguageServerCodeEditor:
+    def _create_code_editor(self, write_precondition: "WritePrecondition | None" = None) -> LanguageServerCodeEditor:
+        # the editor is handed a precondition only when the tool gives one, so the fixture also builds serena main's
+        # editor, which takes none, and the module's tests run against main's src
+        if write_precondition is None:
+            return LanguageServerCodeEditor(LanguageServerSymbolRetriever(self.project))
         return LanguageServerCodeEditor(LanguageServerSymbolRetriever(self.project), write_precondition=write_precondition)
 
 
