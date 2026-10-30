@@ -84,6 +84,23 @@ class TestStructuralEditWrite:
         assert edited_path.read_bytes() == bytes_before
         assert sorted(os.listdir(work_dir)) == listing_before
 
+    def test_lone_surrogate_value_leaves_file_and_directory_as_they_were(self, work_dir: Path) -> None:
+        # the edited file's state before the edit
+        edited_path = work_dir / "doc.json"
+        edited_path.write_text(JSON_SOURCE, encoding="utf-8")
+        bytes_before = edited_path.read_bytes()
+        listing_before = sorted(os.listdir(work_dir))
+
+        # a project in its own utf-8 encoding, which cannot encode a lone surrogate
+        manager = _make_manager_via_subclass(work_dir)
+        cursor_id, _ = manager.start_cursor(name_path="members/existing", relative_path="doc.json")
+
+        with pytest.raises(UnicodeEncodeError):
+            manager.apply_container_edit(cursor_id, "replace", '"\ud800"')
+
+        assert edited_path.read_bytes() == bytes_before
+        assert sorted(os.listdir(work_dir)) == listing_before
+
     def test_edit_keeps_permission_bits(self, work_dir: Path) -> None:
         """Regression guard: replacing the file by a renamed temporary file must not drop its mode."""
         edited_path = work_dir / "doc.json"
