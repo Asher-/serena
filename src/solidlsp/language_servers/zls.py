@@ -7,7 +7,6 @@ import os
 import pathlib
 import platform
 import shutil
-import subprocess
 
 from overrides import override
 
@@ -16,6 +15,7 @@ from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
+from solidlsp.util import supervise
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ class ZigLanguageServer(SolidLanguageServer):
     def _get_zig_version() -> str | None:
         """Get the installed Zig version or None if not found."""
         try:
-            result = subprocess.run(["zig", "version"], capture_output=True, text=True, check=False)
+            result = supervise.run(["zig", "version"], capture_output=True, text=True, check=False)
             if result.returncode == 0:
                 return result.stdout.strip()
         except FileNotFoundError:
@@ -49,7 +49,7 @@ class ZigLanguageServer(SolidLanguageServer):
     def _get_zls_version() -> str | None:
         """Get the installed ZLS version or None if not found."""
         try:
-            result = subprocess.run(["zls", "--version"], capture_output=True, text=True, check=False)
+            result = supervise.run(["zls", "--version"], capture_output=True, text=True, check=False)
             if result.returncode == 0:
                 return result.stdout.strip()
         except FileNotFoundError:

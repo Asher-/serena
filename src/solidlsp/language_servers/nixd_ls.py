@@ -22,6 +22,7 @@ from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
+from solidlsp.util import supervise
 
 log = logging.getLogger(__name__)
 
@@ -133,7 +134,7 @@ class NixLanguageServer(SolidLanguageServer):
     def _get_nixd_version():
         """Get the installed nixd version or None if not found."""
         try:
-            result = subprocess.run(["nixd", "--version"], capture_output=True, text=True, check=False)
+            result = supervise.run(["nixd", "--version"], capture_output=True, text=True, check=False)
             if result.returncode == 0:
                 # nixd outputs version like: nixd 2.0.0
                 return result.stdout.strip()
@@ -191,7 +192,7 @@ class NixLanguageServer(SolidLanguageServer):
         print("Installing nixd using nix... This may take a few minutes.")
         try:
             # Try to install nixd using nix profile
-            result = subprocess.run(
+            result = supervise.run(
                 ["nix", "profile", "install", "github:nix-community/nixd"],
                 capture_output=True,
                 text=True,
@@ -207,7 +208,7 @@ class NixLanguageServer(SolidLanguageServer):
                     return nixd_path
             else:
                 # Try nix-env as fallback
-                result = subprocess.run(
+                result = supervise.run(
                     ["nix-env", "-iA", "nixpkgs.nixd"],
                     capture_output=True,
                     text=True,
@@ -249,7 +250,7 @@ class NixLanguageServer(SolidLanguageServer):
 
         # verify nixd actually runs
         try:
-            result = subprocess.run([nixd_path, "--version"], capture_output=True, text=True, check=False, timeout=5)
+            result = supervise.run([nixd_path, "--version"], capture_output=True, text=True, check=False, timeout=5)
             if result.returncode != 0:
                 raise RuntimeError(f"nixd failed to run: {result.stderr}")
         except Exception as e:

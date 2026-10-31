@@ -19,6 +19,7 @@ from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
+from solidlsp.util import supervise
 
 log = logging.getLogger(__name__)
 
@@ -101,7 +102,7 @@ class FSharpLanguageServer(SolidLanguageServer):
             try:
                 import subprocess
 
-                result = subprocess.run(
+                result = supervise.run(
                     [dotnet_exe, "tool", "install", "--tool-path", fsharp_ls_dir, "fsautocomplete", "--version", fsautocomplete_version],
                     cwd=fsharp_ls_dir,
                     capture_output=True,
@@ -274,7 +275,7 @@ class FSharpLanguageServer(SolidLanguageServer):
             try:
                 import subprocess
 
-                result = subprocess.run([dotnet_exe, "--info"], capture_output=True, text=True, check=True)
+                result = supervise.run([dotnet_exe, "--info"], capture_output=True, text=True, check=True)
                 lines = result.stdout.split("\n")
                 for line in lines:
                     if "Base Path:" in line or "Base path:" in line:

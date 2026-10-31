@@ -1,7 +1,6 @@
 import logging
 import os
 import pathlib
-import subprocess
 from typing import Any
 
 from overrides import override
@@ -11,6 +10,7 @@ from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
+from solidlsp.util import supervise
 
 log = logging.getLogger(__name__)
 
@@ -37,12 +37,12 @@ class RLanguageServer(SolidLanguageServer):
         """Check if R and languageserver are available."""
         try:
             # Check R installation
-            result = subprocess.run(["R", "--version"], capture_output=True, text=True, check=False)
+            result = supervise.run(["R", "--version"], capture_output=True, text=True, check=False)
             if result.returncode != 0:
                 raise RuntimeError("R is not installed or not in PATH")
 
             # Check languageserver package
-            result = subprocess.run(
+            result = supervise.run(
                 ["R", "--vanilla", "--quiet", "--slave", "-e", "if (!require('languageserver', quietly=TRUE)) quit(status=1)"],
                 capture_output=True,
                 text=True,

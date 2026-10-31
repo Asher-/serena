@@ -18,19 +18,16 @@ is simply ``ruby bridge.rb`` with no Gemfile or vendor directory.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
-import struct
-import subprocess
-import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from solidlsp.structural.base import StructuralLanguage
+from solidlsp.structural.bridge_process import StructuralBridge
 from solidlsp.structural.errors import (
     DeclarationError,
     NameResolutionError,
@@ -323,86 +320,12 @@ def _ruby_binary() -> str:
     return "ruby"
 
 
-class _RubyBridge:
-    """Long-lived ``ruby bridge.rb`` subprocess.
-
-    One bridge is shared by a single :class:`RubyStructuralLanguage`
-    instance. Calls are serialized by a mutex so concurrent Python callers
-    do not interleave their JSON frames.
-    """
+class _RubyBridge(StructuralBridge):
+    """Long-lived ``ruby bridge.rb`` process, shared by a single :class:`RubyStructuralLanguage` instance."""
 
     def __init__(self, entry_path: Path):
         """:param entry_path: absolute path to the bridge entry script."""
-        self._entry_path = entry_path
-        self._process: subprocess.Popen[bytes] | None = None
-        self._lock = threading.Lock()
-
-    def _ensure_started(self) -> subprocess.Popen[bytes]:
-        if self._process is None or self._process.poll() is not None:
-            self._process = subprocess.Popen(
-                [_ruby_binary(), str(self._entry_path)],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=0,
-            )
-        return self._process
-
-    def call(self, op: str, **payload: Any) -> dict[str, Any]:
-        with self._lock:
-            proc = self._ensure_started()
-            assert proc.stdin is not None and proc.stdout is not None
-            request = {"op": op, **payload}
-            body = json.dumps(request).encode("utf-8")
-            prefix = struct.pack("<I", len(body))
-            try:
-                proc.stdin.write(prefix + body)
-                proc.stdin.flush()
-                length_bytes = _read_exact(proc.stdout, 4)
-                (length,) = struct.unpack("<I", length_bytes)
-                response_bytes = _read_exact(proc.stdout, length)
-            except (BrokenPipeError, OSError) as exc:
-                stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
-                raise ParseError(
-                    language_key="ruby",
-                    source_preview="",
-                    detail=f"bridge communication failed: {exc}; stderr:\n{stderr}",
-                )
-            return json.loads(response_bytes)
-
-    def close(self) -> None:
-        with self._lock:
-            if self._process is None:
-                return
-            try:
-                if self._process.stdin is not None:
-                    self._process.stdin.close()
-            except OSError:
-                pass
-            try:
-                self._process.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-                self._process.wait()
-            self._process = None
-
-    def __del__(self) -> None:
-        try:
-            self.close()
-        except Exception:
-            pass
-
-
-def _read_exact(stream: Any, n: int) -> bytes:
-    chunks: list[bytes] = []
-    remaining = n
-    while remaining > 0:
-        chunk = stream.read(remaining)
-        if not chunk:
-            raise OSError("bridge closed stdout unexpectedly")
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    return b"".join(chunks)
+        super().__init__([_ruby_binary(), str(entry_path)], "ruby")
 
 
 # -----------------------------------------------------------------------------

@@ -21,6 +21,7 @@ from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
+from solidlsp.util import supervise
 from solidlsp.util.subprocess_util import subprocess_kwargs
 
 log = logging.getLogger(__name__)
@@ -63,7 +64,7 @@ class OcamlLanguageServer(SolidLanguageServer):
         Raises RuntimeError if version cannot be determined.
         """
         try:
-            result = subprocess.run(
+            result = supervise.run(
                 ["opam", "exec", "--", "ocaml", "-version"],
                 check=True,
                 capture_output=True,
@@ -113,7 +114,7 @@ class OcamlLanguageServer(SolidLanguageServer):
         Raises RuntimeError if version cannot be determined.
         """
         try:
-            result = subprocess.run(
+            result = supervise.run(
                 ["opam", "list", "-i", "ocaml-lsp-server", "--columns=version", "--short"],
                 check=True,
                 capture_output=True,
@@ -150,7 +151,7 @@ class OcamlLanguageServer(SolidLanguageServer):
         """
         # Check if ocaml-lsp-server is installed
         try:
-            result = subprocess.run(
+            result = supervise.run(
                 ["opam", "list", "-i", "ocaml-lsp-server"],
                 check=False,
                 capture_output=True,
@@ -178,7 +179,7 @@ class OcamlLanguageServer(SolidLanguageServer):
         # Find the executable path
         try:
             if platform.system() == "Windows":
-                result = subprocess.run(
+                result = supervise.run(
                     ["opam", "exec", "--", "where", "ocamllsp"],
                     check=True,
                     capture_output=True,
@@ -188,7 +189,7 @@ class OcamlLanguageServer(SolidLanguageServer):
                 )
                 executable_path = result.stdout.strip().split("\n")[0]
             else:
-                result = subprocess.run(
+                result = supervise.run(
                     ["opam", "exec", "--", "which", "ocamllsp"],
                     check=True,
                     capture_output=True,
@@ -254,7 +255,7 @@ class OcamlLanguageServer(SolidLanguageServer):
         """
         log.info("Building OCaml index for cross-file references (dune build @ocaml-index)...")
         try:
-            result = subprocess.run(
+            result = supervise.run(
                 ["opam", "exec", "--", "dune", "build", "@ocaml-index"],
                 cwd=repository_root_path,
                 capture_output=True,

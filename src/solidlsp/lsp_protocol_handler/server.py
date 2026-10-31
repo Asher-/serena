@@ -66,6 +66,11 @@ class ProcessLaunchInfo:
     the working directory for the process
     """
 
+    read_only_stdin: bool = False
+    """
+    whether the process's standard input is its FIFO opened read-only, for a server that sizes its reads with FIONREAD
+    """
+
 
 class LSPError(Exception):
     def __init__(self, code: ErrorCodes, message: str) -> None:

@@ -5,7 +5,6 @@ import json
 import os
 import shutil
 import signal
-import subprocess
 import sys
 import time
 from collections.abc import Iterator, Sequence
@@ -47,6 +46,7 @@ from serena.util.dataclass import get_dataclass_default
 from serena.util.logging import MemoryLogHandler
 from solidlsp.ls_config import Language
 from solidlsp.ls_types import SymbolKind
+from solidlsp.util import supervise
 from solidlsp.util.subprocess_util import subprocess_kwargs
 
 log = logging.getLogger(__name__)
@@ -102,16 +102,16 @@ def _open_in_editor(path: str) -> None:
     run_kwargs = subprocess_kwargs()
     try:
         if editor:
-            subprocess.run([editor, path], check=False, **run_kwargs)
+            supervise.run([editor, path], check=False, **run_kwargs)
         elif sys.platform.startswith("win"):
             try:
                 os.startfile(path)
             except OSError:
-                subprocess.run(["notepad.exe", path], check=False, **run_kwargs)
+                supervise.run(["notepad.exe", path], check=False, **run_kwargs)
         elif sys.platform == "darwin":
-            subprocess.run(["open", path], check=False, **run_kwargs)
+            supervise.run(["open", path], check=False, **run_kwargs)
         else:
-            subprocess.run(["xdg-open", path], check=False, **run_kwargs)
+            supervise.run(["xdg-open", path], check=False, **run_kwargs)
     except Exception as e:
         print(f"Failed to open {path}: {e}")
 

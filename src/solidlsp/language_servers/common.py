@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from typing import Any, cast
 
 from solidlsp.ls_utils import FileUtils, PlatformUtils
+from solidlsp.util import supervise
 from solidlsp.util.subprocess_util import subprocess_kwargs
 
 log = logging.getLogger(__name__)
@@ -115,7 +116,7 @@ class RuntimeDependencyCollection:
 
         log.info("Running command %s in '%s'", f"'{command}'" if isinstance(command, str) else command, cwd)
 
-        completed_process = subprocess.run(
+        completed_process = supervise.run(
             command,
             shell=True,
             check=False,

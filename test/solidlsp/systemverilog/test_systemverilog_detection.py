@@ -50,7 +50,7 @@ class TestVeribleVerilogLsDetection:
 
             with patch("shutil.which") as mock_which:
                 mock_which.return_value = "/usr/local/bin/verible-verilog-ls"
-                with patch("subprocess.run") as mock_run:
+                with patch("solidlsp.util.supervise.run") as mock_run:
                     mock_run.return_value = MagicMock(
                         returncode=0,
                         stdout="Verible v0.0-4051-g9fdb4057 (2024-01-01)\nCommit: 9fdb4057",
@@ -78,7 +78,7 @@ class TestVeribleVerilogLsDetection:
             provider = SystemVerilogLanguageServer.DependencyProvider(custom_settings, temp_dir)
 
             with patch("shutil.which", return_value="/usr/bin/verible-verilog-ls"):
-                with patch("subprocess.run") as mock_run:
+                with patch("solidlsp.util.supervise.run") as mock_run:
                     mock_run.return_value = MagicMock(returncode=0, stdout="Verible v0.0-4051-g9fdb4057", stderr="")
                     with patch("solidlsp.language_servers.systemverilog_server.log") as mock_log:
                         result = provider._get_or_install_core_dependency()
@@ -107,7 +107,7 @@ class TestVeribleVerilogLsDetection:
             provider = SystemVerilogLanguageServer.DependencyProvider(custom_settings, temp_dir)
 
             with patch("shutil.which", return_value="/custom/bin/verible-verilog-ls"):
-                with patch("subprocess.run") as mock_run:
+                with patch("solidlsp.util.supervise.run") as mock_run:
                     # Version check fails
                     mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="Unknown option: --version")
                     result = provider._get_or_install_core_dependency()
@@ -130,7 +130,7 @@ class TestVeribleVerilogLsDetection:
             provider = SystemVerilogLanguageServer.DependencyProvider(custom_settings, temp_dir)
 
             with patch("shutil.which", return_value="/opt/verible/bin/verible-verilog-ls"):
-                with patch("subprocess.run") as mock_run:
+                with patch("solidlsp.util.supervise.run") as mock_run:
                     # Version check times out
                     mock_run.side_effect = subprocess.TimeoutExpired(cmd=["verible-verilog-ls", "--version"], timeout=5)
                     result = provider._get_or_install_core_dependency()
@@ -223,7 +223,7 @@ class TestVeribleVerilogLsDetection:
             provider = SystemVerilogLanguageServer.DependencyProvider(custom_settings, temp_dir)
 
             with patch("shutil.which", return_value="/usr/bin/verible-verilog-ls"):
-                with patch("subprocess.run") as mock_run:
+                with patch("solidlsp.util.supervise.run") as mock_run:
                     mock_run.return_value = MagicMock(returncode=0, stdout="Verible v0.0-4051", stderr="")
 
                     with patch("solidlsp.language_servers.systemverilog_server.RuntimeDependencyCollection") as mock_deps_class:

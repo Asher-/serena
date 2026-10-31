@@ -447,7 +447,7 @@ class TestRustAnalyzerDetection:
                     # First call returns None (not installed), second returns path (after install)
                     mock_rustup_path.side_effect = [None, "/home/user/.rustup/toolchains/stable/bin/rust-analyzer"]
                     with patch.object(RustAnalyzer.DependencyProvider, "_get_rustup_version", return_value="1.70.0"):
-                        with patch("subprocess.run") as mock_run:
+                        with patch("solidlsp.util.supervise.run") as mock_run:
                             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
                             result = RustAnalyzer.DependencyProvider._ensure_rust_analyzer_installed()
 
@@ -475,7 +475,7 @@ class TestRustAnalyzerDetection:
             with patch("os.path.isfile", return_value=False):
                 with patch.object(RustAnalyzer.DependencyProvider, "_get_rust_analyzer_via_rustup", return_value=None):
                     with patch.object(RustAnalyzer.DependencyProvider, "_get_rustup_version", return_value="1.70.0"):
-                        with patch("subprocess.run") as mock_run:
+                        with patch("solidlsp.util.supervise.run") as mock_run:
                             mock_run.return_value = MagicMock(
                                 returncode=1, stdout="", stderr="error: component 'rust-analyzer' is not available"
                             )
@@ -507,7 +507,7 @@ class TestRustAnalyzerDetection:
             with patch("os.path.isfile", return_value=False):
                 with patch.object(RustAnalyzer.DependencyProvider, "_get_rust_analyzer_via_rustup", return_value=None):
                     with patch.object(RustAnalyzer.DependencyProvider, "_get_rustup_version", return_value="1.70.0"):
-                        with patch("subprocess.run") as mock_run:
+                        with patch("solidlsp.util.supervise.run") as mock_run:
                             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
                             with pytest.raises(RuntimeError) as exc_info:
                                 RustAnalyzer.DependencyProvider._ensure_rust_analyzer_installed()

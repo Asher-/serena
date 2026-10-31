@@ -29,6 +29,7 @@ from serena.agent import (
     SerenaAgent,
     SerenaConfig,
 )
+from serena.call_journal import CallJournal, CallJournalLayer
 from serena.config.context_mode import SerenaAgentContext
 from serena.config.serena_config import LanguageBackend, ModeSelectionDefinition
 from serena.constants import DEFAULT_CONTEXT, SERENA_LOG_FORMAT
@@ -56,6 +57,9 @@ server.configure_logging = configure_logging  # type: ignore
 class SerenaMCPRequestContext:
     agent: SerenaAgent
 
+
+_ANSWERED_CALL_SECONDS = 24 * 60 * 60
+"""How long an answered call stays in the journal, the retention of every brain server's journal."""
 
 _CALL_SESSION_ID_VAR: contextvars.ContextVar[str | None] = contextvars.ContextVar("serena_call_session_id", default=None)
 """the session id of the tool call being run, taken out of its raw arguments by :class:`_AgentAwareMCPTool`"""
@@ -85,6 +89,24 @@ class _AgentAwareMCPTool(MCPTool):
         finally:
             _CALL_AGENT_ID_VAR.reset(agent_token)
             _CALL_SESSION_ID_VAR.reset(session_token)
+
+
+class _JournaledFastMCP(FastMCP):
+    """
+    A server whose streamable-http listener journals its calls and answers ``brain/resume``, so that the hop before serena
+    recovers a call across serena's restart (pg://brain/daemon/restart/continuity).
+    """
+
+    def __init__(self, journal: CallJournal, **settings: Any) -> None:
+        """
+        :param journal: the journal of the calls the listener serves.
+        :param settings: as for :class:`FastMCP`.
+        """
+        super().__init__(**settings)
+        self._call_journal = journal
+
+    def streamable_http_app(self) -> Any:
+        return CallJournalLayer(super().streamable_http_app(), self._call_journal, self.settings.streamable_http_path)
 
 
 class SerenaMCPFactory:
@@ -390,7 +412,10 @@ class SerenaMCPFactory:
         # retain only FASTMCP_ prefix for already set environment variables.
         Settings.model_config = SettingsConfigDict(env_prefix="FASTMCP_")
         instructions = self._get_initial_instructions()
-        mcp = FastMCP(
+        journal = CallJournal()
+        journal.prune(_ANSWERED_CALL_SECONDS)
+        mcp = _JournaledFastMCP(
+            journal,
             name="Serena",
             lifespan=self.server_lifespan,
             website_url="https://oraios.github.io/serena",
@@ -565,9 +590,7 @@ class SerenaPipeFrameHandler(FrameHandler):
                 # context (so _PIPE_SESSION_ID_VAR stays set inside apply_ex's worker too).
                 ctx = contextvars.copy_context()
                 loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(
-                    None, partial(ctx.run, self._handle_tools_call, frame.get("params") or {})
-                )
+                result = await loop.run_in_executor(None, partial(ctx.run, self._handle_tools_call, frame.get("params") or {}))
             elif method == "prompts/list":
                 result = {"prompts": []}
             elif method == "resources/list":

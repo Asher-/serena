@@ -3,7 +3,6 @@ The Serena Model Context Protocol (MCP) Server
 """
 
 import json
-import multiprocessing
 import os
 import platform
 import re
@@ -57,6 +56,7 @@ from serena.util.inspection import iter_subclasses
 from serena.util.logging import MemoryLogHandler
 from serena.util.session_project_roots import ExplicitProjectRootStore
 from solidlsp.ls_config import Language
+from solidlsp.util import supervise
 
 if TYPE_CHECKING:
     from serena.cursor import CursorManager
@@ -394,7 +394,7 @@ class SerenaAgent:
         self._startup_activation_error: Exception | None = None
         self._startup_activation_target: str | None = None
         self._gui_log_viewer: Optional["GuiLogViewer"] = None
-        self._dashboard_viewer_process: multiprocessing.Process | None = None
+        self._dashboard_viewer_process: supervise.Popen | None = None
 
         self.version = serena_version()
 
@@ -832,10 +832,12 @@ class SerenaAgent:
         url = self.get_dashboard_url()
         assert url is not None
         if SerenaDashboardViewer.is_current_platform_supported():
-            self._dashboard_viewer_process = multiprocessing.Process(
-                target=self._start_dashboard_viewer_process_function, args=(url, minimized, os.getpid()), daemon=True
+            program = "import sys; from serena.agent import SerenaAgent; SerenaAgent._start_dashboard_viewer_process_function(sys.argv[1], sys.argv[2] == 'True', int(sys.argv[3]))"
+            self._dashboard_viewer_process = supervise.Popen(
+                [sys.executable, "-c", program, url, str(minimized), str(os.getpid())],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
-            self._dashboard_viewer_process.start()
         else:
             log.info("Not starting Serena dashboard viewer because the current platform does not support it; using browser-based fallback")
             if not minimized:
@@ -860,7 +862,7 @@ class SerenaAgent:
     @staticmethod
     def _open_dashboard_in_browser(url: str) -> None:
         # Use a subprocess to avoid any output from webbrowser.open being written to stdout
-        subprocess.Popen(
+        supervise.Popen(
             [sys.executable, "-c", f"import webbrowser; webbrowser.open({url!r})"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,

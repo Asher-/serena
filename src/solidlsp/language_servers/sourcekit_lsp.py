@@ -14,6 +14,7 @@ from solidlsp.ls_types import SymbolKind
 from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
+from solidlsp.util import supervise
 
 log = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ class SourceKitLSP(SolidLanguageServer):
         for env_override in [{"DEVELOPER_DIR": xcode_path}, {}]:
             try:
                 run_env = {**os.environ, **env_override} if env_override else None
-                result = subprocess.run(
+                result = supervise.run(
                     ["xcrun", "--find", "sourcekit-lsp"],
                     capture_output=True,
                     text=True,
@@ -69,7 +70,7 @@ class SourceKitLSP(SolidLanguageServer):
     def _get_sourcekit_lsp_version() -> str:
         """Get the installed sourcekit-lsp version or raise error if sourcekit was not found."""
         try:
-            result = subprocess.run(["sourcekit-lsp", "-h"], capture_output=True, text=True, check=False)
+            result = supervise.run(["sourcekit-lsp", "-h"], capture_output=True, text=True, check=False)
             if result.returncode == 0:
                 return result.stdout.strip()
             else:

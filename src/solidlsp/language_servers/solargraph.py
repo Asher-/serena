@@ -19,6 +19,7 @@ from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
+from solidlsp.util import supervise
 
 log = logging.getLogger(__name__)
 
@@ -77,7 +78,7 @@ class Solargraph(SolidLanguageServer):
         """
         # Check if Ruby is installed
         try:
-            result = subprocess.run(["ruby", "--version"], check=True, capture_output=True, cwd=repository_root_path, text=True)
+            result = supervise.run(["ruby", "--version"], check=True, capture_output=True, cwd=repository_root_path, text=True)
             ruby_version = result.stdout.strip()
             log.info(f"Ruby version: {ruby_version}")
 
@@ -184,12 +185,12 @@ class Solargraph(SolidLanguageServer):
 
             dependency = runtime_dependencies[0]
             try:
-                result = subprocess.run(
+                result = supervise.run(
                     ["gem", "list", "^solargraph$", "-i"], check=False, capture_output=True, text=True, cwd=repository_root_path
                 )
                 if result.stdout.strip() == "false":
                     log.info("Installing Solargraph...")
-                    subprocess.run(dependency["installCommand"].split(), check=True, capture_output=True, cwd=repository_root_path)
+                    supervise.run(dependency["installCommand"].split(), check=True, capture_output=True, cwd=repository_root_path)
 
                 return "gem exec solargraph"
             except subprocess.CalledProcessError as e:

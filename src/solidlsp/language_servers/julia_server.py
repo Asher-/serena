@@ -13,6 +13,7 @@ from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
+from solidlsp.util import supervise
 
 log = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ class JuliaLanguageServer(SolidLanguageServer):
         # Check if LanguageServer.jl is installed
         check_cmd = [julia_path, "-e", "using LanguageServer"]
         try:
-            result = subprocess.run(check_cmd, check=False, capture_output=True, text=True, timeout=10)
+            result = supervise.run(check_cmd, check=False, capture_output=True, text=True, timeout=10)
             if result.returncode != 0:
                 # LanguageServer.jl not found, install it
                 JuliaLanguageServer._install_language_server(julia_path)
@@ -99,7 +100,7 @@ class JuliaLanguageServer(SolidLanguageServer):
         install_cmd = [julia_path, "-e", 'using Pkg; Pkg.add("LanguageServer")']
 
         try:
-            result = subprocess.run(install_cmd, check=False, capture_output=True, text=True, timeout=300)  # 5 minutes for installation
+            result = supervise.run(install_cmd, check=False, capture_output=True, text=True, timeout=300)  # 5 minutes for installation
 
             if result.returncode == 0:
                 log.info("LanguageServer.jl installed successfully!")

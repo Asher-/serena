@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import pathlib
 import platform
 import subprocess
 import threading
@@ -17,6 +18,7 @@ from sensai.util.string import ToStringMixin
 from solidlsp.ls_config import Language
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_request import LanguageServerRequest
+from solidlsp.ls_survival import LanguageServerState, LanguageServerStateFile, OpenDocument, text_digest
 from solidlsp.lsp_protocol_handler.lsp_requests import LspNotification
 from solidlsp.lsp_protocol_handler.lsp_types import ErrorCodes
 from solidlsp.lsp_protocol_handler.server import (
@@ -32,6 +34,7 @@ from solidlsp.lsp_protocol_handler.server import (
     make_request,
     make_response,
 )
+from solidlsp.util import supervise
 from solidlsp.util.subprocess_util import quote_arg, subprocess_kwargs
 
 log = logging.getLogger(__name__)
@@ -107,7 +110,7 @@ class LanguageServerProcess:
             await for the responses.
         notify: A LspNotification object that can be used to send notifications to the server.
         cmd: A string that represents the command to launch the language server process.
-        process: A subprocess.Popen object that represents the language server process.
+        process: A supervise.Popen object that represents the language server process.
         request_id: An integer that represents the next available request id for the client.
         _pending_requests: A dictionary that maps request ids to Request objects that
             store the results or errors of the requests.
@@ -143,7 +146,11 @@ class LanguageServerProcess:
         self.notify = LspNotification(self.send_notification)
 
         self.process_launch_info = process_launch_info
-        self.process: subprocess.Popen[bytes] | None = None
+        self.process: supervise.Popen | None = None
+        self._state: LanguageServerState | None = None
+        self._state_file: LanguageServerStateFile | None = None
+        self._state_lock = threading.Lock()
+        self._adopted = False
         self._is_shutting_down = False
 
         self.request_id = 1
@@ -192,16 +199,31 @@ class LanguageServerProcess:
         log.info("Starting language server process via command: %s", self.process_launch_info.cmd)
         kwargs = subprocess_kwargs()
         kwargs["start_new_session"] = self.start_independent_lsp_process
-        self.process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stdin=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=child_proc_env,
-            cwd=self.process_launch_info.cwd,
-            shell=True,
-            **kwargs,
-        )
+
+        # a live server an ended instance held, or else a new one
+        self._state_file = LanguageServerStateFile(self.process_launch_info.cmd, self.process_launch_info.cwd)
+        adoptable = self._state_file.adoptable()
+        if adoptable is not None:
+            log.info("Adopting language server %s from its record", adoptable.record)
+            self.process = supervise.Popen.adopt(pathlib.Path(adoptable.record), adoptable.stdout_offset)
+            self.request_id = adoptable.request_id
+            adoptable.instance_pid = os.getpid()
+            self._state, self._adopted = adoptable, True
+        else:
+            self.process = supervise.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stdin=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=child_proc_env,
+                cwd=self.process_launch_info.cwd,
+                shell=True,
+                waiting={"kind": "solidlsp.language_server"},
+                read_only_stdin=self.process_launch_info.read_only_stdin,
+                **kwargs,
+            )
+            self._state = LanguageServerState(record=str(self.process.record), instance_pid=os.getpid())
+        self._save_state()
 
         # Check if process terminated immediately
         if self.process.returncode is not None:
@@ -231,8 +253,12 @@ class LanguageServerProcess:
         self.process = None
         if process:
             self._cleanup_process(process)
+            process.release()
+        if self._state_file is not None:
+            self._state_file.remove()
+        self._state = None
 
-    def _cleanup_process(self, process: subprocess.Popen[bytes]) -> None:
+    def _cleanup_process(self, process: supervise.Popen) -> None:
         """Clean up a process: close stdin, terminate/kill process, close stdout/stderr."""
         # Close stdin first to prevent deadlocks
         # See: https://bugs.python.org/issue35539
@@ -257,12 +283,12 @@ class LanguageServerProcess:
             except Exception:
                 pass
 
-    def _terminate_or_kill_process(self, process: subprocess.Popen[bytes]) -> None:
+    def _terminate_or_kill_process(self, process: supervise.Popen) -> None:
         """Try to terminate the process gracefully, then forcefully if necessary."""
         # First try to terminate the process tree gracefully
         self._signal_process_tree(process, terminate=True)
 
-    def _signal_process_tree(self, process: subprocess.Popen[bytes], terminate: bool = True) -> None:
+    def _signal_process_tree(self, process: supervise.Popen, terminate: bool = True) -> None:
         """Send signal (terminate or kill) to the process and all its children."""
         signal_method = "terminate" if terminate else "kill"
 
@@ -343,19 +369,24 @@ class LanguageServerProcess:
                 line = self.process.stdout.readline()
                 if not line:
                     continue
+                consumed = len(line)
                 try:
                     num_bytes = content_length(line)
                 except ValueError:
+                    self._mark_consumed(consumed)
                     continue
                 if num_bytes is None:
+                    self._mark_consumed(consumed)
                     continue
                 while line and line.strip():
                     line = self.process.stdout.readline()
+                    consumed += len(line)
                 if not line:
                     continue
                 body = self._read_bytes_from_process(self.process, self.process.stdout, num_bytes)
 
                 self._handle_body(body)
+                self._mark_consumed(consumed + num_bytes)
         except LanguageServerTerminatedException as e:
             exception = e
         except (BrokenPipeError, ConnectionResetError) as e:
@@ -447,7 +478,59 @@ class LanguageServerProcess:
         """
         Send notification pertaining to the given method to the server with the given parameters
         """
-        self._send_payload(make_notification(method, params))
+        if self._admit_notification(method, params):
+            self._send_payload(make_notification(method, params))
+
+    def _save_state(self) -> None:
+        if self._state is not None and self._state_file is not None:
+            self._state.request_id = self.request_id
+            self._state_file.save(self._state)
+
+    def _mark_consumed(self, count: int) -> None:
+        with self._state_lock:
+            if self._state is not None:
+                self._state.stdout_offset += count
+                self._save_state()
+
+    def _admit_notification(self, method: str, params: dict | None) -> bool:
+        """
+        Keeps the state of the documents the server holds, and holds back what an adopted server has had.
+
+        :param method: the notification's method.
+        :param params: the notification's parameters.
+        :return: whether to send the notification.
+        """
+        state = self._state
+        if state is None or params is None:
+            return not (self._adopted and method == "initialized")
+        if method == "initialized":
+            return not self._adopted
+        if method not in ("textDocument/didOpen", "textDocument/didChange", "textDocument/didClose"):
+            return True
+
+        document = params["textDocument"]
+        uri = document["uri"]
+        admit = True
+        with self._state_lock:
+            known = state.open_documents.get(uri)
+            if method == "textDocument/didClose":
+                state.open_documents.pop(uri, None)
+            elif method == "textDocument/didChange":
+                changes = params.get("contentChanges", [])
+                whole = len(changes) == 1 and "range" not in changes[0]
+                state.open_documents[uri] = OpenDocument(document.get("version", 0), text_digest(changes[0]["text"]) if whole else None)
+            elif known is None or not self._adopted:
+                state.open_documents[uri] = OpenDocument(document.get("version", 0), text_digest(document["text"]))
+            else:
+                admit = False
+                digest = text_digest(document["text"])
+                if known.digest != digest:
+                    version = known.version + 1
+                    change = {"textDocument": {"uri": uri, "version": version}, "contentChanges": [{"text": document["text"]}]}
+                    self._send_payload(make_notification("textDocument/didChange", change))
+                    state.open_documents[uri] = OpenDocument(version, digest)
+            self._save_state()
+        return admit
 
     def send_response(self, request_id: Any, params: PayloadLike) -> None:
         """
@@ -476,6 +559,14 @@ class LanguageServerProcess:
         """
         Send request to the server, register the request id, and wait for the response
         """
+        if method == "initialize" and self._adopted and self._state is not None:
+            return self._state.initialize_result
+
+        # a server told its client's pid watches it and ends with it, and a server must outlive serena
+        # (pg://brain/daemon/restart/survival): null is the protocol's own value for a client it does not watch
+        if method == "initialize" and params is not None:
+            params = {**params, "processId": None}
+
         with self._request_id_lock:
             request_id = self.request_id
             self.request_id += 1
@@ -494,6 +585,11 @@ class LanguageServerProcess:
 
         if result.is_error():
             raise SolidLSPException(f"Error processing request {method} with params:\n{params}", cause=result.error) from result.error
+
+        if method == "initialize" and self._state is not None:
+            with self._state_lock:
+                self._state.initialize_result = result.payload
+                self._save_state()
 
         log.debug("Returning result:\n%s", result.payload)
         return result.payload

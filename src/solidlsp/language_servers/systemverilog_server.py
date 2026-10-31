@@ -6,13 +6,13 @@ import logging
 import os
 import pathlib
 import shutil
-import subprocess
 from typing import Any, cast
 
 from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.settings import SolidLSPSettings
+from solidlsp.util import supervise
 
 from .common import RuntimeDependency, RuntimeDependencyCollection
 
@@ -44,7 +44,7 @@ class SystemVerilogLanguageServer(SolidLanguageServer):
             if system_verible:
                 # Log version information
                 try:
-                    result = subprocess.run(
+                    result = supervise.run(
                         [system_verible, "--version"],
                         capture_output=True,
                         text=True,

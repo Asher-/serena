@@ -3,6 +3,7 @@ import subprocess
 
 from pydantic import BaseModel
 
+from solidlsp.util import supervise
 from solidlsp.util.subprocess_util import subprocess_kwargs
 
 
@@ -25,7 +26,7 @@ def execute_shell_command(command: str, cwd: str | None = None, capture_stderr: 
     if cwd is None:
         cwd = os.getcwd()
 
-    process = subprocess.Popen(
+    process = supervise.Popen(
         command,
         shell=True,
         stdin=subprocess.DEVNULL,
@@ -39,13 +40,13 @@ def execute_shell_command(command: str, cwd: str | None = None, capture_stderr: 
     )
 
     stdout, stderr = process.communicate()
-    return ShellCommandResult(stdout=stdout, stderr=stderr, return_code=process.returncode, cwd=cwd)
+    return ShellCommandResult(stdout=stdout, stderr=stderr, return_code=process.wait(), cwd=cwd)
 
 
 def subprocess_check_output(
     args: list[str], encoding: str = "utf-8", strip: bool = True, timeout: float | None = None, cwd: str | None = None
 ) -> str:
-    output = subprocess.check_output(
+    output = supervise.check_output(
         args, stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=timeout, env=os.environ.copy(), cwd=cwd, **subprocess_kwargs()
     ).decode(encoding)  # type: ignore
     if strip:

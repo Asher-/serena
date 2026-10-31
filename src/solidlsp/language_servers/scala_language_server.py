@@ -17,6 +17,7 @@ from solidlsp.ls_utils import PlatformUtils
 from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
+from solidlsp.util import supervise
 
 if not PlatformUtils.get_platform_id().value.startswith("win"):
     pass
@@ -222,7 +223,7 @@ class ScalaLanguageServer(SolidLanguageServer):
                 log.info("'cs' command not found. Trying to install it using 'coursier'.")
                 try:
                     log.info("Running 'coursier setup --yes' to install 'cs'...")
-                    subprocess.run([coursier_command_path, "setup", "--yes"], check=True, capture_output=True, text=True)
+                    supervise.run([coursier_command_path, "setup", "--yes"], check=True, capture_output=True, text=True)
                 except subprocess.CalledProcessError as e:
                     raise RuntimeError(f"Failed to set up 'cs' command with 'coursier setup'. Stderr: {e.stderr}")
 
@@ -234,7 +235,7 @@ class ScalaLanguageServer(SolidLanguageServer):
                 log.info("'cs' command installed successfully.")
 
             log.info(f"metals executable not found at {metals_executable}, bootstrapping...")
-            subprocess.run(["mkdir", "-p", os.path.join(metals_home, metals_version)], check=True)
+            supervise.run(["mkdir", "-p", os.path.join(metals_home, metals_version)], check=True)
             artifact = f"org.scalameta:metals_2.13:{metals_version}"
             cmd = [
                 cs_command_path,
@@ -255,7 +256,7 @@ class ScalaLanguageServer(SolidLanguageServer):
                 "-f",
             ]
             log.info("Bootstrapping metals...")
-            subprocess.run(cmd, cwd=metals_home, check=True)
+            supervise.run(cmd, cwd=metals_home, check=True)
             log.info("Bootstrapping metals finished.")
         return [metals_executable]
 

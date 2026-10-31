@@ -52,9 +52,9 @@ def go_project(agent: SerenaAgent, tmp_path: Path) -> Project:
 
 def _bridge_pids() -> set[int]:
     """
-    :return: the process ids of this process's serena-go-bridge children
+    :return: the process ids of this process's serena-go-bridge descendants, each a child of its supervisor
     """
-    return {child.pid for child in psutil.Process().children() if child.name() == _BRIDGE_PROCESS_NAME}
+    return {child.pid for child in psutil.Process().children(recursive=True) if child.name() == _BRIDGE_PROCESS_NAME}
 
 
 def _miss(*args: object, **kwargs: object) -> None:

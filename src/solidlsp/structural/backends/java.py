@@ -14,18 +14,16 @@ the wire are UTF-8 byte offsets, computed in the bridge from JavaParser's
 
 from __future__ import annotations
 
-import json
 import os
 import re
-import struct
 import subprocess
-import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from solidlsp.structural.base import StructuralLanguage
+from solidlsp.structural.bridge_process import StructuralBridge
 from solidlsp.structural.errors import (
     DeclarationError,
     NameResolutionError,
@@ -35,6 +33,7 @@ from solidlsp.structural.errors import (
 from solidlsp.structural.kinds import AttributeSpec, KindName, KindSchema, KindSpec
 from solidlsp.structural.names import LogicalName, LogicalNameResolver, NameResolution
 from solidlsp.structural.patterns import AstPattern, PatternMatch
+from solidlsp.util import supervise
 
 # -----------------------------------------------------------------------------
 # Attribute specs
@@ -386,7 +385,7 @@ def _java_binary() -> str:
         if candidate.exists():
             return str(candidate)
     try:
-        home = subprocess.check_output(["/usr/libexec/java_home"], text=True, stderr=subprocess.DEVNULL).strip()
+        home = supervise.check_output(["/usr/libexec/java_home"], text=True, stderr=subprocess.DEVNULL).strip()
         if home:
             candidate = Path(home) / "bin" / "java"
             if candidate.exists():
@@ -418,7 +417,7 @@ def _build_bridge_if_needed() -> Path:
             pass
         if jar.exists():
             return jar
-        result = subprocess.run(
+        result = supervise.run(
             ["mvn", "-q", "-B", "package"],
             check=False,
             cwd=str(_BRIDGE_PACKAGE_DIR),
@@ -440,85 +439,11 @@ def _build_bridge_if_needed() -> Path:
     return jar
 
 
-class _JavaBridge:
-    """Long-lived ``serena-java-bridge`` subprocess.
-
-    One bridge is shared by a single :class:`JavaStructuralLanguage`
-    instance. Calls are serialized by a mutex so concurrent Python callers
-    do not interleave their JSON frames.
-    """
+class _JavaBridge(StructuralBridge):
+    """Long-lived ``serena-java-bridge`` process, shared by a single :class:`JavaStructuralLanguage` instance."""
 
     def __init__(self, jar_path: Path):
-        self._jar_path = jar_path
-        self._process: subprocess.Popen[bytes] | None = None
-        self._lock = threading.Lock()
-
-    def _ensure_started(self) -> subprocess.Popen[bytes]:
-        if self._process is None or self._process.poll() is not None:
-            self._process = subprocess.Popen(
-                [_java_binary(), "-jar", str(self._jar_path)],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=0,
-            )
-        return self._process
-
-    def call(self, op: str, **payload: Any) -> dict[str, Any]:
-        with self._lock:
-            proc = self._ensure_started()
-            assert proc.stdin is not None and proc.stdout is not None
-            request = {"op": op, **payload}
-            body = json.dumps(request).encode("utf-8")
-            prefix = struct.pack("<I", len(body))
-            try:
-                proc.stdin.write(prefix + body)
-                proc.stdin.flush()
-                length_bytes = _read_exact(proc.stdout, 4)
-                (length,) = struct.unpack("<I", length_bytes)
-                response_bytes = _read_exact(proc.stdout, length)
-            except (BrokenPipeError, OSError) as exc:
-                stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
-                raise ParseError(
-                    language_key="java",
-                    source_preview="",
-                    detail=f"bridge communication failed: {exc}; stderr:\n{stderr}",
-                )
-            return json.loads(response_bytes)
-
-    def close(self) -> None:
-        with self._lock:
-            if self._process is None:
-                return
-            try:
-                if self._process.stdin is not None:
-                    self._process.stdin.close()
-            except OSError:
-                pass
-            try:
-                self._process.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-                self._process.wait()
-            self._process = None
-
-    def __del__(self) -> None:
-        try:
-            self.close()
-        except Exception:
-            pass
-
-
-def _read_exact(stream: Any, n: int) -> bytes:
-    chunks: list[bytes] = []
-    remaining = n
-    while remaining > 0:
-        chunk = stream.read(remaining)
-        if not chunk:
-            raise OSError("bridge closed stdout unexpectedly")
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    return b"".join(chunks)
+        super().__init__([_java_binary(), "-jar", str(jar_path)], "java")
 
 
 # -----------------------------------------------------------------------------
