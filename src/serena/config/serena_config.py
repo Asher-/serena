@@ -673,6 +673,8 @@ class RegisteredProject(ToStringMixin):
         if self._project_instance is None:
             from ..project import Project
 
+            serena_config.place_data_folder_outside_project(self.project_root)
+
             with LogTime(f"Loading project instance for {self}", logger=log):
                 self._project_instance = Project(
                     project_root=str(self.project_root),
@@ -1062,11 +1064,7 @@ class SerenaConfig(SharedConfig):
                     f"Project with path {project_root} was already added with name '{already_registered_project.project_name}'."
                 )
 
-        # place the data folder of a directory holding none of its own in the serena home directory, so that
-        # activating the directory writes nothing inside it
-        in_project_folder = os.path.join(str(project_root), SERENA_MANAGED_DIR_NAME)
-        if self.project_serena_folder_location == DEFAULT_PROJECT_SERENA_FOLDER_LOCATION and not os.path.isdir(in_project_folder):
-            os.makedirs(self.get_home_project_serena_folder(project_root), exist_ok=True)
+        self.place_data_folder_outside_project(project_root)
 
         project_config = ProjectConfig.load(project_root, serena_config=self, autogenerate=True)
 
@@ -1169,25 +1167,53 @@ class SerenaConfig(SharedConfig):
         """
         Resolves the location of the project's .serena data folder using fallback logic:
 
-        1. If the folder exists at the configured path (``project_serena_folder_location``), use it.
-        2. Otherwise, if it exists at the default location inside the project root, use that.
-        3. Otherwise, if it exists in the serena home directory (:meth:`get_home_project_serena_folder`), use that.
-        4. If none exists, return the configured path (for creation).
+        1. If the folder at the configured path (``project_serena_folder_location``) holds a project.yml, use it.
+        2. Otherwise, if the folder at the default location inside the project root holds one, use that.
+        3. Otherwise, if a folder exists in the serena home directory (:meth:`get_home_project_serena_folder`), use that.
+        4. Otherwise, use the folder that exists at the configured path, then the one at the default location.
+        5. If none exists, return the configured path (for creation).
 
         :param project_root: the absolute path to the project root directory
         :return: the resolved absolute path to the .serena data folder
         :raises SerenaConfigError: if the configured template contains an unknown placeholder
         """
         configured_path = self.get_configured_project_serena_folder(project_root)
-        if os.path.isdir(configured_path):
-            return configured_path
         default_path = os.path.join(str(project_root), SERENA_MANAGED_DIR_NAME)
-        if configured_path != default_path and os.path.isdir(default_path):
-            return default_path
+        for folder in (configured_path, default_path):
+            if self._holds_project_yml(folder):
+                return folder
         home_path = self.get_home_project_serena_folder(project_root)
         if os.path.isdir(home_path):
             return home_path
+        if os.path.isdir(configured_path):
+            return configured_path
+        if configured_path != default_path and os.path.isdir(default_path):
+            return default_path
         return configured_path
+
+    @classmethod
+    def _holds_project_yml(cls, folder: str) -> bool:
+        """
+        :param folder: the path of a project's data folder
+        :return: whether the folder holds a project.yml
+        """
+        return os.path.isfile(os.path.join(folder, ProjectConfig.SERENA_PROJECT_FILE))
+
+    def place_data_folder_outside_project(self, project_root: str | Path) -> None:
+        """
+        Creates the data folder of a project in the serena home directory when its data would otherwise be written inside
+        a directory that holds no project.yml, so that activating the directory writes nothing inside it. A configured
+        location outside the project directory is left to be used.
+
+        :param project_root: the absolute path to the project root directory
+        """
+        configured_path = self.get_configured_project_serena_folder(project_root)
+        default_path = os.path.join(str(project_root), SERENA_MANAGED_DIR_NAME)
+        if self._holds_project_yml(configured_path) or self._holds_project_yml(default_path):
+            return
+        if not Path(configured_path).resolve().is_relative_to(Path(project_root).resolve()):
+            return
+        os.makedirs(self.get_home_project_serena_folder(project_root), exist_ok=True)
 
     @staticmethod
     def get_home_project_serena_folder(project_root: str | Path) -> str:

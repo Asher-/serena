@@ -1,7 +1,7 @@
 """
 Tests that ``activate_project`` binds exactly the directory it is given (task://issue_bin_closure_activation_directory.1).
 
-Each test reproduces one issue of plan://serena/issue_bin_closure_activation_directory:
+Each test pins one clause of plan://serena/issue_bin_closure_activation_directory:
 
 * symptom://serena/activate-project-stuck-on-parent-repo-for-git-worktree -- an absolute worktree path
   must switch the session away from the repository the worktree belongs to;
@@ -12,6 +12,7 @@ Each test reproduces one issue of plan://serena/issue_bin_closure_activation_dir
 """
 
 import logging
+import shutil
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
@@ -162,5 +163,53 @@ def test_activating_a_directory_without_project_yml_writes_nothing_inside_it(tmp
     assert active is not None and active.project_root == str(plain.resolve())
     overview = agent.get_tool(CursorOverviewTool).apply_ex(relative_path="module.py", because=BECAUSE)
     assert "plain" in overview, overview
+
+    assert _files_under(plain) == files_before
+
+
+def test_activating_a_directory_with_a_data_folder_but_no_project_yml_writes_nothing_inside_it(tmp_path: Path, agent: SerenaAgent) -> None:
+    # a repository that tracks .serena/memories and holds no .serena/project.yml
+    tracked = tmp_path / "tracked"
+    (tracked / ".serena" / "memories").mkdir(parents=True)
+    (tracked / ".serena" / "memories" / "note.md").write_text("note\n")
+    (tracked / "module.py").write_text("def tracked():\n    return 1\n")
+    files_before = _files_under(tracked)
+
+    agent.get_tool(ActivateProjectTool).apply(project=str(tracked))
+    overview = agent.get_tool(CursorOverviewTool).apply_ex(relative_path="module.py", because=BECAUSE)
+    assert "tracked" in overview, overview
+
+    assert _files_under(tracked) == files_before
+
+
+def test_loading_a_registered_directory_whose_data_folder_is_gone_writes_nothing_inside_it(tmp_path: Path, agent: SerenaAgent) -> None:
+    # a directory registered by an earlier activation, whose data folder has since been removed
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "module.py").write_text("def plain():\n    return 1\n")
+    files_before = _files_under(plain)
+    agent.get_tool(ActivateProjectTool).apply(project=str(plain))
+    home_folder = Path(agent.serena_config.get_home_project_serena_folder(plain))
+    assert home_folder.is_dir()
+    shutil.rmtree(home_folder)
+
+    # the next instance of the project is loaded from its registration
+    registered = next(project for project in agent.serena_config.projects if Path(project.project_root).resolve() == plain.resolve())
+    registered._project_instance = None
+    registered.get_project_instance(agent.serena_config)
+
+    assert home_folder.is_dir()
+    assert _files_under(plain) == files_before
+
+
+def test_a_configured_location_inside_the_directory_writes_nothing_inside_it(tmp_path: Path, agent: SerenaAgent) -> None:
+    # a configured data folder location that lies inside the project directory
+    agent.serena_config.project_serena_folder_location = "$projectDir/.data"
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "module.py").write_text("def plain():\n    return 1\n")
+    files_before = _files_under(plain)
+
+    agent.get_tool(ActivateProjectTool).apply(project=str(plain))
 
     assert _files_under(plain) == files_before
