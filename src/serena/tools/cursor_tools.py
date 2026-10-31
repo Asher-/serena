@@ -17,7 +17,7 @@ from serena.code_editor import LandedEditError
 from serena.cursor import CursorManager, EdgeType, PlaintextCursorState, ReadRung, StructuralCursorState
 from serena.symbol import LanguageServerSymbol
 from serena.tools import SUCCESS_RESULT
-from serena.tools.tools_base import Tool, ToolMarkerSymbolicEdit, ToolMarkerSymbolicRead
+from serena.tools.tools_base import Tool, ToolMarkerNamesProjectRoot, ToolMarkerSymbolicEdit, ToolMarkerSymbolicRead
 from serena.util.file_lifecycle import StaleWriteError
 from serena.util.line_numbers import to_display_line, to_internal_line
 from serena.util.staleness import UNCONDITIONAL, ExpectedVersion, check_stale, read_file_version
@@ -110,7 +110,7 @@ def _reply_after_landed_edit(manager: CursorManager, cursor_id: str, applied: st
     return f"{applied}\n\n{view}"
 
 
-class CursorStartTool(Tool, ToolMarkerSymbolicRead):
+class CursorStartTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoot):
     """
     Start a navigation cursor at a symbol for incremental code exploration.
     The cursor tracks your position and lets you navigate along code relationships
@@ -200,10 +200,10 @@ class CursorStartTool(Tool, ToolMarkerSymbolicRead):
         :param max_bytes: cap on body bytes shown (0 = no byte cap).
         :param continuation: a token a prior truncated read handed back; pages the next
             window ("give me the rest") and supersedes ``offset_line``.
-        :return: a ``Started cursor <id>.`` line followed by the cursor's
-            symbolic projection. The prefix mirrors :class:`CursorFindTool`'s
-            output so callers can extract the cursor handle uniformly across
-            both entry points.
+        :return: a ``root: <absolute path>`` line, then a ``Started cursor <id>.``
+            line followed by the cursor's symbolic projection. The ``Started cursor``
+            line mirrors :class:`CursorFindTool`'s output so callers can extract the
+            cursor handle uniformly across both entry points.
         """
         parsed_edge_types = _parse_edge_types(edge_types) if edge_types else None
         manager = self.agent.get_cursor_manager()
@@ -223,7 +223,7 @@ class CursorStartTool(Tool, ToolMarkerSymbolicRead):
         )
 
 
-class CursorMoveTool(Tool, ToolMarkerSymbolicRead):
+class CursorMoveTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoot):
     """
     Move a navigation cursor to an adjacent symbol. The target should be
     visible in the cursor's current neighborhood (from cursor_start or cursor_look output).
@@ -277,7 +277,7 @@ class CursorMoveTool(Tool, ToolMarkerSymbolicRead):
         return manager.format_cursor_view(cursor_id)
 
 
-class CursorLookTool(Tool, ToolMarkerSymbolicRead):
+class CursorLookTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoot):
     """
     Look at the neighborhood of the cursor's current position without moving.
     Useful for re-examining the current position after changing edge type configuration.
@@ -306,7 +306,7 @@ class CursorLookTool(Tool, ToolMarkerSymbolicRead):
         )
 
 
-class CursorConfigureTool(Tool, ToolMarkerSymbolicRead):
+class CursorConfigureTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoot):
     """
     Configure which edge types a cursor follows and what information is shown.
     Edge types: contains, references, referenced-by, calls, called-by, inherits, inherited-by.
@@ -382,7 +382,7 @@ class CursorConfigureTool(Tool, ToolMarkerSymbolicRead):
         return manager.format_cursor_view(cursor_id)
 
 
-class CursorHistoryTool(Tool, ToolMarkerSymbolicRead):
+class CursorHistoryTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoot):
     """
     Show the trail of symbols visited by a cursor, from start to current position.
     """
@@ -415,7 +415,7 @@ class CursorCloseTool(Tool, ToolMarkerSymbolicRead):
         return f"Cursor {cursor_id} closed."
 
 
-class CursorFindTool(Tool, ToolMarkerSymbolicRead):
+class CursorFindTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoot):
     """
     Search for symbols in the codebase by name path pattern (the multi-match variant of
     ``cursor_start``, which requires a unique match). If the search yields exactly one
@@ -577,7 +577,7 @@ class CursorFindTool(Tool, ToolMarkerSymbolicRead):
         return self._limit_length(result, max_answer_chars, shortened_result_factories=[shortened_relative_path_to_name_paths])
 
 
-class CursorGrepTool(Tool, ToolMarkerSymbolicRead):
+class CursorGrepTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoot):
     """
     Find a textual pattern and start a cursor at every enclosing symbol.
 
@@ -1553,7 +1553,7 @@ class CursorRenameTool(Tool, ToolMarkerSymbolicEdit):
             return f"{status_message}\n\n(edit applied; cursor {cursor_id} could not re-anchor afterward to the renamed symbol: {e})"
 
 
-class CursorOverviewTool(Tool, ToolMarkerSymbolicRead):
+class CursorOverviewTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoot):
     """
     Return an overview of the top-level symbols in a file by starting a cursor on the
     file's first top-level symbol with only the ``contains`` edge active. This covers the
@@ -1650,7 +1650,7 @@ class CursorOverviewTool(Tool, ToolMarkerSymbolicRead):
         return f"{why}\n\n{relative_path}: {manager.plaintext_overview(relative_path)}"
 
 
-class CursorNarrateTool(Tool, ToolMarkerSymbolicRead):
+class CursorNarrateTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoot):
     """
     Record the agent's goal in understanding on a cursor without moving it.
 

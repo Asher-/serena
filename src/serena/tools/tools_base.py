@@ -96,7 +96,14 @@ class ToolMarker:
     """
 
 
-class ToolMarkerCanEdit(ToolMarker):
+class ToolMarkerNamesProjectRoot(ToolMarker):
+    """
+    Marker class for all tools whose result opens with the line ``root: <absolute path>``, naming the root of the project the
+    call resolved against: the cursor views and, through :class:`ToolMarkerCanEdit`, the write results.
+    """
+
+
+class ToolMarkerCanEdit(ToolMarkerNamesProjectRoot):
     """
     Marker class for all tools that can perform editing operations on files.
     """
@@ -530,6 +537,12 @@ class Tool(Component):
                 msg = f"Error executing tool: {e.__class__.__name__} - {e}"
                 log.error(f"Error executing tool: {e}", exc_info=e)
                 result = msg
+
+            # the root opens the result, so that no line of a file body the result goes on to render is read as the root
+            if isinstance(self, ToolMarkerNamesProjectRoot):
+                project = self.agent.get_active_project()
+                if project is not None:
+                    result = f"root: {project.project_root}\n{result}"
 
             if log_call:
                 log.info(f"Result: {result}")
