@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 import shutil
@@ -14,6 +15,7 @@ from serena.config.serena_config import (
     RegisteredProject,
     SerenaConfig,
     SerenaConfigError,
+    SerenaPaths,
 )
 from serena.constants import PROJECT_TEMPLATE_FILE, SERENA_MANAGED_DIR_NAME
 from serena.project import MemoriesManager, Project
@@ -534,6 +536,200 @@ class TestProjectSerenaDataFolder:
         )
         project = self._make_project(config)
         assert project.path_to_serena_data_folder() == str(custom_serena)
+
+
+class TestDataFolderPlacement:
+    """Tests calling directly the SerenaConfig units that locate a project's data folder and place it outside the project."""
+
+    @pytest.fixture(autouse=True)
+    def _directories(self, work_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Provides a project directory and a serena home directory confined to the test."""
+        self.work_dir = work_dir
+        self.project_root = work_dir / "myproject"
+        self.project_root.mkdir()
+
+        # the serena home directory, and the three folders a project's data can occupy
+        serena_home = work_dir / "serena_home"
+        serena_home.mkdir()
+        monkeypatch.setattr(SerenaPaths(), "serena_user_home_dir", str(serena_home))
+        self.serena_home = serena_home
+        self.home_folder = Path(SerenaConfig.get_home_project_serena_folder(self.project_root))
+        self.default_folder = self.project_root / SERENA_MANAGED_DIR_NAME
+        self.configured_folder = work_dir / "metadata" / "myproject" / SERENA_MANAGED_DIR_NAME
+
+    def _config(self, location: str | None = None) -> SerenaConfig:
+        """
+        :param location: the configured data folder location; ``None`` selects the location outside the project,
+            whose folder is ``configured_folder``
+        :return: a configuration with no registered project and no configuration file
+        """
+        if location is None:
+            location = str(self.work_dir / "metadata") + "/$projectFolderName/" + SERENA_MANAGED_DIR_NAME
+        return SerenaConfig(gui_log_window=False, web_dashboard=False, project_serena_folder_location=location)
+
+    @staticmethod
+    def _make_folder(folder: Path, holds_project_yml: bool = False) -> Path:
+        """
+        :param folder: the data folder to create
+        :param holds_project_yml: whether to write a project.yml into it
+        :return: the folder
+        """
+        folder.mkdir(parents=True)
+        if holds_project_yml:
+            (folder / ProjectConfig.SERENA_PROJECT_FILE).write_text("project_name: myproject\n")
+        return folder
+
+    def _files_under_project(self) -> set[Path]:
+        """
+        :return: every file and directory beneath the project directory
+        """
+        return set(self.project_root.rglob("*"))
+
+    @staticmethod
+    def _add(config: SerenaConfig, project_root: Path) -> Project:
+        """
+        Adds a project and waits for its background scan, which would otherwise outlive the test's directory.
+
+        :param config: the configuration to add the project to
+        :param project_root: the project directory
+        :return: the added project
+        """
+        project = config.add_project_from_path(project_root)
+        project._ignore_spec_available.wait()
+        return project
+
+    def test_add_refuses_a_path_that_does_not_exist(self):
+        with pytest.raises(FileNotFoundError, match="Path does not exist"):
+            self._config(DEFAULT_PROJECT_SERENA_FOLDER_LOCATION).add_project_from_path(self.project_root / "absent")
+
+    def test_add_refuses_a_path_that_is_not_a_directory(self):
+        module = self.project_root / "main.py"
+        module.write_text("print('hello')\n")
+
+        with pytest.raises(FileNotFoundError, match="Path is not a directory"):
+            self._config(DEFAULT_PROJECT_SERENA_FOLDER_LOCATION).add_project_from_path(module)
+
+    def test_add_refuses_a_directory_already_registered(self):
+        config = self._config(DEFAULT_PROJECT_SERENA_FOLDER_LOCATION)
+        self._add(config, self.project_root)
+
+        with pytest.raises(FileExistsError, match="already added with name 'myproject'"):
+            config.add_project_from_path(self.project_root)
+
+        assert len(config.projects) == 1
+
+    def test_add_registers_a_directory_beside_another_and_writes_nothing_inside_it(self):
+        # a directory holding source, and a configuration in which another project is registered
+        (self.project_root / "main.py").write_text("print('hello')\n")
+        files_before = self._files_under_project()
+        config = self._config(DEFAULT_PROJECT_SERENA_FOLDER_LOCATION)
+        other_root = self.work_dir / "other"
+        other_root.mkdir()
+        self._add(config, other_root)
+
+        project = self._add(config, self.project_root)
+
+        assert project.project_root == str(self.project_root.resolve())
+        assert [str(registered.project_root) for registered in config.projects] == [str(other_root.resolve()), project.project_root]
+        assert (self.home_folder / ProjectConfig.SERENA_PROJECT_FILE).is_file()
+        assert self._files_under_project() == files_before
+
+    def test_a_configured_folder_holding_project_yml_is_resolved_first(self):
+        self._make_folder(self.configured_folder, holds_project_yml=True)
+        self._make_folder(self.default_folder, holds_project_yml=True)
+        self._make_folder(self.home_folder)
+
+        assert self._config().get_project_serena_folder(self.project_root) == str(self.configured_folder)
+
+    def test_a_default_folder_holding_project_yml_outranks_the_home_folder(self):
+        self._make_folder(self.configured_folder)
+        self._make_folder(self.default_folder, holds_project_yml=True)
+        self._make_folder(self.home_folder)
+
+        assert self._config().get_project_serena_folder(self.project_root) == str(self.default_folder)
+
+    def test_the_home_folder_outranks_folders_without_project_yml(self):
+        self._make_folder(self.configured_folder)
+        self._make_folder(self.default_folder)
+        self._make_folder(self.home_folder)
+
+        assert self._config().get_project_serena_folder(self.project_root) == str(self.home_folder)
+
+    def test_a_configured_folder_without_project_yml_outranks_the_default_folder(self):
+        self._make_folder(self.configured_folder)
+        self._make_folder(self.default_folder)
+
+        assert self._config().get_project_serena_folder(self.project_root) == str(self.configured_folder)
+
+    def test_a_default_folder_without_project_yml_is_used_when_nothing_else_exists(self):
+        self._make_folder(self.default_folder)
+
+        assert self._config().get_project_serena_folder(self.project_root) == str(self.default_folder)
+
+    def test_the_configured_path_is_returned_for_creation_when_no_folder_exists(self):
+        assert self._config().get_project_serena_folder(self.project_root) == str(self.configured_folder)
+
+    def test_the_default_location_is_returned_for_creation_when_it_is_the_configured_one(self):
+        config = self._config(DEFAULT_PROJECT_SERENA_FOLDER_LOCATION)
+
+        assert config.get_project_serena_folder(self.project_root) == str(self.default_folder)
+
+    @pytest.mark.parametrize("location", [None, DEFAULT_PROJECT_SERENA_FOLDER_LOCATION], ids=["configured", "default"])
+    def test_placement_leaves_a_directory_that_holds_project_yml_alone(self, location: str | None):
+        holder = self.configured_folder if location is None else self.default_folder
+        self._make_folder(holder, holds_project_yml=True)
+
+        self._config(location).place_data_folder_outside_project(self.project_root)
+
+        assert not self.home_folder.exists()
+
+    def test_placement_leaves_a_default_folder_holding_project_yml_alone_under_another_location(self):
+        self._make_folder(self.default_folder, holds_project_yml=True)
+
+        self._config().place_data_folder_outside_project(self.project_root)
+
+        assert not self.home_folder.exists()
+
+    def test_placement_leaves_a_configured_location_outside_the_project_to_be_used(self):
+        self._config().place_data_folder_outside_project(self.project_root)
+
+        assert not self.home_folder.exists()
+        assert not self.configured_folder.exists()
+
+    @pytest.mark.parametrize("location", [DEFAULT_PROJECT_SERENA_FOLDER_LOCATION, "$projectDir/.data"], ids=["default", "inside"])
+    def test_placement_creates_the_home_folder_for_a_location_inside_the_project(self, location: str):
+        files_before = self._files_under_project()
+
+        self._config(location).place_data_folder_outside_project(self.project_root)
+
+        assert self.home_folder.is_dir()
+        assert self._files_under_project() == files_before
+
+    def test_placement_tolerates_a_home_folder_that_exists(self):
+        self._make_folder(self.home_folder)
+
+        self._config(DEFAULT_PROJECT_SERENA_FOLDER_LOCATION).place_data_folder_outside_project(self.project_root)
+
+        assert self.home_folder.is_dir()
+
+    def test_the_home_folder_is_named_after_the_directory_and_a_digest_of_its_path(self):
+        digest = hashlib.sha256(str(self.project_root.resolve()).encode("utf-8")).hexdigest()[:16]
+
+        assert self.home_folder == self.serena_home / "projects" / f"myproject-{digest}"
+
+    def test_two_directories_of_one_name_get_different_home_folders(self):
+        namesake = self.work_dir / "elsewhere" / "myproject"
+        namesake.mkdir(parents=True)
+
+        assert SerenaConfig.get_home_project_serena_folder(namesake) != str(self.home_folder)
+
+    def test_a_folder_holds_project_yml_only_when_that_file_is_in_it(self):
+        self._make_folder(self.default_folder, holds_project_yml=True)
+        self._make_folder(self.configured_folder)
+
+        assert SerenaConfig._holds_project_yml(str(self.default_folder))
+        assert not SerenaConfig._holds_project_yml(str(self.configured_folder))
+        assert not SerenaConfig._holds_project_yml(str(self.home_folder))
 
 
 class TestMemoriesManagerCustomPath:

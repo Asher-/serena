@@ -64,11 +64,11 @@ def _files_under(root: Path) -> set[Path]:
 
 
 @pytest.fixture
-def serena_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def serena_home(work_dir: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """
-    Redirects the serena home directory into the test's temporary directory.
+    Redirects the serena home directory into the test's own directory.
     """
-    home = tmp_path / "serena_home"
+    home = work_dir / "serena_home"
     home.mkdir()
     monkeypatch.setattr(SerenaPaths(), "serena_user_home_dir", str(home))
     return home
@@ -88,14 +88,14 @@ def agent(serena_home: Path) -> Iterator[SerenaAgent]:
         serena_agent.on_shutdown(timeout=5)
 
 
-def test_absolute_worktree_path_switches_away_from_its_repository(tmp_path: Path, agent: SerenaAgent) -> None:
+def test_absolute_worktree_path_switches_away_from_its_repository(work_dir: Path, agent: SerenaAgent) -> None:
     # a repository whose tracked project.yml the worktree shares, so both register under one name
-    repo = tmp_path / "repo"
+    repo = work_dir / "repo"
     _write_project(repo, "shared_name", "def shared():\n    return 1\n")
     _git(repo, "init", "-q")
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "init")
-    worktree = tmp_path / "worktree"
+    worktree = work_dir / "worktree"
     _git(repo, "worktree", "add", "-q", "-b", "feature", str(worktree))
     (worktree / "only_in_worktree.py").write_text("def only_in_worktree():\n    return 2\n")
 
@@ -112,10 +112,10 @@ def test_absolute_worktree_path_switches_away_from_its_repository(tmp_path: Path
     assert "only_in_worktree" in started
 
 
-def test_cursor_tools_read_the_newly_activated_tree(tmp_path: Path, agent: SerenaAgent) -> None:
+def test_cursor_tools_read_the_newly_activated_tree(work_dir: Path, agent: SerenaAgent) -> None:
     # two projects whose module.py defines different functions
-    project_a = tmp_path / "a"
-    project_b = tmp_path / "b"
+    project_a = work_dir / "a"
+    project_b = work_dir / "b"
     _write_project(project_a, "project_a", "def only_in_a():\n    return 1\n")
     _write_project(project_b, "project_b", "def only_in_b():\n    return 2\n")
 
@@ -134,10 +134,10 @@ def test_cursor_tools_read_the_newly_activated_tree(tmp_path: Path, agent: Seren
     assert "only_in_b" in grep and "only_in_a" not in grep, grep
 
 
-def test_activation_by_a_name_registered_for_two_directories_refuses_and_lists_both(tmp_path: Path, agent: SerenaAgent) -> None:
+def test_activation_by_a_name_registered_for_two_directories_refuses_and_lists_both(work_dir: Path, agent: SerenaAgent) -> None:
     # two directories registered under one name
-    first = tmp_path / "first"
-    second = tmp_path / "second"
+    first = work_dir / "first"
+    second = work_dir / "second"
     _write_project(first, "twin", "def first():\n    return 1\n")
     _write_project(second, "twin", "def second():\n    return 2\n")
     activate = agent.get_tool(ActivateProjectTool)
@@ -151,9 +151,9 @@ def test_activation_by_a_name_registered_for_two_directories_refuses_and_lists_b
     assert agent.get_active_project() is active_before
 
 
-def test_activating_a_directory_without_project_yml_writes_nothing_inside_it(tmp_path: Path, agent: SerenaAgent) -> None:
+def test_activating_a_directory_without_project_yml_writes_nothing_inside_it(work_dir: Path, agent: SerenaAgent) -> None:
     # a plain directory holding source but no .serena/project.yml
-    plain = tmp_path / "plain"
+    plain = work_dir / "plain"
     plain.mkdir()
     (plain / "module.py").write_text("def plain():\n    return 1\n")
     files_before = _files_under(plain)
@@ -168,9 +168,9 @@ def test_activating_a_directory_without_project_yml_writes_nothing_inside_it(tmp
     assert _files_under(plain) == files_before
 
 
-def test_activating_a_directory_with_a_data_folder_but_no_project_yml_writes_nothing_inside_it(tmp_path: Path, agent: SerenaAgent) -> None:
+def test_activating_a_directory_with_a_data_folder_but_no_project_yml_writes_nothing_inside_it(work_dir: Path, agent: SerenaAgent) -> None:
     # a repository that tracks .serena/memories and holds no .serena/project.yml
-    tracked = tmp_path / "tracked"
+    tracked = work_dir / "tracked"
     (tracked / ".serena" / "memories").mkdir(parents=True)
     (tracked / ".serena" / "memories" / "note.md").write_text("note\n")
     (tracked / "module.py").write_text("def tracked():\n    return 1\n")
@@ -183,9 +183,9 @@ def test_activating_a_directory_with_a_data_folder_but_no_project_yml_writes_not
     assert _files_under(tracked) == files_before
 
 
-def test_loading_a_registered_directory_whose_data_folder_is_gone_writes_nothing_inside_it(tmp_path: Path, agent: SerenaAgent) -> None:
+def test_loading_a_registered_directory_whose_data_folder_is_gone_writes_nothing_inside_it(work_dir: Path, agent: SerenaAgent) -> None:
     # a directory registered by an earlier activation, whose data folder has since been removed
-    plain = tmp_path / "plain"
+    plain = work_dir / "plain"
     plain.mkdir()
     (plain / "module.py").write_text("def plain():\n    return 1\n")
     files_before = _files_under(plain)
@@ -203,10 +203,10 @@ def test_loading_a_registered_directory_whose_data_folder_is_gone_writes_nothing
     assert _files_under(plain) == files_before
 
 
-def test_a_configured_location_inside_the_directory_writes_nothing_inside_it(tmp_path: Path, agent: SerenaAgent) -> None:
+def test_a_configured_location_inside_the_directory_writes_nothing_inside_it(work_dir: Path, agent: SerenaAgent) -> None:
     # a configured data folder location that lies inside the project directory
     agent.serena_config.project_serena_folder_location = "$projectDir/.data"
-    plain = tmp_path / "plain"
+    plain = work_dir / "plain"
     plain.mkdir()
     (plain / "module.py").write_text("def plain():\n    return 1\n")
     files_before = _files_under(plain)
@@ -216,10 +216,10 @@ def test_a_configured_location_inside_the_directory_writes_nothing_inside_it(tmp
     assert _files_under(plain) == files_before
 
 
-def test_a_session_activates_a_worktree_registered_under_its_own_name(tmp_path: Path, agent: SerenaAgent) -> None:
+def test_a_session_activates_a_worktree_registered_under_its_own_name(work_dir: Path, agent: SerenaAgent) -> None:
     # a repository and its linked worktree, each registered under a name of its own, as the reported configuration was
-    repository = tmp_path / "repository"
-    worktree = tmp_path / "vfe-branch"
+    repository = work_dir / "repository"
+    worktree = work_dir / "vfe-branch"
     repository.mkdir()
     _write_project(repository, "repository", "def in_repository():\n    return 1\n")
     _git(repository, "init", "-q")
@@ -238,9 +238,9 @@ def test_a_session_activates_a_worktree_registered_under_its_own_name(tmp_path: 
     assert "in_worktree" in overview, overview
 
 
-def test_a_session_reads_the_tree_it_activated_last(tmp_path: Path, agent: SerenaAgent) -> None:
+def test_a_session_reads_the_tree_it_activated_last(work_dir: Path, agent: SerenaAgent) -> None:
     # two projects of one relative path, activated in turn by published calls of one forwarded session
-    first, second = tmp_path / "first", tmp_path / "second"
+    first, second = work_dir / "first", work_dir / "second"
     first.mkdir()
     second.mkdir()
     _write_project(first, "first", "def in_first():\n    return 1\n")
@@ -257,9 +257,9 @@ def test_a_session_reads_the_tree_it_activated_last(tmp_path: Path, agent: Seren
     assert "in_second" in overview and "in_first" not in overview, overview
 
 
-def test_a_session_activating_a_name_of_two_roots_is_refused_with_both(tmp_path: Path, agent: SerenaAgent) -> None:
+def test_a_session_activating_a_name_of_two_roots_is_refused_with_both(work_dir: Path, agent: SerenaAgent) -> None:
     # two directories registered under one name, activated by that name in a published call
-    first, second = tmp_path / "first", tmp_path / "second"
+    first, second = work_dir / "first", work_dir / "second"
     first.mkdir()
     second.mkdir()
     _write_project(first, "shared_name", "def in_first():\n    return 1\n")
