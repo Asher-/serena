@@ -14,6 +14,12 @@ Only ``str`` session keys are persisted. Tier-3 keys are ``id(mcp_ctx.session)``
 ints whose meaning ends with the process, so writing them would let an unrelated
 future session inherit a root at a recycled address.
 
+A record is keyed so that every call of one conversation reads it. A client's
+``X-Forwarded-Mcp-Session-Id`` changes when its connection ends and a new one
+initializes, and a tier-2 session key begins with that id, so the record of a
+call carrying a session identifier is keyed on the session key from ``session/``
+on. The record of any other call is keyed on its session key.
+
 Every operation is best-effort: a store that cannot be read or written degrades
 the cross-restart restore, and must never prevent an activation from succeeding
 or a tool call from running. Failures are logged at warning level rather than
@@ -22,6 +28,7 @@ raised.
 
 import json
 import os
+import re
 import threading
 import time
 from typing import Any, Final
@@ -38,10 +45,18 @@ CC session), so without an age bound the file would grow for the life of the
 installation.
 """
 
+_SESSION_IDENTIFIER_KEY: Final[re.Pattern[str]] = re.compile(r"[^/]+/(session/.+)", re.DOTALL)
+"""
+the session key of a call carrying a session identifier, which is the forwarded
+session id followed directly by ``session/``. The segment must follow that id: a
+pipe session's key is a project root, and a root or an agent identifier may hold
+``/session/`` without the key being a session identifier's.
+"""
+
 
 class ExplicitProjectRootStore:
     """
-    A crash-safe, process-shared record of ``session_key -> explicitly activated project_root``.
+    A crash-safe, process-shared record of each session's explicitly activated project root, by record key (:meth:`_record_key`).
 
     Reads re-load the file each time rather than caching: several daemons may
     share one ``SERENA_HOME``, and a stale in-process cache would resurrect a
@@ -63,17 +78,21 @@ class ExplicitProjectRootStore:
         """
         :param session_key: the per-session key :meth:`Tool.apply_ex` derived.
         :return: the project root this session explicitly activated, or None if
-            the key is non-durable, unknown, or expired.
+            the key is non-durable, unknown, or expired. The record under the
+            session's record key is read first, and one under the session key
+            itself second.
         """
         if not isinstance(session_key, str):
             return None
         with self._lock:
-            entry = self._read().get(session_key)
+            entries = self._read()
+        entry = entries.get(self._record_key(session_key), entries.get(session_key))
         return entry["root"] if entry is not None else None
 
     def set(self, session_key: str | int, project_root: str) -> None:
         """
-        Record ``project_root`` as the root ``session_key`` explicitly activated.
+        Record ``project_root`` as the root ``session_key`` explicitly activated,
+        under the session's record key.
 
         :param session_key: the per-session key; non-``str`` keys are ignored.
         :param project_root: the absolute project root that was activated.
@@ -82,12 +101,13 @@ class ExplicitProjectRootStore:
             return
         with self._lock:
             entries = self._read()
-            entries[session_key] = {"root": project_root, "updated_at": time.time()}
+            entries[self._record_key(session_key)] = {"root": project_root, "updated_at": time.time()}
             self._write(entries)
 
     def discard(self, session_key: str | int) -> None:
         """
-        Drop ``session_key``'s record. Idempotent; unknown keys are a no-op.
+        Drop ``session_key``'s record under the session's record key and under
+        the session key itself. Idempotent; unknown keys are a no-op.
 
         :param session_key: the per-session key being evicted.
         """
@@ -95,8 +115,20 @@ class ExplicitProjectRootStore:
             return
         with self._lock:
             entries = self._read()
-            if entries.pop(session_key, None) is not None:
+            removed = [entries.pop(key, None) for key in (self._record_key(session_key), session_key)]
+            if any(removed):
                 self._write(entries)
+
+    @staticmethod
+    def _record_key(session_key: str) -> str:
+        """
+        :param session_key: the per-session key :meth:`Tool.apply_ex` derived.
+        :return: the key of the session's record: the text of ``session_key``
+            from ``session/`` on when that segment directly follows the forwarded
+            session id, and ``session_key`` itself otherwise.
+        """
+        match = _SESSION_IDENTIFIER_KEY.fullmatch(session_key)
+        return match.group(1) if match is not None else session_key
 
     def _read(self) -> dict[str, dict[str, Any]]:
         """
