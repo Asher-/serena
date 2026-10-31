@@ -236,3 +236,39 @@ def test_a_session_activates_a_worktree_registered_under_its_own_name(tmp_path: 
 
     overview = agent.get_tool(CursorOverviewTool).apply_ex(mcp_ctx=context, log_call=False, relative_path="module.py", because=BECAUSE)
     assert "in_worktree" in overview, overview
+
+
+def test_a_session_reads_the_tree_it_activated_last(tmp_path: Path, agent: SerenaAgent) -> None:
+    # two projects of one relative path, activated in turn by published calls of one forwarded session
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    _write_project(first, "first", "def in_first():\n    return 1\n")
+    _write_project(second, "second", "def in_second():\n    return 2\n")
+    activate = agent.get_tool(ActivateProjectTool)
+    context = _make_mcp_ctx(forwarded_header="cc-session-activation-directory")
+    activate.apply_ex(mcp_ctx=context, log_call=False, project=str(first))
+    overview = agent.get_tool(CursorOverviewTool).apply_ex(mcp_ctx=context, log_call=False, relative_path="module.py", because=BECAUSE)
+    assert "in_first" in overview, overview
+
+    activate.apply_ex(mcp_ctx=context, log_call=False, project=str(second))
+
+    overview = agent.get_tool(CursorOverviewTool).apply_ex(mcp_ctx=context, log_call=False, relative_path="module.py", because=BECAUSE)
+    assert "in_second" in overview and "in_first" not in overview, overview
+
+
+def test_a_session_activating_a_name_of_two_roots_is_refused_with_both(tmp_path: Path, agent: SerenaAgent) -> None:
+    # two directories registered under one name, activated by that name in a published call
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    _write_project(first, "shared_name", "def in_first():\n    return 1\n")
+    _write_project(second, "shared_name", "def in_second():\n    return 2\n")
+    activate = agent.get_tool(ActivateProjectTool)
+    context = _make_mcp_ctx(forwarded_header="cc-session-activation-directory")
+    activate.apply_ex(mcp_ctx=context, log_call=False, project=str(first))
+    activate.apply_ex(mcp_ctx=context, log_call=False, project=str(second))
+
+    result = activate.apply_ex(mcp_ctx=context, log_call=False, project="shared_name")
+
+    assert str(first.resolve()) in result and str(second.resolve()) in result, result
