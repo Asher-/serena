@@ -15,6 +15,7 @@ from sensai.util.string import ToStringMixin
 
 log = logging.getLogger(__name__)
 T = TypeVar("T")
+R = TypeVar("R")
 
 
 class TaskExecutor:
@@ -77,6 +78,16 @@ class TaskExecutor:
 
         def _tostring_includes(self) -> list[str]:
             return ["name"]
+
+        def run_in_context(self, function: Callable[[], R]) -> R:
+            """
+            Calls a function in a copy of the task's context, which holds what the task's body has bound so far. The context
+            itself cannot be entered from another thread while the body runs in it.
+
+            :param function: the function to call
+            :return: the function's result
+            """
+            return self._context.copy().run(function)
 
         def start(self) -> None:
             """

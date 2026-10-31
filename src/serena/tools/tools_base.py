@@ -538,11 +538,8 @@ class Tool(Component):
                 log.error(f"Error executing tool: {e}", exc_info=e)
                 result = msg
 
-            # the root opens the result, so that no line of a file body the result goes on to render is read as the root
             if isinstance(self, ToolMarkerNamesProjectRoot):
-                project = self.agent.get_active_project()
-                if project is not None:
-                    result = f"root: {project.project_root}\n{result}"
+                result = self._with_project_root(result, self.agent.get_active_project())
 
             if log_call:
                 log.info(f"Result: {result}")
@@ -641,18 +638,34 @@ class Tool(Component):
 
         The task's future is cancelled, which frees the session's queue for its next task; the task's thread cannot be
         stopped and runs on, but its result is discarded. A task that completed in the meantime cannot be cancelled,
-        and its outcome stands.
+        and its outcome stands. A write whose thread runs on can still land, so the answer to it names the root of the call's
+        project, as the result of a completed write does.
 
         :param task_exec: the call's task
         :param deadline: the deadline, in seconds, the call was allowed
-        :return: the typed timeout state, or the outcome of a task that completed at the deadline
+        :return: the typed timeout state, opened by the root line for a write, or the outcome of a task that completed at the
+            deadline
         """
         if not task_exec.future.cancel():
             exception = task_exec.future.exception()
             return task_exec.future.result() if exception is None else self._error_result(exception)
         timeout = ToolCallTimeout(tool_name=self.get_name_from_cls(), deadline_seconds=deadline)
         log.error(timeout.render())
+        if isinstance(self, ToolMarkerCanEdit):
+            # read in the task's context: this thread holds none of the call's bindings, so it could name another project
+            return self._with_project_root(timeout.render(), task_exec.run_in_context(self.agent.get_active_project))
         return timeout.render()
+
+    @staticmethod
+    def _with_project_root(result: str, project: Project | None) -> str:
+        """
+        :param result: the result of a call
+        :param project: the project the call resolved against, or None if it has none
+        :return: the result, opened by the line naming the project's root. The root comes first because
+            ``hooks/track-serena-cursor-path.sh`` in brain records the first line of that form in a result (``head -n1`` over
+            its ``VIEW_ROOT`` match), and a file body the result goes on to render can hold a line of the same form.
+        """
+        return result if project is None else f"root: {project.project_root}\n{result}"
 
     @staticmethod
     def _to_json(x: Any) -> str:

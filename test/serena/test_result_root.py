@@ -4,11 +4,14 @@ line of its own reading ``root: <absolute path>``: the line ``hooks/track-serena
 session's serena root, and the one thing in a result that says which tree answered (task://issue_bin_closure_result_root.1).
 
 Both projects of a test hold a file of one relative path, so nothing but the root line tells their answers apart. A result is
-read at :meth:`Tool.apply_ex`, the boundary every published tool call passes, and its root the way the hook reads it: the first
-matching line of the result, whatever the result goes on to render.
+read at :meth:`Tool.apply_ex`, the boundary every published tool call passes, and its root the way the hook reads it (see
+:data:`_ROOT_LINE`): the first matching line of the result, whatever the result goes on to render.
+
+The readers outside the cursor surface are not named here: bug://serena/result/root/reader/absence lists them.
 """
 
 import re
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,7 +37,7 @@ from serena.tools.cursor_tools import (
     CursorStartTool,
 )
 from serena.tools.file_tools import CreateTextFileTool
-from serena.tools.tools_base import Tool
+from serena.tools.tools_base import SUCCESS_RESULT, Tool, ToolMarkerCanEdit
 from solidlsp.ls_config import Language
 from test.conftest import language_tests_enabled
 from test.serena.test_streamable_http_cc_session_key import _make_mcp_ctx
@@ -42,11 +45,17 @@ from test.serena.test_streamable_http_cc_session_key import _make_mcp_ctx
 _SESSION = "cc-session-result-root"
 """the forwarded session id of every call of a test"""
 
+_OTHER_SESSION = "cc-session-result-root-other"
+"""the forwarded session id of a session other than the test's"""
+
 _BECAUSE = "to learn which tree answers"
 """the stated goal of every call that requires one"""
 
 _ROOT_LINE = re.compile(r"^root: (/.*\S)\s*$", re.MULTILINE)
-"""the line ``hooks/track-serena-cursor-path.sh`` records a root from"""
+"""
+the line ``hooks/track-serena-cursor-path.sh`` in brain records a root from: its ``VIEW_ROOT`` is the ``sed`` match of this form
+piped through ``head -n1``, so the first such line of a result is the one recorded
+"""
 
 _EDITED_FILE = "module.py"
 """the relative path of the file both projects of a test hold"""
@@ -62,6 +71,12 @@ _ROOT_CARRYING_FILE = "settings.yaml"
 
 _ELSEWHERE = "/elsewhere"
 """the root the root-carrying file's first line names"""
+
+_HOLD_BOUND_SECONDS = 30.0
+"""the bound on the wait for a held write to start, which only a failing test reaches"""
+
+_DEADLINE_SECONDS = 2.0
+"""the deadline a held write is abandoned at, which is only rendered: no test waits it out"""
 
 
 def _root_named_by(result: str) -> str | None:
@@ -118,6 +133,14 @@ class _Session:
         :param root: the root of the registered project to activate for the session
         """
         self.call(ActivateProjectTool, project=root)
+
+    def activate_in_another_session(self, root: str) -> None:
+        """
+        :param root: the root of the registered project to activate for a session other than this one
+        """
+        self.agent.get_tool(ActivateProjectTool).apply_ex(
+            mcp_ctx=_make_mcp_ctx(forwarded_header=_OTHER_SESSION), log_call=False, project=root
+        )
 
     def start_cursor(self, name_path: str = "Greeter", relative_path: str = _EDITED_FILE) -> str:
         """
@@ -192,7 +215,8 @@ class TestCursorViewsNameTheRoot:
     def test_a_body_that_reads_as_a_root_line_does_not_shadow_the_root(self, session: _Session) -> None:
         """
         A structural body renders its lines unnumbered, so a file's own ``root: <path>`` line reaches a view looking exactly
-        like the root line. The hook records the first such line of a result, so the root line precedes the body.
+        like the root line. The hook keeps the first such line of a result (see :data:`_ROOT_LINE`), so the root line precedes
+        the body.
         """
         session.activate(session.first_root)
         Path(session.first_root, _ROOT_CARRYING_FILE).write_text(f"root: {_ELSEWHERE}\n", encoding="utf-8")
@@ -252,6 +276,50 @@ class TestWriteResultsNameTheRoot:
 
         assert _root_named_by(result) == session.first_root, f"the refusal does not name the active root: {result}"
         assert Path(session.first_root, _EDITED_FILE).read_text(encoding="utf-8") == _SOURCE, "the refused write changed the file"
+
+
+class _HeldWriteTool(Tool, ToolMarkerCanEdit):
+    """A write whose call holds until the test releases it, as a write past its deadline does."""
+
+    def __init__(self, agent: SerenaAgent) -> None:
+        super().__init__(agent)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def apply(self) -> str:
+        """
+        Holds until the test releases it.
+
+        :return: the success result of a write, once released
+        """
+        self.entered.set()
+        self.release.wait()
+        return SUCCESS_RESULT
+
+
+class TestWritePastItsDeadlineNamesTheRoot:
+    """the answer to a write past its deadline is given outside the call's task, and the write can still land"""
+
+    def test_a_write_past_its_deadline_names_the_root_of_its_own_call(self, session: _Session, monkeypatch: pytest.MonkeyPatch) -> None:
+        """
+        The thread that answers at the deadline holds none of the call's bindings and another session holds the second
+        project, so the root can only come from the call's own context. The abandonment is called with the write held on a
+        gate, which fixes the order without a clock.
+        """
+        session.activate(session.first_root)
+        session.activate_in_another_session(session.second_root)
+        write = _HeldWriteTool(session.agent)
+        monkeypatch.setattr(write, "is_active", lambda: True)
+
+        task_exec = write._issue_call(False, True, _make_mcp_ctx(forwarded_header=_SESSION))
+        try:
+            assert write.entered.wait(_HOLD_BOUND_SECONDS), "the write never started"
+            answer = write._timeout_result(task_exec, _DEADLINE_SECONDS)
+        finally:
+            write.release.set()
+
+        assert _root_named_by(answer) == session.first_root, f"the answer does not name the root of its call: {answer}"
+        assert "timed out" in answer
 
 
 class TestActivationMovesTheRoot:
