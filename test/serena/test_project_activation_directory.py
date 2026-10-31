@@ -23,6 +23,7 @@ from serena.agent import SerenaAgent
 from serena.config.serena_config import SerenaConfig, SerenaPaths
 from serena.tools.config_tools import ActivateProjectTool
 from serena.tools.cursor_tools import CursorGrepTool, CursorOverviewTool, CursorStartTool
+from test.serena.test_streamable_http_cc_session_key import _make_mcp_ctx
 
 BECAUSE = "to check which project tree this cursor tool reads after an activation"
 
@@ -213,3 +214,25 @@ def test_a_configured_location_inside_the_directory_writes_nothing_inside_it(tmp
     agent.get_tool(ActivateProjectTool).apply(project=str(plain))
 
     assert _files_under(plain) == files_before
+
+
+def test_a_session_activates_a_worktree_registered_under_its_own_name(tmp_path: Path, agent: SerenaAgent) -> None:
+    # a repository and its linked worktree, each registered under a name of its own, as the reported configuration was
+    repository = tmp_path / "repository"
+    worktree = tmp_path / "vfe-branch"
+    repository.mkdir()
+    _write_project(repository, "repository", "def in_repository():\n    return 1\n")
+    _git(repository, "init", "-q")
+    _git(repository, "add", "-A")
+    _git(repository, "commit", "-q", "-m", "first")
+    _git(repository, "worktree", "add", "-q", "-b", "vfe-branch", str(worktree))
+    _write_project(worktree, "vfe-branch", "def in_worktree():\n    return 2\n")
+
+    # both activations are published calls of one forwarded session
+    activate = agent.get_tool(ActivateProjectTool)
+    context = _make_mcp_ctx(forwarded_header="cc-session-activation-directory")
+    activate.apply_ex(mcp_ctx=context, log_call=False, project=str(repository))
+    activate.apply_ex(mcp_ctx=context, log_call=False, project=str(worktree))
+
+    overview = agent.get_tool(CursorOverviewTool).apply_ex(mcp_ctx=context, log_call=False, relative_path="module.py", because=BECAUSE)
+    assert "in_worktree" in overview, overview
