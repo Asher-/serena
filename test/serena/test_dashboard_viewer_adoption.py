@@ -79,9 +79,10 @@ def root(scratch: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
 
 @pytest.fixture
 def viewer(scratch: Path) -> Path:
-    """The stand-in viewer program, which writes each argument it was given on a line of its own and runs on."""
+    """The stand-in viewer program, which writes each argument it was given on a line of its own, by one rename, and runs on."""
     program = scratch / "viewer"
-    program.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > "{scratch}/arguments.$$"\nexec sleep 300\n')
+    arguments = scratch / "arguments.$$"
+    program.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > "{arguments}.tmp" && mv "{arguments}.tmp" "{arguments}"\nexec sleep 300\n')
     program.chmod(0o755)
     return program
 
@@ -115,7 +116,7 @@ def test_the_viewer_is_given_no_pid_of_serenas(agent: SerenaAgent, scratch: Path
     assert process is not None
     arguments = scratch / f"arguments.{process.pid}"
     deadline = time.monotonic() + 30
-    while not arguments.exists() or not arguments.read_text().endswith("\n"):
+    while not arguments.exists():
         assert time.monotonic() < deadline, "the viewer wrote no arguments"
         time.sleep(0.01)
 
