@@ -36,7 +36,7 @@ def _git(cwd: Path, *args: str) -> None:
     :param args: the git arguments
     """
     subprocess.run(
-        ["git", "-C", str(cwd), "-c", "user.email=test@example.com", "-c", "user.name=test", *args],
+        ["git", "-C", str(cwd), "-c", "user.email=test@example.com", "-c", "user.name=test", "-c", "core.excludesFile=/dev/null", *args],
         check=True,
         capture_output=True,
     )
@@ -50,7 +50,7 @@ def _write_project(root: Path, project_name: str, module_source: str) -> None:
     :param project_name: the name the project's configuration declares
     :param module_source: the source of the project's ``module.py``
     """
-    (root / ".serena").mkdir(parents=True)
+    (root / ".serena").mkdir(parents=True, exist_ok=True)
     (root / ".serena" / "project.yml").write_text(f"project_name: {project_name}\nlanguages:\n- python\n")
     (root / "module.py").write_text(module_source)
 
@@ -181,6 +181,26 @@ def test_activating_a_directory_with_a_data_folder_but_no_project_yml_writes_not
     assert "tracked" in overview, overview
 
     assert _files_under(tracked) == files_before
+
+
+def test_a_configured_location_outside_the_directory_takes_the_data_of_a_data_folder_without_project_yml(
+    work_dir: Path, agent: SerenaAgent
+) -> None:
+    # a configured data folder location outside the project, and a directory that tracks .serena/memories only
+    metadata = work_dir / "metadata"
+    agent.serena_config.project_serena_folder_location = str(metadata) + "/$projectFolderName/.serena"
+    tracked = work_dir / "tracked"
+    (tracked / ".serena" / "memories").mkdir(parents=True)
+    (tracked / ".serena" / "memories" / "note.md").write_text("note\n")
+    (tracked / "module.py").write_text("def tracked():\n    return 1\n")
+    files_before = _files_under(tracked)
+
+    agent.get_tool(ActivateProjectTool).apply(project=str(tracked))
+    overview = agent.get_tool(CursorOverviewTool).apply_ex(relative_path="module.py", because=BECAUSE)
+    assert "tracked" in overview, overview
+
+    assert _files_under(tracked) == files_before
+    assert (metadata / "tracked" / ".serena" / "project.yml").is_file()
 
 
 def test_loading_a_registered_directory_whose_data_folder_is_gone_writes_nothing_inside_it(work_dir: Path, agent: SerenaAgent) -> None:

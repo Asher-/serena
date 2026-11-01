@@ -690,11 +690,19 @@ class TestDataFolderPlacement:
 
         assert not self.home_folder.exists()
 
-    def test_placement_leaves_a_configured_location_outside_the_project_to_be_used(self):
+    def test_placement_creates_a_configured_location_outside_the_project(self):
         self._config().place_data_folder_outside_project(self.project_root)
 
+        assert self.configured_folder.is_dir()
         assert not self.home_folder.exists()
-        assert not self.configured_folder.exists()
+
+    def test_placement_makes_a_configured_location_outside_the_project_outrank_a_default_folder_without_project_yml(self):
+        self._make_folder(self.default_folder)
+        config = self._config()
+
+        config.place_data_folder_outside_project(self.project_root)
+
+        assert config.get_project_serena_folder(self.project_root) == str(self.configured_folder)
 
     @pytest.mark.parametrize("location", [DEFAULT_PROJECT_SERENA_FOLDER_LOCATION, "$projectDir/.data"], ids=["default", "inside"])
     def test_placement_creates_the_home_folder_for_a_location_inside_the_project(self, location: str):

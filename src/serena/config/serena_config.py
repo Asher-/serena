@@ -1201,9 +1201,10 @@ class SerenaConfig(SharedConfig):
 
     def place_data_folder_outside_project(self, project_root: str | Path) -> None:
         """
-        Creates the data folder of a project in the serena home directory when its data would otherwise be written inside
-        a directory that holds no project.yml, so that activating the directory writes nothing inside it. A configured
-        location outside the project directory is left to be used.
+        Creates the data folder of a project outside its directory when the directory holds no project.yml, so that
+        activating the directory writes nothing inside it. A configured location outside the project directory is
+        created where it is configured, so that it is resolved ahead of a data folder inside the project that holds no
+        project.yml; for any other location, the folder is created in the serena home directory.
 
         :param project_root: the absolute path to the project root directory
         """
@@ -1212,6 +1213,7 @@ class SerenaConfig(SharedConfig):
         if self._holds_project_yml(configured_path) or self._holds_project_yml(default_path):
             return
         if not Path(configured_path).resolve().is_relative_to(Path(project_root).resolve()):
+            os.makedirs(configured_path, exist_ok=True)
             return
         os.makedirs(self.get_home_project_serena_folder(project_root), exist_ok=True)
 
