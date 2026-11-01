@@ -16,10 +16,9 @@ from serena.util import file_lifecycle
 from serena.util.yaml import load_yaml, save_yaml
 
 
-@pytest.fixture
-def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    directory = tmp_path / "home"
-    directory.mkdir()
+@pytest.fixture(autouse=True)
+def home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    directory = tmp_path_factory.mktemp("home")
     monkeypatch.setattr(SerenaPaths(), "serena_user_home_dir", str(directory))
     return directory
 
@@ -43,6 +42,14 @@ def test_a_dump_that_raises_leaves_the_file_as_it_was(tmp_path: Path) -> None:
         save_yaml(str(target), {"unrepresentable": object()})
 
     assert target.read_text() == "projects: []\n"
+
+
+def test_a_save_creates_the_file_and_its_directory(tmp_path: Path) -> None:
+    target = tmp_path / "absent" / "config.yml"
+
+    save_yaml(str(target), {"projects": []})
+
+    assert load_yaml(str(target))["projects"] == []
 
 
 def test_a_save_replaces_the_whole_file_at_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -88,6 +95,41 @@ def test_a_removal_by_one_instance_is_not_undone_by_a_later_save_of_another(home
     assert _roots_on_file(home) == set()
 
 
+def test_a_second_save_keeps_what_another_instance_registered_before_the_first(home: Path, tmp_path: Path) -> None:
+    first = SerenaConfig.from_config_file()
+    second = SerenaConfig.from_config_file()
+    one, other, third = _project(tmp_path, "one"), _project(tmp_path, "other"), _project(tmp_path, "third")
+
+    first.add_project_from_path(one)
+    second.add_project_from_path(other)
+    second.add_project_from_path(third)
+
+    assert _roots_on_file(home) == {str(one.resolve()), str(other.resolve()), str(third.resolve())}
+
+
+def test_a_second_save_does_not_bring_back_what_another_instance_removed(home: Path, tmp_path: Path) -> None:
+    gone, one, other = _project(tmp_path, "gone"), _project(tmp_path, "one"), _project(tmp_path, "other")
+    SerenaConfig.from_config_file().add_project_from_path(gone)
+    remover = SerenaConfig.from_config_file()
+    bystander = SerenaConfig.from_config_file()
+
+    remover.remove_project(remover.projects[0].project_name)
+    bystander.add_project_from_path(one)
+    bystander.add_project_from_path(other)
+
+    assert _roots_on_file(home) == {str(one.resolve()), str(other.resolve())}
+
+
+def test_a_second_save_applies_this_instances_own_removal(home: Path, tmp_path: Path) -> None:
+    config = SerenaConfig.from_config_file()
+    one = _project(tmp_path, "one")
+
+    config.add_project_from_path(one)
+    config.remove_project(config.projects[0].project_name)
+
+    assert _roots_on_file(home) == set()
+
+
 def test_a_save_waits_for_a_save_that_read_the_file_and_has_not_replaced_it(
     home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -126,10 +168,13 @@ def test_a_save_waits_for_a_save_that_read_the_file_and_has_not_replaced_it(
     assert _roots_on_file(home) == {str(one.resolve()), str(other.resolve())}
 
 
-def test_a_configuration_with_no_file_saves_nothing(tmp_path: Path) -> None:
+def test_a_configuration_with_no_file_saves_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    saved: list[str] = []
+    monkeypatch.setattr(serena_config, "save_yaml", lambda path, data: saved.append(path))
+
     SerenaConfig().save()
 
-    assert list(tmp_path.iterdir()) == []
+    assert saved == []
 
 
 def test_a_save_writes_a_file_removed_since_it_was_read(home: Path, tmp_path: Path) -> None:

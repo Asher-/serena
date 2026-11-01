@@ -794,8 +794,8 @@ class SerenaConfig(SharedConfig):
     """
     _project_roots_on_file: set[str] = field(default_factory=set)
     """
-    the project roots the configuration file held when this instance last read or wrote it; what they differ by from
-    ``projects`` is what this instance registered or removed since
+    the project roots this instance has accounted for: those the configuration file listed when it was read, then those
+    in ``projects`` at each write; what ``projects`` differs by from them is what this instance registered or removed since
     """
 
     # *** static members ***
@@ -1098,8 +1098,8 @@ class SerenaConfig(SharedConfig):
     def save(self) -> None:
         """
         Saves the configuration to the file from which it was loaded (if any). The project roots another process registered
-        or removed since this instance last read the file stay as that process left them; every other field takes this
-        instance's value.
+        or removed since this instance last read or wrote the file stay as that process left them; every other field takes
+        this instance's value.
         """
         if self.config_file_path is None:
             return
@@ -1134,7 +1134,7 @@ class SerenaConfig(SharedConfig):
             roots = (on_file | (own - self._project_roots_on_file)) - (self._project_roots_on_file - own)
             commented_yaml["projects"] = sorted(roots)
             save_yaml(self.config_file_path, commented_yaml)
-            self._project_roots_on_file = roots
+            self._project_roots_on_file = own
 
     @staticmethod
     def _project_roots_of(loaded_yaml: CommentedMap) -> set[str]:
