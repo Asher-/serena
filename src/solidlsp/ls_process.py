@@ -571,6 +571,10 @@ class LanguageServerProcess:
             request_id = self.request_id
             self.request_id += 1
 
+        # the next id persisted before the request is sent, so an instance adopting the server numbers past it
+        with self._state_lock:
+            self._save_state()
+
         request = Request(request_id=request_id, method=method)
         log.debug("Starting: %s", request)
 
