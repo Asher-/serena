@@ -79,6 +79,8 @@ class OmniSharp(SolidLanguageServer):
             log.error("No *.sln file found in repository")
             raise SolidLSPException("No SLN file found in repository")
 
+        # no --hostPID: OmniSharp ends when the process it names ends, and the language server outlives serena
+        # (bug://serena/language_server/initialize/process_id/client/watch)
         cmd = " ".join(
             [
                 omnisharp_executable_path,
@@ -88,8 +90,6 @@ class OmniSharp(SolidLanguageServer):
                 "-z",
                 "-s",
                 f'"{slnfilename}"',
-                "--hostPID",
-                str(os.getpid()),
                 "DotNet:enablePackageRestore=false",
                 "--loglevel",
                 "trace",

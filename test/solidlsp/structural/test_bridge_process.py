@@ -265,14 +265,18 @@ def test_of_two_instances_reaching_one_state_file_one_claims_it(
     states.save(BridgeState(record=str(tmp_path / "20261031T000000-a.json"), instance_pid=1))
     rival: list[BridgeState | None] = []
 
-    # the rival claims between this instance reading the state and claiming it
-    def rival_claims_first(_pid: int) -> bool:
+    # the rival claims between this instance reading the state and claiming it; every other process is as it is
+    real_alive = supervise.alive
+
+    def rival_claims_first(pid: int, start: str) -> bool:
+        if pid != 1:
+            return real_alive(pid, start)
         if not rival:
             rival.append(None)
             rival[0] = BridgeStates(command).claim()
         return False
 
-    monkeypatch.setattr(supervise, "process_exists", rival_claims_first)
+    monkeypatch.setattr(supervise, "alive", rival_claims_first)
 
     mine = states.claim()
 

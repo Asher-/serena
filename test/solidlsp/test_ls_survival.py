@@ -18,7 +18,7 @@ import pytest
 
 from solidlsp.ls_config import Language
 from solidlsp.ls_process import LanguageServerProcess, ProcessLaunchInfo
-from solidlsp.ls_survival import LanguageServerStateFile
+from solidlsp.ls_survival import LanguageServerStates
 from solidlsp.util import supervise
 
 pytestmark = pytest.mark.skipif(not os.environ.get(supervise.PROGRAM_ENV), reason="BRAIN_SUPERVISE names no program")
@@ -116,7 +116,7 @@ def test_the_next_instance_adopts_the_server_with_no_second_initialize_or_did_op
     assert methods.count("initialized") == 1
     assert methods.count("textDocument/didOpen") == 1
     process.stop()
-    assert not LanguageServerStateFile(command, str(tmp_path)).path.exists()
+    assert list(LanguageServerStates.kind_directory().rglob("*.json")) == []
 
 
 def test_a_document_changed_while_no_instance_ran_is_brought_up_to_date(tmp_path: Path) -> None:

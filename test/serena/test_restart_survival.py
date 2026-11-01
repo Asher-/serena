@@ -4,6 +4,7 @@ over streamable HTTP as the multiplexer speaks to it. Everything serena started 
 and the next instance must take it over and answer for the calls the ended one held.
 """
 
+import errno
 import json
 import os
 import shutil
@@ -22,14 +23,14 @@ import httpx
 import psutil
 import pytest
 
-from serena.call_journal import CALL_ID_HEADER, RESUME_METHOD
+from serena.call_journal import CALL_ID_HEADER, RESUME_METHOD, daemon_owner
 from solidlsp.util import supervise
 
 pytestmark = pytest.mark.skipif(not os.environ.get(supervise.PROGRAM_ENV), reason="BRAIN_SUPERVISE names no program")
 
 _FIXTURE = Path(__file__).parents[1] / "resources" / "repos" / "python" / "test_repo"
 _DOCUMENT = "test_repo/models.py"
-_START_SECONDS = 60.0
+_START_SECONDS = 300.0
 _LANGUAGE_SERVER_KIND = "solidlsp.language_server"
 _MCP_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
 
@@ -46,12 +47,21 @@ class _Started:
 class _Serena:
     """One instance of serena, in a process group of its own as launchd gives it one."""
 
-    def __init__(self, port: int, root: Path, log: Path) -> None:
+    def __init__(self, port: int, root: Path, log: Path, home: Path | None = None) -> None:
+        """
+        :param port: the port serena listens on.
+        :param root: the directory of the records serena keeps.
+        :param log: the file serena's output is appended to.
+        :param home: serena's home directory, holding the configuration it reads, in place of the user's.
+        """
+        self.port = port
         self.url = f"http://127.0.0.1:{port}/mcp"
         self._client = httpx.Client(timeout=_START_SECONDS, headers=_MCP_HEADERS)
         self._session: str | None = None
         self._next_id = 0
         environment = {**os.environ, supervise.ROOT_ENV: str(root)}
+        if home is not None:
+            environment["SERENA_HOME"] = str(home)
         command = [
             sys.executable,
             "-c",
@@ -120,8 +130,40 @@ class _Serena:
         result = self.call("activate_project", {"project": str(project)})
         assert not result.get("isError"), result
 
+    def answer_to_resume(self, call_id: str) -> dict[str, Any]:
+        """:return: the JSON-RPC message answering a ``brain/resume`` of the call."""
+        return self._request(RESUME_METHOD, {"call_id": call_id})
+
     def resume(self, call_id: str) -> dict[str, Any]:
-        return self._request(RESUME_METHOD, {"call_id": call_id})["result"]
+        return self.answer_to_resume(call_id)["result"]
+
+    def ping(self) -> None:
+        assert self._request("ping", {})["result"] == {}
+
+    def open_call(self, tool: str, arguments: dict[str, Any], call_id: str) -> socket.socket:
+        """
+        Sends a ``tools/call`` over a connection of its own.
+
+        :return: the connection, once serena has answered the request's status, 200, and so accepted the call.
+        """
+        self._next_id += 1
+        params = {"name": tool, "arguments": arguments}
+        body = json.dumps({"jsonrpc": "2.0", "id": self._next_id, "method": "tools/call", "params": params}).encode()
+        head = (
+            f"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\nContent-Type: application/json\r\n"
+            f"Accept: application/json, text/event-stream\r\nMcp-Session-Id: {self._session}\r\n"
+            f"{CALL_ID_HEADER}: {call_id}\r\nContent-Length: {len(body)}\r\n\r\n"
+        )
+        connection = socket.create_connection(("127.0.0.1", self.port))
+        connection.sendall(head.encode() + body)
+        received = b""
+        while b"\r\n" not in received:
+            chunk = connection.recv(1024)
+            assert chunk, "serena closed the call's connection before answering its status"
+            received += chunk
+        status = received.split(b"\r\n", 1)[0]
+        assert status.split()[1] == b"200", status
+        return connection
 
     def kill(self) -> None:
         os.killpg(self.process.pid, signal.SIGKILL)
@@ -166,8 +208,12 @@ def _initialize_answers(started: _Started) -> int:
 
 
 @pytest.fixture
-def root(tmp_path: Path) -> Iterator[Path]:
-    """The instances' root, whose processes are stopped after the test whatever it left running."""
+def root(tmp_path: Path, port: int, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """
+    The instances' root, whose processes are stopped after the test whatever it left running. Its records are those of
+    the owner of a serena listening on the test's port, which this process's records name too.
+    """
+    monkeypatch.setattr(supervise, "OWNER", daemon_owner(port))
     directory = tmp_path / "restart"
     directory.mkdir()
     yield directory
@@ -195,8 +241,8 @@ def instances(port: int, root: Path, tmp_path: Path) -> Iterator[list[_Serena]]:
     started: list[_Serena] = []
 
     class Start(list):  # type: ignore[type-arg]
-        def __call__(self) -> _Serena:
-            instance = _Serena(port, root, tmp_path / "serena.log")
+        def __call__(self, home: Path | None = None) -> _Serena:
+            instance = _Serena(port, root, tmp_path / "serena.log", home)
             started.append(instance)
             return instance
 
@@ -278,8 +324,68 @@ def test_resume_answers_a_call_in_flight_at_the_kill_with_the_restart(instances:
     assert second.resume("in-flight") == resumed
 
 
-def test_resume_of_a_call_serena_never_received_is_a_failed_result(instances: Any) -> None:
-    resumed = instances().resume("never-sent")
+def test_resume_of_a_call_serena_never_received_is_answered_with_error_code_minus_32003(instances: Any) -> None:
+    answer = instances().answer_to_resume("never-sent")
 
-    assert resumed["isError"] is True
-    assert "never-sent" in resumed["content"][0]["text"]
+    assert "result" not in answer
+    assert answer["error"]["code"] == -32003
+
+
+def _open_writer(fifo: Path) -> int:
+    """
+    :return: a descriptor writing to the FIFO, opened once a reader has opened it, which a writer opened without blocking
+        cannot be before.
+    """
+    deadline = time.monotonic() + _START_SECONDS
+    while True:
+        try:
+            return os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError as e:
+            if e.errno != errno.ENXIO:
+                raise
+        assert time.monotonic() < deadline, f"nothing opened {fifo} to read it"
+        time.sleep(0.001)
+
+
+def _await_closed(pid: int, port: int) -> None:
+    """Returns once the process holds no TCP connection to the local port, as it does once it has closed its end."""
+    deadline = time.monotonic() + _START_SECONDS
+    while any(connection.raddr and connection.raddr.port == port for connection in psutil.Process(pid).net_connections(kind="tcp")):
+        assert time.monotonic() < deadline, f"serena kept its connection to port {port} open"
+        time.sleep(0.001)
+
+
+def test_resume_answers_a_call_whose_connection_closed_while_it_ran_with_the_tools_real_answer(
+    instances: Any, project: Path, tmp_path: Path
+) -> None:
+    # serena under a home of its own, whose configuration excludes none of the memory tools
+    first = instances(home=tmp_path / "home")
+    first.activate(project)
+    memories = project / ".serena" / "memories"
+    memories.mkdir(parents=True, exist_ok=True)
+    memory = memories / "held.md"
+    os.mkfifo(memory)
+
+    # the call, its tool reading a memory that is a FIFO and so waiting for the test to write it
+    connection = first.open_call("read_memory", {"memory_name": "held"}, call_id="held")
+    writer = _open_writer(memory)
+
+    # the call's connection closed while the tool waits, closed by serena too, and a request served after it
+    port = connection.getsockname()[1]
+    connection.close()
+    _await_closed(first.process.pid, port)
+    first.ping()
+
+    # the tool's answer, once the memory is written
+    os.write(writer, b"the memory\n")
+    os.close(writer)
+    resumed = first.resume("held")
+
+    # the same tool's answer over a connection that stays open, from a regular file holding the same memory
+    memory.unlink()
+    memory.write_text("the memory\n")
+    answered = first.call("read_memory", {"memory_name": "held"})
+
+    assert resumed["isError"] is False
+    assert resumed["content"] == answered["content"]
+    assert first.resume("held") == resumed

@@ -103,10 +103,6 @@ class RuntimeDependencyCollection:
     @staticmethod
     def _run_command(command: str | list[str], cwd: str) -> None:
         kwargs = subprocess_kwargs()
-        if not PlatformUtils.get_platform_id().is_windows():
-            import pwd
-
-            kwargs["user"] = pwd.getpwuid(os.getuid()).pw_name  # type: ignore
 
         is_windows = platform.system() == "Windows"
         if not isinstance(command, str) and not is_windows:

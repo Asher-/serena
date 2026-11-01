@@ -18,7 +18,7 @@ from sensai.util.string import ToStringMixin
 from solidlsp.ls_config import Language
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_request import LanguageServerRequest
-from solidlsp.ls_survival import LanguageServerState, LanguageServerStateFile, OpenDocument, text_digest
+from solidlsp.ls_survival import HOLDINGS, LANGUAGE_SERVER_KIND, LanguageServerState, LanguageServerStates, OpenDocument, text_digest
 from solidlsp.lsp_protocol_handler.lsp_requests import LspNotification
 from solidlsp.lsp_protocol_handler.lsp_types import ErrorCodes
 from solidlsp.lsp_protocol_handler.server import (
@@ -148,8 +148,9 @@ class LanguageServerProcess:
         self.process_launch_info = process_launch_info
         self.process: supervise.Popen | None = None
         self._state: LanguageServerState | None = None
-        self._state_file: LanguageServerStateFile | None = None
+        self._states: LanguageServerStates | None = None
         self._state_lock = threading.Lock()
+        self._reclaimed = 0
         self._adopted = False
         self._is_shutting_down = False
 
@@ -200,14 +201,15 @@ class LanguageServerProcess:
         kwargs = subprocess_kwargs()
         kwargs["start_new_session"] = self.start_independent_lsp_process
 
-        # a live server an ended instance held, or else a new one
-        self._state_file = LanguageServerStateFile(self.process_launch_info.cmd, self.process_launch_info.cwd)
-        adoptable = self._state_file.adoptable()
+        # a live server this instance took over when it started or an ended instance held, or else a new one, which
+        # outlives the call that starts it and so names none
+        self._states = LanguageServerStates(self.process_launch_info.cmd, self.process_launch_info.cwd)
+        adoptable = HOLDINGS.take(self._states) or self._states.take_over()
+        self._reclaimed = 0
         if adoptable is not None:
             log.info("Adopting language server %s from its record", adoptable.record)
             self.process = supervise.Popen.adopt(pathlib.Path(adoptable.record), adoptable.stdout_offset)
             self.request_id = adoptable.request_id
-            adoptable.instance_pid = os.getpid()
             self._state, self._adopted = adoptable, True
         else:
             self.process = supervise.Popen(
@@ -218,11 +220,14 @@ class LanguageServerProcess:
                 env=child_proc_env,
                 cwd=self.process_launch_info.cwd,
                 shell=True,
-                waiting={"kind": "solidlsp.language_server"},
+                call_id="",
+                waiting=supervise.Waiting.of(LANGUAGE_SERVER_KIND),
+                keep=True,
                 read_only_stdin=self.process_launch_info.read_only_stdin,
                 **kwargs,
             )
-            self._state = LanguageServerState(record=str(self.process.record), instance_pid=os.getpid())
+            self._state = LanguageServerState(record=str(self.process.record), instance_pid=0)
+        self._state.hold()
         self._save_state()
 
         # Check if process terminated immediately
@@ -254,8 +259,8 @@ class LanguageServerProcess:
         if process:
             self._cleanup_process(process)
             process.release()
-        if self._state_file is not None:
-            self._state_file.remove()
+        if self._states is not None and self._state is not None:
+            self._states.remove(self._state)
         self._state = None
 
     def _cleanup_process(self, process: supervise.Popen) -> None:
@@ -482,15 +487,20 @@ class LanguageServerProcess:
             self._send_payload(make_notification(method, params))
 
     def _save_state(self) -> None:
-        if self._state is not None and self._state_file is not None:
+        if self._state is not None and self._states is not None:
             self._state.request_id = self.request_id
-            self._state_file.save(self._state)
+            self._states.save(self._state)
 
     def _mark_consumed(self, count: int) -> None:
         with self._state_lock:
             if self._state is not None:
                 self._state.stdout_offset += count
                 self._save_state()
+
+                # the blocks of what was consumed freed, below the offset saved for a next instance to read on from
+                if self.process is not None and self._state.stdout_offset - self._reclaimed >= supervise.RECLAIM_BYTES:
+                    self.process.reclaim_stdout(self._state.stdout_offset)
+                    self._reclaimed = self._state.stdout_offset
 
     def _admit_notification(self, method: str, params: dict | None) -> bool:
         """

@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import time
 from collections.abc import Iterator, Sequence
@@ -46,7 +47,6 @@ from serena.util.dataclass import get_dataclass_default
 from serena.util.logging import MemoryLogHandler
 from solidlsp.ls_config import Language
 from solidlsp.ls_types import SymbolKind
-from solidlsp.util import supervise
 from solidlsp.util.subprocess_util import subprocess_kwargs
 
 log = logging.getLogger(__name__)
@@ -97,21 +97,25 @@ def find_project_root(root: str | Path | None = None) -> str | None:
 
 
 def _open_in_editor(path: str) -> None:
-    """Open the given file in the system's default editor or viewer."""
+    """
+    Open the given file in the system's default editor or viewer. A person runs this at a terminal and no brain server
+    does, so the editor is started directly with the terminal as its standard streams, which the brain-supervise program
+    cannot give it (decision://brain/daemon_restart_survival/serena/cli/editor).
+    """
     editor = os.environ.get("EDITOR")
     run_kwargs = subprocess_kwargs()
     try:
         if editor:
-            supervise.run([editor, path], check=False, **run_kwargs)
+            subprocess.run([editor, path], check=False, **run_kwargs)
         elif sys.platform.startswith("win"):
             try:
                 os.startfile(path)
             except OSError:
-                supervise.run(["notepad.exe", path], check=False, **run_kwargs)
+                subprocess.run(["notepad.exe", path], check=False, **run_kwargs)
         elif sys.platform == "darwin":
-            supervise.run(["open", path], check=False, **run_kwargs)
+            subprocess.run(["open", path], check=False, **run_kwargs)
         else:
-            supervise.run(["xdg-open", path], check=False, **run_kwargs)
+            subprocess.run(["xdg-open", path], check=False, **run_kwargs)
     except Exception as e:
         print(f"Failed to open {path}: {e}")
 
@@ -352,11 +356,7 @@ class TopLevelCommands(AutoRegisteringGroup):
         # pre-rotation file that already exceeds the ceiling. Subsequent starts skip the
         # rename because the .legacy sentinel is present.
         legacy_log_path = operator_log_dir / "serena.log.legacy"
-        if (
-            operator_log_path.exists()
-            and not legacy_log_path.exists()
-            and operator_log_path.stat().st_size > _OPERATOR_LOG_MAX_BYTES
-        ):
+        if operator_log_path.exists() and not legacy_log_path.exists() and operator_log_path.stat().st_size > _OPERATOR_LOG_MAX_BYTES:
             operator_log_path.rename(legacy_log_path)
         file_handler = RotatingFileHandler(log_path, maxBytes=_OPERATOR_LOG_MAX_BYTES, backupCount=5)
         file_handler.formatter = formatter
@@ -437,7 +437,7 @@ class TopLevelCommands(AutoRegisteringGroup):
         factory = SerenaMCPFactory(context=context, project=project_file, memory_log_handler=memory_log_handler)
         server = factory.create_mcp_server(
             host=host,
-            port=port,
+            port=None if transport == "stdio" else port,
             modes=modes,
             language_backend=LanguageBackend.from_str(language_backend) if language_backend else None,
             enable_web_dashboard=enable_web_dashboard,

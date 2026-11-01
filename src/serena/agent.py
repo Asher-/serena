@@ -22,6 +22,7 @@ from sensai.util import logging
 from sensai.util.logging import LogTime
 from sensai.util.string import dict_string
 
+import serena.util.shell  # noqa: F401 -- registers the continuation of a shell command's record
 from interprompt.jinja_template import JinjaTemplate
 from serena import serena_version
 from serena.analytics import RegisteredTokenCountEstimator, ToolUsageStats
@@ -56,6 +57,8 @@ from serena.util.inspection import iter_subclasses
 from serena.util.logging import MemoryLogHandler
 from serena.util.session_project_roots import ExplicitProjectRootStore
 from solidlsp.ls_config import Language
+from solidlsp.ls_survival import LANGUAGE_SERVER_KIND, LanguageServerStates
+from solidlsp.structural.bridge_process import BRIDGE_KIND, BridgeStates
 from solidlsp.util import supervise
 
 if TYPE_CHECKING:
@@ -69,16 +72,12 @@ _UNSET: object = object()
 # holds one SerenaAgent across every connected client; without per-session
 # isolation, sessions race on a single global active_project slot and resolve
 # paths against each other's projects (see Tool.apply_ex for where this is set).
-_SESSION_KEY_VAR: "_contextvars.ContextVar[int | None]" = _contextvars.ContextVar(
-    "serena_session_key", default=None
-)
+_SESSION_KEY_VAR: "_contextvars.ContextVar[int | None]" = _contextvars.ContextVar("serena_session_key", default=None)
 # In-flight resolved active project for the current call. Read by every
 # accessor (get_active_project, the _active_project property) so direct field
 # reads scattered across the agent see the per-session value, not the global
 # legacy slot.
-_ACTIVE_PROJECT_VAR: "_contextvars.ContextVar[object]" = _contextvars.ContextVar(
-    "serena_active_project", default=_UNSET
-)
+_ACTIVE_PROJECT_VAR: "_contextvars.ContextVar[object]" = _contextvars.ContextVar("serena_active_project", default=_UNSET)
 # IRONCLAD zero-crossover guard. Set to True inside Tool.apply_ex's worker-thread
 # closure for every MCP call. While True, the per-session lookup miss path in
 # the _active_project getter and get_cursor_manager MUST NOT fall through to the
@@ -86,9 +85,7 @@ _ACTIVE_PROJECT_VAR: "_contextvars.ContextVar[object]" = _contextvars.ContextVar
 # those slots exist only for non-MCP callers (CLI, dashboard, tests) and serving
 # them inside an MCP call admits cross-project state confusion between
 # simultaneous clients. On a miss, raise/return-None instead.
-_MCP_CALL_IN_FLIGHT: "_contextvars.ContextVar[bool]" = _contextvars.ContextVar(
-    "serena_mcp_call_in_flight", default=False
-)
+_MCP_CALL_IN_FLIGHT: "_contextvars.ContextVar[bool]" = _contextvars.ContextVar("serena_mcp_call_in_flight", default=False)
 # Pipe-asserted stable session_id for clients connecting via the per-client stdio
 # pipe (src/serena/pipe.py + src/serena/daemon_pipe.py). The daemon's pipe
 # FrameHandler sets this ContextVar to PipeConnection.session_id BEFORE invoking
@@ -98,13 +95,14 @@ _MCP_CALL_IN_FLIGHT: "_contextvars.ContextVar[bool]" = _contextvars.ContextVar(
 # survives MCP-transport churn (streamable-http reuses the connection but creates
 # a fresh mcp_ctx.session per request, which would otherwise rotate the
 # id()-derived key on every call).
-_PIPE_SESSION_ID_VAR: "_contextvars.ContextVar[str | None]" = _contextvars.ContextVar(
-    "serena_pipe_session_id", default=None
-)
+_PIPE_SESSION_ID_VAR: "_contextvars.ContextVar[str | None]" = _contextvars.ContextVar("serena_pipe_session_id", default=None)
 # The hold of the tool call running in this context, set by Tool._issue_call's task for every call of a session (see
 # SerenaAgent._pin_session_project_for_call). It follows the session's slot while the call runs: a rebinding of the slot
 # by the call itself moves the hold onto the newly bound project (see the _active_project setter).
 _CALL_HOLD_VAR: "_contextvars.ContextVar[_CallHold | None]" = _contextvars.ContextVar("serena_call_hold", default=None)
+
+_DASHBOARD_VIEWER_KIND = "serena.dashboard_viewer"
+"""The waiting kind of the dashboard viewer's record, whose state names the dashboard's URL."""
 
 
 log = logging.getLogger(__name__)
@@ -311,7 +309,6 @@ class ActiveModes:
 
 
 class SerenaAgent:
-
     def __init__(
         self,
         project: str | None = None,
@@ -805,12 +802,12 @@ class SerenaAgent:
         return self._dashboard_url
 
     @staticmethod
-    def _start_dashboard_viewer_process_function(url: str, minimized: bool, parent_process_id: int) -> None:
+    def _start_dashboard_viewer_process_function(url: str, minimized: bool) -> None:
         """
         Main function of the subprocess for starting the dashboard viewer
         """
         try:
-            SerenaDashboardViewer(url, start_minimized=minimized, parent_process_id=parent_process_id).run()
+            SerenaDashboardViewer(url, start_minimized=minimized).run()
         except webview.errors.WebViewException as e:
             log.warning(f"Could not open Serena Dashboard viewer. Cause:\n{e}")
             # Fall back to opening the browser window if the window was supposed to be shown directly
@@ -832,16 +829,55 @@ class SerenaAgent:
         url = self.get_dashboard_url()
         assert url is not None
         if SerenaDashboardViewer.is_current_platform_supported():
-            program = "import sys; from serena.agent import SerenaAgent; SerenaAgent._start_dashboard_viewer_process_function(sys.argv[1], sys.argv[2] == 'True', int(sys.argv[3]))"
-            self._dashboard_viewer_process = supervise.Popen(
-                [sys.executable, "-c", program, url, str(minimized), str(os.getpid())],
+            # the viewer of this dashboard an ended instance started, or else a new one; it watches no pid of serena's,
+            # since it outlives serena as a language server does (bug://serena/language_server/initialize/process_id/client/watch)
+            program = "import sys; from serena.agent import SerenaAgent; SerenaAgent._start_dashboard_viewer_process_function(sys.argv[1], sys.argv[2] == 'True')"
+            self._dashboard_viewer_process = self._adopt_dashboard_viewer(url) or supervise.Popen(
+                [sys.executable, "-c", program, url, str(minimized)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                call_id="",
+                waiting=supervise.Waiting.of(_DASHBOARD_VIEWER_KIND, {"url": url}),
+                keep=True,
             )
         else:
             log.info("Not starting Serena dashboard viewer because the current platform does not support it; using browser-based fallback")
             if not minimized:
                 self._open_dashboard_in_browser(url)
+
+    @staticmethod
+    def _adopt_dashboard_viewer(url: str) -> supervise.Popen | None:
+        """
+        :param url: the dashboard's URL.
+        :return: a live viewer of that URL an ended instance started, now this instance's, so that no second viewer is
+            started (pg://brain/daemon/restart/readoption), or None when there is none.
+        """
+        for record in supervise.records():
+            waiting = record.waiting
+            if waiting.kind != _DASHBOARD_VIEWER_KIND or waiting.state != {"url": url} or waiting.started_by_a_live_instance():
+                continue
+            if not record.outcome().ended:
+                return supervise.Popen.adopt(record.path)
+        return None
+
+    def adopt_processes(self, calls: supervise.Calls) -> list[threading.Thread]:
+        """
+        Takes up every process an ended instance of serena started whose outcome no instance has consumed, before serena
+        serves its first call (pg://brain/daemon/restart/readoption). Each live language server and bridge is held for the
+        first use of its command, whatever project it serves, and every other record is answered for by its continuation
+        or waited on and discarded (decision://brain/daemon_restart_survival/journal/continuation).
+
+        :param calls: the journal of the calls serena serves.
+        :return: the threads waiting on the processes of those other records that still run.
+        """
+        # the kept processes, each taken over through its state
+        LanguageServerStates.hold_everywhere()
+        BridgeStates.hold_everywhere()
+
+        # every other record, but that of the viewer this instance took over already
+        kept_records = LanguageServerStates.named_records() | BridgeStates.named_records()
+        held = [self._dashboard_viewer_process.record] if self._dashboard_viewer_process is not None else []
+        return supervise.Adoption(calls, (LANGUAGE_SERVER_KIND, BRIDGE_KIND), kept_records).adopt(skip=held)
 
     def open_dashboard(self) -> bool:
         """
@@ -861,13 +897,14 @@ class SerenaAgent:
 
     @staticmethod
     def _open_dashboard_in_browser(url: str) -> None:
-        # Use a subprocess to avoid any output from webbrowser.open being written to stdout
+        # Use a subprocess to avoid any output from webbrowser.open being written to stdout; no call waits on it
         supervise.Popen(
             [sys.executable, "-c", f"import webbrowser; webbrowser.open({url!r})"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=False,
+            call_id="",
         )
 
     def get_exposed_tool_instances(self) -> list["Tool"]:
@@ -1201,12 +1238,6 @@ class SerenaAgent:
             self._evict_session_state(key, keep_durable_record=True)
         return evicted
 
-    
-
-    
-
-    
-
     def _warn_missing_forwarded_session_id_once(self, session_key: str | int) -> None:
         """Emits a one-time warning when no X-Forwarded-Mcp-Session-Id header is present.
 
@@ -1233,6 +1264,7 @@ class SerenaAgent:
             "See plan://Serena:serena/streamable-http-cc-session-id-pass-through-v2.",
             session_key,
         )
+
     def evict_pipe_session(self, session_id: str) -> None:
         """Drop ``session_id`` from every per-session map.
 

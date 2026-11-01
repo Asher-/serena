@@ -1,5 +1,5 @@
 """
-The supervised process: :mod:`serena.util.supervise` against the real brain-supervise program, named by
+The supervised process: :mod:`solidlsp.util.supervise` against the real brain-supervise program, named by
 BRAIN_SUPERVISE. A process outlives the end of the process that started it, which is what the test
 child exists to show.
 """
@@ -114,6 +114,28 @@ def test_a_read_only_stdin_counts_its_bytes_and_reads_no_end_of_file_once_every_
     assert process.wait() == 0
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="the claim observed is macOS's")
+def test_on_macos_fionread_counts_no_bytes_of_a_stdin_fifo_opened_read_write_though_a_read_takes_them() -> None:
+    # what FIONREAD says of the stdin, the FIFO the supervisor hands the process read-write, and what a read then takes
+    script = textwrap.dedent(
+        """
+        import fcntl, os, select, struct, termios
+        select.select([0], [], [])
+        print(struct.unpack("i", fcntl.ioctl(0, termios.FIONREAD, bytes(4)))[0], flush=True)
+        print(os.read(0, 100).decode().strip(), flush=True)
+        """
+    )
+    process = supervise.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    assert process.stdin is not None and process.stdout is not None
+
+    process.stdin.write("line\n")
+    process.stdin.flush()
+
+    assert process.stdout.readline() == "0\n"
+    assert process.stdout.readline() == "line\n"
+    assert process.wait() == 0
+
+
 def test_a_read_only_stdin_keeps_the_record_on_the_process_and_is_adopted_by_the_next(tmp_path: Path) -> None:
     # a starter leading a group of its own, killed with the process reading its FIFO read-only
     script = textwrap.dedent(
@@ -121,7 +143,7 @@ def test_a_read_only_stdin_keeps_the_record_on_the_process_and_is_adopted_by_the
         import subprocess, sys, time
         from solidlsp.util import supervise
         process = supervise.Popen(
-            ["/bin/cat"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, waiting={"kind": "test"}, read_only_stdin=True
+            ["/bin/cat"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, waiting=supervise.Waiting.of("test"), keep=True, read_only_stdin=True
         )
         process.stdin.write(b"before\\n")
         process.stdin.flush()
@@ -167,7 +189,7 @@ def test_a_process_outlives_a_kill_of_its_starters_group_and_is_adopted_by_the_n
         """
         import subprocess, sys, time
         from solidlsp.util import supervise
-        process = supervise.Popen(["/bin/cat"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, waiting={"kind": "test"})
+        process = supervise.Popen(["/bin/cat"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, waiting=supervise.Waiting.of("test"), keep=True)
         process.stdin.write(b"before\\n")
         process.stdin.flush()
         print(process.record, process.stdout.readline().decode().strip(), flush=True)

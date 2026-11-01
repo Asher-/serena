@@ -6,19 +6,18 @@ outlives serena, so the next instance adopts a live one instead of starting anot
 (pg://brain/daemon/restart/cancellation).
 """
 
-import hashlib
 import json
 import logging
-import os
 import struct
 import subprocess
 import threading
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from secrets import token_hex
 from typing import Any
 
+from solidlsp.ls_survival import HOLDINGS, KeptState, KeptStates
 from solidlsp.structural.errors import ParseError
 from solidlsp.util import supervise
 
@@ -29,6 +28,9 @@ _LENGTH = struct.Struct("<I")
 
 _STOP_SECONDS = 2.0
 """How long a bridge has to end on its terminate signal before it is killed."""
+
+BRIDGE_KIND = "solidlsp.structural_bridge"
+"""The waiting kind of a bridge's record."""
 
 _ADOPTION_SECONDS = 60.0
 """
@@ -46,87 +48,24 @@ def frame(body: bytes) -> bytes:
 
 
 @dataclass
-class BridgeState:
+class BridgeState(KeptState):
     """What the next instance needs to take a bridge over."""
 
-    record: str
-    """the path of the bridge's supervise record."""
-    instance_pid: int
-    """the pid of the serena instance holding the bridge."""
+    stdout_offset: int = 0
+    """an offset of the bridge's stdout at a frame's first byte, below which every byte has been consumed."""
 
 
-class BridgeStates:
+class BridgeStates(KeptStates[BridgeState]):
     """The state files of the bridges that run one command. One command runs in as many bridges as serena has sessions."""
+
+    KIND = "bridge"
+    STATE_TYPE = BridgeState
 
     def __init__(self, command: Sequence[str]) -> None:
         """
         :param command: the command the bridges run.
         """
-        key = hashlib.sha256(json.dumps(list(command)).encode()).hexdigest()[:32]
-        self._directory = supervise.restart_root() / supervise.OWNER / "bridge" / key
-
-    def claim(self) -> BridgeState | None:
-        """
-        :return: the state of a bridge whose last instance has ended, now held by this instance, or None when there
-            is none. A bridge another live instance holds is that instance's.
-        """
-        for path in sorted(self._directory.glob("*.json")):
-            state = self._claimed(path)
-            if state is not None:
-                return state
-        return None
-
-    def _claimed(self, path: Path) -> BridgeState | None:
-        state = self._load(path)
-        if state is None or self._held(state):
-            return None
-
-        # the rename takes the file from every other instance while this one looks again: an instance that finished
-        # claiming before the rename has written the file back under its own pid, so it is read once more here
-        claim = path.with_name(f"{path.name}.{os.getpid()}.claim")
-        try:
-            path.rename(claim)
-        except FileNotFoundError:
-            return None
-        current = self._load(claim)
-        if current is None or self._held(current):
-            claim.rename(path)
-            return None
-
-        current.instance_pid = os.getpid()
-        self.save(current)
-        claim.unlink()
-        return current
-
-    @staticmethod
-    def _load(path: Path) -> BridgeState | None:
-        try:
-            return BridgeState(**json.loads(path.read_text()))
-        except (FileNotFoundError, ValueError, TypeError):
-            return None
-
-    @staticmethod
-    def _held(state: BridgeState) -> bool:
-        return state.instance_pid == os.getpid() or supervise.process_exists(state.instance_pid)
-
-    def save(self, state: BridgeState) -> None:
-        """
-        :param state: the state to hold, written by rename so a reader sees one whole state.
-        """
-        self._directory.mkdir(parents=True, exist_ok=True)
-        path = self._path(state)
-        temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-        temporary.write_text(json.dumps(asdict(state)))
-        temporary.replace(path)
-
-    def remove(self, state: BridgeState) -> None:
-        """
-        :param state: the state of a bridge that is gone.
-        """
-        self._path(state).unlink(missing_ok=True)
-
-    def _path(self, state: BridgeState) -> Path:
-        return self._directory / f"{Path(state.record).stem}.json"
+        super().__init__(list(command))
 
 
 class StructuralBridge:
@@ -145,6 +84,7 @@ class StructuralBridge:
         self._states = BridgeStates(self._command)
         self._process: supervise.Popen | None = None
         self._state: BridgeState | None = None
+        self._consumed = 0
         self._lock = threading.Lock()
 
     def call(self, op: str, **payload: Any) -> dict[str, Any]:
@@ -165,6 +105,7 @@ class StructuralBridge:
                     source_preview="",
                     detail=f"bridge communication failed: {exc}; stderr:\n{stderr}",
                 ) from exc
+            self._reclaim(process)
             return json.loads(response)
 
     def close(self) -> None:
@@ -193,28 +134,35 @@ class StructuralBridge:
         return self._process
 
     def _start(self) -> supervise.Popen:
+        # a bridge outlives the call that starts it, and so names none
         process = supervise.Popen(
             self._command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
-            waiting={"kind": "solidlsp.structural_bridge"},
+            call_id="",
+            waiting=supervise.Waiting.of(BRIDGE_KIND),
+            keep=True,
         )
-        self._state = BridgeState(record=str(process.record), instance_pid=os.getpid())
+        self._state = BridgeState(record=str(process.record), instance_pid=0)
+        self._state.hold()
         self._states.save(self._state)
+        self._consumed = 0
         return process
 
     def _adopt(self) -> supervise.Popen | None:
         """
-        :return: a live bridge an ended instance left, now this instance's, or None when no such bridge answers.
+        :return: a live bridge this instance took over when it started or an ended instance left, now this instance's,
+            or None when no such bridge answers.
         """
-        while (state := self._states.claim()) is not None:
+        while (state := HOLDINGS.take(self._states) or self._states.take_over()) is not None:
             try:
-                process = supervise.Popen.adopt(Path(state.record))
+                process = supervise.Popen.adopt(Path(state.record), state.stdout_offset)
             except FileNotFoundError:
                 self._states.remove(state)
                 continue
+            self._consumed = state.stdout_offset
             if process.poll() is None and self._synchronize(process):
                 log.info("Adopted %s bridge %s", self._language_key, state.record)
                 self._state = state
@@ -224,8 +172,8 @@ class StructuralBridge:
 
     def _synchronize(self, process: supervise.Popen) -> bool:
         """
-        Sends a request of a name no bridge knows, whose answer repeats the name, and consumes stdout from its first
-        byte through that answer. Whatever the ended instance sent has then been answered and passed over, so the next
+        Sends a request of a name no bridge knows, whose answer repeats the name, and consumes stdout from the offset the
+        state names through that answer. Whatever the ended instance sent has then been answered and passed over, so the next
         call reads its own answer, and nothing about a call had to be stored while the ended instance ran.
 
         :param process: an adopted bridge.
@@ -265,11 +213,26 @@ class StructuralBridge:
         process.stdin.write(frame(json.dumps(request).encode("utf-8")))
         process.stdin.flush()
 
-    @staticmethod
-    def _receive(process: supervise.Popen) -> bytes:
+    def _receive(self, process: supervise.Popen) -> bytes:
         assert process.stdout is not None
         (length,) = _LENGTH.unpack(_read_exact(process.stdout, _LENGTH.size))
-        return _read_exact(process.stdout, length)
+        body = _read_exact(process.stdout, length)
+        self._consumed += _LENGTH.size + length
+        return body
+
+    def _reclaim(self, process: supervise.Popen) -> None:
+        """
+        Frees the blocks of stdout the bridge's answers have been read from, once they reach a megabyte past the offset
+        the state names. The state names the offset first, so a next instance reads on from a frame's first byte above
+        every freed block (bug://brain/multiplexer/stdio/stdout/file/growth).
+
+        :param process: the bridge.
+        """
+        assert self._state is not None
+        if self._consumed - self._state.stdout_offset >= supervise.RECLAIM_BYTES:
+            self._state.stdout_offset = self._consumed
+            self._states.save(self._state)
+            process.reclaim_stdout(self._consumed)
 
 
 def _read_exact(stream: Any, n: int) -> bytes:

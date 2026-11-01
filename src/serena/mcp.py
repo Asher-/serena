@@ -17,8 +17,8 @@ import docstring_parser
 from mcp.server.fastmcp import server
 from mcp.server.fastmcp.server import FastMCP, Settings
 from mcp.server.fastmcp.tools.base import Tool as MCPTool
+from mcp.types import CallToolRequest, ToolAnnotations
 from mcp.types import Tool as WireTool
-from mcp.types import ToolAnnotations
 from pydantic_settings import SettingsConfigDict
 from sensai.util import logging
 from starlette.requests import Request
@@ -29,7 +29,7 @@ from serena.agent import (
     SerenaAgent,
     SerenaConfig,
 )
-from serena.call_journal import CallJournal, CallJournalLayer
+from serena.call_journal import CallJournal, CallJournalLayer, JournaledCallHandler, daemon_owner
 from serena.config.context_mode import SerenaAgentContext
 from serena.config.serena_config import LanguageBackend, ModeSelectionDefinition
 from serena.constants import DEFAULT_CONTEXT, SERENA_LOG_FORMAT
@@ -38,6 +38,7 @@ from serena.tools import Tool
 from serena.tools.tools_base import AGENT_ID_ARGUMENT, SESSION_ID_ARGUMENT
 from serena.util.exception import show_fatal_exception_safe
 from serena.util.logging import MemoryLogHandler
+from solidlsp.util import supervise
 
 log = logging.getLogger(__name__)
 
@@ -57,9 +58,6 @@ server.configure_logging = configure_logging  # type: ignore
 class SerenaMCPRequestContext:
     agent: SerenaAgent
 
-
-_ANSWERED_CALL_SECONDS = 24 * 60 * 60
-"""How long an answered call stays in the journal, the retention of every brain server's journal."""
 
 _CALL_SESSION_ID_VAR: contextvars.ContextVar[str | None] = contextvars.ContextVar("serena_call_session_id", default=None)
 """the session id of the tool call being run, taken out of its raw arguments by :class:`_AgentAwareMCPTool`"""
@@ -93,17 +91,23 @@ class _AgentAwareMCPTool(MCPTool):
 
 class _JournaledFastMCP(FastMCP):
     """
-    A server whose streamable-http listener journals its calls and answers ``brain/resume``, so that the hop before serena
-    recovers a call across serena's restart (pg://brain/daemon/restart/continuity).
+    A server that journals each ``tools/call`` whose HTTP request names a call id in X-Brain-Call-Id, through
+    :class:`JournaledCallHandler`, and whose streamable-http listener answers ``brain/resume``, so that the hop before
+    serena recovers a call across serena's restart or the loss of the connection that carried it
+    (pg://brain/daemon/restart/continuity).
     """
 
     def __init__(self, journal: CallJournal, **settings: Any) -> None:
         """
-        :param journal: the journal of the calls the listener serves.
+        :param journal: the journal of the calls the server serves.
         :param settings: as for :class:`FastMCP`.
         """
         super().__init__(**settings)
         self._call_journal = journal
+
+        # the tools/call handler FastMCP registered, journaling the calls that name a call id
+        handlers = self._mcp_server.request_handlers
+        handlers[CallToolRequest] = JournaledCallHandler(handlers[CallToolRequest], journal)
 
     def streamable_http_app(self) -> Any:
         return CallJournalLayer(super().streamable_http_app(), self._call_journal, self.settings.streamable_http_path)
@@ -351,7 +355,7 @@ class SerenaMCPFactory:
     def create_mcp_server(
         self,
         host: str = "127.0.0.1",
-        port: int = 8000,
+        port: int | None = 8000,
         modes: Sequence[str] = (),
         language_backend: LanguageBackend | None = None,
         enable_web_dashboard: bool | None = None,
@@ -365,7 +369,10 @@ class SerenaMCPFactory:
         Create an MCP server with process-isolated SerenaAgent to prevent asyncio contamination.
 
         :param host: The host to bind to
-        :param port: The port to bind to
+        :param port: The port to bind to, or None for a server that listens on no port, as one serving stdio does. No hop
+            sends such a server call ids, so it opens no call journal and takes up no process an ended instance left; the
+            processes it starts are recorded under :data:`serena.call_journal.SERVER`, where the daemon's startup adoption
+            leaves them to this server for as long as it runs.
         :param modes: List of mode names or paths to mode files
         :param language_backend: the language backend to use, overriding the configuration setting.
         :param enable_web_dashboard: Whether to enable the web dashboard. If not specified, will take the value from the serena configuration.
@@ -378,6 +385,10 @@ class SerenaMCPFactory:
             This is useful for debugging language server issues.
         :param tool_timeout: Timeout in seconds for tool execution. If not specified, will take the value from the serena configuration.
         """
+        # the owner of the records of every process this server starts, named before the agent starts any
+        # (decision://brain/daemon_restart_survival/journal/instance)
+        supervise.OWNER = daemon_owner(port)
+
         try:
             config = self._create_default_serena_config()
 
@@ -412,17 +423,27 @@ class SerenaMCPFactory:
         # retain only FASTMCP_ prefix for already set environment variables.
         Settings.model_config = SettingsConfigDict(env_prefix="FASTMCP_")
         instructions = self._get_initial_instructions()
-        journal = CallJournal()
-        journal.prune(_ANSWERED_CALL_SECONDS)
-        mcp = _JournaledFastMCP(
-            journal,
+        settings: dict[str, Any] = dict(
             name="Serena",
             lifespan=self.server_lifespan,
             website_url="https://oraios.github.io/serena",
             host=host,
-            port=port,
             instructions=instructions,
         )
+
+        # a server listening on no port, which journals no call and takes up nothing an ended instance left
+        mcp: FastMCP
+        if port is None:
+            mcp = FastMCP(**settings)
+
+        # a listening server, which takes up the processes an ended instance started before the first call is served
+        # (pg://brain/daemon/restart/readoption) and journals its calls
+        else:
+            journal = CallJournal()
+            assert self.agent is not None
+            self.agent.adopt_processes(journal)
+            mcp = _JournaledFastMCP(journal, port=port, **settings)
+
         # Register tools once at server creation, not per SSE session: the MCP
         # SDK enters server_lifespan per Server.run() (i.e. per SSE connection),
         # so per-session registration would race on the shared tool dict.
