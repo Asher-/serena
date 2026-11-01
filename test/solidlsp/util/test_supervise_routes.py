@@ -7,6 +7,7 @@ and the records startup adoption cannot take up or whose call it cannot answer.
 
 import ctypes
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -198,7 +199,7 @@ def test_on_linux_a_start_time_is_the_field_of_stat_after_a_command_name_with_sp
 
 
 def test_on_linux_a_reclaim_punches_out_the_whole_blocks_and_a_refusal_leaves_the_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # the kernel's call stands in, since this host has no fallocate: what is asserted is the call serena makes of it
     stream = tmp_path / "stream"
@@ -215,10 +216,13 @@ def test_on_linux_a_reclaim_punches_out_the_whole_blocks_and_a_refusal_leaves_th
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(ctypes, "CDLL", lambda *_args, **_kwargs: Libc())
 
-    supervise.reclaim(stream, block * 2 + 5)
-    supervise.reclaim(stream, block)
+    with caplog.at_level(logging.DEBUG, logger=supervise.__name__):
+        supervise.reclaim(stream, block * 2 + 5)
+        assert "Could not free" not in caplog.text
+        supervise.reclaim(stream, block)
 
     assert calls == [(supervise._FALLOC_PUNCH_HOLE, 0, block * 2), (supervise._FALLOC_PUNCH_HOLE, 0, block)]
+    assert "Could not free the consumed prefix" in caplog.text
     assert stream.read_bytes() == b"x" * 100
 
 
