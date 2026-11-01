@@ -93,7 +93,7 @@ class _JournaledFastMCP(FastMCP):
     """
     A server that journals each ``tools/call`` whose HTTP request names a call id in X-Brain-Call-Id, through
     :class:`JournaledCallHandler`, and whose streamable-http listener answers ``brain/resume``, so that the hop before
-    serena recovers a call across serena's restart or the loss of the connection that carried it
+    serena recovers a call across a SIGKILL of serena's process group or the loss of the connection that carried it
     (pg://brain/daemon/restart/continuity).
     """
 
@@ -370,9 +370,10 @@ class SerenaMCPFactory:
 
         :param host: The host to bind to
         :param port: The port to bind to, or None for a server that listens on no port, as one serving stdio does. No hop
-            sends such a server call ids, so it opens no call journal and takes up no process an ended instance left; the
-            processes it starts are recorded under :data:`serena.call_journal.SERVER`, where the daemon's startup adoption
-            leaves them to this server for as long as it runs.
+            sends such a server call ids, so it opens no call journal and adopts nothing at startup, though its first use of
+            a command takes over a process of it an ended instance left, which is then this server's; the processes it holds
+            are recorded under :data:`serena.call_journal.SERVER`, where the daemon's startup adoption leaves them to this
+            server for as long as it runs.
         :param modes: List of mode names or paths to mode files
         :param language_backend: the language backend to use, overriding the configuration setting.
         :param enable_web_dashboard: Whether to enable the web dashboard. If not specified, will take the value from the serena configuration.
@@ -431,7 +432,7 @@ class SerenaMCPFactory:
             instructions=instructions,
         )
 
-        # a server listening on no port, which journals no call and takes up nothing an ended instance left
+        # a server listening on no port, which journals no call and adopts nothing at startup
         mcp: FastMCP
         if port is None:
             mcp = FastMCP(**settings)

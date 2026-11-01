@@ -34,6 +34,8 @@ SCRATCH = SCRATCH_ROOT
 
 _URL = "http://127.0.0.1:24282/dashboard/index.html"
 
+_VIEWER_KIND = "serena.dashboard_viewer"
+
 _PYTHON = sys.executable
 """The interpreter, which a test's agent replaces by the stand-in viewer."""
 
@@ -160,3 +162,77 @@ def test_a_live_viewer_an_ended_instance_started_is_adopted_and_no_second_is_sta
     assert agent._dashboard_viewer_process is not None and agent._dashboard_viewer_process.pid == first
     assert len(_live_viewers(root)) == 1
     assert watchers == []
+
+
+def test_the_viewer_process_function_runs_a_viewer_of_the_url_that_watches_no_pid_of_serenas(monkeypatch: pytest.MonkeyPatch) -> None:
+    ran: list[tuple[str, bool, int | None]] = []
+    monkeypatch.setattr(
+        SerenaDashboardViewer, "run", lambda viewer: ran.append((viewer.url, viewer.start_minimized, viewer.parent_process_id))
+    )
+
+    SerenaAgent._start_dashboard_viewer_process_function(_URL, True)
+
+    assert ran == [(_URL, True, None)]
+
+
+@pytest.mark.parametrize(
+    ("kind", "url", "started_here"),
+    [("another.kind", _URL, False), (_VIEWER_KIND, "http://127.0.0.1:1/dashboard/index.html", False), (_VIEWER_KIND, _URL, True)],
+)
+def test_a_record_of_another_kind_another_url_or_a_live_instance_is_passed_over(
+    kind: str, url: str, started_here: bool, root: Path
+) -> None:
+    waiting = (supervise.Waiting.of if started_here else supervise.Waiting)(kind, {"url": url})
+    process = supervise.Popen(["/bin/sleep", "300"], call_id="", waiting=waiting, keep=True)
+
+    assert [record.path for record in supervise.records()] == [process.record]
+    assert SerenaAgent._adopt_dashboard_viewer(_URL) is None
+
+
+def test_a_viewer_of_the_url_whose_process_has_ended_is_passed_over(root: Path) -> None:
+    process = supervise.Popen(["/bin/sh", "-c", ":"], call_id="", waiting=supervise.Waiting(_VIEWER_KIND, {"url": _URL}), keep=True)
+    process.wait()
+
+    assert [record.outcome().ended for record in supervise.records()] == [True]
+    assert SerenaAgent._adopt_dashboard_viewer(_URL) is None
+
+
+def test_nothing_is_started_where_no_display_is_usable(agent: SerenaAgent, root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(serena.agent, "system_has_usable_display", lambda: False)
+
+    agent._start_dashboard_viewer(minimized=False)
+
+    assert agent._dashboard_viewer_process is None
+    assert supervise.records() == []
+
+
+def test_where_the_platform_has_no_viewer_the_dashboard_opens_in_the_browser(
+    agent: SerenaAgent, scratch: Path, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened = scratch / "opened"
+    browser = scratch / "browser"
+    browser.write_text(f'#!/bin/sh\nprintf %s "$1" > "{opened}.tmp" && mv "{opened}.tmp" "{opened}"\n')
+    browser.chmod(0o755)
+    monkeypatch.setenv("BROWSER", str(browser))
+    monkeypatch.setattr(sys, "executable", _PYTHON)
+    monkeypatch.setattr(SerenaDashboardViewer, "is_current_platform_supported", staticmethod(lambda: False))
+
+    agent._start_dashboard_viewer(minimized=False)
+
+    deadline = time.monotonic() + 30
+    while not opened.exists():
+        assert time.monotonic() < deadline, "no browser was opened"
+        time.sleep(0.01)
+    assert opened.read_text() == _URL
+    assert agent._dashboard_viewer_process is None
+
+
+def test_where_the_platform_has_no_viewer_a_minimized_start_opens_nothing(
+    agent: SerenaAgent, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(SerenaDashboardViewer, "is_current_platform_supported", staticmethod(lambda: False))
+
+    agent._start_dashboard_viewer(minimized=True)
+
+    assert agent._dashboard_viewer_process is None
+    assert supervise.records() == []

@@ -138,6 +138,46 @@ def test_a_shell_command_that_ended_while_no_instance_ran_has_its_outcome_delive
     assert _records(root) == []
 
 
+def test_a_shell_command_whose_output_cannot_be_read_has_its_call_answered_with_the_failure_and_its_record_discarded(
+    root: Path, scratch: Path
+) -> None:
+    marker = scratch / "go"
+    _first_instance_killed_while(root, "shell-4", "shell", f"while [ ! -e {marker} ]; do sleep 0.01; done; echo done")
+    marker.touch()
+    _await(lambda: all(record.outcome().ended for record in _records(root)), "the command did not end")
+    [record] = _records(root)
+    Path(record.stdout).chmod(0)
+
+    journal = CallJournal()
+    watchers = _adoption(journal).adopt()
+    answer = journal.resume("shell-4")
+
+    assert watchers == []
+    assert answer.is_error and answer.text.startswith("Error: the result of the shell command could not be read from its record:")
+    assert _records(root) == []
+
+
+@pytest.mark.parametrize("how", ["shell", "inline"])
+def test_a_record_whose_call_already_holds_an_answer_is_adopted_and_the_journal_keeps_that_answer(
+    root: Path, scratch: Path, how: str
+) -> None:
+    call_id = f"{how}-answered"
+    marker = scratch / "go"
+    _first_instance_killed_while(root, call_id, how, f"while [ ! -e {marker} ]; do sleep 0.01; done; echo out")
+
+    journal = CallJournal()
+    journal.finish(call_id, CallResult("the answer its caller read"))
+    watchers = _adoption(journal).adopt()
+    marker.touch()
+    for watcher in watchers:
+        watcher.join(_DEADLINE_SECONDS)
+    answer = journal.resume(call_id)
+
+    assert len(watchers) == 1
+    assert (answer.text, answer.is_error) == ("the answer its caller read", False)
+    assert _records(root) == []
+
+
 def test_a_call_whose_process_names_no_continuation_is_answered_with_the_restart_and_its_record_discarded(
     root: Path, scratch: Path
 ) -> None:

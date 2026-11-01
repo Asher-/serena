@@ -13,6 +13,7 @@ import pytest
 
 from solidlsp.language_servers.omnisharp import OmniSharp
 from solidlsp.ls_config import Language, LanguageServerConfig
+from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.settings import SolidLSPSettings
 from solidlsp.util import supervise
 from test.solidlsp.util.supervised_stand_in import StandIns, assert_started_through_brain_supervise
@@ -56,3 +57,13 @@ def test_omnisharp_is_started_through_brain_supervise_and_handed_no_pid_to_watch
     assert "--hostPID" not in started_with
     assert str(os.getpid()) not in started_with
     assert_started_through_brain_supervise(omnisharp)
+
+
+def test_omnisharp_refuses_a_repository_holding_no_solution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    monkeypatch.setattr(OmniSharp, "_setup_runtime_dependencies", classmethod(lambda cls, config, settings: ("omnisharp", "plugin.dll")))
+    settings = SolidLSPSettings(solidlsp_dir=str(tmp_path / "solidlsp"), project_data_path=str(tmp_path / "project_data"))
+
+    with pytest.raises(SolidLSPException, match="No SLN file found"):
+        OmniSharp(LanguageServerConfig(code_language=Language.CSHARP_OMNISHARP), str(repository), settings)

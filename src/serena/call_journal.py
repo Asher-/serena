@@ -199,16 +199,18 @@ class CallJournal:
 
     def finish(self, call_id: str, result: CallResult) -> None:
         """
-        Records a call's answer and releases every ``brain/resume`` waiting on it.
+        Records a call's answer, unless the call already holds one, which stands because its caller may have read it, and
+        releases every ``brain/resume`` waiting on the call.
 
         :param call_id: the call.
         :param result: its answer.
         """
         with self._lock:
             entry = json.loads(self._path(call_id).read_text())
-            entry["result"] = {"text": result.text, "is_error": result.is_error}
-            entry["finished"] = datetime.now(UTC).isoformat()
-            self._write(entry)
+            if "result" not in entry:
+                entry["result"] = {"text": result.text, "is_error": result.is_error}
+                entry["finished"] = datetime.now(UTC).isoformat()
+                self._write(entry)
             self._open.discard(call_id)
             self._finished.notify_all()
 

@@ -3,7 +3,8 @@ Every process serena starts, started through the brain-supervise program.
 
 A supervised process leads a process group of its own under a supervisor that leads a session of
 its own, writes its streams to files and FIFOs rather than to pipes serena holds, and has its outcome
-recorded whether or not serena is running, so it outlives a restart of serena
+recorded whether or not serena is running, so a language server or bridge outlives a SIGKILL of
+serena's process group or a SIGTERM of serena
 (pg://brain/daemon/restart/survival). :class:`Popen` and :func:`run` stand where ``subprocess.Popen``
 and ``subprocess.run`` stood; ``subprocess.PIPE``, ``subprocess.DEVNULL``, ``subprocess.STDOUT`` and its
 exceptions keep their meanings. This module is the one place serena calls ``subprocess`` to start

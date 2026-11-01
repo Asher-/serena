@@ -2,9 +2,9 @@
 The owner of the records a serena keeps (decision://brain/daemon_restart_survival/journal/instance): the daemon on the
 default port keeps them under ``serena``, a serena listening on any other port under ``serena-<port>``, so that it starts
 beside a live daemon and keeps its calls apart from the daemon's, and a serena listening on no port, as one serving stdio
-does, opens no call journal and takes up nothing an ended instance left, so that it too starts beside a live daemon and
-leaves the daemon's records alone. The processes such a serena starts are recorded under ``serena`` naming it, and the
-daemon's startup adoption leaves them to it while it runs. Each serena here is a real ``serena start-mcp-server``.
+does, opens no call journal and adopts nothing at startup, so that it too starts beside a live daemon, though its first
+use of a command takes over a process of it an ended instance left. The processes such a serena holds are recorded under
+``serena`` naming it, and the daemon's startup adoption leaves them to it while it runs. Each serena here is a real ``serena start-mcp-server``.
 """
 
 import json

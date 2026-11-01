@@ -1,6 +1,6 @@
 """
 Serena starts a process through the brain-supervise program and no other way
-(task://daemon_restart_survival.18): :mod:`solidlsp.util.supervise` is the one module under src that
+(task://daemon_restart_survival_serena.2): :mod:`solidlsp.util.supervise` is the one module under src that
 starts anything directly, and what it starts is the supervisor. The one exemption is the editor a person opens
 from serena's command line, which needs the terminal (decision://brain/daemon_restart_survival/serena/cli/editor).
 """
@@ -61,6 +61,18 @@ EVENT_LOOP_STARTS = {"subprocess_exec", "subprocess_shell"}
 
 EXEMPT = {("serena/cli.py", "_open_in_editor")}
 """The functions, by file under src, whose starts are exempt: those a person runs at a terminal and no server does."""
+
+
+PID_READS = {"getpid", "getppid"}
+"""The attributes of os that read a pid of serena's."""
+
+PID_BOOKKEEPING = {
+    ("solidlsp/util/supervise.py", "of"),
+    ("solidlsp/ls_survival.py", "hold"),
+    ("solidlsp/ls_survival.py", "_claimed"),
+    ("solidlsp/ls_survival.py", "save"),
+}
+"""The functions, by file under src, that read serena's pid for a record of serena's own and build no launch command."""
 
 
 @dataclass(frozen=True)
@@ -149,6 +161,53 @@ def find_starts(source: str) -> list[Start]:
     return finder.starts
 
 
+class _PidFinder(_StartFinder):
+    """
+    Finds each read of a pid of serena's in a module, by attribute of os under any name it is imported as and by import,
+    but the value of a processId key, which initialize params hold and send_request nulls.
+    """
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.module == "os":
+            for alias in node.names:
+                if alias.name in PID_READS:
+                    self._found(f"os.{alias.name}")
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        if node.attr in PID_READS and self._dotted(node.value) == "os":
+            self._found(f"os.{node.attr}")
+        self.generic_visit(node)
+
+    def visit_Dict(self, node: ast.Dict) -> None:
+        for key, value in zip(node.keys, node.values, strict=True):
+            if not (_names_process_id(key) and _reads_a_pid(value)):
+                self.visit(value)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        [target, *rest] = node.targets
+        if rest or not (isinstance(target, ast.Subscript) and _names_process_id(target.slice) and _reads_a_pid(node.value)):
+            self.generic_visit(node)
+
+
+def _names_process_id(node: ast.expr | None) -> bool:
+    return isinstance(node, ast.Constant) and node.value == "processId"
+
+
+def _reads_a_pid(node: ast.expr) -> bool:
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in PID_READS
+
+
+def find_pid_reads(source: str) -> list[Start]:
+    """
+    :param source: the text of a Python module.
+    :return: each read in it of a pid of serena's that could reach a launch command.
+    """
+    tree = ast.parse(source)
+    finder = _PidFinder(tree)
+    finder.visit(tree)
+    return finder.starts
+
+
 def direct_starts(source: str) -> list[str]:
     """
     :param source: the text of a Python module.
@@ -227,3 +286,43 @@ def test_a_start_in_an_exempt_function_of_another_file_is_still_found() -> None:
     starts = find_starts("import subprocess\ndef _open_in_editor():\n    subprocess.run(['vi'])\n")
     assert [(start.name, start.function) for start in starts] == [("subprocess.run", "_open_in_editor")]
     assert ("serena/other.py", "_open_in_editor") not in EXEMPT
+
+
+def test_no_pid_of_serenas_reaches_a_launch_command_under_solidlsp() -> None:
+    offenders = {}
+    for path in (SOURCE_ROOT / "solidlsp").rglob("*.py"):
+        relative = path.relative_to(SOURCE_ROOT).as_posix()
+        reads = [read.name for read in find_pid_reads(path.read_text(encoding="utf-8")) if (relative, read.function) not in PID_BOOKKEEPING]
+        if reads:
+            offenders[relative] = reads
+    assert offenders == {}
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import os\ncmd = ['omnisharp', '--hostPID', str(os.getpid())]\n",
+        "import os\ncmd = f'server --parent {os.getppid()}'\n",
+        "import os as o\ncmd = ['server', str(o.getpid())]\n",
+        "from os import getpid\ncmd = ['server', str(getpid())]\n",
+        "from os import getppid as parent\ncmd = ['server', str(parent())]\n",
+        "import os\npid = os.getpid()\ncmd = ['server', str(pid)]\n",
+        "import os\nenv = {}\nenv['HOST_PID'] = str(os.getpid())\n",
+        "import os\nparams = {'processId': None, 'args': [str(os.getpid())]}\n",
+        "import os\nparams = {'processId': str(os.getpid())}\n",
+        "import os\nd = {}\nd['parentProcessId'] = os.getpid()\n",
+    ],
+)
+def test_a_pid_of_serenas_outside_a_process_id_key_is_found(source: str) -> None:
+    assert find_pid_reads(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import os\nparams = {'processId': os.getpid(), 'rootUri': 'file:///a'}\n",
+        "import os\nparams = {}\nparams['processId'] = os.getpid()\n",
+    ],
+)
+def test_a_pid_of_serenas_as_the_process_id_of_initialize_params_stays_allowed(source: str) -> None:
+    assert find_pid_reads(source) == []

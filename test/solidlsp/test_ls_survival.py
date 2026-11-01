@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from solidlsp.ls_config import Language
+from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_process import LanguageServerProcess, ProcessLaunchInfo
 from solidlsp.ls_survival import LanguageServerStates
 from solidlsp.util import supervise
@@ -46,11 +47,17 @@ SERVER = textwrap.dedent(
         method = message.get("method")
         journal.write(method + "\\n")
         if method == "initialize":
+            with open(sys.argv[1] + ".initialize", "w") as received:
+                json.dump(message["params"], received)
             answer(message["id"], {"capabilities": {"documentSymbolProvider": True}})
         elif method == "textDocument/didOpen":
             opened.add(message["params"]["textDocument"]["uri"])
         elif method == "textDocument/documentSymbol":
             answer(message["id"], [{"name": "open" if message["params"]["textDocument"]["uri"] in opened else "closed"}])
+        elif method == "workspace/refused":
+            body = json.dumps({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32601, "message": "refused"}}).encode()
+            sys.stdout.buffer.write(b"Content-Length: %d\\r\\n\\r\\n" % len(body) + body)
+            sys.stdout.buffer.flush()
         elif "id" in message:
             answer(message["id"], None)
     """
@@ -136,3 +143,47 @@ def test_a_document_changed_while_no_instance_ran_is_brought_up_to_date(tmp_path
     assert methods.count("textDocument/didOpen") == 1
     assert methods.count("textDocument/didChange") == 1
     process.stop()
+
+
+def test_a_live_pid_sent_in_initialize_params_reaches_the_server_as_a_null_process_id(tmp_path: Path) -> None:
+    server = tmp_path / "server.py"
+    server.write_text(SERVER)
+    journal = tmp_path / "journal"
+    command = [sys.executable, str(server), str(journal)]
+    process = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), Language.PYTHON, lambda _: logging.INFO)
+    process.start()
+
+    try:
+        process.send_request("initialize", {"processId": os.getpid(), "rootUri": "file:///a"})
+
+        assert json.loads(Path(f"{journal}.initialize").read_text()) == {"processId": None, "rootUri": "file:///a"}
+    finally:
+        process.stop()
+
+
+def test_an_error_the_server_answers_with_is_raised_to_the_caller(tmp_path: Path) -> None:
+    server = tmp_path / "server.py"
+    server.write_text(SERVER)
+    command = [sys.executable, str(server), str(tmp_path / "journal")]
+    process = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), Language.PYTHON, lambda _: logging.INFO)
+    process.start()
+
+    try:
+        with pytest.raises(SolidLSPException, match="workspace/refused"):
+            process.send_request("workspace/refused", {})
+    finally:
+        process.stop()
+
+
+def test_a_second_stop_finds_nothing_held_and_leaves_no_state(tmp_path: Path) -> None:
+    server = tmp_path / "server.py"
+    server.write_text(SERVER)
+    command = [sys.executable, str(server), str(tmp_path / "journal")]
+    process = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), Language.PYTHON, lambda _: logging.INFO)
+    process.start()
+    process.stop()
+
+    process.stop()
+
+    assert process.process is None
+    assert list(LanguageServerStates.kind_directory().rglob("*.json")) == []

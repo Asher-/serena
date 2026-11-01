@@ -139,6 +139,16 @@ def test_a_finished_call_is_answered_with_its_result_by_the_next_instance() -> N
     assert CallJournal().resume("call-1") == CallResult("found")
 
 
+def test_a_call_that_holds_an_answer_keeps_it_when_a_process_of_the_call_finishes_it_again() -> None:
+    _ended_instance({"call-1": "the answer its caller read"})
+    journal = CallJournal()
+    journal.claim("call-1")
+
+    journal.finish("call-1", CallResult("the process's outcome", True))
+
+    assert journal.resume("call-1") == CallResult("the answer its caller read")
+
+
 def test_a_call_in_flight_in_this_instance_is_answered_when_it_finishes() -> None:
     journal = CallJournal()
     journal.receive("call-1", "find_symbol", {})
