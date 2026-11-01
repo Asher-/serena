@@ -1,5 +1,5 @@
+import io
 import logging
-import os
 from collections.abc import Sequence
 from enum import Enum
 from typing import Any
@@ -8,6 +8,7 @@ from ruamel.yaml import YAML, CommentToken, StreamMark
 from ruamel.yaml.comments import CommentedMap
 
 from serena.constants import SERENA_FILE_ENCODING
+from serena.util.file_lifecycle import AtomicFileWriter
 
 log = logging.getLogger(__name__)
 
@@ -181,10 +182,18 @@ def normalise_yaml_comments(commented_map: CommentedMap, comment_normalisation: 
 
 
 def save_yaml(path: str, data: dict | CommentedMap, preserve_comments: bool = True) -> None:
+    """
+    Replaces the file at the given path with the data as YAML. The whole text is rendered before the file is touched and
+    comes in by one rename, so a reader sees the old text or the new one, and a dump that raises leaves the file as it was.
+
+    :param path: the path of the file, which is created along with its directory if necessary.
+    :param data: the data to write.
+    :param preserve_comments: whether the comments the data carries are written.
+    """
     yaml = _create_yaml(preserve_comments)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding=SERENA_FILE_ENCODING) as f:
-        yaml.dump(data, f)
+    text = io.StringIO()
+    yaml.dump(data, text)
+    AtomicFileWriter().write_text(path, text.getvalue(), SERENA_FILE_ENCODING, None)
 
 
 def yaml_comment_entry_is_empty(comment_entry: Any) -> bool:

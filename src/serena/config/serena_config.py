@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Self, TypeVar
 
 import yaml
+from filelock import FileLock
 from ruamel.yaml.comments import CommentedMap
 from sensai.util import logging
 from sensai.util.logging import LogTime, datetime_tag
@@ -791,6 +792,11 @@ class SerenaConfig(SharedConfig):
     the path to the configuration file to which updates of the configuration shall be saved;
     if None, the configuration is not saved to disk
     """
+    _project_roots_on_file: set[str] = field(default_factory=set)
+    """
+    the project roots the configuration file held when this instance last read or wrote it; what they differ by from
+    ``projects`` is what this instance registered or removed since
+    """
 
     # *** static members ***
 
@@ -895,6 +901,7 @@ class SerenaConfig(SharedConfig):
         # read projects
         if "projects" not in loaded_commented_yaml:
             raise SerenaConfigError("`projects` key not found in Serena configuration. Please update your `serena_config.yml` file.")
+        instance._project_roots_on_file = cls._project_roots_of(loaded_commented_yaml)
         instance.projects = []
         for path in loaded_commented_yaml["projects"]:
             path = Path(path).resolve()
@@ -1090,7 +1097,9 @@ class SerenaConfig(SharedConfig):
 
     def save(self) -> None:
         """
-        Saves the configuration to the file from which it was loaded (if any)
+        Saves the configuration to the file from which it was loaded (if any). The project roots another process registered
+        or removed since this instance last read the file stay as that process left them; every other field takes this
+        instance's value.
         """
         if self.config_file_path is None:
             return
@@ -1102,9 +1111,6 @@ class SerenaConfig(SharedConfig):
         # update fields with current values
         for field_name in self._iter_config_file_mapped_fields_without_type_conversion():
             commented_yaml[field_name] = getattr(self, field_name)
-
-        # convert project objects into list of paths
-        commented_yaml["projects"] = sorted({str(project.project_root) for project in self.projects})
 
         # convert language backend to string
         commented_yaml["language_backend"] = self.language_backend.value
@@ -1120,7 +1126,23 @@ class SerenaConfig(SharedConfig):
         template_yaml = load_yaml(SERENA_CONFIG_TEMPLATE_FILE, comment_normalisation=YamlCommentNormalisation.LEADING)
         transfer_missing_yaml_comments(template_yaml, commented_yaml, YamlCommentNormalisation.LEADING, force_update_all=True)
 
-        save_yaml(self.config_file_path, commented_yaml)
+        # the project roots the file holds now, with this instance's own registrations and removals applied, read and
+        # replaced under one lock so that no other process's save falls between the two
+        with FileLock(self.config_file_path + ".lock"):
+            on_file = self._project_roots_of(load_yaml(self.config_file_path)) if os.path.exists(self.config_file_path) else set()
+            own = {str(project.project_root) for project in self.projects}
+            roots = (on_file | (own - self._project_roots_on_file)) - (self._project_roots_on_file - own)
+            commented_yaml["projects"] = sorted(roots)
+            save_yaml(self.config_file_path, commented_yaml)
+            self._project_roots_on_file = roots
+
+    @staticmethod
+    def _project_roots_of(loaded_yaml: CommentedMap) -> set[str]:
+        """
+        :param loaded_yaml: the loaded contents of a configuration file.
+        :return: the resolved project roots it lists.
+        """
+        return {str(Path(root).resolve()) for root in loaded_yaml.get("projects") or []}
 
     @staticmethod
     def _resolve_serena_folder_location(template: str, placeholders: dict[str, str]) -> str:
