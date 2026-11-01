@@ -2,6 +2,7 @@ import logging
 import os
 import platform
 import shutil as _sh
+import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -24,6 +25,26 @@ from .solidlsp.clojure import is_clojure_cli_available
 configure(level=logging.INFO)
 
 log = logging.getLogger(__name__)
+
+SCRATCH_ROOT = Path(__file__).resolve().parents[1] / "build" / "test"
+"""
+The directory under which every test keeps its files, in the repository's ``build/``, which ``.gitignore`` excludes, and
+never a system temp directory (convention://global/organization/script/project/temp).
+"""
+
+# the temp directory of this process and of every process a test starts: tempfile and pytest's tmp_path and
+# tmp_path_factory, whose numbered base directory pytest takes from tempfile, all make their files under SCRATCH_ROOT
+SCRATCH_ROOT.mkdir(parents=True, exist_ok=True)
+tempfile.tempdir = str(SCRATCH_ROOT)
+os.environ["TMPDIR"] = str(SCRATCH_ROOT)
+
+# the serena home of this process and of every process a test starts, so that no test reads or writes the developer's
+# configuration (bug://serena/config/file/write/atomicity); the language servers already downloaded stay in use
+SERENA_HOME = Path(tempfile.mkdtemp(prefix="serena-home-", dir=SCRATCH_ROOT))
+os.environ["SERENA_HOME"] = str(SERENA_HOME)
+_DOWNLOADED_LANGUAGE_SERVERS = Path.home() / SERENA_MANAGED_DIR_NAME / "language_servers"
+if _DOWNLOADED_LANGUAGE_SERVERS.is_dir():
+    (SERENA_HOME / "language_servers").symlink_to(_DOWNLOADED_LANGUAGE_SERVERS)
 
 
 @pytest.fixture(scope="session")
