@@ -16,7 +16,7 @@ import subprocess
 import sys
 import textwrap
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from secrets import token_hex
 
@@ -114,8 +114,14 @@ def _command(scratch: Path, mode: str = "answers") -> list[str]:
     return [sys.executable, str(server), mode]
 
 
-def _first_instance(scratch: Path, root: Path, command: list[str], servers: int = 1, big: int = 0) -> list[int]:
-    """Runs a first instance that starts the servers, and kills its whole group; :return: the servers' pids."""
+def _first_instance(
+    scratch: Path, root: Path, command: list[str], servers: int = 1, big: int = 0, settled: Callable[[], bool] = lambda: True
+) -> list[int]:
+    """
+    Runs a first instance that starts the servers, and kills its whole group once it reports them and ``settled`` holds.
+
+    :return: the servers' pids.
+    """
     instance = subprocess.Popen(
         [sys.executable, "-c", FIRST_INSTANCE, json.dumps(command), str(scratch), str(servers), str(big)],
         env={**os.environ, supervise.ROOT_ENV: str(root)},
@@ -125,6 +131,7 @@ def _first_instance(scratch: Path, root: Path, command: list[str], servers: int 
     )
     assert instance.stdout is not None
     pids = json.loads(instance.stdout.readline())
+    _await(settled, "the first instance did not settle")
     os.killpg(instance.pid, signal.SIGKILL)
     instance.wait()
     return pids
@@ -217,7 +224,14 @@ def test_the_first_use_of_a_command_attaches_to_the_server_held_since_startup(sc
 
 def test_the_consumed_prefix_of_a_servers_stdout_is_freed_and_a_next_instance_reads_on_from_its_offset(scratch: Path, root: Path) -> None:
     command = _command(scratch)
-    [pid] = _first_instance(scratch, root, command, big=5)
+
+    def offset_saved_through_stdout() -> bool:
+        # a caller has its answer before the reader saves the offset past it, so the instance is killed only once that is saved
+        [path] = _state_files(root)
+        state = json.loads(path.read_text())
+        return state["stdout_offset"] == os.stat(supervise.Record.load(Path(state["record"])).stdout).st_size
+
+    [pid] = _first_instance(scratch, root, command, big=5, settled=offset_saved_through_stdout)
     [path] = _state_files(root)
     state = json.loads(path.read_text())
     stdout = Path(supervise.Record.load(Path(state["record"])).stdout)
