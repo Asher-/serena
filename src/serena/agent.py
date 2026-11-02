@@ -851,6 +851,10 @@ class SerenaAgent:
         self.prompt_factory = SerenaPromptFactory()
 
         # initialise active modes (baseline modes prior to project activation, allowing newly activated modes to be tracked)
+        # the modes the agent was started with, which apply to every session that set none, and the mode overrides of the
+        # single slot outside any session
+        self._configured_mode_overrides = modes
+        self._mode_overrides = modes
         self._active_modes: ActiveModes
         self._update_active_modes(log_message=False)
 
@@ -858,10 +862,6 @@ class SerenaAgent:
         # Note: We cannot update the active tools yet, because the base toolset has not been computed yet
         #       (and its computation depends on the active project)
         self._active_modes: ActiveModes
-        # the modes the agent was started with, which apply to every session that set none, and the mode overrides of the
-        # single slot outside any session
-        self._configured_mode_overrides = modes
-        self._mode_overrides = modes
         if project is not None:
             try:
                 self.activate_project_from_path_or_name(project, update_active_modes=False, update_active_tools=False)

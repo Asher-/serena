@@ -19,6 +19,9 @@ from solidlsp.ls_utils import TextCoordinateProvider, TextCoordinates, TextUtils
 if TYPE_CHECKING:
     from serena.code_editor import CodeEditor
     from serena.project import Project
+from serena.constants import DEFAULT_SOURCE_FILE_ENCODING
+from serena.util.line_numbers import to_display_line
+from solidlsp.ls_utils import TextUtils
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +42,7 @@ class TextLine:
     """Represents a line of text with information on how it relates to the match."""
 
     line_number: int
+    """the 0-based index of the line in the source text."""
     line_content: str
     match_type: LineType
     """Represents the type of line (match, prefix, postfix)"""
@@ -52,11 +56,13 @@ class TextLine:
     def format_line(self, include_line_numbers: bool = True) -> str:
         """Format the line for display (e.g.,for logging or passing to an LLM).
 
-        :param include_line_numbers: Whether to include the line number in the result.
+        :param include_line_numbers: Whether to include the (1-based, ``cat -n``
+            equivalent) line number in the result. The stored ``line_number`` is
+            0-based; it is converted to 1-based here at the display boundary.
         """
         prefix = self.get_display_prefix()
         if include_line_numbers:
-            line_num = str(self.line_number).rjust(4)
+            line_num = str(to_display_line(self.line_number)).rjust(4)
             prefix = f"{prefix}{line_num}"
         return f"{prefix}:{self.line_content}"
 
@@ -123,6 +129,27 @@ class MatchedConsecutiveLines:
         return cls(lines=text_lines, source_file_path=source_file_path)
 
 
+def glob_to_regex(glob_pat: str) -> str:
+    regex_parts: list[str] = []
+    i = 0
+    while i < len(glob_pat):
+        ch = glob_pat[i]
+        if ch == "*":
+            regex_parts.append(".*")
+        elif ch == "?":
+            regex_parts.append("..")
+        elif ch == "\\":
+            i += 1
+            if i < len(glob_pat):
+                regex_parts.append(re.escape(glob_pat[i]))
+            else:
+                regex_parts.append("\\")
+        else:
+            regex_parts.append(re.escape(ch))
+        i += 1
+    return "".join(regex_parts)
+
+
 def search_text(
     pattern: str,
     content: str | None = None,
@@ -130,9 +157,16 @@ def search_text(
     context_lines_before: int = 0,
     context_lines_after: int = 0,
     multiline: bool = True,
+    is_glob: bool = False,
+    encoding: str = DEFAULT_SOURCE_FILE_ENCODING,
 ) -> list[MatchedConsecutiveLines]:
     """
     Search for a pattern in text content. Supports both regex and glob-like patterns.
+
+    Every emitted :class:`TextLine` carries a ``line_number`` that is the 0-based
+    index of the line in ``content``, matching the convention used by
+    :meth:`MatchedConsecutiveLines.from_file_contents`, the LSP layer, and every
+    other line-oriented surface in the codebase.
 
     :param pattern: Pattern to search for (regex or glob-like pattern)
     :param content: The text content to search. May be None if source_file_path is provided.
@@ -141,11 +175,17 @@ def search_text(
     :param context_lines_before: Number of context lines to include before matches
     :param context_lines_after: Number of context lines to include after matches
     :param multiline: whether to apply multi-line matching, enabling the flags re.DOTALL and re.MULTILINE
+    :param is_glob: If True, pattern is treated as a glob-like pattern (e.g., "*.py", "test_??.py")
+             and will be converted to regex internally
+    :param encoding: Text encoding to use when ``source_file_path`` is read because ``content`` is None.
+        Defaults to UTF-8; callers with a known project encoding should pass it explicitly.
+
     :return: List of `TextSearchMatch` objects
     :raises: ValueError if the pattern is not valid
     """
+    # read the file when only the path was supplied
     if source_file_path and content is None:
-        with open(source_file_path) as f:
+        with open(source_file_path, encoding=encoding) as f:
             content = f.read()
 
     if content is None:
@@ -154,6 +194,10 @@ def search_text(
     matches = []
     lines = TextUtils.split_lines(content)
     total_lines = len(lines)
+
+    # Convert a glob-like pattern to a regular expression
+    if is_glob:
+        pattern = glob_to_regex(pattern)
 
     # precompute line start offsets once so that each match's coordinates can be resolved via binary search
     # instead of re-scanning the text from the beginning for every match

@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+import io
 import logging
-import os
-import tempfile
-import time
 from collections.abc import Sequence
 from enum import Enum
 from typing import Any
@@ -12,6 +10,7 @@ from ruamel.yaml import YAML, CommentedSeq, CommentToken, StreamMark
 from ruamel.yaml.comments import CommentedMap
 
 from serena.constants import SERENA_FILE_ENCODING
+from serena.util.file_lifecycle import AtomicFileWriter
 
 log = logging.getLogger(__name__)
 
@@ -219,44 +218,18 @@ def normalise_yaml_comments(commented_map: CommentedMap, comment_normalisation: 
 
 
 def save_yaml(path: str, data: dict | CommentedMap, preserve_comments: bool = True) -> None:
-    yaml = _create_yaml(preserve_comments)
-    target_dir = os.path.dirname(path)
-    os.makedirs(target_dir, exist_ok=True)
-    # Atomic write: dump to a temp file in the SAME directory, then os.replace onto the target.
-    # A plain truncate-and-write (open(path, "w")) is NOT atomic: a concurrent writer (e.g. a second
-    # Serena process updating the auto-managed registered-projects list) or an interrupted write can
-    # leave the file half-overwritten — writing a shorter value over a longer one leaves a stale tail,
-    # which corrupts the YAML so it no longer parses and every later load fails. temp + os.replace makes
-    # each write all-or-nothing (last-writer-wins, never a corrupt interleave).
-    fd, tmp = tempfile.mkstemp(dir=target_dir, prefix=os.path.basename(path) + ".", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding=SERENA_FILE_ENCODING) as f:
-            yaml.dump(data, f)
-        _replace_with_retry(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-
-def _replace_with_retry(src: str, dst: str, *, attempts: int = 10, delay_s: float = 0.05) -> None:
-    """``os.replace(src, dst)`` with a short retry on a Windows sharing violation.
-
-    On Windows the atomic rename fails with ``PermissionError`` (WinError 5/32) if another process
-    momentarily holds ``dst`` open — e.g. a second Serena process reading or replacing the same
-    config. A brief bounded retry rides out that contention; the temp file is still complete, so we
-    never fall back to a non-atomic write.
     """
-    for attempt in range(attempts):
-        try:
-            os.replace(src, dst)
-            return
-        except PermissionError:
-            if attempt == attempts - 1:
-                raise
-            time.sleep(delay_s)
+    Replaces the file at the given path with the data as YAML. The whole text is rendered before the file is touched and
+    comes in by one rename, so a reader sees the old text or the new one, and a dump that raises leaves the file as it was.
+
+    :param path: the path of the file, which is created along with its directory if necessary.
+    :param data: the data to write.
+    :param preserve_comments: whether the comments the data carries are written.
+    """
+    yaml = _create_yaml(preserve_comments)
+    text = io.StringIO()
+    yaml.dump(data, text)
+    AtomicFileWriter().write_text(path, text.getvalue(), SERENA_FILE_ENCODING, None)
 
 
 def yaml_comment_entry_is_empty(comment_entry: Any) -> bool:
