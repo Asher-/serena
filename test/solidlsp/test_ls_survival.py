@@ -233,7 +233,7 @@ def test_a_server_adopted_after_it_went_quiet_starts_without_the_signal_it_gave_
 
 def test_no_language_server_waits_with_no_limit_on_what_an_adopted_server_will_not_say_again() -> None:
     offenders = []
-    for path in (Path(__file__).parents[2] / "src" / "solidlsp" / "language_servers").glob("*.py"):
+    for path in (Path(__file__).parents[2] / "src" / "solidlsp" / "language_servers").rglob("*.py"):
         lines = path.read_text(encoding="utf-8").splitlines()
         for index, line in enumerate(lines):
             guarded = any("self.server.adopted" in above for above in lines[max(0, index - 2) : index])

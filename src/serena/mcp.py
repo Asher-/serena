@@ -433,6 +433,7 @@ class SerenaMCPFactory:
         )
 
         # a server listening on no port, which journals no call and adopts nothing at startup
+        # (decision://serena/daemon_restart_survival_serena/stdio/adoption)
         mcp: FastMCP
         if port is None:
             mcp = FastMCP(**settings)

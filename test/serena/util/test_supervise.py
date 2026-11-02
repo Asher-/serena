@@ -52,6 +52,35 @@ def test_run_of_a_command_that_is_not_there_raises_as_subprocess_does() -> None:
         supervise.run(["serena-no-such-command"])
 
 
+def test_run_of_a_file_without_its_execute_bit_by_its_path_raises_as_subprocess_does(tmp_path: Path) -> None:
+    program = tmp_path / "program"
+    program.write_text("#!/bin/sh\n")
+    program.chmod(0o644)
+
+    with pytest.raises(PermissionError):
+        subprocess.run([str(program)], check=False)
+    with pytest.raises(PermissionError):
+        supervise.run([str(program)])
+
+
+def test_run_of_a_file_without_its_execute_bit_by_its_name_on_path_raises_as_subprocess_does(tmp_path: Path) -> None:
+    (tmp_path / "program").write_text("#!/bin/sh\n")
+    (tmp_path / "program").chmod(0o644)
+    env = {"PATH": str(tmp_path)}
+
+    with pytest.raises(PermissionError):
+        subprocess.run(["program"], env=env, check=False)
+    with pytest.raises(PermissionError):
+        supervise.run(["program"], env=env)
+
+
+def test_run_of_a_directory_raises_as_subprocess_does(tmp_path: Path) -> None:
+    with pytest.raises(PermissionError):
+        subprocess.run([str(tmp_path)], check=False)
+    with pytest.raises(PermissionError):
+        supervise.run([str(tmp_path)])
+
+
 def test_run_in_a_directory_that_is_not_there_raises_as_subprocess_does(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         supervise.run(["/bin/echo"], cwd=tmp_path / "absent")

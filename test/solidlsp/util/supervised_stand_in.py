@@ -11,12 +11,18 @@ other than through brain-supervise finds no such record.
 
 The body of a stand-in is shell, with the program's arguments in ``$@``. Since PATH holds nothing but stand-ins, a body
 names every other program by its absolute path.
+
+Two routes are not reached by a stand-in that runs. A program that is found on PATH but cannot be started is
+:meth:`StandIns.unrunnable`. A run that outlasts a long fixed timeout is replaced, for the handler of that timeout, by
+:func:`time_out_runs`.
 """
 
 import json
 import shlex
+import subprocess
 import threading
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -145,6 +151,49 @@ class StandIns:
         (answers / "stderr").write_text(stderr)
         quoted = shlex.quote(str(answers))
         return self.add(name, f"/bin/cat {quoted}/stdout\n/bin/cat {quoted}/stderr >&2\nexit {exit_code}")
+
+    def unrunnable(self, name: str) -> Path:
+        """
+        :param name: the program's name.
+        :return: an executable named as the program whose interpreter does not exist, so that PATH finds the program and
+            starting it fails.
+        """
+        path = self.bin / name
+        path.write_text("#!/nonexistent/interpreter\n")
+        path.chmod(0o755)
+        return path
+
+
+@dataclass(frozen=True)
+class TimedOutRun:
+    """One run that :func:`time_out_runs` made time out."""
+
+    args: str | Sequence[str]
+    """the command of the run, as :func:`solidlsp.util.supervise.run` was given it."""
+    timeout: float | None
+    """the timeout of the run in seconds, as :func:`solidlsp.util.supervise.run` was given it."""
+
+
+def time_out_runs(monkeypatch: pytest.MonkeyPatch, matching: Callable[[Sequence[str]], bool] = lambda args: True) -> list[TimedOutRun]:
+    """
+    Makes each matching run time out as soon as it is asked for, for the handler of a timeout that the test would
+    otherwise wait out. A run that does not match is started as it is.
+
+    :param monkeypatch: the test's monkeypatch, through which :func:`solidlsp.util.supervise.run` is replaced for the test.
+    :param matching: whether the command of a run is one that times out.
+    :return: the runs that timed out, in the order they were asked for, which grows as the test runs.
+    """
+    real_run = supervise.run
+    timed_out: list[TimedOutRun] = []
+
+    def run(args: str | Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        if not matching(args):
+            return real_run(args, **kwargs)
+        timed_out.append(TimedOutRun(args, kwargs.get("timeout")))
+        raise subprocess.TimeoutExpired(args, kwargs.get("timeout") or 0)
+
+    monkeypatch.setattr(supervise, "run", run)
+    return timed_out
 
 
 def assert_started_through_brain_supervise(*stand_ins: StandIn) -> None:

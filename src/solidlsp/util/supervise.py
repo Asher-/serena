@@ -8,7 +8,8 @@ serena's process group or a SIGTERM of serena
 (pg://brain/daemon/restart/survival). :class:`Popen` and :func:`run` stand where ``subprocess.Popen``
 and ``subprocess.run`` stood; ``subprocess.PIPE``, ``subprocess.DEVNULL``, ``subprocess.STDOUT`` and its
 exceptions keep their meanings. This module is the one place serena calls ``subprocess`` to start
-anything, and what it starts is the supervisor.
+anything, and what it starts is the supervisor; the one start elsewhere is the command-line editor of
+serena/cli.py, exempted by decision://brain/daemon_restart_survival/serena/cli/editor.
 """
 
 import contextvars
@@ -549,7 +550,7 @@ class Popen:
         path_var = (env if env is not None else os.environ).get("PATH")
         resolved = shutil.which(argv[0], path=path_var)
         if resolved is None:
-            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), argv[0])
+            raise _not_runnable(argv[0], path_var)
         if cwd is not None and not os.path.isdir(cwd):
             raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), os.fspath(cwd))
         if read_only_stdin:
@@ -820,6 +821,18 @@ class Popen:
 
     def __exit__(self, *exc: object) -> None:
         self.close_streams()
+
+
+def _not_runnable(name: str, path_var: str | None) -> OSError:
+    """
+    :param name: the program a start could not resolve.
+    :param path_var: the PATH it searched.
+    :return: what exec answers: a :class:`PermissionError` where something of that name exists, as a file without its
+        execute bit or a directory does, and a :class:`FileNotFoundError` where nothing does.
+    """
+    directories = [""] if os.path.dirname(name) else (path_var if path_var is not None else os.defpath).split(os.pathsep)
+    code = errno.EACCES if any(os.path.exists(os.path.join(directory, name)) for directory in directories) else errno.ENOENT
+    return OSError(code, os.strerror(code), name)
 
 
 def _argv(args: str | Sequence[str], shell: bool) -> list[str]:
