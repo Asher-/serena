@@ -291,13 +291,6 @@ class LanguageServerId(Enum):
     definitions, completion). Must be explicitly specified as the main
     language, not auto-detected.
     """
-    JSON = "json"
-    """Serena's in-house JSON structural backend (experimental).
-    Backed by :class:`JsonStructuralLanguage` (a hand-rolled round-trip CST),
-    so every parse / serialize cycle is byte-exact. There is no language
-    server yet — the backend provides structural editing only. Must be
-    explicitly specified as the main language, not auto-detected.
-    """
     YAML = "yaml"
     """YAML language server (experimental).
     Must be explicitly specified as the main language, not auto-detected.
@@ -634,8 +627,6 @@ class LanguageServerId(Enum):
                 return FilenameMatcher(".md", ".markdown")
             case self.LATEX:
                 return FilenameMatcher(".tex", ".bib", ".sty", ".cls")
-            case self.JSON:
-                return FilenameMatcher(".json")
             case self.SCALA:
                 return FilenameMatcher(".scala", ".sbt")
             case self.JULIA | self.JULIA_FATOU:
@@ -1074,8 +1065,6 @@ class LanguageServerId(Enum):
                 from solidlsp.language_servers.graphql_language_server import GraphQLLanguageServer
 
                 return GraphQLLanguageServer
-            case self.JSON:
-                raise NotImplementedError("LanguageServerId.JSON has no language server; use the JSON structural backend instead.")
             case _:
                 raise ValueError(f"Unhandled language: {self}")
 
