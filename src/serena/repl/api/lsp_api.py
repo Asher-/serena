@@ -121,6 +121,7 @@ class LspSymbolCollectionRenderer(Renderer[LspSymbolCollection]):
         grouper: SymbolDictGrouper | None = None,
     ):
         super().__init__(agent, max_answer_chars)
+        self._agent = agent
         self._output_params = output_params
         self._grouper = grouper
 
