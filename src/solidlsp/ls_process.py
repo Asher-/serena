@@ -528,7 +528,10 @@ class LanguageServerProcess:
             elif method == "textDocument/didChange":
                 changes = params.get("contentChanges", [])
                 whole = len(changes) == 1 and "range" not in changes[0]
-                state.open_documents[uri] = OpenDocument(document.get("version", 0), text_digest(changes[0]["text"]) if whole else None)
+
+                # a server's versions only rise, and a client that reopened a document an adopted server holds counts from 0
+                document["version"] = max(document.get("version", 0), known.version + 1 if known is not None else 0)
+                state.open_documents[uri] = OpenDocument(document["version"], text_digest(changes[0]["text"]) if whole else None)
             elif known is None or not self._adopted:
                 state.open_documents[uri] = OpenDocument(document.get("version", 0), text_digest(document["text"]))
             else:

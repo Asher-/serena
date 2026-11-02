@@ -52,6 +52,9 @@ SERVER = textwrap.dedent(
             answer(message["id"], {"capabilities": {"documentSymbolProvider": True}})
         elif method == "textDocument/didOpen":
             opened.add(message["params"]["textDocument"]["uri"])
+        elif method == "textDocument/didChange":
+            with open(sys.argv[1] + ".versions", "a") as versions:
+                versions.write(str(message["params"]["textDocument"]["version"]) + "\\n")
         elif method == "textDocument/documentSymbol":
             answer(message["id"], [{"name": "open" if message["params"]["textDocument"]["uri"] in opened else "closed"}])
         elif method == "workspace/refused":
@@ -142,6 +145,28 @@ def test_a_document_changed_while_no_instance_ran_is_brought_up_to_date(tmp_path
     methods = journal.read_text().split()
     assert methods.count("textDocument/didOpen") == 1
     assert methods.count("textDocument/didChange") == 1
+    process.stop()
+
+
+def test_a_change_after_an_adoption_counts_on_from_the_version_the_server_holds(tmp_path: Path) -> None:
+    server = tmp_path / "server.py"
+    server.write_text(SERVER)
+    journal = tmp_path / "journal"
+    command = [sys.executable, str(server), str(journal)]
+    _start_and_kill_the_first_instance(tmp_path, command)
+
+    # a client whose buffer of a document restarts its count on being opened again
+    process = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), Language.PYTHON, lambda _: logging.INFO)
+    process.start()
+    process.send_notification(
+        "textDocument/didOpen", {"textDocument": {"uri": "file:///a", "version": 0, "languageId": "python", "text": "b"}}
+    )
+    process.send_notification(
+        "textDocument/didChange", {"textDocument": {"uri": "file:///a", "version": 1}, "contentChanges": [{"text": "c"}]}
+    )
+    process.send_request("textDocument/documentSymbol", {"textDocument": {"uri": "file:///a"}})
+
+    assert Path(f"{journal}.versions").read_text().split() == ["2", "3"]
     process.stop()
 
 

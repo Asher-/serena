@@ -215,18 +215,6 @@ def alive(pid: int, start: str) -> bool:
     return start != "" and start_time(pid) == start
 
 
-def process_exists(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
 @dataclass(frozen=True)
 class Waiting:
     """

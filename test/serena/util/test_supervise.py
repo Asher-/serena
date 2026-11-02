@@ -13,6 +13,7 @@ import textwrap
 import time
 from pathlib import Path
 
+import psutil
 import pytest
 
 from solidlsp.util import supervise
@@ -161,7 +162,7 @@ def test_a_read_only_stdin_keeps_the_record_on_the_process_and_is_adopted_by_the
 
     # the next instance reaches the same process through the record's FIFO
     fields = json.loads(record.read_text())
-    assert supervise.process_exists(fields["pid"])
+    assert psutil.pid_exists(fields["pid"])
     process = supervise.Popen.adopt(record, stdout_offset=len(b"before\n"))
     assert process.stdin is not None and process.stdout is not None
     process.stdin.write(b"after\n")
@@ -178,9 +179,9 @@ def test_a_signal_reaches_a_child_of_the_process() -> None:
     process.kill()
     process.wait()
     deadline = time.monotonic() + 10
-    while supervise.process_exists(child) and time.monotonic() < deadline:
+    while psutil.pid_exists(child) and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert not supervise.process_exists(child)
+    assert not psutil.pid_exists(child)
 
 
 def test_a_process_outlives_a_kill_of_its_starters_group_and_is_adopted_by_the_next(tmp_path: Path) -> None:
@@ -206,7 +207,7 @@ def test_a_process_outlives_a_kill_of_its_starters_group_and_is_adopted_by_the_n
 
     # the next instance, reading on from the first byte the ended one did not consume
     fields = json.loads(record.read_text())
-    assert supervise.process_exists(fields["pid"])
+    assert psutil.pid_exists(fields["pid"])
     process = supervise.Popen.adopt(record, stdout_offset=len(b"before\n"))
     assert process.pid == fields["pid"]
     assert process.stdin is not None and process.stdout is not None

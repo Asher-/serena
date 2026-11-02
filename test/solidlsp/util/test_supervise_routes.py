@@ -284,3 +284,70 @@ def test_communicate_writes_its_input_to_the_fifo_and_keeps_a_kept_record() -> N
     assert process.communicate(b"line\nrest\n") == (b"line\n", None)
     assert process.record.exists()
     process.release()
+
+
+def test_no_program_named_and_none_on_the_path_is_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(supervise.PROGRAM_ENV)
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    with pytest.raises(FileNotFoundError, match=supervise.PROGRAM_ENV):
+        supervise.program()
+
+
+def test_a_program_on_the_path_is_found_where_none_is_named(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    found = tmp_path / "brain-supervise"
+    found.write_text("#!/bin/sh\n")
+    found.chmod(0o755)
+    monkeypatch.delenv(supervise.PROGRAM_ENV)
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    assert supervise.program() == str(found)
+
+
+def test_the_records_leave_out_one_that_cannot_be_read_and_one_whose_outcome_is_consumed() -> None:
+    process = supervise.Popen(["/bin/sleep", "300"], waiting=supervise.Waiting.of("test"), keep=True)
+    directory = process.record.parent
+    torn = directory / "torn.json"
+    torn.write_text("{")
+    gone = directory / "gone.json"
+    gone.symlink_to(directory / "nowhere.json")
+    consumed = directory / "consumed.json"
+    consumed.write_text(json.dumps({**json.loads(process.record.read_text()), "consumed": True}))
+
+    found = [record.path for record in supervise.records()]
+
+    # the fixture's sweep reads every record it finds
+    for path in (torn, gone, consumed):
+        path.unlink()
+    assert found == [process.record]
+
+
+def test_a_stream_that_is_gone_or_no_file_reads_as_nothing_and_a_record_that_is_gone_holds_an_end(tmp_path: Path) -> None:
+    record = supervise.Record(tmp_path / "gone.json", "", supervise.Waiting(), "", str(tmp_path / "gone.err"))
+
+    assert record.read(record.stdout) == b""
+    assert record.read(record.stderr) == b""
+    assert record.outcome() == supervise.Outcome(True, -1)
+    assert record.wait() == supervise.Outcome(True, -1)
+
+
+def test_waiting_fields_that_describe_nothing_are_nothing_waiting() -> None:
+    assert supervise.Waiting.from_fields(None) == supervise.Waiting()
+
+
+def test_a_stop_ends_a_process_by_its_terminate_signal() -> None:
+    process = supervise.Popen(["/bin/sleep", "300"], keep=True)
+
+    outcome = supervise.Record.load(process.record).stop()
+
+    assert outcome.ended and outcome.returncode == -signal.SIGTERM
+
+
+def test_a_stop_kills_a_process_deaf_to_its_terminate_signal() -> None:
+    process = supervise.Popen(["/bin/sh", "-c", "trap '' TERM; echo ready; exec sleep 300"], stdout=subprocess.PIPE, keep=True)
+    assert process.stdout is not None
+    assert process.stdout.readline() == b"ready\n"
+
+    outcome = supervise.Record.load(process.record).stop()
+
+    assert outcome.ended and outcome.returncode == -signal.SIGKILL

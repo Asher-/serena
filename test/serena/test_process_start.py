@@ -44,11 +44,22 @@ DIRECT_STARTS = {
     "asyncio": {"create_subprocess_exec", "create_subprocess_shell"},
     "asyncio.subprocess": {"create_subprocess_exec", "create_subprocess_shell"},
     "anyio": {"open_process", "run_process"},
+    "anyio.to_process": {"run_sync"},
     "psutil": {"Popen"},
     "pty": {"fork", "spawn"},
     "multiprocessing": {"Process", "Pool", "Manager", "get_context"},
     "multiprocessing.pool": {"Pool"},
-    "multiprocessing.context": {"Process", "SpawnProcess", "ForkProcess", "ForkServerProcess"},
+    "multiprocessing.context": {
+        "Process",
+        "SpawnProcess",
+        "ForkProcess",
+        "ForkServerProcess",
+        "BaseContext",
+        "DefaultContext",
+        "SpawnContext",
+        "ForkContext",
+        "ForkServerContext",
+    },
     "multiprocessing.process": {"BaseProcess"},
     "multiprocessing.managers": {"BaseManager", "SyncManager"},
     "concurrent.futures": {"ProcessPoolExecutor"},
@@ -112,7 +123,7 @@ class _StartFinder(ast.NodeVisitor):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         module = node.module or ""
         for alias in node.names:
-            if alias.name in DIRECT_STARTS.get(module, ()):
+            if alias.name in DIRECT_STARTS.get(module, ()) or (alias.name == "*" and module in DIRECT_STARTS):
                 self._found(f"{module}.{alias.name}")
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -170,7 +181,7 @@ class _PidFinder(_StartFinder):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         if node.module == "os":
             for alias in node.names:
-                if alias.name in PID_READS:
+                if alias.name in PID_READS or alias.name == "*":
                     self._found(f"os.{alias.name}")
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
@@ -267,7 +278,14 @@ def test_the_command_line_editor_starts_the_editor_directly_and_is_the_one_exemp
         "import anyio\nanyio.open_process(['ls'])\n",
         "from anyio import open_process\n",
         "import anyio as a\na.run_process(['ls'])\n",
+        "from anyio import to_process\nto_process.run_sync(print)\n",
+        "import anyio.to_process\nanyio.to_process.run_sync(print)\n",
+        "from anyio.to_process import run_sync\n",
         "import os\nos.startfile('x')\n",
+        "from multiprocessing.context import SpawnContext\nSpawnContext().Process()\n",
+        "import multiprocessing.context as c\nc.ForkServerContext().Process()\n",
+        "from subprocess import *\nrun(['ls'])\n",
+        "from os import *\nsystem('ls')\n",
     ],
 )
 def test_a_direct_start_is_found(source: str) -> None:
@@ -306,6 +324,7 @@ def test_no_pid_of_serenas_reaches_a_launch_command_under_solidlsp() -> None:
         "import os as o\ncmd = ['server', str(o.getpid())]\n",
         "from os import getpid\ncmd = ['server', str(getpid())]\n",
         "from os import getppid as parent\ncmd = ['server', str(parent())]\n",
+        "from os import *\ncmd = ['server', str(getpid())]\n",
         "import os\npid = os.getpid()\ncmd = ['server', str(pid)]\n",
         "import os\nenv = {}\nenv['HOST_PID'] = str(os.getpid())\n",
         "import os\nparams = {'processId': None, 'args': [str(os.getpid())]}\n",
