@@ -418,23 +418,6 @@ class CodeEditor(Generic[TSymbol], ABC):
         with self.edited_file_context(relative_path) as edited_file:
             self._delete_line_range(edited_file, start_line, end_line)
 
-    def replace_lines(self, relative_path: str, start_line: int, end_line: int, content: str) -> None:
-        """
-        Replaces a range of lines in the given file, writing the file once.
-
-        Deleting the range and inserting the replacement as two separate operations
-        would persist the deletion even if the insertion failed, leaving the file
-        without the lines the caller asked to replace.
-
-        :param relative_path: the relative path of the file in which to replace the lines
-        :param start_line: the 0-based index of the first line to replace (inclusive)
-        :param end_line: the 0-based index of the last line to replace (inclusive)
-        :param content: the content to insert in place of the range
-        """
-        with self.edited_file_context(relative_path) as edited_file:
-            self._delete_line_range(edited_file, start_line, end_line)
-            edited_file.insert_text_at_position(PositionInFile(line=start_line, col=0), content)
-
     def _delete_line_range(self, edited_file: "CodeEditor.EditedFile", start_line: int, end_line: int) -> None:
         """
         Deletes the given inclusive line range from an open edited file.

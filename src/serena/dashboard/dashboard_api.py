@@ -725,8 +725,8 @@ class SerenaDashboardAPI:
         """
 
         def run() -> ResponseLanguageServerStatus:
-            active = sorted(lang.value for lang in self._agent.get_active_lsp_languages())
-            unavailable = {lang.value: str(exc) for lang, exc in self._agent.get_unavailable_lsp_languages().items()}
+            active = sorted(ls_id.get_key() for ls_id in self._agent.get_active_language_server_ids())
+            unavailable = {ls_id.get_key(): str(exc) for ls_id, exc in self._agent.get_unavailable_lsp_languages().items()}
             return ResponseLanguageServerStatus(active=active, unavailable=unavailable)
 
         return self._agent.execute_task(run, logged=False)
