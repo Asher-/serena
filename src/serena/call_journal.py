@@ -19,8 +19,8 @@ from typing import Any
 
 import anyio
 import psutil
-from mcp.server.lowlevel.server import request_ctx
-from mcp.types import CallToolRequest, CallToolResult, ServerResult, TextContent
+from mcp.server import ServerRequestContext
+from mcp.types import CallToolRequestParams, CallToolResult, TextContent
 
 from solidlsp.util import supervise
 
@@ -255,7 +255,7 @@ class JournaledCallHandler:
     again: the call is answered as ``brain/resume`` answers it.
     """
 
-    def __init__(self, handler: Callable[[CallToolRequest], Awaitable[ServerResult]], journal: CallJournal) -> None:
+    def __init__(self, handler: Callable[[ServerRequestContext, CallToolRequestParams], Awaitable[CallToolResult]], journal: CallJournal) -> None:
         """
         :param handler: the handler FastMCP registered for ``tools/call``.
         :param journal: the journal.
@@ -263,16 +263,16 @@ class JournaledCallHandler:
         self._handler = handler
         self._journal = journal
 
-    async def __call__(self, request: CallToolRequest) -> ServerResult:
+    async def __call__(self, ctx: ServerRequestContext, params: CallToolRequestParams) -> CallToolResult:
         # the call id the HTTP request carrying the call names
-        call_id = _call_id()
+        call_id = _call_id(ctx)
         if not call_id:
-            return await self._handler(request)
+            return await self._handler(ctx, params)
 
         # the call, recorded before its work starts, or answered from the journal when the journal already holds it
-        tool = request.params.name
+        tool = params.name
         try:
-            fresh = self._journal.receive(call_id, tool, request.params.arguments)
+            fresh = self._journal.receive(call_id, tool, params.arguments)
         except NoCallError:
             return _tool_result(CallResult(f"Error: {CALL_ID_HEADER} {call_id!r} cannot name a call of serena's journal", True))
         if not fresh:
@@ -281,7 +281,7 @@ class JournaledCallHandler:
         # the call's work, whose answer is journaled where it ends, however it ends
         token = CALL_ID_VAR.set(call_id)
         try:
-            response = await self._handler(request)
+            response = await self._handler(ctx, params)
         except BaseException as e:
             self._journal.finish(call_id, CallResult(f"Error: call {call_id} ({tool}) ended before it answered: {type(e).__name__}", True))
             raise
@@ -347,35 +347,31 @@ class CallJournalLayer:
         await _respond(send, {"jsonrpc": "2.0", "id": request_id, "result": {"content": content, "isError": result.is_error}})
 
 
-def _call_id() -> str:
+def _call_id(ctx: ServerRequestContext) -> str:
     """
+    :param ctx: the context of the request being handled.
     :return: the call id in X-Brain-Call-Id of the HTTP request that carried the request being handled, or "" when there
         is no such request or it names none.
     """
-    try:
-        context = request_ctx.get()
-    except LookupError:
-        return ""
-    headers = getattr(context.request, "headers", None)
+    headers = getattr(ctx.request, "headers", None)
     return headers.get(CALL_ID_HEADER, "") if headers is not None else ""
 
 
-def _journaled(response: ServerResult) -> CallResult:
+def _journaled(response: CallToolResult) -> CallResult:
     """
     :param response: the answer FastMCP's handler gave a ``tools/call``.
     :return: the answer as the journal keeps it: the text of its content and whether it is a failure.
     """
-    result = response.root
-    text = "".join(getattr(item, "text", "") for item in getattr(result, "content", []))
-    return CallResult(text, bool(getattr(result, "isError", False)))
+    text = "".join(getattr(item, "text", "") for item in getattr(response, "content", []))
+    return CallResult(text, bool(getattr(response, "is_error", False)))
 
 
-def _tool_result(result: CallResult) -> ServerResult:
+def _tool_result(result: CallResult) -> CallToolResult:
     """
     :param result: an answer the journal keeps.
     :return: the answer as a ``tools/call`` result.
     """
-    return ServerResult(CallToolResult(content=[TextContent(type="text", text=result.text)], isError=result.is_error))
+    return CallToolResult(content=[TextContent(type="text", text=result.text)], is_error=result.is_error)
 
 
 def _decode(body: bytes) -> dict[str, Any]:

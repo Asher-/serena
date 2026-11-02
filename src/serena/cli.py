@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import collections
+import faulthandler
 import glob
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 from collections.abc import Iterator, Sequence
 from logging import Logger
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -109,7 +112,11 @@ def find_project_root(root: str | Path | None = None) -> str | None:
 
 
 def _open_in_editor(path: str) -> None:
-    """Open the given file in the system's default editor or viewer."""
+    """
+    Open the given file in the system's default editor or viewer. A person runs this at a terminal and no brain server
+    does, so the editor is started directly with the terminal as its standard streams, which the brain-supervise program
+    cannot give it (decision://brain/daemon_restart_survival/serena/cli/editor).
+    """
     editor = os.environ.get("EDITOR")
     run_kwargs = subprocess_kwargs()
     try:
@@ -339,10 +346,32 @@ class TopLevelCommands(AutoRegisteringGroup):
     )
     @click.option(
         "--transport",
-        type=click.Choice(["stdio", "sse", "streamable-http"]),
+        type=click.Choice(["stdio", "sse", "streamable-http", "pipe"]),
         default="stdio",
         show_default=True,
-        help="Transport protocol.",
+        help="Transport protocol. Use 'pipe' to run as a per-client forwarder that talks to a Serena daemon over --daemon-url.",
+    )
+    @click.option(
+        "--daemon-url",
+        type=str,
+        default="unix:///tmp/serena-daemon.sock",
+        show_default=True,
+        help="URI of the Serena daemon's socket; consulted only when --transport pipe is selected.",
+    )
+    @click.option(
+        "--pipe-socket-path",
+        type=str,
+        default=None,
+        show_default=True,
+        help=(
+            "Filesystem path for the daemon-side pipe listener Unix socket. When set, the daemon "
+            "(any non-pipe transport) ALSO accepts pipe forwarder connections at this path; pipe "
+            "forwarders are spawned per-client by 'serena start-mcp-server --transport pipe' and "
+            "supply a stable session_id pinning per-session state to the pipe's lifetime. Default "
+            "None disables the pipe listener (legacy daemon behaviour). To activate the pipe "
+            "transport in production, set this to /tmp/serena-daemon.sock (matches the design plan "
+            "default and the pipe forwarder's default --daemon-url)."
+        ),
     )
     @click.option(
         "--host",
@@ -400,7 +429,9 @@ class TopLevelCommands(AutoRegisteringGroup):
         added_modes: Sequence[str],
         language_backend: str | None,
         agent_interface: str | None,
-        transport: Literal["stdio", "sse", "streamable-http"],
+        transport: Literal["stdio", "sse", "streamable-http", "pipe"],
+        daemon_url: str,
+        pipe_socket_path: str | None,
         host: str,
         port: int,
         enable_web_dashboard: bool | None,
@@ -410,7 +441,6 @@ class TopLevelCommands(AutoRegisteringGroup):
         trace_lsp_communication: bool | None,
         tool_timeout: float | None,
     ) -> None:
-        from serena.mcp import SerenaMCPFactory, uvicorn_ignore_logging_config_context
 
         # initialize logging, using INFO level initially (will later be adjusted by SerenaAgent according to the config)
         #   * memory log handler (for use by GUI/Dashboard)
@@ -424,16 +454,56 @@ class TopLevelCommands(AutoRegisteringGroup):
         stderr_handler = logging.StreamHandler(stream=sys.stderr)
         stderr_handler.formatter = formatter
         Logger.root.addHandler(stderr_handler)
-        log_path = SerenaPaths().get_next_log_file_path("mcp")
-        file_handler = logging.FileHandler(log_path, mode="w")
+        # operator-facing rotating log at ~/Library/Logs/serena/serena.log replaces the
+        # legacy per-start FileHandler so the daemon's long-running log file has a bounded
+        # ceiling. The single file is ALSO launchd's StandardOutPath / StandardErrorPath
+        # capture target; with no rotation it has grown to hundreds of MB. The rotating
+        # handler caps it at 6 x 100 MB. Known wart: after a Python rotation, launchd's
+        # held fd still points at the renamed inode, so any process-crash output captured
+        # by launchd lands in the rotated file rather than the fresh serena.log -- the
+        # leak is bounded per-daemon-lifetime because launchd reopens serena.log when the
+        # daemon process restarts.
+        operator_log_dir = Path.home() / "Library" / "Logs" / "serena"
+        operator_log_dir.mkdir(parents=True, exist_ok=True)
+        operator_log_path = operator_log_dir / "serena.log"
+        log_path = str(operator_log_path)
+        _OPERATOR_LOG_MAX_BYTES = 100 * 1024 * 1024
+        # one-time idempotent legacy rename so the rotating handler does not inherit a
+        # pre-rotation file that already exceeds the ceiling. Subsequent starts skip the
+        # rename because the .legacy sentinel is present.
+        legacy_log_path = operator_log_dir / "serena.log.legacy"
+        if operator_log_path.exists() and not legacy_log_path.exists() and operator_log_path.stat().st_size > _OPERATOR_LOG_MAX_BYTES:
+            operator_log_path.rename(legacy_log_path)
+        file_handler = RotatingFileHandler(log_path, maxBytes=_OPERATOR_LOG_MAX_BYTES, backupCount=5)
         file_handler.formatter = formatter
         Logger.root.addHandler(file_handler)
+        # preserve the contract that ``SerenaPaths().last_returned_log_file_path`` points
+        # to the active log file so ``SerenaAgent.get_log_inspection_instructions`` can
+        # report a real path; without this the dashboard-off branch returns a generic
+        # "logs not available" message.
+        SerenaPaths().last_returned_log_file_path = log_path
+
+        # SIGUSR1 produces an all-thread traceback on stderr (captured by launchd into
+        # serena.log). The launchd healthcheck extension probes this on every iteration
+        # to detect daemons whose main thread is responsive only to the MCP initialize
+        # handler. Registered after logging init so the dump is visible in the operator
+        # log.
+        try:
+            faulthandler.register(signal.SIGUSR1, file=sys.stderr, all_threads=True, chain=False)
+        except OSError:
+            # sys.stderr lacks fileno() under click's CliRunner; the SIGUSR1 traceback
+            # is daemon-runtime defense-in-depth, harmless to skip in test harnesses.
+            pass
 
         log.info("Initializing Serena MCP server")
         log.info("Storing logs in %s", log_path)
 
         # Handle --project-from-cwd flag
         project_activation_error: str | None = None
+        # dispatch to the per-client pipe forwarder when 'pipe' transport is selected;
+        # Handle --project-from-cwd flag (runs BEFORE any transport-specific
+        # dispatch so the pipe branch sees the resolved project_root and can
+        # assert it as the session_id at handshake)
         if project_from_cwd:
             if project is not None or project_file_arg is not None:
                 raise click.UsageError("--project-from-cwd cannot be used with --project or positional project argument")
@@ -450,6 +520,42 @@ class TopLevelCommands(AutoRegisteringGroup):
 
         project_file = project_file_arg or project
 
+        # dispatch to the per-client pipe forwarder when 'pipe' transport is selected;
+        # the pipe is NOT a daemon and must not instantiate SerenaMCPFactory. The pipe
+        # asserts the resolved project_root as the session_id at handshake; the daemon
+        # keys per-session state on it. Project root IS the session identity, so a
+        # respawned pipe-client into the same cwd re-attaches to the same daemon-side
+        # state and activation is preserved across pipe-client restarts.
+        if transport == "pipe":
+            from serena.pipe import run_pipe_client
+
+            if not project_file:
+                raise click.UsageError(
+                    "--transport pipe requires --project, a positional project argument, "
+                    "or --project-from-cwd: the resolved project root is asserted as the "
+                    "session_id at handshake so the daemon can preserve per-session state "
+                    "across pipe-client restarts."
+                )
+            project_path = Path(project_file).expanduser()
+            if not project_path.is_dir():
+                raise click.UsageError(
+                    f"--transport pipe requires a valid project directory; got {project_file!r} "
+                    "(not a directory). Use --project <absolute_path> or --project-from-cwd "
+                    "in a project tree."
+                )
+            project_root = str(project_path.resolve())
+            log.info("Starting Serena pipe forwarder; daemon_url=%s, project_root=%s", daemon_url, project_root)
+            run_pipe_client(daemon_url=daemon_url, project_root=project_root)
+            return
+        # spin the CPU watchdog only on the daemon path. The pipe forwarder is
+        # short-lived (one process per Claude Code session) and does not host a
+        # language server, so the watchdog has nothing useful to observe there;
+        # gating on the post-pipe-return point keeps the per-forwarder overhead
+        # at zero.
+        from serena.util.watchdog import start_wedge_watchdog
+
+        start_wedge_watchdog()
+
         mode_selection_def: ModeSelectionDefinition | None = None
         if default_modes or added_modes:
             mode_selection_def = ModeSelectionDefinitionWithAddedModes(default_modes=default_modes or None, added_modes=added_modes or None)
@@ -459,6 +565,7 @@ class TopLevelCommands(AutoRegisteringGroup):
             mode_selection_def=mode_selection_def,
             language_backend=LanguageBackendRegistry.get_instance().resolve(language_backend) if language_backend else None,
             agent_interface=AgentInterface.from_str(agent_interface) if agent_interface else None,
+            port=None if transport == "stdio" else port,
             enable_web_dashboard=enable_web_dashboard,
             open_web_dashboard=open_web_dashboard,
             enable_gui_log_window=enable_gui_log_window,
@@ -467,13 +574,52 @@ class TopLevelCommands(AutoRegisteringGroup):
             tool_timeout=tool_timeout,
             project_activation_error=project_activation_error,
         )
+        # the multiplexer reports each ended forwarded session on this server's HTTP listener (pg://serena/session/eviction)
+        assert factory.agent is not None, "create_mcp_server must populate factory.agent"
+        SessionEndRoute(factory.agent).register(server)
         if project_file_arg:
             log.warning(
                 "Positional project arg is deprecated; use --project instead. Used: %s",
                 project_file,
             )
         log.info("Starting MCP server …")
-        if transport == "stdio":
+
+        # T6 daemon-startup wiring: when --pipe-socket-path is set, the daemon
+        # also runs a PipeListener concurrently with the FastMCP server in the
+        # same asyncio event loop. The listener is built via mcp.build_pipe_listener
+        # so SerenaPipeFrameHandler + SerenaCatalogProvider + SerenaAgent.evict_pipe_session
+        # are all wired against factory.agent. Without --pipe-socket-path, the legacy
+        # behaviour (FastMCP server only) is preserved bit-for-bit so existing
+        # daemon plists continue to work unchanged.
+        if pipe_socket_path:
+            import asyncio as _asyncio
+
+            from serena.mcp import build_pipe_listener
+
+            assert factory.agent is not None, "create_mcp_server must populate factory.agent"
+            openai_compat = factory.context.name in {"chatgpt", "codex", "oaicompat-agent"}
+            listener = build_pipe_listener(factory.agent, openai_tool_compatible=openai_compat)
+
+            async def _run_with_pipe() -> None:
+                await listener.start(pipe_socket_path)
+                log.info("Pipe listener bound to %s", pipe_socket_path)
+                try:
+                    if transport == "stdio":
+                        await server.run_stdio_async()
+                    elif transport == "sse":
+                        await server.run_sse_async(host=host, port=port)
+                    elif transport == "streamable-http":
+                        await server.run_streamable_http_async(host=host, port=port)
+                    else:
+                        # 'pipe' was already handled above; any other value is a
+                        # logic error that should be caught loudly
+                        raise ValueError(f"Unsupported transport with --pipe-socket-path: {transport!r}")
+                finally:
+                    await listener.stop()
+
+            with uvicorn_ignore_logging_config_context():
+                _asyncio.run(_run_with_pipe())
+        elif transport == "stdio":
             server.run(transport="stdio")
         else:
             with uvicorn_ignore_logging_config_context():

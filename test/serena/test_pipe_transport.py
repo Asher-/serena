@@ -74,7 +74,7 @@ class TestPipeCLI:
         project_dir.mkdir()
         with (
             patch("serena.pipe.run_pipe_client") as run_pipe,
-            patch("serena.cli.SerenaMCPFactory") as factory,
+            patch("serena.mcp.SerenaMCPFactory") as factory,
         ):
             result = cli_runner.invoke(
                 TopLevelCommands.start_mcp_server,
@@ -100,7 +100,7 @@ class TestPipeCLI:
         project_dir.mkdir()
         with (
             patch("serena.pipe.run_pipe_client") as run_pipe,
-            patch("serena.cli.SerenaMCPFactory") as factory,
+            patch("serena.mcp.SerenaMCPFactory") as factory,
         ):
             result = cli_runner.invoke(
                 TopLevelCommands.start_mcp_server,
@@ -117,7 +117,7 @@ class TestPipeCLI:
         # the legacy stdio path must continue to flow through SerenaMCPFactory unchanged
         with (
             patch("serena.pipe.run_pipe_client") as run_pipe,
-            patch("serena.cli.SerenaMCPFactory") as factory,
+            patch("serena.mcp.SerenaMCPFactory") as factory,
         ):
             cli_runner.invoke(TopLevelCommands.start_mcp_server, ["--transport", "stdio"])
         run_pipe.assert_not_called()

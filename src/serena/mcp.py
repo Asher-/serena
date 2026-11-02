@@ -3,12 +3,15 @@ The Serena Model Context Protocol (MCP) Server
 """
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+import asyncio
+import atexit
+import contextvars
 import sys
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
-from functools import wraps
+from functools import partial, wraps
 from inspect import signature
 from typing import Any, Literal, cast
 
@@ -16,24 +19,30 @@ import docstring_parser
 import uvicorn
 from mcp.server.mcpserver import server
 from mcp.server.mcpserver.context import LifespanContextT, RequestT
-from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.mcpserver.server import Context
 from mcp.server.mcpserver.server import MCPServer as FastMCP
 from mcp.server.mcpserver.tools.base import Tool as FastMCPTool
+from mcp.types import Tool as WireTool
 from mcp.types import ToolAnnotations
 from sensai.util import logging
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
 
-from serena import __version__ as serena_version_str
+from serena import serena_version
 from serena.agent import (
     SerenaAgent,
 )
+from serena.call_journal import CallJournal, CallJournalLayer, JournaledCallHandler, daemon_owner
 from serena.config.context_mode import SerenaAgentContext
 from serena.config.serena_config import AgentInterface, ModeSelectionDefinition, SerenaConfig
 from serena.constants import DEFAULT_CONTEXT, SERENA_LOG_FORMAT
+from serena.daemon_pipe import CatalogProvider, FrameHandler, PipeListener
 from serena.language_backend import LanguageBackend
-from serena.tools import Tool, ToolCallError
+from serena.tools import Tool
+from serena.tools.tools_base import AGENT_ID_ARGUMENT, SESSION_ID_ARGUMENT
 from serena.util.exception import show_fatal_exception_safe
 from serena.util.logging import MemoryLogHandler
+from solidlsp.util import supervise
 
 log = logging.getLogger(__name__)
 
@@ -82,7 +91,21 @@ class SerenaMCPRequestContext:
     agent: SerenaAgent
 
 
+_CALL_SESSION_ID_VAR: contextvars.ContextVar[str | None] = contextvars.ContextVar("serena_call_session_id", default=None)
+"""the session id of the tool call being run, taken out of its raw arguments by :class:`_AgentAwareMCPTool`"""
+
+_CALL_AGENT_ID_VAR: contextvars.ContextVar[str | None] = contextvars.ContextVar("serena_call_agent_id", default=None)
+"""the agent id of the tool call being run, taken out of its raw arguments by :class:`_AgentAwareMCPTool`"""
+
+
 class SerenaFastMCPTool(FastMCPTool):
+    """
+    A published tool that takes the reserved session-id and agent-id arguments out of a call's raw arguments before
+    FastMCP validates them, whose argument model would otherwise drop the undeclared keys, and hands them to the call
+    through ``_CALL_SESSION_ID_VAR`` and ``_CALL_AGENT_ID_VAR`` (pg://serena/session/project/separation,
+    pg://serena/session/project/agent).
+    """
+
     def __init__(self, tool: Tool, openai_tool_compatible: bool, structured_output: bool | None):
         """
         :param tool: the Serena tool
@@ -93,7 +116,7 @@ class SerenaFastMCPTool(FastMCPTool):
         func_name = tool.get_name()
         func_doc = tool.get_apply_docstring() or ""
         func_arg_metadata = tool.get_apply_fn_metadata(structured_output=structured_output)
-        is_async = False
+        is_async = True
         parameters = func_arg_metadata.arg_model.model_json_schema()
         if openai_tool_compatible:
             parameters = SerenaMCPFactory._sanitize_for_openai_tools(parameters)
@@ -127,11 +150,26 @@ class SerenaFastMCPTool(FastMCPTool):
                 param_desc = f"{param_doc.description.strip().strip('.') + '.'}"
                 properties["description"] = param_desc[0].upper() + param_desc[1:]
 
-        def execute_fn(**kwargs) -> str:
-            try:
-                return tool.apply_ex(log_call=True, catch_exceptions=False, **kwargs)
-            except ToolCallError as e:
-                raise ToolError(e.get_error_message()) from e
+        # the reserved session-id argument, declared so that a client which keeps only the arguments a schema declares
+        # still sends it; the published tool takes it out before validation, so no apply receives it, and "" is no
+        # session id (pg://serena/session/project/separation)
+        parameters_properties[SESSION_ID_ARGUMENT] = {
+            "type": "string",
+            "default": "",
+            "description": "Reserved: set by the client's hook to the calling session's id. Never set it yourself.",
+        }
+
+        # awaited on the server's event loop: the call's task runs on its session's queue while the loop goes on
+        # serving the requests of other sessions
+        async def execute_fn(**kwargs) -> str:
+            # the session id and agent id the published tool took out of the raw arguments before validating them
+            session_id = _CALL_SESSION_ID_VAR.get()
+            if session_id is not None:
+                kwargs[SESSION_ID_ARGUMENT] = session_id
+            agent_id = _CALL_AGENT_ID_VAR.get()
+            if agent_id is not None:
+                kwargs[AGENT_ID_ARGUMENT] = agent_id
+            return await tool.apply_ex_async(log_call=True, catch_exceptions=True, **kwargs)
 
         # Generate human-readable title from snake_case tool name
         tool_title = " ".join(word.capitalize() for word in func_name.split("_"))
@@ -166,12 +204,50 @@ class SerenaFastMCPTool(FastMCPTool):
         context: Context[LifespanContextT, RequestT],
         convert_result: bool = False,
     ) -> Any:
+        # the session id and agent id, out of the arguments the tool validates
+        arguments = dict(arguments)
+        session_id = arguments.pop(SESSION_ID_ARGUMENT, None) or None
+        agent_id = arguments.pop(AGENT_ID_ARGUMENT, None) or None
+
         # apply parameter aliases
         for param_alias, param_name in self._param_aliases.items():
             if param_alias in arguments and param_name not in arguments:
                 arguments[param_name] = arguments.pop(param_alias)
 
-        return await super().run(arguments, context, convert_result)
+        session_token = _CALL_SESSION_ID_VAR.set(session_id)
+        agent_token = _CALL_AGENT_ID_VAR.set(agent_id)
+        try:
+            return await super().run(arguments, context, convert_result)
+        finally:
+            _CALL_AGENT_ID_VAR.reset(agent_token)
+            _CALL_SESSION_ID_VAR.reset(session_token)
+
+
+class _JournaledFastMCP(FastMCP):
+    """
+    A server that journals each ``tools/call`` whose HTTP request names a call id in X-Brain-Call-Id, through
+    :class:`JournaledCallHandler`, and whose streamable-http listener answers ``brain/resume``, so that the hop before
+    serena recovers a call across a SIGKILL of serena's process group or the loss of the connection that carried it
+    (pg://brain/daemon/restart/continuity).
+    """
+
+    def __init__(self, journal: CallJournal, **settings: Any) -> None:
+        """
+        :param journal: the journal of the calls the server serves.
+        :param settings: as for :class:`FastMCP`.
+        """
+        super().__init__(**settings)
+        self._call_journal = journal
+
+        # the tools/call handler FastMCP registered, journaling the calls that name a call id
+        lowlevel = self._lowlevel_server
+        entry = lowlevel.get_request_handler("tools/call")
+        assert entry is not None
+        lowlevel.add_request_handler("tools/call", entry.params_type, JournaledCallHandler(entry.handler, journal))
+
+    def streamable_http_app(self, **kwargs: Any) -> Any:
+        path = kwargs.get("streamable_http_path", "/mcp")
+        return CallJournalLayer(super().streamable_http_app(**kwargs), self._call_journal, path)
 
 
 class SerenaMCPFactory:
@@ -354,6 +430,7 @@ class SerenaMCPFactory:
     def create_mcp_server(
         self,
         mode_selection_def: ModeSelectionDefinition | None = None,
+        port: int | None = 8000,
         language_backend: LanguageBackend | None = None,
         agent_interface: AgentInterface | None = None,
         enable_web_dashboard: bool | None = None,
@@ -368,6 +445,11 @@ class SerenaMCPFactory:
         Create an MCP server with process-isolated SerenaAgent to prevent asyncio contamination.
 
         :param mode_selection_def: the mode selection definition to apply
+        :param port: The port to bind to, or None for a server that listens on no port, as one serving stdio does. No hop
+            sends such a server call ids, so it opens no call journal and adopts nothing at startup, though its first use of
+            a command takes over a process of it an ended instance left, which is then this server's; the processes it holds
+            are recorded under :data:`serena.call_journal.SERVER`, where the daemon's startup adoption leaves them to this
+            server for as long as it runs.
         :param language_backend: the language backend to use, overriding the configuration setting.
         :param agent_interface: the agent interface to use, overriding the configuration setting.
         :param enable_web_dashboard: Whether to enable the web dashboard. If not specified, will take the value from the serena configuration.
@@ -381,6 +463,10 @@ class SerenaMCPFactory:
         :param tool_timeout: Timeout in seconds for tool execution. If not specified, will take the value from the serena configuration.
         :param project_activation_error: an initial project activation error to report back to the client
         """
+        # the owner of the records of every process this server starts, named before the agent starts any
+        # (decision://brain/daemon_restart_survival/journal/instance)
+        supervise.OWNER = daemon_owner(port)
+
         try:
             config = SerenaConfig.from_config_file()
 
@@ -411,29 +497,51 @@ class SerenaMCPFactory:
 
         instructions = self._get_initial_instructions()
         log.info("MCP server initial instructions:\n%s", instructions)
-        mcp = FastMCP(
+        settings: dict[str, Any] = dict(
             name="Serena",
-            version=serena_version_str,
+            version=serena_version(),
             lifespan=self.server_lifespan,
             website_url="https://oraios.github.io/serena",
             instructions=instructions,
         )
+
+        # a server listening on no port, which journals no call and adopts nothing at startup
+        # (decision://serena/daemon_restart_survival_serena/stdio/adoption)
+        mcp: FastMCP
+        if port is None:
+            mcp = FastMCP(**settings)
+
+        # a listening server, which takes up the processes an ended instance started before the first call is served
+        # (pg://brain/daemon/restart/readoption) and journals its calls
+        else:
+            journal = CallJournal()
+            assert self.agent is not None
+            self.agent.adopt_processes(journal)
+            mcp = _JournaledFastMCP(journal, **settings)
+
+        # Register tools once at server creation, not per SSE session: the MCP
+        # SDK enters server_lifespan per Server.run() (i.e. per SSE connection),
+        # so per-session registration would race on the shared tool dict.
+        openai_tool_compatible = self.context.name in ["chatgpt", "codex", "oaicompat-agent"]
+        self._set_mcp_tools(mcp, openai_tool_compatible=openai_tool_compatible, structured_output=self.agent.get_context().structured_tool_output)
+
+        # Tear down the agent at process exit, not per SSE session: calling
+        # agent.on_shutdown() in server_lifespan's finally block killed the
+        # language server on every client disconnect, breaking other concurrent
+        # sessions with "No active project" and 15-min hangs (regression from 48025c7d).
+        atexit.register(self._on_process_exit)
+
         return mcp
 
     @asynccontextmanager
     async def server_lifespan(self, mcp_server: FastMCP) -> AsyncIterator[None]:
-        """
-        Manages the lifespan of MCP server instances and performs necessary setup and teardown.
-        For stdio transport, there is a single server instance.
-        For other transports, this is called once per connection!
+        """Per-SSE-session lifespan; intentionally a no-op.
 
-        :param mcp_server: the MCP server instance to configure
+        The MCP SDK enters this context per Server.run(), which FastMCP invokes
+        per SSE connection. Tool registration and agent shutdown live in
+        create_mcp_server, not here.
         """
-        openai_tool_compatible = self.context.name in ["chatgpt", "codex", "oaicompat-agent"]
-        assert self.agent is not None
-        context = self.agent.get_context()
-        self._set_mcp_tools(mcp_server, openai_tool_compatible=openai_tool_compatible, structured_output=context.structured_tool_output)
-        log.info("MCP server lifetime setup complete")
+        log.info("MCP session opened")
         try:
             yield
         finally:
@@ -444,8 +552,335 @@ class SerenaMCPFactory:
                 if self.agent is not None:
                     self.agent.on_shutdown()
             else:
-                log.info("Client disconnected")
+                log.info("MCP session closed")
+
+    def _on_process_exit(self) -> None:
+        """Tear down the agent at process exit (atexit handler)."""
+        if self.agent is not None:
+            self.agent.on_shutdown()
 
     def _get_initial_instructions(self) -> str:
         assert self.agent is not None
         return self.agent.create_connection_prompt()
+
+
+class SerenaCatalogProvider(CatalogProvider):
+    """Production :class:`CatalogProvider` that emits Serena's tool catalog as wire-format dicts.
+
+    Iterates the agent's exposed tools (the same set returned by
+    :meth:`SerenaMCPFactory._iter_tools`) and converts each Serena ``Tool`` to a
+    wire-format ``mcp.types.Tool`` dict via :meth:`SerenaMCPFactory.make_mcp_tool`.
+    The resulting list is returned verbatim from every ``pipe/catalog/get`` request;
+    the catalog is session-agnostic in this iteration since Serena's exposed tool
+    set is fixed at server creation. Per-session shaping (e.g. project-conditional
+    tool availability) would re-use the ``session_id`` parameter in a future revision.
+    """
+
+    def __init__(self, agent: SerenaAgent, openai_tool_compatible: bool = False) -> None:
+        """
+        :param agent: The :class:`SerenaAgent` whose exposed tools form the catalog.
+        :param openai_tool_compatible: Whether to apply the OpenAI-compatible schema sanitization
+            (mirrors :meth:`SerenaMCPFactory._set_mcp_tools`'s switch). Default ``False`` matches
+            the standard MCP wire format; OpenAI-compatible clients (``chatgpt``, ``codex``,
+            ``oaicompat-agent`` contexts) opt in by setting this ``True``.
+        """
+        self._agent = agent
+        self._openai_tool_compatible = openai_tool_compatible
+
+    async def get_catalog(self, session_id: str) -> list[dict[str, Any]]:
+        """Return the JSON-serializable tool definitions for the requesting pipe connection.
+
+        :param session_id: The daemon-allocated session_id; ignored in this iteration since
+            Serena's catalog does not vary per session, but accepted to satisfy the
+            :class:`CatalogProvider` contract and leave room for session-scoped catalogs.
+        :returns: A list of dicts, each shaped as a wire-format ``mcp.types.Tool`` JSON
+            object (``name``, ``description``, ``inputSchema``, optional ``annotations``,
+            optional ``title``). Empty when the agent exposes no tools.
+        """
+        catalog: list[dict[str, Any]] = []
+        for tool in self._agent.get_exposed_tool_instances():
+            mcp_tool = SerenaMCPFactory.make_mcp_tool(tool, openai_tool_compatible=self._openai_tool_compatible)
+            wire_tool = WireTool(
+                name=mcp_tool.name,
+                description=mcp_tool.description,
+                input_schema=mcp_tool.parameters,
+                annotations=mcp_tool.annotations,
+                title=mcp_tool.title,
+            )
+            catalog.append(wire_tool.model_dump(by_alias=True, exclude_none=True))
+        return catalog
+
+
+class SerenaPipeFrameHandler(FrameHandler):
+    """Production :class:`FrameHandler` that dispatches JSON-RPC frames to Serena tools directly.
+
+    The daemon-side dispatch is a thin JSON-RPC method router that handles the small set of
+    methods a host issues after handshake (``initialize``, ``notifications/initialized``,
+    ``tools/call``, ``prompts/list``, ``resources/list``, ``ping``). For every dispatch
+    ``_PIPE_SESSION_ID_VAR`` is set to the pipe-asserted session_id BEFORE any handler runs,
+    so :meth:`Tool.apply_ex`'s session keying picks it up via the ContextVar; the per-session
+    ``_active_projects_by_session`` and ``_cursor_managers_by_session`` maps then route
+    correctly without needing the SDK's transport-layer Session machinery.
+
+    ``tools/list`` requests never reach this handler -- the pipe forwarder
+    (:func:`serena.pipe._run_forwarder`) answers them locally from the catalog fetched at
+    handshake time, and the listener intercepts ``pipe/catalog/get`` envelopes before
+    FrameHandler dispatch. The handler therefore deliberately omits a ``tools/list`` branch.
+
+    The dispatch is direct rather than a wrapping of the SDK's lowlevel ``Server.run``
+    coroutine. The wrapped form is per-connection long-lived and keeps a separate
+    anyio-stream pump per session; the per-frame form here is simpler, has fewer moving
+    parts, and exercises the same :meth:`Tool.apply_ex` invocation path the SDK would have
+    routed to. The ``_PIPE_SESSION_ID_VAR`` keying is the only hard requirement -- whichever
+    integration shape we choose, that ContextVar must be set before any tool dispatch.
+    """
+
+    def __init__(self, agent: SerenaAgent) -> None:
+        """
+        :param agent: The :class:`SerenaAgent` whose exposed tools handle ``tools/call`` requests.
+        """
+        self._agent = agent
+
+    async def handle(self, session_id: str, frame: dict[str, Any]) -> dict[str, Any] | None:
+        """Set ``_PIPE_SESSION_ID_VAR`` and dispatch one JSON-RPC frame.
+
+        :param session_id: The daemon-allocated session_id for the originating pipe connection.
+            Set into ``_PIPE_SESSION_ID_VAR`` for the duration of this dispatch so any tool
+            invoked during the call sees it via the ContextVar.
+        :param frame: The JSON-RPC frame as a parsed dict (already JSON-decoded by
+            :class:`PipeEnvelope`).
+        :returns: The JSON-RPC response frame to ferry back over the pipe, or ``None`` for
+            JSON-RPC notifications (frames without an ``id``) and any other request that
+            does not produce a response.
+        """
+        from serena.agent import _PIPE_SESSION_ID_VAR
+
+        # set on this Task's ContextVar context so concurrent connections (each running in its
+        # own _forward_frames Task with its own context copy) cannot race on the var; the
+        # finally-reset preserves the caller's prior value if there ever is one (there will not
+        # be in production, but tests sometimes pre-set the var to assert handler behaviour)
+        token = _PIPE_SESSION_ID_VAR.set(session_id)
+        try:
+            return await self._dispatch(frame)
+        finally:
+            _PIPE_SESSION_ID_VAR.reset(token)
+
+    async def _dispatch(self, frame: dict[str, Any]) -> dict[str, Any] | None:
+        """Route ``frame`` to the matching method handler and produce the response shape.
+
+        :param frame: The JSON-RPC frame as a parsed dict.
+        :returns: The JSON-RPC response frame, or ``None`` for notifications.
+        """
+        method = frame.get("method")
+        frame_id = frame.get("id")
+
+        if frame_id is None:
+            # JSON-RPC notification: no response is sent. We deliberately do not
+            # raise on unknown notifications -- the host can send transport-level
+            # signals (notifications/initialized, notifications/cancelled, ...) that
+            # the daemon side has no explicit handler for and yet must not error on.
+            log.debug("SerenaPipeFrameHandler: notification %r dropped", method)
+            return None
+
+        try:
+            if method == "initialize":
+                result = self._handle_initialize(frame.get("params") or {})
+            elif method == "tools/call":
+                # tools/call delegates to Tool.apply_ex, which is synchronous and blocks on its
+                # own internal task_executor. Calling that directly inside the asyncio Task would
+                # pin the event loop until the tool finishes -- starving every other live pipe
+                # connection. Run it via the loop's default executor with the current Task's
+                # context (so _PIPE_SESSION_ID_VAR stays set inside apply_ex's worker too).
+                ctx = contextvars.copy_context()
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(None, partial(ctx.run, self._handle_tools_call, frame.get("params") or {}))
+            elif method == "prompts/list":
+                result = {"prompts": []}
+            elif method == "resources/list":
+                result = {"resources": []}
+            elif method == "ping":
+                result = {}
+            else:
+                return self._error_response(frame_id, -32601, f"Method not found: {method!r}")
+            return {"jsonrpc": "2.0", "id": frame_id, "result": result}
+        except Exception as exc:
+            log.exception("SerenaPipeFrameHandler: dispatch failed for method=%r", method)
+            return self._error_response(frame_id, -32603, f"Internal error: {exc}")
+
+    def _handle_initialize(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Build the ``initialize`` response from the host's request parameters.
+
+        Echoes the host's ``protocolVersion`` if supplied (so a host that pins to a specific
+        revision sees that revision back), advertises Serena's tools/prompts/resources
+        capabilities, and stamps ``serverInfo`` with the running version so the host's
+        diagnostic output reflects the daemon it actually connected to.
+        """
+        return {
+            "protocolVersion": params.get("protocolVersion", "2024-11-05"),
+            "capabilities": {
+                "tools": {},
+                "prompts": {},
+                "resources": {},
+            },
+            "serverInfo": {
+                "name": "Serena",
+                "version": serena_version(),
+            },
+        }
+
+    def _handle_tools_call(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Look up the named Serena tool and invoke ``apply_ex`` with the request arguments.
+
+        ``mcp_ctx=None`` is passed deliberately: the pipe transport supplies the session
+        identity via ``_PIPE_SESSION_ID_VAR`` (set by :meth:`handle`), and the SDK's
+        transport-layer Session is not present in the daemon-side dispatch path. Tool errors
+        are caught by :meth:`Tool.apply_ex` itself (with ``catch_exceptions=True``); the
+        method returns the tool's stringified output, which we wrap in the standard MCP
+        text-content shape.
+        """
+        name = params.get("name")
+        if not isinstance(name, str):
+            raise ValueError("tools/call params.name must be a string")
+        arguments = params.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            raise ValueError("tools/call params.arguments must be an object")
+
+        # exposed-tools lookup -- the catalog (advertised at handshake) is keyed off the
+        # same list, so any name the host can issue must resolve here. An unknown name is
+        # a contract violation by the host (or an indication the daemon catalog drifted
+        # from the pipe's cached catalog) and surfaces as a tools-call-level error rather
+        # than a JSON-RPC method-not-found, which is reserved for unknown JSON-RPC methods.
+        tool = next((t for t in self._agent.get_exposed_tool_instances() if t.get_name() == name), None)
+        if tool is None:
+            raise ValueError(f"Unknown tool: {name!r}")
+
+        result = tool.apply_ex(log_call=True, catch_exceptions=True, mcp_ctx=None, **arguments)
+        return {"content": [{"type": "text", "text": result}]}
+
+    @staticmethod
+    def _error_response(frame_id: Any, code: int, message: str) -> dict[str, Any]:
+        """Build a JSON-RPC error response with the given code and message."""
+        return {
+            "jsonrpc": "2.0",
+            "id": frame_id,
+            "error": {"code": code, "message": message},
+        }
+
+
+def build_pipe_listener(agent: SerenaAgent, *, openai_tool_compatible: bool = False) -> PipeListener:
+    """Construct the production :class:`PipeListener` wired into ``agent``.
+
+    Composes the daemon-side pipe transport against a real Serena agent:
+
+    * :class:`SerenaPipeFrameHandler` dispatches ``tools/call`` and friends
+      against ``agent.get_exposed_tool_instances()``.
+    * :class:`SerenaCatalogProvider` answers ``pipe/catalog/get`` from the
+      same exposed-tool list.
+
+    Per the project-root-as-session-id contract
+    (``plan://Serena:serena/serena-pipe-session-id-is-the-session-id``)
+    the listener is intentionally constructed WITHOUT any socket-disconnect
+    handler. Daemon-side per-session state (active project, cursor manager,
+    task executor) MUST survive socket disconnect so that a pipe-client
+    process which exits and respawns into the same project_root re-attaches
+    to the daemon's existing per-session entry and finds activation preserved.
+    :meth:`SerenaAgent.evict_pipe_session` remains available for explicit
+    operator-driven cleanup but is deliberately NOT wired to socket lifecycle.
+
+    Returned listener is NOT started; the caller is responsible for calling
+    :meth:`PipeListener.start` (and matching :meth:`PipeListener.stop` on
+    teardown). Keeping start/stop out of this helper lets the daemon's
+    asyncio coordinator (e.g. the start-mcp-server CLI dispatch when
+    ``--pipe-socket-path`` is set) bind the lifecycle to the FastMCP server's
+    own run loop.
+
+    :param agent: The :class:`SerenaAgent` whose exposed tools and per-session
+        state the listener routes against.
+    :param openai_tool_compatible: Whether the catalog should emit the
+        OpenAI-compatible schema variant; mirrors
+        :meth:`SerenaMCPFactory._set_mcp_tools`'s switch and applies to the
+        ``chatgpt``, ``codex``, ``oaicompat-agent`` contexts. Default
+        ``False`` matches the standard MCP wire format.
+    :returns: A constructed-but-not-started :class:`PipeListener` ready for
+        :meth:`PipeListener.start` to bind its Unix socket.
+    """
+    # compose the listener with frame and catalog providers; no disconnect
+    # handler is wired so daemon-side per-session state survives socket churn
+    return PipeListener(
+        frame_handler=SerenaPipeFrameHandler(agent),
+        catalog_provider=SerenaCatalogProvider(agent, openai_tool_compatible=openai_tool_compatible),
+    )
+
+
+class SessionEndRoute:
+    """
+    The HTTP route by which the multiplexer reports that a forwarded session has ended (pg://serena/session/eviction),
+    and the brain SessionEnd hook that a Claude Code session has ended (pg://serena/session/eviction/claude_session).
+
+    A POST to :attr:`PATH` whose JSON body ``{"forwarded_session_id": "<id>"}`` names a forwarded session id evicts every
+    per-session slot under that id through :meth:`SerenaAgent.evict_forwarded_session`; one whose body
+    ``{"claude_session_id": "<id>"}`` names a Claude Code session id evicts every per-session slot carrying that id after
+    ``/session/`` through :meth:`SerenaAgent.evict_claude_session`. A body that names both, or names no id, is answered
+    400 and evicts nothing.
+    """
+
+    PATH = "/sessions/end"
+    """the path of the route on the server's HTTP listener"""
+
+    FORWARDED_SESSION_ID_FIELD = "forwarded_session_id"
+    """the field of the request body that names the ended forwarded session id"""
+
+    CLAUDE_SESSION_ID_FIELD = "claude_session_id"
+    """the field of the request body that names the ended Claude Code session id"""
+
+    def __init__(self, agent: SerenaAgent):
+        """
+        :param agent: the agent whose per-session slots the route evicts
+        """
+        self._agent = agent
+
+    def register(self, server: FastMCP) -> None:
+        """
+        Adds the route to the HTTP listener ``server`` serves.
+
+        :param server: the server whose streamable-http listener serves the route
+        """
+        server.custom_route(self.PATH, methods=["POST"])(self.handle)
+
+    async def handle(self, request: Request) -> Response:
+        """
+        Answers a session-end notification.
+
+        :param request: the POST to :attr:`PATH`
+        :return: 200 with the evicted session keys, or 400 when the body names both a forwarded and a Claude Code session
+            id, or names no non-empty string id of the session it reports ended
+        """
+        # the body, read as a JSON object
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            body = {}
+
+        # a body naming both kinds of session is refused, since the two would evict different slots
+        if self.FORWARDED_SESSION_ID_FIELD in body and self.CLAUDE_SESSION_ID_FIELD in body:
+            both = f"{self.FORWARDED_SESSION_ID_FIELD} and {self.CLAUDE_SESSION_ID_FIELD}"
+            log.warning(f"Refused a session-end notification whose body names both {both}")
+            return JSONResponse({"error": f"the body must name one of {both}, not both"}, status_code=400)
+
+        # the ended session the body names, and the eviction its end calls for
+        evict: Callable[[str], list[str]]
+        if self.CLAUDE_SESSION_ID_FIELD in body:
+            field, evict = self.CLAUDE_SESSION_ID_FIELD, self._agent.evict_claude_session
+        else:
+            field, evict = self.FORWARDED_SESSION_ID_FIELD, self._agent.evict_forwarded_session
+        session_id = body.get(field)
+        if not isinstance(session_id, str) or not session_id:
+            log.warning(f"Refused a session-end notification whose body names no {field}")
+            return JSONResponse({"error": f"the body must name a non-empty string {field}"}, status_code=400)
+
+        # the slots that session held, evicted off the event loop since dropping a cursor manager waits for its bridges to exit
+        evicted = sorted(await asyncio.to_thread(evict, session_id))
+        log.info(f"Session end of {field} {session_id} evicted {len(evicted)} slot(s): {evicted}")
+        return JSONResponse({"evicted": evicted})

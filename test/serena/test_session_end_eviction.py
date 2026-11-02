@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 import psutil
 import pytest
 from click.testing import CliRunner
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer as FastMCP
 from starlette.testclient import TestClient
 
 from serena.agent import _SESSION_KEY_VAR, SerenaAgent

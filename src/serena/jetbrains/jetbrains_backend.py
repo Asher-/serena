@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from serena.project import Project
     from serena.repl.facade import ApiScope, Facade
     from serena.tools import Tool
+    from serena.util.file_lifecycle import WritePrecondition
 
 log = logging.getLogger(__name__)
 
@@ -70,8 +71,8 @@ class JetBrainsLanguageBackend(LanguageBackend):
         pass
 
     @override
-    def create_code_editor(self, project: "Project") -> "CodeEditor":
-        return JetBrainsCodeEditor(project)
+    def create_code_editor(self, project: "Project", write_precondition: "WritePrecondition | None" = None) -> "CodeEditor":
+        return JetBrainsCodeEditor(project, write_precondition=write_precondition)
 
     @override
     def is_source_file(self, abs_path: str, project: "Project") -> bool:

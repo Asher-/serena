@@ -14,6 +14,7 @@ log = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from serena.agent import SerenaAgent
     from serena.code_editor import CodeEditor
+    from serena.util.file_lifecycle import WritePrecondition
     from serena.project import Project
     from serena.repl.facade import ApiScope, Facade
     from serena.tools import Tool
@@ -91,8 +92,13 @@ class LanguageBackend(ABC):
         return ""
 
     @abstractmethod
-    def create_code_editor(self, project: "Project") -> "CodeEditor":
-        pass
+    def create_code_editor(self, project: "Project", write_precondition: "WritePrecondition | None" = None) -> "CodeEditor":
+        """
+        :param project: the project to edit
+        :param write_precondition: the condition the editor's save of the file it names evaluates immediately before
+            replacing that file; ``None`` saves unconditionally.
+        :return: a code editor for this backend
+        """
 
     @abstractmethod
     def is_source_file(self, abs_path: str, project: "Project") -> bool:

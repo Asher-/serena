@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from serena.project import Project
     from serena.repl.facade import ApiScope, Facade
     from serena.tools import Tool
+    from serena.util.file_lifecycle import WritePrecondition
 
 log = logging.getLogger(__name__)
 
@@ -53,12 +54,12 @@ class LSPLanguageBackend(LanguageBackend):
         return f"Language server status: {project.get_language_server_manager_status()}\n"
 
     @override
-    def create_code_editor(self, project: "Project") -> "LanguageServerCodeEditor":
+    def create_code_editor(self, project: "Project", write_precondition: "WritePrecondition | None" = None) -> "LanguageServerCodeEditor":
         from serena.code_editor import LanguageServerCodeEditor
         from serena.symbol import LanguageServerSymbolRetriever
 
         symbol_retriever = LanguageServerSymbolRetriever(project)
-        return LanguageServerCodeEditor(symbol_retriever)
+        return LanguageServerCodeEditor(symbol_retriever, write_precondition=write_precondition)
 
     @override
     def is_source_file(self, abs_path: str, project: "Project") -> bool:
