@@ -12,12 +12,14 @@ import pytest
 
 from serena.project import Project
 from solidlsp import SolidLanguageServer
-from solidlsp.ls_config import Language
-
-from . import EXPERT_UNAVAILABLE, EXPERT_UNAVAILABLE_REASON
+from solidlsp.ls_config import LanguageServerId
+from test.conftest import language_server_tests_enabled
 
 # These marks will be applied to all tests in this module
-pytestmark = [pytest.mark.elixir, pytest.mark.skipif(EXPERT_UNAVAILABLE, reason=f"Next LS not available: {EXPERT_UNAVAILABLE_REASON}")]
+pytestmark = [
+    pytest.mark.elixir,
+    pytest.mark.skipif(not language_server_tests_enabled(LanguageServerId.ELIXIR), reason="Elixir tests are disabled"),
+]
 
 
 class TestElixirIntegration:
@@ -43,7 +45,7 @@ class TestElixirIntegration:
         assert (repo_path / "test" / "test_repo_test.exs").exists(), "test file should exist"
         assert (repo_path / "test" / "models_test.exs").exists(), "models test should exist"
 
-    @pytest.mark.parametrize("language_server", [Language.ELIXIR], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.ELIXIR], indirect=True)
     def test_cross_file_symbol_resolution(self, language_server: SolidLanguageServer):
         """Test that symbols can be resolved across different files."""
         # Test that User struct from models.ex can be found when referenced in services.ex
@@ -68,7 +70,7 @@ class TestElixirIntegration:
             # Should point to models.ex
             assert "models.ex" in defining_symbol["location"]["uri"]
 
-    @pytest.mark.parametrize("language_server", [Language.ELIXIR], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.ELIXIR], indirect=True)
     def test_module_hierarchy_understanding(self, language_server: SolidLanguageServer):
         """Test that the language server understands Elixir module hierarchy."""
         models_file = os.path.join("lib", "models.ex")
@@ -92,7 +94,7 @@ class TestElixirIntegration:
 
     def test_file_extension_matching(self):
         """Test that the Elixir language recognizes the correct file extensions."""
-        language = Language.ELIXIR
+        language = LanguageServerId.ELIXIR
         matcher = language.get_source_fn_matcher()
 
         # Test Elixir file extensions
@@ -111,12 +113,12 @@ class TestElixirIntegration:
 
 
 class TestElixirProject:
-    @pytest.mark.parametrize("project", [Language.ELIXIR], indirect=True)
+    @pytest.mark.parametrize("project", [LanguageServerId.ELIXIR], indirect=True)
     def test_comprehensive_symbol_search(self, project: Project):
         """Test comprehensive symbol search across the entire project."""
         # Search for all function definitions
         function_pattern = r"def\s+\w+\s*[\(\s]"
-        function_matches = project.search_source_files_for_pattern(function_pattern)
+        function_matches = project.search_project_files_for_pattern(function_pattern)
 
         # Should find functions across multiple files
         if function_matches:
@@ -132,19 +134,19 @@ class TestElixirProject:
 
         # Search for struct definitions
         struct_pattern = r"defstruct\s+\["
-        struct_matches = project.search_source_files_for_pattern(struct_pattern)
+        struct_matches = project.search_project_files_for_pattern(struct_pattern)
 
         if struct_matches:
             # Should find structs primarily in models.ex
             models_structs = [m for m in struct_matches if m.source_file_path and "models.ex" in m.source_file_path]
             assert len(models_structs) > 0, "Should find struct definitions in models.ex"
 
-    @pytest.mark.parametrize("project", [Language.ELIXIR], indirect=True)
+    @pytest.mark.parametrize("project", [LanguageServerId.ELIXIR], indirect=True)
     def test_protocol_and_implementation_understanding(self, project: Project):
         """Test that the language server understands Elixir protocols and implementations."""
         # Search for protocol definitions
         protocol_pattern = r"defprotocol\s+\w+"
-        protocol_matches = project.search_source_files_for_pattern(protocol_pattern, paths_include_glob="**/models.ex")
+        protocol_matches = project.search_project_files_for_pattern(protocol_pattern, paths_include_glob="**/models.ex")
 
         if protocol_matches:
             # Should find the Serializable protocol
@@ -153,7 +155,7 @@ class TestElixirProject:
 
         # Search for protocol implementations
         impl_pattern = r"defimpl\s+\w+"
-        impl_matches = project.search_source_files_for_pattern(impl_pattern, paths_include_glob="**/models.ex")
+        impl_matches = project.search_project_files_for_pattern(impl_pattern, paths_include_glob="**/models.ex")
 
         if impl_matches:
             # Should find multiple implementations

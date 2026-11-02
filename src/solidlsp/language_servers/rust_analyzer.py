@@ -1,6 +1,7 @@
 """
 Provides Rust specific instantiation of the LanguageServer class. Contains various configurations and settings specific to Rust.
 """
+# SPDX-License-Identifier: MIT
 
 import logging
 import os
@@ -9,16 +10,19 @@ import platform
 import shutil
 import subprocess
 import threading
-from typing import cast
 
 from overrides import override
 
-from solidlsp.language_servers.common import RequiredCLI
-from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
+from solidlsp import ls_types
+from solidlsp.ls import (
+    LanguageServerDependencyProvider,
+    LanguageServerDependencyProviderSinglePath,
+    LSPConstants,
+    SolidLanguageServer,
+)
 from solidlsp.ls_config import LanguageServerConfig
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.settings import SolidLSPSettings
-from solidlsp.util import supervise
+from solidlsp.util.subprocess_util import subprocess_run
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +31,10 @@ class RustAnalyzer(SolidLanguageServer):
     """
     Provides Rust specific instantiation of the LanguageServer class. Contains various configurations and settings specific to Rust.
     """
+
+    @classmethod
+    def supports_implementation_request(cls) -> bool:
+        return True
 
     @staticmethod
     def _determine_log_level(line: str) -> int:
@@ -49,7 +57,7 @@ class RustAnalyzer(SolidLanguageServer):
         def _get_rustup_version() -> str | None:
             """Get installed rustup version or None if not found."""
             try:
-                result = supervise.run(["rustup", "--version"], capture_output=True, text=True, check=False)
+                result = subprocess_run(["rustup", "--version"], capture_output=True, text=True, check=False)
                 if result.returncode == 0:
                     return result.stdout.strip()
             except FileNotFoundError:
@@ -60,7 +68,7 @@ class RustAnalyzer(SolidLanguageServer):
         def _get_rust_analyzer_via_rustup() -> str | None:
             """Get rust-analyzer path via rustup. Returns None if not found."""
             try:
-                result = supervise.run(["rustup", "which", "rust-analyzer"], capture_output=True, text=True, check=False)
+                result = subprocess_run(["rustup", "which", "rust-analyzer"], capture_output=True, text=True, check=False)
                 if result.returncode == 0:
                     return result.stdout.strip()
             except FileNotFoundError:
@@ -75,7 +83,7 @@ class RustAnalyzer(SolidLanguageServer):
             that fails because the component is not installed.
             """
             try:
-                result = supervise.run([path, "--version"], capture_output=True, text=True, check=False, timeout=10)
+                result = subprocess_run([path, "--version"], capture_output=True, text=True, check=False, timeout=10)
                 return result.returncode == 0
             except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
                 return False
@@ -101,7 +109,7 @@ class RustAnalyzer(SolidLanguageServer):
             # If rustup is available but rust-analyzer not installed, auto-install it BEFORE
             # checking PATH. This ensures we get the correct version matching the toolchain.
             if RustAnalyzer.DependencyProvider._get_rustup_version():
-                result = supervise.run(["rustup", "component", "add", "rust-analyzer"], check=False, capture_output=True, text=True)
+                result = subprocess_run(["rustup", "component", "add", "rust-analyzer"], check=False, capture_output=True, text=True)
                 if result.returncode == 0:
                     # Verify installation worked
                     rustup_path = RustAnalyzer.DependencyProvider._get_rust_analyzer_via_rustup()
@@ -151,33 +159,33 @@ class RustAnalyzer(SolidLanguageServer):
                 if path and os.path.isfile(path) and os.access(path, os.X_OK):
                     return path
 
-            # Build platform-specific install hints and raise via the shared helper.
-            install_hints = [
-                "Rustup: rustup component add rust-analyzer",
-                "Cargo: cargo install rust-analyzer",
+            # Provide helpful error message with all searched locations
+            searched = [p for p in common_paths if p]
+            install_instructions = [
+                "  - Rustup: rustup component add rust-analyzer",
+                "  - Cargo: cargo install rust-analyzer",
             ]
             if is_windows:
-                install_hints.extend(
+                install_instructions.extend(
                     [
-                        "Scoop: scoop install rust-analyzer",
-                        "Chocolatey: choco install rust-analyzer",
-                        "Standalone: Download from https://github.com/rust-lang/rust-analyzer/releases",
+                        "  - Scoop: scoop install rust-analyzer",
+                        "  - Chocolatey: choco install rust-analyzer",
+                        "  - Standalone: Download from https://github.com/rust-lang/rust-analyzer/releases",
                     ]
                 )
             else:
-                install_hints.extend(
+                install_instructions.extend(
                     [
-                        "Homebrew (macOS): brew install rust-analyzer",
-                        "System package manager (Linux): apt/dnf/pacman install rust-analyzer",
+                        "  - Homebrew (macOS): brew install rust-analyzer",
+                        "  - System package manager (Linux): apt/dnf/pacman install rust-analyzer",
                     ]
                 )
 
-            searched = [p for p in common_paths if p]
-            raise RequiredCLI(
-                name="rust-analyzer",
-                rationale="rust-analyzer is the Rust language server used by serena.",
-                install_hints=install_hints,
-            ).build_missing_error(searched=searched)
+            raise RuntimeError(
+                "rust-analyzer is not installed or not in PATH.\n"
+                "Searched locations:\n" + "\n".join(f"  - {p}" for p in searched) + "\n"
+                "Please install rust-analyzer via:\n" + "\n".join(install_instructions)
+            )
 
         def _get_or_install_core_dependency(self) -> str:
             return self._ensure_rust_analyzer_installed()
@@ -208,14 +216,11 @@ class RustAnalyzer(SolidLanguageServer):
     def is_ignored_dirname(self, dirname: str) -> bool:
         return super().is_ignored_dirname(dirname) or dirname in ["target"]
 
-    @staticmethod
-    def _get_initialize_params(repository_absolute_path: str) -> InitializeParams:
+    def _create_base_initialize_params(self) -> dict:
         """
         Returns the initialize params for the Rust Analyzer Language Server.
         """
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
         initialize_params = {
-            "clientInfo": {"name": "Visual Studio Code - Insiders", "version": "1.82.0-insider"},
             "locale": "en",
             "capabilities": {
                 "workspace": {
@@ -416,6 +421,10 @@ class RustAnalyzer(SolidLanguageServer):
                             "textDocument/semanticTokens/full",
                             "textDocument/semanticTokens/range",
                             "textDocument/semanticTokens/full/delta",
+                            # rust-analyzer's internal cancellation tracking does not cover hover,
+                            # so hover requests it cancels while indexing come back ContentModified;
+                            # we retry them ourselves (see LanguageServerInterface.send_request). #1724
+                            "textDocument/hover",
                         ],
                     },
                     "regularExpressions": {"engine": "ECMAScript", "version": "ES2020"},
@@ -503,7 +512,10 @@ class RustAnalyzer(SolidLanguageServer):
                 "showUnlinkedFileNotification": True,
                 "showDependenciesExplorer": True,
                 "assist": {"emitMustUse": False, "expressionFillDefault": "todo"},
-                "cachePriming": {"enable": True, "numThreads": 0},
+                # Eager cache priming and automatic Cargo reloads can repeatedly
+                # index large, actively-built workspaces. Keep checkOnSave enabled
+                # because Rust diagnostics rely on flycheck.
+                "cachePriming": {"enable": False, "numThreads": 0},
                 "cargo": {
                     "autoreload": True,
                     "buildScripts": {
@@ -670,17 +682,38 @@ class RustAnalyzer(SolidLanguageServer):
                 "workspace": {"symbol": {"search": {"kind": "only_types", "limit": 128, "scope": "workspace"}}},
             },
             "trace": "verbose",
-            "processId": os.getpid(),
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
         }
-        return cast(InitializeParams, initialize_params)
+        return initialize_params
+
+    @override
+    def _get_published_diagnostics_wait_timeout(self, pull_diagnostics_failed: bool) -> float:
+        timeout = super()._get_published_diagnostics_wait_timeout(pull_diagnostics_failed)
+        # Rust diagnostics are often published asynchronously after the pull-diagnostics request,
+        # so keep a wider fallback wait window across all platforms.
+        return max(timeout, 8.0)
+
+    @override
+    def request_text_document_diagnostics(
+        self,
+        relative_file_path: str,
+        start_line: int = 0,
+        end_line: int = -1,
+        min_severity: int = 4,
+    ) -> list[ls_types.Diagnostic]:
+        uri = self._validate_text_document_diagnostics_request(relative_file_path, start_line, end_line, min_severity)
+
+        # With cache priming disabled, startup can finish before rust-analyzer
+        # schedules its initial flycheck. Trigger the retained checkOnSave path
+        # explicitly whenever diagnostics are requested.
+        with self.open_file(relative_file_path):
+            self.server.notify.did_save_text_document(
+                {  # ty: ignore[invalid-argument-type]  # dict built from LSPConstants keys; shape matches the TypedDict
+                    LSPConstants.TEXT_DOCUMENT: {
+                        LSPConstants.URI: uri,
+                    }
+                }
+            )
+            return super().request_text_document_diagnostics(relative_file_path, start_line, end_line, min_severity)
 
     def _start_server(self) -> None:
         """
@@ -688,9 +721,8 @@ class RustAnalyzer(SolidLanguageServer):
         """
 
         def register_capability_handler(params: dict) -> None:
-            assert "registrations" in params
-            for registration in params["registrations"]:
-                if registration["method"] == "workspace/executeCommand":
+            for registration in params.get("registrations", []):
+                if registration.get("method") == "workspace/executeCommand":
                     self.initialize_searcher_command_available.set()
                     self.resolve_main_method_available.set()
             return
@@ -699,7 +731,7 @@ class RustAnalyzer(SolidLanguageServer):
             # TODO: Should we wait for
             # server -> client: {'jsonrpc': '2.0', 'method': 'language/status', 'params': {'type': 'ProjectStatus', 'message': 'OK'}}
             # Before proceeding?
-            if params["type"] == "ServiceReady" and params["message"] == "ServiceReady":
+            if params.get("type") == "ServiceReady" and params.get("message") == "ServiceReady":
                 self.service_ready_event.set()
 
         def execute_client_command_handler(params: dict) -> list:
@@ -709,7 +741,7 @@ class RustAnalyzer(SolidLanguageServer):
             return
 
         def check_experimental_status(params: dict) -> None:
-            if params["quiescent"] == True:
+            if params.get("quiescent") is True:
                 self.server_ready.set()
 
         def window_log_message(msg: dict) -> None:
@@ -726,18 +758,29 @@ class RustAnalyzer(SolidLanguageServer):
 
         log.info("Starting RustAnalyzer server process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request from LSP client to LSP server and awaiting response")
         init_response = self.server.send.initialize(initialize_params)
-        assert init_response["capabilities"]["textDocumentSync"]["change"] == 2  # type: ignore
-        assert "completionProvider" in init_response["capabilities"]
-        assert init_response["capabilities"]["completionProvider"] == {
-            "resolveProvider": True,
-            "triggerCharacters": [":", ".", "'", "("],
-            "completionItem": {"labelDetailsSupport": True},
-        }
+        # Validate key server capabilities. These are sanity checks, not hard requirements:
+        # rust-analyzer may evolve its advertised capabilities across versions, so a mismatch is
+        # logged rather than asserted. (An over-strict equality check on completionProvider here
+        # previously crashed startup whenever upstream added or changed a completionProvider field.)
+        capabilities = init_response.get("capabilities", {}) if isinstance(init_response, dict) else {}
+        text_document_sync = capabilities.get("textDocumentSync")
+        change_kind = text_document_sync.get("change") if isinstance(text_document_sync, dict) else text_document_sync
+        if change_kind != 2:
+            log.warning("rust-analyzer: unexpected textDocumentSync.change=%r (expected 2 = incremental)", change_kind)
+        if "completionProvider" not in capabilities:
+            log.warning("rust-analyzer: server did not advertise a completionProvider capability")
         self.server.notify.initialized({})
 
-        if not self.server.adopted:
-            self.server_ready.wait()
+        # Wait for rust-analyzer to finish initial indexing (it emits experimental/serverStatus with
+        # quiescent=true when ready). Use a timeout so a server that crashes or never signals
+        # readiness cannot hang startup indefinitely (previously this waited with no timeout).
+        _SERVER_READY_TIMEOUT = 120.0
+        log.info("Waiting for rust-analyzer to signal readiness (quiescent)...")
+        if self.server_ready.wait(timeout=_SERVER_READY_TIMEOUT):
+            log.info("rust-analyzer ready")
+        else:
+            log.warning("rust-analyzer did not signal readiness within %.0fs; proceeding anyway", _SERVER_READY_TIMEOUT)

@@ -1,9 +1,27 @@
-from typing import Literal
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+from typing import TYPE_CHECKING, Literal, cast
 
 from serena.tools import Tool, ToolMarkerCanEdit
 
+if TYPE_CHECKING:
+    from serena.repl.api.mem_api import MemoryApi
 
-class WriteMemoryTool(Tool, ToolMarkerCanEdit):
+
+class MemoryApiMixin:
+    """
+    Mixin for tools which delegate to the memory API.
+    The API is imported locally, since the API module refers to the tools (as corresponding tools).
+    """
+
+    def _api(self) -> "MemoryApi":
+        from serena.repl.api.mem_api import MemoryApi
+
+        tool = cast(Tool, cast(object, self))
+        return MemoryApi(tool.agent)
+
+
+class WriteMemoryTool(Tool, ToolMarkerCanEdit, MemoryApiMixin):
     """
     Write some information (utf-8-encoded) about this project that can be useful for future tasks to a memory in md format.
     The memory name should be meaningful.
@@ -11,82 +29,71 @@ class WriteMemoryTool(Tool, ToolMarkerCanEdit):
 
     def apply(self, memory_name: str, content: str, max_chars: int = -1) -> str:
         """
-        Write information (utf-8-encoded) about this project that can be useful for future tasks to a memory in md format.
-        The memory name should be meaningful and can include "/" to organize into topics (e.g., "auth/login/logic").
-        If explicitly instructed, use the "global/" prefix for writing a memory that is shared across projects
-        (e.g., "global/java/style_guide")
+        Write information about this project that can be useful for future tasks in md format.
+        The name should be meaningful and can include "/" to organize into topics.
+        If explicitly instructed, use the "global/" prefix for writing a memory that is shared across projects.
+        References to other memories should be inside backticks and prefixed with mem:,
+        e.g., `mem:auth`.
 
-        :param max_chars: the maximum number of characters to write. By default, determined by the config,
-            change only if instructed to do so.
+        :param memory_name: memory name
+        :param content: memory content, utf8-encoded
+        :param max_chars: see other tools
         """
-        # NOTE: utf-8 encoding is configured in the MemoriesManager
-        if max_chars == -1:
-            max_chars = self.agent.serena_config.default_max_tool_answer_chars
-        if len(content) > max_chars:
-            raise ValueError(
-                f"Content for {memory_name} is too long. Max length is {max_chars} characters. " + "Please make the content shorter."
-            )
-
-        return self.memories_manager.save_memory(memory_name, content, is_tool_context=True)
+        return self._api().write_memory(memory_name, content, max_chars)
 
 
-class ReadMemoryTool(Tool):
+class ReadMemoryTool(Tool, MemoryApiMixin):
     """
-    Read the content of a memory file. This tool should only be used if the information
-    is relevant to the current task. You can infer whether the information
-    is relevant from the memory file name.
-    You should not read the same memory file multiple times in the same conversation.
+    Reads the content of a memory file.
     """
 
     def apply(self, memory_name: str) -> str:
         """
-        Reads the contents of a memory. Should only be used if the information
-        is likely to be relevant to the current task, inferring relevance from the memory name.
+        Use to read a memory that is likely to be relevant to the current task, inferring relevance e.g. from the name.
         """
-        return self.memories_manager.load_memory(memory_name)
+        return self._api().read_memory(memory_name)
 
 
-class ListMemoriesTool(Tool):
+class ListMemoriesTool(Tool, MemoryApiMixin):
     """
-    List available memories. Any memory can be read using the `read_memory` tool.
+    Lists available memories.
     """
 
     def apply(self, topic: str = "") -> str:
         """
         Lists available memories, optionally filtered by topic.
         """
-        return self._to_json(self.memories_manager.list_memories(topic).to_dict())
+        return self._api().list_memories(topic).represent()
 
 
-class DeleteMemoryTool(Tool, ToolMarkerCanEdit):
+class DeleteMemoryTool(Tool, ToolMarkerCanEdit, MemoryApiMixin):
     """
-    Delete a memory file. Should only happen if a user asks for it explicitly,
-    for example by saying that the information retrieved from a memory file is no longer correct
-    or no longer relevant for the project.
+    Delete a memory file.
     """
 
     def apply(self, memory_name: str) -> str:
         """
         Delete a memory, only call if instructed explicitly or permission was granted by the user.
         """
-        return self.memories_manager.delete_memory(memory_name, is_tool_context=True)
+        return self._api().delete_memory(memory_name)
 
 
-class RenameMemoryTool(Tool, ToolMarkerCanEdit):
+class RenameMemoryTool(Tool, ToolMarkerCanEdit, MemoryApiMixin):
     """
-    Renames or moves a memory. Moving between project and global scope is supported
-    (e.g., renaming "global/foo" to "bar" moves it from global to project scope).
+    Renames or moves a memory, updating references that are marked with the `mem:` prefix.
     """
 
     def apply(self, old_name: str, new_name: str) -> str:
         """
         Rename or move a memory, use "/" in the name to organize into topics.
         The "global" topic should only be used if explicitly instructed.
+        References to other memories that are marked with the `mem:` prefix will be updated accordingly.
+        References in read-only memories are not affected.
         """
-        return self.memories_manager.move_memory(old_name, new_name, is_tool_context=True)
+        return self._api().rename_memory(old_name, new_name)
 
 
-class EditMemoryTool(Tool, ToolMarkerCanEdit):
+class EditMemoryTool(Tool, ToolMarkerCanEdit, MemoryApiMixin):
     """
     Replaces content matching a regular expression in a memory.
     """
@@ -100,16 +107,16 @@ class EditMemoryTool(Tool, ToolMarkerCanEdit):
         allow_multiple_occurrences: bool = False,
     ) -> str:
         r"""
-        Replaces content matching a regular expression in a memory.
+        Replace content matching a regular expression in a memory.
 
         :param memory_name: the name of the memory
-        :param needle: the string or regex pattern to search for.
+        :param needle: the string or regex pattern to search for. In regex mode, be careful to not replace too much!
             If `mode` is "literal", this string will be matched exactly.
             If `mode` is "regex", this string will be treated as a regular expression (syntax of Python's `re` module,
-            with flags DOTALL and MULTILINE enabled).
+            with the MULTILINE and DOTALL flags enabled).
         :param repl: the replacement string (verbatim).
         :param mode: either "literal" or "regex", specifying how the `needle` parameter is to be interpreted.
         :param allow_multiple_occurrences: whether to allow matching and replacing multiple occurrences.
             If false and multiple occurrences are found, an error will be returned.
         """
-        return self.memories_manager.edit_memory(memory_name, needle, repl, mode, allow_multiple_occurrences, is_tool_context=True)
+        return self._api().edit_memory(memory_name, needle, repl, mode, allow_multiple_occurrences)

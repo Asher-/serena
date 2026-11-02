@@ -1,11 +1,14 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 from typing import Any
 
 import jinja2
 import jinja2.meta
 import jinja2.nodes
 import jinja2.visitor
+from jinja2.sandbox import SandboxedEnvironment
 
-from interprompt.util.class_decorators import singleton
+from .util.class_decorators import singleton
 
 
 class ParameterizedTemplateInterface:
@@ -19,7 +22,7 @@ class _JinjaEnvProvider:
 
     def get_env(self) -> jinja2.Environment:
         if self._env is None:
-            self._env = jinja2.Environment()
+            self._env = SandboxedEnvironment()
         return self._env
 
 
@@ -29,6 +32,9 @@ class JinjaTemplate(ParameterizedTemplateInterface):
         self._template = _JinjaEnvProvider().get_env().from_string(self._template_string)
         parsed_content = self._template.environment.parse(self._template_string)
         self._parameters = sorted(jinja2.meta.find_undeclared_variables(parsed_content))
+
+    def get_template_string(self) -> str:
+        return self._template_string
 
     def render(self, **params: Any) -> str:
         """Renders the template with the given kwargs. You can find out which parameters are required by calling get_parameter_names()."""

@@ -1,18 +1,24 @@
-import fnmatch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+import hashlib
+import json
 import logging
-import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 from bs4 import BeautifulSoup
 from joblib import Parallel, delayed
+from sensai.util.string import ToStringMixin
 
-from serena.constants import DEFAULT_SOURCE_FILE_ENCODING
-from serena.util.line_numbers import to_display_line
-from solidlsp.ls_utils import TextUtils
+from serena.util.file_proxy import FileCollection, FileProxy
+from solidlsp.ls_utils import TextCoordinateProvider, TextCoordinates, TextUtils
+
+if TYPE_CHECKING:
+    from serena.code_editor import CodeEditor
+    from serena.project import Project
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +39,6 @@ class TextLine:
     """Represents a line of text with information on how it relates to the match."""
 
     line_number: int
-    """the 0-based index of the line in the source text."""
     line_content: str
     match_type: LineType
     """Represents the type of line (match, prefix, postfix)"""
@@ -47,13 +52,11 @@ class TextLine:
     def format_line(self, include_line_numbers: bool = True) -> str:
         """Format the line for display (e.g.,for logging or passing to an LLM).
 
-        :param include_line_numbers: Whether to include the (1-based, ``cat -n``
-            equivalent) line number in the result. The stored ``line_number`` is
-            0-based; it is converted to 1-based here at the display boundary.
+        :param include_line_numbers: Whether to include the line number in the result.
         """
         prefix = self.get_display_prefix()
         if include_line_numbers:
-            line_num = str(to_display_line(self.line_number)).rjust(4)
+            line_num = str(self.line_number).rjust(4)
             prefix = f"{prefix}{line_num}"
         return f"{prefix}:{self.line_content}"
 
@@ -104,7 +107,7 @@ class MatchedConsecutiveLines:
     def from_file_contents(
         cls, file_contents: str, line: int, context_lines_before: int = 0, context_lines_after: int = 0, source_file_path: str | None = None
     ) -> Self:
-        line_contents = file_contents.split("\n")
+        line_contents = TextUtils.split_lines(file_contents)
         start_lineno = max(0, line - context_lines_before)
         end_lineno = min(len(line_contents) - 1, line + context_lines_after)
         text_lines: list[TextLine] = []
@@ -120,166 +123,83 @@ class MatchedConsecutiveLines:
         return cls(lines=text_lines, source_file_path=source_file_path)
 
 
-def glob_to_regex(glob_pat: str) -> str:
-    regex_parts: list[str] = []
-    i = 0
-    while i < len(glob_pat):
-        ch = glob_pat[i]
-        if ch == "*":
-            regex_parts.append(".*")
-        elif ch == "?":
-            regex_parts.append("..")
-        elif ch == "\\":
-            i += 1
-            if i < len(glob_pat):
-                regex_parts.append(re.escape(glob_pat[i]))
-            else:
-                regex_parts.append("\\")
-        else:
-            regex_parts.append(re.escape(ch))
-        i += 1
-    return "".join(regex_parts)
-
-
 def search_text(
     pattern: str,
     content: str | None = None,
     source_file_path: str | None = None,
-    allow_multiline_match: bool = False,
     context_lines_before: int = 0,
     context_lines_after: int = 0,
-    is_glob: bool = False,
-    encoding: str = DEFAULT_SOURCE_FILE_ENCODING,
+    multiline: bool = True,
 ) -> list[MatchedConsecutiveLines]:
     """
     Search for a pattern in text content. Supports both regex and glob-like patterns.
-
-    Every emitted :class:`TextLine` carries a ``line_number`` that is the 0-based
-    index of the line in ``content``, matching the convention used by
-    :meth:`MatchedConsecutiveLines.from_file_contents`, the LSP layer, and every
-    other line-oriented surface in the codebase.
 
     :param pattern: Pattern to search for (regex or glob-like pattern)
     :param content: The text content to search. May be None if source_file_path is provided.
     :param source_file_path: Optional path to the source file. If content is None,
         this has to be passed and the file will be read.
-    :param allow_multiline_match: Whether to search across multiple lines. Currently, the default
-        option (False) is very inefficient, so it is recommended to set this to True.
     :param context_lines_before: Number of context lines to include before matches
     :param context_lines_after: Number of context lines to include after matches
-    :param is_glob: If True, pattern is treated as a glob-like pattern (e.g., "*.py", "test_??.py")
-             and will be converted to regex internally
-    :param encoding: Text encoding to use when ``source_file_path`` is read because ``content`` is None.
-        Defaults to UTF-8; callers with a known project encoding should pass it explicitly.
-
+    :param multiline: whether to apply multi-line matching, enabling the flags re.DOTALL and re.MULTILINE
     :return: List of `TextSearchMatch` objects
-
     :raises: ValueError if the pattern is not valid
-
     """
-    # read the file when only the path was supplied
     if source_file_path and content is None:
-        with open(source_file_path, encoding=encoding) as f:
+        with open(source_file_path) as f:
             content = f.read()
 
     if content is None:
         raise ValueError("Pass either content or source_file_path")
 
     matches = []
-    lines = content.splitlines()
+    lines = TextUtils.split_lines(content)
     total_lines = len(lines)
 
-    # Convert pattern to a compiled regex if it's a string
-    if is_glob:
-        pattern = glob_to_regex(pattern)
-    if allow_multiline_match:
-        # multiline scan: DOTALL lets '.' span newlines so a single match can cross lines
-        compiled_pattern = re.compile(pattern, re.DOTALL)
-        for match in compiled_pattern.finditer(content):
-            start_pos = match.start()
-            end_pos = match.end()
+    # precompute line start offsets once so that each match's coordinates can be resolved via binary search
+    # instead of re-scanning the text from the beginning for every match
+    coordinates = TextCoordinateProvider(content)
 
-            # find the 0-based line indices that bound the match span
-            start_line_num = content[:start_pos].count("\n")
-            end_line_num = content[:end_pos].count("\n")
+    # For multiline matches, optionally use DOTALL so '.' matches newlines
+    flags = (re.MULTILINE | re.DOTALL) if multiline else 0
+    compiled_pattern = re.compile(pattern, flags)
+    # Search across the entire content as a single string
+    for match in compiled_pattern.finditer(content):
+        start_pos = match.start()
+        end_pos = match.end()
 
-            # clamp the requested context window to the file's 0-based line range
-            context_start = max(0, start_line_num - context_lines_before)
-            context_end = min(total_lines - 1, end_line_num + context_lines_after)
+        # Find the line numbers for the start and end positions
+        start_loc = coordinates.compute_coordinates(start_pos)
+        end_loc = coordinates.compute_coordinates(end_pos)
+        start_line_num, end_line_num = start_loc.line, end_loc.line
+        if end_line_num > start_line_num and end_loc.col == 0:
+            # `end_pos` is exclusive, so if it is at the start of a line, the match ends with the
+            # preceding line's newline and does not extend into the line that `end_pos` points to
+            end_line_num -= 1
 
-            # tag each line in the window as BEFORE / MATCH / AFTER and emit it
-            context_lines = []
-            for i in range(context_start, context_end + 1):
-                if i < start_line_num:
-                    match_type = LineType.BEFORE_MATCH
-                elif i > end_line_num:
-                    match_type = LineType.AFTER_MATCH
-                else:
-                    match_type = LineType.MATCH
+        # Calculate the range of lines to include in the context
+        context_start = max(0, start_line_num - context_lines_before)
+        context_end = min(total_lines - 1, end_line_num + context_lines_after)
 
-                context_lines.append(TextLine(line_number=i, line_content=lines[i], match_type=match_type))
+        # Create TextLine objects for the context
+        context_lines = []
+        for line_num in range(context_start, context_end + 1):
+            if context_start <= line_num < start_line_num:
+                match_type = LineType.BEFORE_MATCH
+            elif end_line_num < line_num <= context_end:
+                match_type = LineType.AFTER_MATCH
+            else:
+                match_type = LineType.MATCH
 
-            matches.append(MatchedConsecutiveLines(lines=context_lines, source_file_path=source_file_path))
-    else:
-        # TODO: extremely inefficient! Since we currently don't use this option in SerenaAgent or LanguageServer,
-        #   it is not urgent to fix, but should be either improved or the option should be removed.
-        # line-by-line scan: each line tested against the regex independently
-        compiled_pattern = re.compile(pattern)
-        for i, line in enumerate(lines):
-            if compiled_pattern.search(line):
-                # clamp the requested context window to the file's 0-based line range
-                context_start = max(0, i - context_lines_before)
-                context_end = min(total_lines - 1, i + context_lines_after)
+            context_lines.append(TextLine(line_number=line_num, line_content=lines[line_num], match_type=match_type))
 
-                # tag each line in the window as BEFORE / MATCH / AFTER and emit it
-                context_lines = []
-                for j in range(context_start, context_end + 1):
-                    if j < i:
-                        match_type = LineType.BEFORE_MATCH
-                    elif j > i:
-                        match_type = LineType.AFTER_MATCH
-                    else:
-                        match_type = LineType.MATCH
-
-                    context_lines.append(TextLine(line_number=j, line_content=lines[j], match_type=match_type))
-
-                matches.append(MatchedConsecutiveLines(lines=context_lines, source_file_path=source_file_path))
+        matches.append(MatchedConsecutiveLines(lines=context_lines, source_file_path=source_file_path))
 
     return matches
 
 
-def default_file_reader(file_path: str, encoding: str = DEFAULT_SOURCE_FILE_ENCODING) -> str:
-    """Reads using the given encoding (UTF-8 by default)."""
-    with open(file_path, encoding=encoding) as f:
-        return f.read()
-
-
-def expand_braces(pattern: str) -> list[str]:
+class GlobMatcher(ToStringMixin):
     """
-    Expands brace patterns in a glob string.
-    For example, "**/*.{js,jsx,ts,tsx}" becomes ["**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx"].
-    Handles multiple brace sets as well.
-    """
-    patterns = [pattern]
-    while any("{" in p for p in patterns):
-        new_patterns = []
-        for p in patterns:
-            match = re.search(r"\{([^{}]+)\}", p)
-            if match:
-                prefix = p[: match.start()]
-                suffix = p[match.end() :]
-                options = match.group(1).split(",")
-                for option in options:
-                    new_patterns.append(f"{prefix}{option}{suffix}")
-            else:
-                new_patterns.append(p)
-        patterns = new_patterns
-    return patterns
-
-
-def glob_match(pattern: str, path: str) -> bool:
-    """
-    Match a file path against a glob pattern.
+    Supports matching a file path against a glob pattern.
 
     Supports standard glob patterns:
     - * matches any number of characters except /
@@ -289,117 +209,162 @@ def glob_match(pattern: str, path: str) -> bool:
 
     Supports brace expansion:
     - {a,b,c} expands to multiple patterns (including nesting)
-
-    Unsupported patterns:
-    - Bash extended glob features are unavailable in Python's fnmatch
-    - Extended globs like !(), ?(), +(), *(), @() are not supported
-
-    :param pattern: Glob pattern (e.g., 'src/**/*.py', '**agent.py')
-    :param path: File path to match against
-    :return: True if path matches pattern
     """
-    pattern = pattern.replace("\\", "/")  # Normalize backslashes to forward slashes
-    path = path.replace("\\", "/")  # Normalize path backslashes to forward slashes
 
-    # Handle ** patterns that should match zero or more directories
-    if "**" in pattern:
-        # Method 1: Standard fnmatch (matches one or more directories)
-        regex1 = fnmatch.translate(pattern)
-        if re.match(regex1, path):
-            return True
+    def __init__(self, expr: str):
+        """
+        :param expr: a glob pattern which may make use of brace expansion (e.g., "src/**/*.{js,jsx,ts,tsx}")
+        """
+        expr = expr.replace("\\", "/")  # normalise backslashes to forward slashes
+        self._glob_expr = expr
+        self._glob_patterns = self._expand_braces(expr)
+        self._regex_patterns = [re.compile(self._translate_glob_to_regex(p)) for p in self._glob_patterns]
 
-        # Method 2: Handle zero-directory case by removing /** entirely
-        # Convert "src/**/test.py" to "src/test.py"
-        if "/**/" in pattern:
-            zero_dir_pattern = pattern.replace("/**/", "/")
-            regex2 = fnmatch.translate(zero_dir_pattern)
-            if re.match(regex2, path):
-                return True
+    def _tostring_includes(self) -> list[str]:
+        return ["_glob_expr"]
 
-        # Method 3: Handle leading ** case by removing **/
-        # Convert "**/test.py" to "test.py"
-        if pattern.startswith("**/"):
-            zero_dir_pattern = pattern[3:]  # Remove "**/"
-            regex3 = fnmatch.translate(zero_dir_pattern)
-            if re.match(regex3, path):
-                return True
+    @staticmethod
+    def _expand_braces(pattern: str) -> list[str]:
+        """
+        Expands brace patterns in a glob string.
+        For example, "**/*.{js,jsx,ts,tsx}" becomes ["**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx"].
+        Handles multiple brace sets as well.
+        """
+        patterns = [pattern]
+        while any("{" in p or "}" in p for p in patterns):
+            new_patterns = []
+            for p in patterns:
+                match = re.search(r"\{([^{}]*)\}", p)
+                if match:
+                    options_expr = match.group(1)
+                    if not options_expr:
+                        raise ValueError(f"Invalid glob brace expression in {pattern!r}: empty braces are not allowed")
 
-        return False
-    else:
-        # Simple pattern without **, use fnmatch directly
-        return fnmatch.fnmatch(path, pattern)
+                    prefix = p[: match.start()]
+                    suffix = p[match.end() :]
+                    options = options_expr.split(",")
+                    for option in options:
+                        new_patterns.append(f"{prefix}{option}{suffix}")
+                else:
+                    raise ValueError(f"Invalid glob brace expression in {pattern!r}: unmatched brace")
+            patterns = new_patterns
+        return patterns
+
+    @staticmethod
+    def _translate_glob_to_regex(pattern: str) -> str:
+        res = []
+        i = 0
+        n = len(pattern)
+        while i < n:
+            c = pattern[i]
+            i += 1
+            if c == "*":
+                if i < n and pattern[i] == "*":  # **
+                    i += 1
+                    if i < n and pattern[i] == "/":  # **/
+                        i += 1
+                        if res and res[-1] == "/":  # /**/
+                            res = res[:-1]
+                            res.append("(?:/|/.*/)")
+                        elif res:  # c**/ (with c != '/')
+                            res.append(".*/")
+                        else:  # **/ at the start of the pattern
+                            res.append("(?:.*/)?")
+                    else:  # c**d  (with c, d != '/')
+                        res.append(".*")
+                else:  # single *
+                    if not res or res[-1] != "[^/]*":
+                        res.append("[^/]*")
+            elif c == "?":
+                res.append("[^/]")
+            elif c == "[":
+                j = i
+                if j < n and pattern[j] == "!":
+                    j += 1
+                if j < n and pattern[j] == "]":
+                    j += 1
+                while j < n and pattern[j] != "]":
+                    j += 1
+                if j >= n:
+                    res.append(r"\[")
+                else:
+                    stuff = pattern[i:j]
+                    if stuff.startswith("!"):
+                        stuff = "^" + stuff[1:]
+                    elif stuff.startswith("^"):
+                        stuff = r"\^" + stuff
+                    res.append(f"[{stuff}]")
+                    i = j + 1
+            else:
+                res.append(re.escape(c))
+        inner = "".join(res)
+        return f"(?s:{inner})\\Z"
+
+    def matches(self, path: str) -> bool:
+        path = path.replace("\\", "/")  # normalise backslashes to forward slashes
+        return any(regex.match(path) for regex in self._regex_patterns)
 
 
 def search_files(
-    relative_file_paths: list[str],
+    file_collection: FileCollection,
     pattern: str,
-    root_path: str = "",
-    file_reader: Callable[[str], str] = default_file_reader,
     context_lines_before: int = 0,
     context_lines_after: int = 0,
     paths_include_glob: str | None = None,
     paths_exclude_glob: str | None = None,
+    multiline: bool = True,
 ) -> list[MatchedConsecutiveLines]:
     """
     Search for a pattern in a list of files.
 
-    :param relative_file_paths: List of relative file paths in which to search
-    :param pattern: Pattern to search for
-    :param root_path: Root path to resolve relative paths against (by default, current working directory).
-    :param file_reader: Function to read a file, by default will just use os.open.
-        All files that can't be read by it will be skipped.
-    :param context_lines_before: Number of context lines to include before matches
-    :param context_lines_after: Number of context lines to include after matches
-    :param paths_include_glob: Optional glob pattern to include files from the list
-    :param paths_exclude_glob: Optional glob pattern to exclude files from the list
-    :return: List of MatchedConsecutiveLines objects
+    :param file_collection: the collection of files to search (will be optionally filtered by glob patterns)
+    :param pattern: pattern to search for
+    :param context_lines_before: number of context lines to include before matches
+    :param context_lines_after: number of context lines to include after matches
+    :param paths_include_glob: optional glob pattern to include files from the list
+    :param paths_exclude_glob: optional glob pattern to exclude files from the list
+    :param multiline: whether to apply multi-line matching, enabling the flags re.DOTALL and re.MULTILINE (default: True)
+    :return: list of MatchedConsecutiveLines objects
+    :raises ValueError: if the pattern is not a valid regular expression
     """
-    # Pre-filter paths (done sequentially to avoid overhead)
-    # Use proper glob matching instead of gitignore patterns
-    include_patterns = expand_braces(paths_include_glob) if paths_include_glob else None
-    exclude_patterns = expand_braces(paths_exclude_glob) if paths_exclude_glob else None
+    # Validate the pattern once, before the per-file processing below: a pattern that does not
+    # compile is a defect in the request, not a per-file read failure, so it must not be turned
+    # into the empty result that reads like "the pattern occurs nowhere" (see `search_text`,
+    # which documents this error, and the replacement tools, which let it surface).
+    try:
+        re.compile(pattern, (re.MULTILINE | re.DOTALL) if multiline else 0)
+    except re.error as e:
+        raise ValueError(f"Invalid regular expression {pattern!r}: {e}") from e
 
-    filtered_paths = []
-    for path in relative_file_paths:
-        if include_patterns:
-            if not any(glob_match(p, path) for p in include_patterns):
-                log.debug(f"Skipping {path}: does not match include pattern {paths_include_glob}")
-                continue
+    # apply glob filter
+    file_collection = file_collection.filter_glob(paths_include_glob=paths_include_glob, paths_exclude_glob=paths_exclude_glob)
+    log.info(f"Processing {len(file_collection)} files.")
 
-        if exclude_patterns:
-            if any(glob_match(p, path) for p in exclude_patterns):
-                log.debug(f"Skipping {path}: matches exclude pattern {paths_exclude_glob}")
-                continue
-
-        filtered_paths.append(path)
-
-    log.info(f"Processing {len(filtered_paths)} files.")
-
-    def process_single_file(path: str) -> dict[str, Any]:
+    def process_single_file(file_proxy: FileProxy) -> dict[str, Any]:
         """Process a single file - this function will be parallelized."""
+        relative_path = file_proxy.get_relative_path()
         try:
-            abs_path = os.path.join(root_path, path)
-            file_content = file_reader(abs_path)
+            file_content = file_proxy.get_contents()
             search_results = search_text(
                 pattern,
                 content=file_content,
-                source_file_path=path,
-                allow_multiline_match=True,
+                source_file_path=relative_path,
                 context_lines_before=context_lines_before,
                 context_lines_after=context_lines_after,
+                multiline=multiline,
             )
             if len(search_results) > 0:
-                log.debug(f"Found {len(search_results)} matches in {path}")
-            return {"path": path, "results": search_results, "error": None}
+                log.debug(f"Found {len(search_results)} matches in {relative_path}")
+            return {"path": relative_path, "results": search_results, "error": None}
         except Exception as e:
-            log.debug(f"Error processing {path}: {e}")
-            return {"path": path, "results": [], "error": str(e)}
+            log.debug(f"Error processing {relative_path}: {e}")
+            return {"path": relative_path, "results": [], "error": str(e)}
 
     # Execute in parallel using joblib
     results = Parallel(
         n_jobs=-1,
         backend="threading",
-    )(delayed(process_single_file)(path) for path in filtered_paths)
+    )(delayed(process_single_file)(file_proxy) for file_proxy in file_collection)
 
     # Collect results and errors
     matches = []
@@ -414,7 +379,7 @@ def search_files(
     if skipped_file_error_tuples:
         log.debug(f"Failed to read {len(skipped_file_error_tuples)} files: {skipped_file_error_tuples}")
 
-    log.info(f"Found {len(matches)} total matches across {len(filtered_paths)} files")
+    log.info(f"Found {len(matches)} total matches across {len(file_collection)} files")
     return matches
 
 
@@ -442,25 +407,32 @@ class ContentReplacer:
     provides dual modes for maximum flexibility.
     """
 
-    def __init__(self, mode: Literal["literal", "regex"], allow_multiple_occurrences: bool):
+    def __init__(self, mode: Literal["literal", "regex"], allow_multiple_occurrences: bool, regex_multiline: bool = True):
         """
 
         :param mode: the mode indicating whether to the needle in replacements corresponds to a regular expression
             (mode "regex") or to a literal string (mode "literal")
         :param allow_multiple_occurrences: whether it is allowed that the search expression matches multiple occurrences.
             If False, an error will be raised if more than one match is found.
+        :param regex_multiline: whether to apply multi-line regex matching, enabling the flags re.DOTALL and re.MULTILINE
         """
         self.mode = mode
         self.allow_multiple_occurrences = allow_multiple_occurrences
+        self.regex_multiline = regex_multiline
 
     @staticmethod
-    def _create_replacement_function(regex_pattern: str, repl_template: str, regex_flags: int) -> Callable[[re.Match], str]:
+    def _create_replacement_function(
+        regex_pattern: str, repl_template: str, regex_flags: int, expand_backrefs: bool
+    ) -> Callable[[re.Match], str]:
         """
         Creates a replacement function that validates for ambiguity and handles backreferences.
 
         :param regex_pattern: The regex pattern being used for matching
-        :param repl_template: The replacement template with $!1, $!2, etc. for backreferences
+        :param repl_template: The replacement template; in regex mode, it may contain $!1, $!2, etc. for
+            backreferences; in literal mode, it is used verbatim
         :param regex_flags: The flags to use when searching (e.g., re.DOTALL | re.MULTILINE)
+        :param expand_backrefs: Whether $!N backreferences are expanded in the template; false in literal mode,
+            mirroring the mode gate in MultiFileContentReplacer.find_occurrences
         :return: A function suitable for use with re.sub() or re.subn()
         """
 
@@ -482,11 +454,19 @@ class ContentReplacer:
                     "e.g. by matching specific context after the match, or try using the literal mode."
                 )
 
-            # Handle backreferences: replace $!1, $!2, etc. with actual matched groups
+            # in literal mode, the template is the final replacement; $!N sequences need no escaping
+            if not expand_backrefs:
+                return repl_template
+
+            # Handle backreferences: replace $!1, $!2, etc. with actual matched groups; groups that
+            # exist but did not participate in the match expand to the empty string
             def expand_backreference(m: re.Match) -> str:
                 group_num = int(m.group(1))
-                group_value = match.group(group_num)
-                return group_value if group_value is not None else m.group(0)
+                try:
+                    group_value = match.group(group_num)
+                except IndexError as e:
+                    raise ValueError(f"Backreference $!{group_num} refers to a group that does not exist in the search expression") from e
+                return group_value if group_value is not None else ""
 
             result = re.sub(r"\$!(\d+)", expand_backreference, repl_template)
             return result
@@ -506,8 +486,8 @@ class ContentReplacer:
 
         :param content: the content in which to perform the replacement
         :param needle: the search expression, which is either a literal string or a regular expression, depending on the mode
-        :param repl: the replacement string, which, in regex mode, may contain backreferences in the form of $!1, $!2, etc. to
-            refer to matched groups in the search expression
+        :param repl: the replacement string; in regex mode, it may contain backreferences in the form of $!1, $!2, etc.
+            to refer to matched groups in the search expression; in literal mode, it is used verbatim
         :return: the updated content after performing the replacement
         """
         if self.mode == "literal":
@@ -517,10 +497,10 @@ class ContentReplacer:
         else:
             raise ValueError(f"Invalid mode: '{self.mode}', expected 'literal' or 'regex'.")
 
-        regex_flags = re.DOTALL | re.MULTILINE
+        regex_flags = (re.MULTILINE | re.DOTALL) if self.regex_multiline else 0
 
-        # create replacement function with validation and backreference handling
-        repl_fn = self._create_replacement_function(regex, repl, regex_flags=regex_flags)
+        # create replacement function with ambiguity validation and, in regex mode, backreference handling
+        repl_fn = self._create_replacement_function(regex, repl, regex_flags=regex_flags, expand_backrefs=self.mode == "regex")
 
         # perform replacement
         updated_content, n = re.subn(regex, repl_fn, content, flags=regex_flags)
@@ -536,18 +516,443 @@ class ContentReplacer:
 
 
 @dataclass
-class TextCoords:
-    line: int
-    """
-    0-based line number
-    """
-    col: int
-    """
-    0-based column number
-    """
+class ReplacementOccurrence:
+    """A single prospective replacement of a pattern match within one file."""
+
+    occurrence_id: str
+    """stable, content-anchored identifier: '<relative_path>:<index_in_file>@<digest>'"""
+    relative_path: str
+    index_in_file: int
+    """0-based index of this match among the matches within its file (in position order)"""
+    start: int
+    """character offset of the match start within the file content"""
+    end: int
+    """character offset of the match end within the file content"""
+    matched_text: str
+    replacement: str
+    """the fully expanded replacement text (backreferences already resolved)"""
+    start_line: int
+    """0-based line number of the match start"""
+    end_line: int
+    """0-based line number of the match end"""
+    is_ambiguous: bool = False
+    """whether the pattern matches again within the matched text (possible over-match)"""
 
 
-def find_text_coordinates(content: str, regex: str, require_unique: bool = False) -> TextCoords | None:
+class MultiFileContentReplacer:
+    """
+    Occurrence-level counterpart of :class:`ContentReplacer` operating on multiple files:
+    finds every match of a pattern across a set of file contents, assigns each occurrence a
+    stable content-anchored id, renders minimal line diffs for previewing, and computes the
+    updated content of a file for a selected subset of occurrences.
+    """
+
+    OCCURRENCE_ID_REGEX = re.compile(r"^(?P<path>.+):(?P<index>\d+)@(?P<digest>[0-9a-f]{16})$")
+    _DIGEST_LEN = 16
+
+    def __init__(self, mode: Literal["literal", "regex"], regex_multiline: bool = True):
+        """
+        :param mode: whether the needle is a literal string ("literal") or a regular expression ("regex")
+        :param regex_multiline: whether to apply multi-line regex matching, enabling the flags re.DOTALL and re.MULTILINE
+        """
+        if mode not in ("literal", "regex"):
+            raise ValueError(f"Invalid mode: '{mode}', expected 'literal' or 'regex'.")
+        self.mode = mode
+        self._flags = (re.MULTILINE | re.DOTALL) if regex_multiline else 0
+
+    def _compile(self, needle: str) -> re.Pattern:
+        return re.compile(re.escape(needle) if self.mode == "literal" else needle, flags=self._flags)
+
+    @classmethod
+    def _digest(cls, text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[: cls._DIGEST_LEN]
+
+    @classmethod
+    def make_occurrence_id(cls, relative_path: str, index_in_file: int, content_digest: str, start: int, end: int) -> str:
+        """Creates an identifier bound to the file's content and the matched character range."""
+        return f"{relative_path}:{index_in_file}@{cls._digest(f'{content_digest}:{start}:{end}')}"
+
+    @staticmethod
+    def _expand_backreferences(match: re.Match, repl_template: str) -> str:
+        """Expands $!1, $!2, ... in the replacement template (same syntax as :class:`ContentReplacer`)."""
+
+        def expand(m: re.Match) -> str:
+            group_num = int(m.group(1))
+            try:
+                group_value = match.group(group_num)
+            except IndexError as e:
+                raise ValueError(f"Backreference $!{group_num} refers to a group that does not exist in the search expression") from e
+            return group_value if group_value is not None else ""
+
+        return re.sub(r"\$!(\d+)", expand, repl_template)
+
+    def find_occurrences(self, files: list[tuple[str, str]], needle: str, repl: str) -> list[ReplacementOccurrence]:
+        """
+        Finds all matches of the needle in the given files.
+
+        :param files: (relative_path, content) pairs; processed in the given order
+        :param needle: the search expression (literal string or regex, depending on the mode)
+        :param repl: the replacement template (may contain $!N backreferences in regex mode)
+        :return: occurrences in deterministic order (file order, then position within the file)
+        """
+        pattern = self._compile(needle)
+        occurrences: list[ReplacementOccurrence] = []
+        for relative_path, content in files:
+            content_digest = self._digest(content)
+            for index_in_file, match in enumerate(pattern.finditer(content)):
+                matched_text = match.group(0)
+                replacement = self._expand_backreferences(match, repl) if self.mode == "regex" else repl
+                # same over-match heuristic as ContentReplacer: for a multi-line match, the pattern
+                # matching again within the matched text indicates the match may have swallowed
+                # more than intended
+                is_ambiguous = "\n" in matched_text and pattern.search(matched_text[1:]) is not None
+
+                # the match end is exclusive, so a match that consumes a line break ends on the
+                # line before the one `match.end()` points at; `search_text` applies the same rule
+                start_line = content.count("\n", 0, match.start())
+                end_line = content.count("\n", 0, match.end())
+                if end_line > start_line and matched_text.endswith("\n"):
+                    end_line -= 1
+
+                occurrences.append(
+                    ReplacementOccurrence(
+                        occurrence_id=self.make_occurrence_id(relative_path, index_in_file, content_digest, match.start(), match.end()),
+                        relative_path=relative_path,
+                        index_in_file=index_in_file,
+                        start=match.start(),
+                        end=match.end(),
+                        matched_text=matched_text,
+                        replacement=replacement,
+                        start_line=start_line,
+                        end_line=end_line,
+                        is_ambiguous=is_ambiguous,
+                    )
+                )
+        return occurrences
+
+    @staticmethod
+    def apply_to_content(content: str, occurrences: list[ReplacementOccurrence]) -> str:
+        """
+        Applies the given occurrences (which must have been derived from exactly this content)
+        and returns the updated content.
+        """
+        for occ in sorted(occurrences, key=lambda o: o.start, reverse=True):
+            assert content[occ.start : occ.end] == occ.matched_text, (
+                f"Occurrence {occ.occurrence_id} does not match the content it is being applied to"
+            )
+            content = content[: occ.start] + occ.replacement + content[occ.end :]
+        return content
+
+    @staticmethod
+    def _format_block(block: str, prefix: str, max_lines: int, max_line_chars: int) -> list[str]:
+        lines = block.split("\n")
+        shown = lines[:max_lines]
+        result = []
+        for line in shown:
+            if len(line) > max_line_chars:
+                line = line[:max_line_chars] + f"… (+{len(line) - max_line_chars} chars)"
+            result.append(f"    {prefix} {line}")
+        if len(lines) > max_lines:
+            result.append(f"    {prefix} … ({len(lines) - max_lines} more lines)")
+        return result
+
+    def render_occurrence_diff(
+        self, occ: ReplacementOccurrence, content: str, max_lines_per_side: int = 6, max_line_chars: int = 200
+    ) -> str:
+        """
+        Renders a minimal line diff for the occurrence: the full lines spanned by the match,
+        before and after the replacement.
+
+        :param occ: the occurrence (must have been derived from exactly this content)
+        :param content: the file content the occurrence was found in
+        :param max_lines_per_side: cap on the number of displayed lines per diff side
+        :param max_line_chars: cap on the number of displayed characters per line
+        :return: the rendered diff
+        """
+        line_start = content.rfind("\n", 0, occ.start) + 1
+        line_end = content.find("\n", occ.end)
+        if line_end == -1:
+            line_end = len(content)
+        old_block = content[line_start:line_end]
+        new_block = content[line_start : occ.start] + occ.replacement + content[occ.end : line_end]
+
+        # the file's final line break terminates the last line rather than starting a further one, so
+        # splitting an end-of-file window would materialize the empty remainder behind it as a phantom
+        # line; for a window ending before the file end, an empty remainder instead denotes a real
+        # blank line behind the match, which is merged away by it and therefore has to be shown
+        if line_end == len(content):
+            old_block = old_block.removesuffix("\n")
+            new_block = new_block.removesuffix("\n")
+
+        # the window runs to the next line break after the exclusive match end, so when the match
+        # itself consumed a line break the following line is included on both sides; drop such
+        # trailing lines, as a line the replacement leaves unchanged is not part of the change
+        old_lines = old_block.split("\n")
+        new_lines = new_block.split("\n")
+        while len(old_lines) > 1 and len(new_lines) > 1 and old_lines[-1] == new_lines[-1]:
+            old_lines.pop()
+            new_lines.pop()
+        old_block = "\n".join(old_lines)
+        new_block = "\n".join(new_lines)
+
+        location = f"line {occ.start_line}" if occ.start_line == occ.end_line else f"lines {occ.start_line}-{occ.end_line}"
+        header = f"  [{occ.occurrence_id}] {location}"
+        if occ.is_ambiguous:
+            header += "  (WARNING: the pattern matches again inside this match — possible over-match, verify the diff)"
+        diff_lines = [header]
+        diff_lines += self._format_block(old_block, "-", max_lines_per_side, max_line_chars)
+        diff_lines += self._format_block(new_block, "+", max_lines_per_side, max_line_chars)
+        return "\n".join(diff_lines)
+
+
+class ReplacementRejectedError(ValueError):
+    """
+    Raised when a replacement is not applied because a safety check failed; no changes have been made.
+    """
+
+    def __init__(self, message: str, show_prospective_changes: bool) -> None:
+        """
+        :param message: the reason for the rejection
+        :param show_prospective_changes: whether the listing of the prospective changes should be presented along
+            with the message (the message refers to it)
+        """
+        super().__init__(message)
+        self.show_prospective_changes = show_prospective_changes
+
+
+@dataclass
+class MultiFileReplacementResult:
+    """
+    The result of an applied replacement.
+    """
+
+    num_occurrences_by_file: dict[str, int]
+    """the number of replaced occurrences per file (relative path), in application order"""
+
+    @property
+    def num_occurrences(self) -> int:
+        return sum(self.num_occurrences_by_file.values())
+
+    def to_display_string(self) -> str:
+        per_file = "\n".join(f"  {path}: {n}" for path, n in self.num_occurrences_by_file.items())
+        return f"Replaced {self.num_occurrences} occurrence(s) in {len(self.num_occurrences_by_file)} file(s):\n{per_file}"
+
+
+class MultiFileReplacement:
+    """
+    A prospective replacement of a pattern across the files of a project within a given scope: holds the
+    occurrences found, supports selecting occurrences by their ids, guards blind application against
+    unintended replacements, renders a preview listing and applies the replacement via a code editor.
+    """
+
+    def __init__(
+        self,
+        project: "Project",
+        needle: str,
+        repl: str,
+        mode: Literal["literal", "regex"],
+        relative_path: str = "",
+        paths_include_glob: str = "",
+        paths_exclude_glob: str = "",
+    ) -> None:
+        """
+        :param project: the project whose files are to be searched
+        :param needle: the string (mode "literal") or regular expression (mode "regex") to search for
+        :param repl: the replacement string (may contain $!N backreferences in regex mode)
+        :param mode: how `needle` is to be interpreted
+        :param relative_path: only consider this file or directory (default: the whole project)
+        :param paths_include_glob: optional glob restricting which files are considered
+        :param paths_exclude_glob: optional glob of files to exclude; takes precedence over the include glob
+        """
+        self._replacer = MultiFileContentReplacer(mode=mode)
+        self._needle = needle
+        self._repl = repl
+        files = self._collect_files(project, relative_path.strip(), paths_include_glob.strip(), paths_exclude_glob.strip())
+        self._contents = dict(files)
+        self.occurrences: list[ReplacementOccurrence] = self._replacer.find_occurrences(files, needle, repl)
+
+    @staticmethod
+    def _collect_files(project: "Project", relative_path: str, paths_include_glob: str, paths_exclude_glob: str) -> list[tuple[str, str]]:
+        """
+        :return: the (relative_path, content) pairs of the readable, non-ignored files in scope, in sorted path order
+        """
+        if relative_path:
+            project.validate_relative_path(relative_path, require_not_ignored=True)
+        file_collection = project.create_file_collection(relative_path, code_files_only=False, skip_ignored_files=True).filter_glob(
+            paths_include_glob or None, paths_exclude_glob or None
+        )
+        files: list[tuple[str, str]] = []
+        for file_proxy in sorted(file_collection, key=lambda f: f.get_relative_path()):
+            try:
+                files.append((file_proxy.get_relative_path(), file_proxy.get_contents()))
+            except Exception:
+                continue  # skip unreadable (e.g. binary) files
+        return files
+
+    @property
+    def affected_files(self) -> list[str]:
+        """
+        :return: the relative paths of the files containing occurrences, sorted
+        """
+        return sorted({o.relative_path for o in self.occurrences})
+
+    def select(self, occurrence_ids: list[str]) -> list[ReplacementOccurrence]:
+        """
+        Resolves the given occurrence ids (as obtained from a previous listing).
+
+        :param occurrence_ids: the ids of the occurrences to select
+        :return: the selected occurrences
+        :raises ReplacementRejectedError: if the selection is empty or any id cannot be resolved
+        """
+        occurrences_by_id = {o.occurrence_id: o for o in self.occurrences}
+        indices_by_path: dict[str, set[int]] = {}
+        for o in self.occurrences:
+            indices_by_path.setdefault(o.relative_path, set()).add(o.index_in_file)
+
+        # resolve each id, diagnosing failures
+        selected: dict[str, ReplacementOccurrence] = {}
+        problems: list[str] = []
+        for oid in occurrence_ids:
+            occurrence = occurrences_by_id.get(oid)
+            if occurrence is not None:
+                selected[oid] = occurrence
+                continue
+            id_match = MultiFileContentReplacer.OCCURRENCE_ID_REGEX.match(oid)
+            if id_match is None:
+                problems.append(f"{oid}: malformed id (expected '<path>:<index>@<digest>' as returned by a dry run)")
+            elif id_match.group("path") not in indices_by_path:
+                problems.append(f"{oid}: the pattern currently has no matches in this file")
+            elif int(id_match.group("index")) not in indices_by_path[id_match.group("path")]:
+                problems.append(f"{oid}: the file now has fewer matches than at dry-run time (content changed)")
+            else:
+                problems.append(f"{oid}: the file content or matched range changed since the dry run")
+
+        if problems:
+            problem_lines = "\n".join(f"  {p}" for p in problems)
+            raise ReplacementRejectedError(
+                f"{len(problems)} of the given occurrence_ids could not be resolved - NO changes were applied:\n"
+                f"{problem_lines}\n"
+                "Re-run with dry_run=True to obtain current occurrence ids.",
+                show_prospective_changes=False,
+            )
+        if not selected:
+            raise ReplacementRejectedError(
+                "occurrence_ids is empty - pass at least one id from a dry run, or omit the parameter to replace all.",
+                show_prospective_changes=False,
+            )
+        return list(selected.values())
+
+    def select_all_guarded(self, expected_count: int = -1) -> list[ReplacementOccurrence]:
+        """
+        Selects all occurrences for a blind application (without explicit selection), applying safety checks.
+
+        :param expected_count: the number of occurrences expected; -1 disables the check
+        :return: all occurrences
+        :raises ReplacementRejectedError: if there are no occurrences, the count differs from the expectation
+            or any occurrence is ambiguous
+        """
+        if not self.occurrences:
+            raise ReplacementRejectedError(
+                "No occurrences of the pattern were found - NO changes were applied. "
+                "Check the mode (a literal needle containing regex metacharacters must use mode 'literal'; "
+                "wildcards require mode 'regex') and the path/glob restrictions, "
+                "or locate the content with search_for_pattern first.",
+                show_prospective_changes=False,
+            )
+        if expected_count >= 0 and len(self.occurrences) != expected_count:
+            raise ReplacementRejectedError(
+                f"expected_count={expected_count}, but the pattern matches {len(self.occurrences)} occurrence(s) - "
+                "NO changes were applied. Review the prospective changes below; re-issue with the corrected "
+                "expectation, a refined pattern, or occurrence_ids selecting the intended subset.",
+                show_prospective_changes=True,
+            )
+        num_ambiguous = sum(1 for o in self.occurrences if o.is_ambiguous)
+        if num_ambiguous:
+            raise ReplacementRejectedError(
+                f"{num_ambiguous} occurrence(s) are ambiguous (the pattern matches again inside the matched text, "
+                "indicating possible over-matching) - NO changes were applied. Review the prospective changes below "
+                "and either refine the pattern or explicitly select occurrences via occurrence_ids.",
+                show_prospective_changes=True,
+            )
+        return list(self.occurrences)
+
+    def render_listing(self, max_answer_chars: int, dry_run: bool) -> str:
+        """
+        Renders the prospective changes as a list of minimal line diffs with occurrence ids, subject to the given length limit
+        (falling back to locations only, per-file counts and finally a summary).
+
+        :param max_answer_chars: the maximum number of characters (must be positive)
+        :param dry_run: whether the listing is the result of a dry run (adding instructions on how to proceed)
+        :return: the listing
+        """
+        affected_files = self.affected_files
+        header = f"Found {len(self.occurrences)} occurrence(s) in {len(affected_files)} file(s)."
+        if dry_run:
+            header += (
+                " DRY RUN - no changes were applied.\n"
+                "Re-issue with dry_run=False to replace all of them, or additionally pass occurrence_ids "
+                "with the ids of the occurrences to replace."
+            )
+        parts = [header]
+        for path in affected_files:
+            file_occurrences = [o for o in self.occurrences if o.relative_path == path]
+            parts.append(f"\n{path} ({len(file_occurrences)} occurrence(s)):")
+            for occ in file_occurrences:
+                parts.append(self._replacer.render_occurrence_diff(occ, self._contents[path]))
+        result = "\n".join(parts)
+
+        # shortened result closures, from least to most aggressive shortening
+        def make_locations_only() -> str:
+            return "\n".join([header] + [f"  [{o.occurrence_id}] line {o.start_line}" for o in self.occurrences])
+
+        def make_per_file_counts() -> str:
+            counts = {path: sum(1 for o in self.occurrences if o.relative_path == path) for path in affected_files}
+            return f"{header}\nOccurrence counts per file:\n{TextOutputUtils.to_json(counts)}"
+
+        def make_summary() -> str:
+            return header
+
+        shortened_result_factories: list[Callable[[], str]] = [make_locations_only, make_per_file_counts, make_summary]
+        return TextOutputUtils.limit_length(result, max_answer_chars, shortened_result_factories)
+
+    def apply(self, code_editor: "CodeEditor", occurrences: list[ReplacementOccurrence]) -> MultiFileReplacementResult:
+        """
+        Applies the given (selected) occurrences.
+
+        :param code_editor: the code editor through which to modify the files
+        :param occurrences: the occurrences to replace (obtained from `select` or `select_all_guarded`)
+        :return: the result
+        :raises ValueError: if a file's content changed such that a selected occurrence no longer resolves
+            (the file is then not modified)
+        """
+        from serena.code_editor import EditedFileContext
+
+        occurrences_by_file: dict[str, list[ReplacementOccurrence]] = {}
+        for occ in occurrences:
+            occurrences_by_file.setdefault(occ.relative_path, []).append(occ)
+
+        for path, file_occurrences in occurrences_by_file.items():
+            with EditedFileContext(path, code_editor) as context:
+                original_content = context.get_original_content()
+                if original_content != self._contents[path]:
+                    # the editor's view differs from what was scanned (e.g. line-ending normalization);
+                    # re-derive the occurrences from the authoritative content and re-validate by id
+                    fresh_by_id = {
+                        o.occurrence_id: o for o in self._replacer.find_occurrences([(path, original_content)], self._needle, self._repl)
+                    }
+                    try:
+                        file_occurrences = [fresh_by_id[o.occurrence_id] for o in file_occurrences]
+                    except KeyError as e:
+                        raise ValueError(
+                            f"The content of {path} changed while replacing (occurrence {e} no longer resolves); "
+                            f"the file was NOT modified. Re-run with dry_run=True for current ids."
+                        ) from e
+                context.set_updated_content(self._replacer.apply_to_content(original_content, file_occurrences))
+
+        return MultiFileReplacementResult({path: len(occs) for path, occs in occurrences_by_file.items()})
+
+
+def find_text_coordinates(content: str, regex: str, require_unique: bool = False) -> TextCoordinates | None:
     """
     Finds the line and column number of the first match of a regex pattern in the given content.
 
@@ -572,4 +977,40 @@ def find_text_coordinates(content: str, regex: str, require_unique: bool = False
             raise ValueError(f"Regex must contain exactly one group to capture the position, but found {len(match.groups())} groups.")
         index_in_content = match.start(1)
         line, col = TextUtils.get_line_col_from_index(content, index_in_content)
-        return TextCoords(line, col)
+        return TextCoordinates(line, col)
+
+
+class TextOutputUtils:
+    @staticmethod
+    def to_json(x: Any) -> str:
+        return json.dumps(x, ensure_ascii=False)
+
+    @staticmethod
+    def limit_length(
+        result: str,
+        max_answer_chars: int,
+        shortened_result_factories: list[Callable[[], str]] | None = None,
+    ) -> str:
+        """Limit the length of the result string, optionally trying progressively shorter versions.
+
+        :param result: the full result string
+        :param max_answer_chars: maximum allowed characters; if exceeded, attempt to use shortened versions
+        :param shortened_result_factories: optional list of closures, each producing a progressively shorter
+            version of the result. They are tried in order until one fits within ``max_answer_chars``.
+        :return: the result string, potentially replaced by a shortened version
+        """
+        if max_answer_chars <= 0:
+            raise ValueError(f"max_answer_chars must be positive; got: {max_answer_chars=}")
+        if (n_chars := len(result)) > max_answer_chars:
+            too_long_msg = (
+                f"The answer is too long ({n_chars} characters). " + "You can adjust your query or raise the max_answer_chars parameter."
+            )
+            if shortened_result_factories is not None:
+                # try each shortening closure in order;
+                for make_shorter in shortened_result_factories:
+                    shortened = make_shorter()
+                    candidate = f"{too_long_msg}\n{shortened}"
+                    if len(candidate) <= max_answer_chars:
+                        return candidate
+            result = too_long_msg
+        return result

@@ -1,10 +1,10 @@
 """
 Provides PHP specific instantiation of the LanguageServer class using Phpactor.
 """
+# SPDX-License-Identifier: MIT
 
 import logging
 import os
-import pathlib
 import re
 import shutil
 import stat
@@ -12,18 +12,30 @@ import stat
 from overrides import override
 
 from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
-from solidlsp.ls_config import Language, LanguageServerConfig
+from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.ls_utils import FileUtils
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.settings import SolidLSPSettings
-from solidlsp.util import supervise
+from solidlsp.util.subprocess_util import subprocess_run
 
 log = logging.getLogger(__name__)
 
-PHPACTOR_VERSION = "2025.12.21.1"
-PHPACTOR_PHAR_URL = f"https://github.com/phpactor/phpactor/releases/download/{PHPACTOR_VERSION}/phpactor.phar"
-PHPACTOR_PHAR_SHA256 = "53bbe9625cd9b5e9b394bc2f595fbad13dbbe6dfc96950c56dea3b5d9a246cc3"
 PHPACTOR_ALLOWED_HOSTS = ("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com")
+
+# Version pinning convention (see eclipse_jdtls.py for the full spec):
+#   INITIAL_* — frozen forever; legacy unversioned install dir is reserved for it.
+#   DEFAULT_* — bumped on upgrades; goes into a versioned subdir.
+INITIAL_PHPACTOR_VERSION = "2025.12.21.1"
+INITIAL_PHPACTOR_PHAR_SHA256 = "53bbe9625cd9b5e9b394bc2f595fbad13dbbe6dfc96950c56dea3b5d9a246cc3"
+DEFAULT_PHPACTOR_VERSION = "2025.12.21.1"
+DEFAULT_PHPACTOR_PHAR_SHA256 = "53bbe9625cd9b5e9b394bc2f595fbad13dbbe6dfc96950c56dea3b5d9a246cc3"
+
+
+def _phpactor_sha(version: str) -> str | None:
+    if version == INITIAL_PHPACTOR_VERSION:
+        return INITIAL_PHPACTOR_PHAR_SHA256
+    if version == DEFAULT_PHPACTOR_VERSION:
+        return DEFAULT_PHPACTOR_PHAR_SHA256
+    return None
 
 
 class PhpactorServer(SolidLanguageServer):
@@ -48,7 +60,7 @@ class PhpactorServer(SolidLanguageServer):
             """
             Setup runtime dependencies for Phpactor and return the path to the PHAR file.
             """
-            phpactor_version = self._custom_settings.get("phpactor_version", PHPACTOR_VERSION)
+            phpactor_version = self._custom_settings.get("phpactor_version", DEFAULT_PHPACTOR_VERSION)
             phpactor_phar_url = f"https://github.com/phpactor/phpactor/releases/download/{phpactor_version}/phpactor.phar"
             # Verify PHP is installed
             php_path = shutil.which("php")
@@ -57,7 +69,7 @@ class PhpactorServer(SolidLanguageServer):
             )
 
             # Check PHP version (Phpactor requires PHP 8.1+)
-            result = supervise.run(["php", "--version"], capture_output=True, text=True, check=False)
+            result = subprocess_run(["php", "--version"], capture_output=True, text=True, check=False)
             php_version_output = result.stdout.strip()
             log.info(f"PHP version: {php_version_output}")
             version_match = re.search(r"PHP (\d+)\.(\d+)", php_version_output)
@@ -68,15 +80,20 @@ class PhpactorServer(SolidLanguageServer):
             else:
                 log.warning("Could not parse PHP version from output. Continuing anyway.")
 
-            phpactor_phar_path = os.path.join(self._ls_resources_dir, "phpactor.phar")
+            # legacy unversioned phar at root reserved for INITIAL; every other version goes into a versioned subdir
+            if phpactor_version == INITIAL_PHPACTOR_VERSION:
+                phar_dir = self._ls_resources_dir
+            else:
+                phar_dir = os.path.join(self._ls_resources_dir, f"phpactor-{phpactor_version}")
+            phpactor_phar_path = os.path.join(phar_dir, "phpactor.phar")
             if not os.path.exists(phpactor_phar_path):
-                os.makedirs(self._ls_resources_dir, exist_ok=True)
+                os.makedirs(phar_dir, exist_ok=True)
                 log.info(f"Downloading phpactor PHAR from {phpactor_phar_url}")
                 FileUtils.download_and_extract_archive_verified(
                     phpactor_phar_url,
                     phpactor_phar_path,
                     "binary",
-                    expected_sha256=PHPACTOR_PHAR_SHA256 if phpactor_version == PHPACTOR_VERSION else None,
+                    expected_sha256=_phpactor_sha(phpactor_version),
                     allowed_hosts=PHPACTOR_ALLOWED_HOSTS,
                 )
 
@@ -93,8 +110,6 @@ class PhpactorServer(SolidLanguageServer):
 
     def __init__(self, config: LanguageServerConfig, repository_root_path: str, solidlsp_settings: SolidLSPSettings):
         super().__init__(config, repository_root_path, None, "php", solidlsp_settings)
-        # Override internal language enum for correct file matching
-        self.language = Language.PHP_PHPACTOR
 
         self._ignored_dirnames = {"node_modules", "cache"}
         if self._custom_settings.get("ignore_vendor", True):
@@ -104,15 +119,11 @@ class PhpactorServer(SolidLanguageServer):
     def _create_dependency_provider(self) -> LanguageServerDependencyProvider:
         return self.DependencyProvider(self._custom_settings, self._ls_resources_dir)
 
-    def _get_initialize_params(self, repository_absolute_path: str) -> InitializeParams:
+    def _create_base_initialize_params(self) -> dict:
         """
         Returns the initialization params for the Phpactor Language Server.
         """
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
         initialize_params = {
-            "processId": os.getpid(),
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
             "capabilities": {
                 "textDocument": {
                     "synchronization": {"didSave": True, "dynamicRegistration": True},
@@ -127,19 +138,13 @@ class PhpactorServer(SolidLanguageServer):
                     "didChangeConfiguration": {"dynamicRegistration": True},
                 },
             },
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
             "initializationOptions": {
                 "language_server_phpstan.enabled": False,
                 "language_server_psalm.enabled": False,
                 "language_server_php_cs_fixer.enabled": False,
             },
         }
-        return initialize_params  # type: ignore
+        return initialize_params
 
     def _start_server(self) -> None:
         """Start Phpactor server process."""
@@ -160,7 +165,7 @@ class PhpactorServer(SolidLanguageServer):
 
         log.info("Starting Phpactor server process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request from LSP client to LSP server and awaiting response")
         init_response = self.server.send.initialize(initialize_params)

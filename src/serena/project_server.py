@@ -1,14 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 import json
 import logging
-from typing import TYPE_CHECKING
+import pickle
+import secrets
+import threading
+from typing import TYPE_CHECKING, Any
 
 import requests as requests_lib
-from flask import Flask, request
+from flask import Flask, Response, abort, request
 from pydantic import BaseModel
 from sensai.util.logging import LogTime
 
-from serena.config.serena_config import LanguageBackend, SerenaConfig
-from serena.jetbrains.jetbrains_plugin_client import JetBrainsPluginClient
+from serena.config.serena_config import SerenaConfig
+from serena.constants import SerenaPorts
+from serena.language_backend import BuiltinLanguageBackend
 
 if TYPE_CHECKING:
     from serena.project import Project
@@ -30,6 +36,19 @@ class QueryProjectRequest(BaseModel):
     tool_params_json: str
 
 
+class CallFacadeMethodRequest(BaseModel):
+    """
+    Request model for the /call_facade_method endpoint: the execution of a REPL facade method
+    in the context of a project.
+    """
+
+    project_name: str
+    facade_name: str
+    method_name: str
+    args: list[Any]
+    kwargs: dict[str, Any]
+
+
 class ProjectServer:
     """
     A lightweight Flask server that exposes a SerenaAgent's project querying
@@ -42,24 +61,53 @@ class ProjectServer:
     :class:`~serena.tools.query_project_tools.QueryProjectTool`.
     """
 
-    PORT = JetBrainsPluginClient.BASE_PORT - 1
+    PORT = SerenaPorts.PROJECT_SERVER_PORT
 
-    def __init__(self) -> None:
+    def __init__(self, host: str = "127.0.0.1", port: int | None = None) -> None:
+        """
+        :param host: the host address to listen on.
+        :param port: the port to listen on; if None, use default
+        """
         from serena.agent import SerenaAgent
 
-        serena_config = SerenaConfig.from_config_file()
-        serena_config.gui_log_window = False
-        serena_config.web_dashboard = False
-        serena_config.language_backend = LanguageBackend.LSP
+        if port is None:
+            port = self.PORT
+
+        serena_config = SerenaConfig.from_config_file().with_headless_mode_overrides()
+        serena_config.set_builtin_language_backend(BuiltinLanguageBackend.LSP)
 
         self._agent = SerenaAgent(serena_config=serena_config)
-        self._loaded_projects_by_name: dict[str, "Project"] = {}
+        self._loaded_projects_by_root: dict[str, "Project"] = {}
+        self._project_load_locks_by_root: dict[str, threading.Lock] = {}
+        self._active_project_lock = threading.Lock()
+        self._loaded_projects_lock = threading.Lock()
+        self._port = port
+        self._host = host
 
-        # create the Flask application
+        # create the Flask application, limiting trusted hosts for the case where the server is running on localhost
         self._app = Flask(__name__)
+        local_hosts = ["localhost", "127.0.0.1"]
+        if self._host in local_hosts:
+            self._app.config["TRUSTED_HOSTS"] = local_hosts
+
         self._setup_routes()
 
+    def get_serena_config(self) -> SerenaConfig:
+        return self._agent.serena_config
+
+    def get_auth_secret(self) -> str:
+        """Returns the authentication secret used by the server."""
+        return self._agent.serena_config.auth_secret
+
     def _setup_routes(self) -> None:
+        @self._app.before_request
+        def authenticate() -> None:
+            # authenticate every request before parsing input or accessing projects
+            secret = self.get_auth_secret()
+            provided = request.headers.get("Authorization", "")
+            if not secret or not secrets.compare_digest(provided.encode("utf-8"), f"Bearer {secret}".encode()):
+                abort(401)
+
         @self._app.route("/heartbeat", methods=["GET"])
         def heartbeat() -> dict[str, str]:
             return {"status": "alive"}
@@ -69,43 +117,91 @@ class ProjectServer:
             query_request = QueryProjectRequest.model_validate(request.get_json())
             return self._query_project(query_request)
 
-    def _get_project(self, project_name: str) -> "Project":
+        @self._app.route("/call_facade_method", methods=["POST"])
+        def call_facade_method() -> Response:
+            call_request = CallFacadeMethodRequest.model_validate(request.get_json())
+            try:
+                result = self._call_facade_method(call_request)
+            except Exception as e:
+                # report the error to the client (which raises it in the REPL) instead of a generic server error page
+                log.warning("Facade method call failed: %s", e)
+                return Response(f"{type(e).__name__}: {e}", status=400, mimetype="text/plain")
+            # NOTE: the result is pickled; the client (a Serena instance on the same machine) unpickles it
+            return Response(pickle.dumps(result), mimetype="application/octet-stream")
+
+    def _get_project(self, project_root_or_name: str) -> "Project":
         """Gets the project with the given name, loading it if necessary."""
-        if project_name in self._loaded_projects_by_name:
-            return self._loaded_projects_by_name[project_name]
-        else:
-            serena_config = self._agent.serena_config
-            registered_project = serena_config.get_registered_project(project_name)
-            if registered_project is None:
-                raise ValueError(f"Project '{project_name}' is not registered with Serena.")
-            with LogTime(f"Loading project '{project_name}'"):
+        serena_config = self._agent.serena_config
+        registered_project = serena_config.get_registered_project(project_root_or_name)
+        if registered_project is None:
+            raise ValueError(f"Project '{project_root_or_name}' is not registered with Serena.")
+
+        key = str(registered_project.project_root)
+
+        # find or publish the per-project load lock while holding the shared dictionaries
+        with self._loaded_projects_lock:
+            project = self._loaded_projects_by_root.get(key)
+            if project is not None:
+                return project
+            project_load_lock = self._project_load_locks_by_root.get(key)
+            if project_load_lock is None:
+                project_load_lock = threading.Lock()
+                self._project_load_locks_by_root[key] = project_load_lock
+
+        # initialize only this project; another project's cached lookup or cold load can proceed
+        with project_load_lock:
+            with self._loaded_projects_lock:
+                project = self._loaded_projects_by_root.get(key)
+                if project is not None:
+                    return project
+
+            with LogTime(f"Loading project '{project_root_or_name}'"):
                 project = registered_project.get_project_instance(serena_config)
                 project.create_language_server_manager()
-            self._loaded_projects_by_name[project_name] = project
+
+            with self._loaded_projects_lock:
+                self._loaded_projects_by_root[key] = project
             return project
 
     def _query_project(self, req: QueryProjectRequest) -> str:
-        """Handle a /query_project request by invoking the agent on the specified project and tool."""
+        """Handle a /query_project request by invoking the agent on the specified project and tool.
+
+        The active project is process-wide state, whereas ``apply_ex`` runs the tool on the
+        agent's task executor thread. Without the lock, a second request entering
+        ``active_project_context`` while the first request's tool is still executing would
+        redirect that tool to the wrong project (and restore the wrong project afterwards).
+        """
         project = self._get_project(req.project_name)
-        with self._agent.active_project_context(project):
+        with self._active_project_lock, self._agent.active_project_context(project):
             tool = self._agent.get_tool_by_name(req.tool_name)
+            if not tool.is_readonly():
+                raise ValueError(f"Tool '{req.tool_name}' is not read-only and cannot be executed via the query_project route")
             params = json.loads(req.tool_params_json)
             return tool.apply_ex(**params)
 
-    def run(self, host: str = "127.0.0.1", port: int = PORT) -> int:
-        """Run the server on the given host and port.
+    def _call_facade_method(self, req: CallFacadeMethodRequest) -> Any:
+        """
+        Handles a /call_facade_method request by executing the facade method on the agent's REPL facades in the
+        context of the specified project (see `_query_project` regarding the lock).
+        """
+        project = self._get_project(req.project_name)
+        with self._active_project_lock, self._agent.active_project_context(project):
+            facade = self._agent.get_repl().entrypoint.get_facade_(req.facade_name)
+            method = facade.get_method(req.method_name)
+            return self._agent.execute_task(lambda: method(*req.args, **req.kwargs))
 
-        :param host: the host address to listen on.
-        :param port: the port to listen on.
-        :return: the port number the server is running on.
+    def run(self) -> None:
+        """
+        Run the server on the given host and port.
         """
         from flask import cli
 
         # suppress the default Flask startup banner
-        cli.show_server_banner = lambda *args, **kwargs: None
+        # ty cannot model reassigning a third-party module's function attribute (it rejects any
+        # replacement, even one with an identical signature), so the monkeypatch is suppressed here
+        cli.show_server_banner = lambda *args, **kwargs: None  # ty: ignore[invalid-assignment]
 
-        self._app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)
-        return port
+        self._app.run(host=self._host, port=self._port, debug=False, use_reloader=False, threaded=True)
 
 
 class ProjectServerClient:
@@ -116,18 +212,23 @@ class ProjectServerClient:
     :class:`ConnectionError` is raised.
     """
 
-    def __init__(self, host: str = "127.0.0.1", port: int = ProjectServer.PORT, timeout: int = 300) -> None:
+    def __init__(self, serena_config: SerenaConfig, host: str = "127.0.0.1", port: int | None = None) -> None:
         """
         :param host: the host address of the project server.
-        :param port: the port of the project server.
+        :param port: the port of the project server; if None, use default.
+        :param auth_secret: the shared authentication secret; defaults to the secret in Serena's configuration.
         :raises ConnectionError: if the project server is not reachable.
         """
+        if port is None:
+            port = ProjectServer.PORT
         self._base_url = f"http://{host}:{port}"
-        self._timeout = timeout
+        self._timeout = serena_config.tool_timeout - 1
+        auth_secret = serena_config.auth_secret
+        self._headers = {"Authorization": f"Bearer {auth_secret}"}
 
         # verify that the server is running
         try:
-            response = requests_lib.get(f"{self._base_url}/heartbeat", timeout=5)
+            response = requests_lib.get(f"{self._base_url}/heartbeat", headers=self._headers, timeout=5)
             response.raise_for_status()
         except requests_lib.ConnectionError:
             raise ConnectionError(f"ProjectServer is not reachable at {self._base_url}. Make sure the server is running.")
@@ -152,6 +253,25 @@ class ProjectServerClient:
             tool_params_json=tool_params_json,
         ).model_dump()
 
-        response = requests_lib.post(f"{self._base_url}/query_project", json=payload, timeout=self._timeout)
+        response = requests_lib.post(f"{self._base_url}/query_project", json=payload, headers=self._headers, timeout=self._timeout)
         response.raise_for_status()
         return response.text
+
+    def call_facade_method(self, project_name: str, facade_name: str, method_name: str, args: list[Any], kwargs: dict[str, Any]) -> Any:
+        """
+        Executes a (read-only) REPL facade method in the context of a project.
+
+        :param project_name: the name of the project to query
+        :param facade_name: the facade's name
+        :param method_name: the method's name
+        :param args: the positional arguments (JSON-serialisable)
+        :param kwargs: the keyword arguments (JSON-serialisable)
+        :return: the method's result, as returned by the server (unpickled; the server is a trusted local process)
+        """
+        payload = CallFacadeMethodRequest(
+            project_name=project_name, facade_name=facade_name, method_name=method_name, args=args, kwargs=kwargs
+        ).model_dump()
+        response = requests_lib.post(f"{self._base_url}/call_facade_method", json=payload, headers=self._headers, timeout=self._timeout)
+        if not response.ok:
+            raise ValueError(f"Project server error ({response.status_code}): {response.text[:2000]}")
+        return pickle.loads(response.content)

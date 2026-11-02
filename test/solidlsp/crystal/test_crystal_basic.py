@@ -10,29 +10,32 @@ Known Crystalline limitations:
 """
 
 import os
-import shutil
 
 import pytest
 
 from solidlsp import SolidLanguageServer
-from solidlsp.ls_config import Language
+from solidlsp.language_servers.crystal_language_server import CrystalLanguageServer
+from solidlsp.ls_config import LanguageServerId
+from test.conftest import language_server_tests_enabled
 from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name, request_all_symbols
 
 pytestmark = [
     pytest.mark.crystal,
-    pytest.mark.skipif(shutil.which("crystalline") is None, reason="Crystalline is not installed"),
+    pytest.mark.skipif(
+        not language_server_tests_enabled(LanguageServerId.CRYSTAL), reason="Crystal tests are disabled (crystalline not available)"
+    ),
 ]
 
 
 class TestCrystalDocumentSymbols:
     """Test document symbol retrieval, which works reliably in Crystalline."""
 
-    @pytest.mark.parametrize("language_server", [Language.CRYSTAL], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.CRYSTAL], indirect=True)
     def test_ls_is_running(self, language_server: SolidLanguageServer) -> None:
         """Test that the language server starts successfully."""
         assert language_server.is_running()
 
-    @pytest.mark.parametrize("language_server", [Language.CRYSTAL], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.CRYSTAL], indirect=True)
     def test_document_symbols_main(self, language_server: SolidLanguageServer) -> None:
         """Test that document symbols are returned for the main file."""
         file_path = os.path.join("src", "main.cr")
@@ -43,7 +46,7 @@ class TestCrystalDocumentSymbols:
         assert "Calculator" in symbol_names, f"Calculator not found in symbols. Found: {symbol_names}"
         assert "User" in symbol_names, f"User not found in symbols. Found: {symbol_names}"
 
-    @pytest.mark.parametrize("language_server", [Language.CRYSTAL], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.CRYSTAL], indirect=True)
     def test_document_symbols_utils(self, language_server: SolidLanguageServer) -> None:
         """Test that document symbols are returned for the utils file."""
         file_path = os.path.join("src", "utils.cr")
@@ -53,7 +56,7 @@ class TestCrystalDocumentSymbols:
         symbol_names = [s.get("name") for s in all_symbols if s.get("name")]
         assert "Utils" in symbol_names, f"Utils not found in symbols. Found: {symbol_names}"
 
-    @pytest.mark.parametrize("language_server", [Language.CRYSTAL], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.CRYSTAL], indirect=True)
     def test_find_symbol(self, language_server: SolidLanguageServer) -> None:
         """Test that the full symbol tree contains expected symbols."""
         from solidlsp.ls_utils import SymbolUtils
@@ -63,7 +66,7 @@ class TestCrystalDocumentSymbols:
         assert SymbolUtils.symbol_tree_contains_name(symbols, "User"), "User not found in symbol tree"
         assert SymbolUtils.symbol_tree_contains_name(symbols, "Utils"), "Utils not found in symbol tree"
 
-    @pytest.mark.parametrize("language_server", [Language.CRYSTAL], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.CRYSTAL], indirect=True)
     def test_bare_symbol_names(self, language_server: SolidLanguageServer) -> None:
         """Test that symbol names do not contain unexpected formatting characters."""
         all_symbols = request_all_symbols(language_server)
@@ -86,13 +89,14 @@ class TestCrystalDefinition:
     module-scoped ``language_server`` fixture ensures we get a fresh server.
     """
 
-    @pytest.mark.parametrize("language_server", [Language.CRYSTAL], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.CRYSTAL], indirect=True)
     def test_goto_definition_within_file(self, language_server: SolidLanguageServer) -> None:
         """Test goto_definition for a symbol defined within the same file."""
         file_path = os.path.join("src", "main.cr")
 
         # wait for Crystalline to compile the project
-        language_server.language_server._wait_for_compilation()
+        assert isinstance(language_server, CrystalLanguageServer)
+        language_server._wait_for_compilation()
 
         # Calculator.new on line 35 (0-indexed: 34), col 13 -> Calculator class on line 3 (0-indexed: 2)
         definitions = language_server.request_definition(file_path, 34, 13)

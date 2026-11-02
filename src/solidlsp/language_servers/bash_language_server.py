@@ -2,26 +2,83 @@
 Provides Bash specific instantiation of the LanguageServer class using bash-language-server.
 Contains various configurations and settings specific to Bash scripting.
 """
+# SPDX-License-Identifier: MIT
 
 import logging
 import os
-import pathlib
 import shutil
 import threading
 
 from solidlsp.language_servers.common import RuntimeDependency, RuntimeDependencyCollection, build_npm_install_command
 from solidlsp.ls import (
-    DocumentSymbols,
     LanguageServerDependencyProvider,
     LanguageServerDependencyProviderSinglePath,
-    LSPFileBuffer,
     SolidLanguageServer,
 )
 from solidlsp.ls_config import LanguageServerConfig
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
+from solidlsp.ls_utils import FileUtils, PlatformId, PlatformUtils
 from solidlsp.settings import SolidLSPSettings
 
 log = logging.getLogger(__name__)
+
+
+# ShellCheck binary release info; download directly from upstream GitHub releases rather than
+# relying on the `shellcheck` npm wrapper (which lazily downloads on first invocation and
+# turned the bash LS install into a fragile, network-dependent step).
+# Version pinning convention (see eclipse_jdtls.py for the full spec):
+#   INITIAL_* — frozen forever; legacy unversioned install dir is reserved for it.
+#   DEFAULT_* — bumped on upgrades; goes into a versioned subdir.
+INITIAL_BASH_LANGUAGE_SERVER_VERSION = "5.6.0"
+DEFAULT_BASH_LANGUAGE_SERVER_VERSION = "5.6.0"
+
+# ShellCheck binary path already encodes _SHELLCHECK_VERSION (see _shellcheck_binary_path),
+# so version bumps trigger reinstall correctly without further intervention.
+_SHELLCHECK_VERSION = "0.10.0"
+_SHELLCHECK_RELEASE_BASE = f"https://github.com/koalaman/shellcheck/releases/download/v{_SHELLCHECK_VERSION}"
+_SHELLCHECK_ALLOWED_HOSTS = (
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+)
+# Per-platform archive metadata: tar.xz on POSIX (extracts to shellcheck-v<ver>/shellcheck),
+# zip on Windows (extracts to shellcheck.exe at archive root).
+_SHELLCHECK_DEPENDENCIES: dict[PlatformId, dict[str, str]] = {
+    PlatformId.LINUX_x64: {
+        "url": f"{_SHELLCHECK_RELEASE_BASE}/shellcheck-v{_SHELLCHECK_VERSION}.linux.x86_64.tar.xz",
+        "sha256": "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87",
+    },
+    PlatformId.LINUX_arm64: {
+        "url": f"{_SHELLCHECK_RELEASE_BASE}/shellcheck-v{_SHELLCHECK_VERSION}.linux.aarch64.tar.xz",
+        "sha256": "324a7e89de8fa2aed0d0c28f3dab59cf84c6d74264022c00c22af665ed1a09bb",
+    },
+    PlatformId.OSX_x64: {
+        "url": f"{_SHELLCHECK_RELEASE_BASE}/shellcheck-v{_SHELLCHECK_VERSION}.darwin.x86_64.tar.xz",
+        "sha256": "ef27684f23279d112d8ad84e0823642e43f838993bbb8c0963db9b58a90464c2",
+    },
+    PlatformId.OSX_arm64: {
+        "url": f"{_SHELLCHECK_RELEASE_BASE}/shellcheck-v{_SHELLCHECK_VERSION}.darwin.aarch64.tar.xz",
+        "sha256": "bbd2f14826328eee7679da7221f2bc3afb011f6a928b848c80c321f6046ddf81",
+    },
+    PlatformId.WIN_x64: {
+        "url": f"{_SHELLCHECK_RELEASE_BASE}/shellcheck-v{_SHELLCHECK_VERSION}.zip",
+        "sha256": "eb6cd53a54ea97a56540e9d296ce7e2fa68715aa507ff23574646c1e12b2e143",
+    },
+}
+
+
+def _shellcheck_install_dir(bash_ls_dir: str) -> str:
+    return os.path.join(bash_ls_dir, "shellcheck")
+
+
+def _shellcheck_binary_path(bash_ls_dir: str) -> str:
+    """
+    Returns the path to the extracted ShellCheck binary. POSIX archives extract under
+    ``shellcheck-v<ver>/shellcheck``; the Windows zip drops ``shellcheck.exe`` at archive root.
+    """
+    install_dir = _shellcheck_install_dir(bash_ls_dir)
+    if os.name == "nt":
+        return os.path.join(install_dir, "shellcheck.exe")
+    return os.path.join(install_dir, f"shellcheck-v{_SHELLCHECK_VERSION}", "shellcheck")
 
 
 class BashLanguageServer(SolidLanguageServer):
@@ -53,37 +110,37 @@ class BashLanguageServer(SolidLanguageServer):
             """
             Setup runtime dependencies for Bash Language Server and return the command to start the server.
             """
-            # Verify both node and npm are installed
+            # verify node + npm are available for the bash-language-server install
             is_node_installed = shutil.which("node") is not None
             assert is_node_installed, "node is not installed or isn't in PATH. Please install NodeJS and try again."
             is_npm_installed = shutil.which("npm") is not None
             assert is_npm_installed, "npm is not installed or isn't in PATH. Please install npm and try again."
-            bash_language_server_version = self._custom_settings.get("bash_language_server_version", "5.6.0")
+            bash_language_server_version = self._custom_settings.get("bash_language_server_version", DEFAULT_BASH_LANGUAGE_SERVER_VERSION)
             npm_registry = self._custom_settings.get("npm_registry")
 
-            deps = RuntimeDependencyCollection(
-                [
-                    RuntimeDependency(
-                        id="bash-language-server",
-                        description="bash-language-server package",
-                        command=build_npm_install_command("bash-language-server", bash_language_server_version, npm_registry),
-                        platform_id="any",
-                    ),
-                ]
-            )
-
-            # Install bash-language-server if not already installed
-            bash_ls_dir = os.path.join(self._ls_resources_dir, "bash-lsp")
-            bash_executable_path = os.path.join(bash_ls_dir, "node_modules", ".bin", "bash-language-server")
-
-            # Handle Windows executable extension
+            bash_ls_dir = self._resolve_bash_ls_dir(bash_language_server_version)
+            managed_bin_dir = os.path.join(bash_ls_dir, "node_modules", ".bin")
+            bash_executable_path = os.path.join(managed_bin_dir, "bash-language-server")
             if os.name == "nt":
                 bash_executable_path += ".cmd"
 
+            # install bash-language-server via npm
             if not os.path.exists(bash_executable_path):
-                log.info(f"Bash Language Server executable not found at {bash_executable_path}. Installing...")
-                deps.install(bash_ls_dir)
-                log.info("Bash language server dependencies installed successfully")
+                bls_deps = RuntimeDependencyCollection(
+                    [
+                        RuntimeDependency(
+                            id="bash-language-server",
+                            description="bash-language-server package",
+                            command=build_npm_install_command("bash-language-server", bash_language_server_version, npm_registry),
+                            platform_id="any",
+                        ),
+                    ]
+                )
+                log.info("Installing bash-language-server...")
+                bls_deps.install(bash_ls_dir)
+
+            # install ShellCheck binary directly from upstream releases for the current platform
+            self._install_shellcheck_if_missing(bash_ls_dir)
 
             if not os.path.exists(bash_executable_path):
                 raise FileNotFoundError(
@@ -92,15 +149,66 @@ class BashLanguageServer(SolidLanguageServer):
 
             return bash_executable_path
 
+        @staticmethod
+        def _install_shellcheck_if_missing(bash_ls_dir: str) -> None:
+            """
+            Downloads and extracts the platform-appropriate ShellCheck release into
+            ``${bash_ls_dir}/shellcheck`` if the binary is not already present.
+            """
+            binary_path = _shellcheck_binary_path(bash_ls_dir)
+            if os.path.exists(binary_path):
+                return
+
+            install_dir = _shellcheck_install_dir(bash_ls_dir)
+            os.makedirs(install_dir, exist_ok=True)
+
+            release = _SHELLCHECK_DEPENDENCIES.get(PlatformUtils.get_platform_id())
+            if release is None:
+                raise RuntimeError(f"ShellCheck has no upstream binary release for platform {PlatformUtils.get_platform_id().value}")
+
+            archive_type = "zip" if os.name == "nt" else "xztar"
+            log.info(f"Downloading ShellCheck v{_SHELLCHECK_VERSION} for {PlatformUtils.get_platform_id().value}")
+            FileUtils.download_and_extract_archive_verified(
+                release["url"],
+                install_dir,
+                archive_type,
+                expected_sha256=release["sha256"],
+                allowed_hosts=_SHELLCHECK_ALLOWED_HOSTS,
+            )
+
+            if not os.path.exists(binary_path):
+                raise FileNotFoundError(f"ShellCheck binary not found at {binary_path} after extraction; archive layout may have changed.")
+
+            # ensure the binary is executable on POSIX (zip extraction does not preserve perms)
+            if os.name != "nt":
+                current = os.stat(binary_path).st_mode
+                os.chmod(binary_path, current | 0o111)
+
+        def create_launch_command_env(self) -> dict[str, str]:
+            bash_language_server_version = self._custom_settings.get("bash_language_server_version", DEFAULT_BASH_LANGUAGE_SERVER_VERSION)
+            bash_ls_dir = self._resolve_bash_ls_dir(bash_language_server_version)
+            managed_bin_dir = os.path.join(bash_ls_dir, "node_modules", ".bin")
+            return {
+                "PATH": managed_bin_dir + os.pathsep + os.environ.get("PATH", ""),
+                "SHELLCHECK_PATH": _shellcheck_binary_path(bash_ls_dir),
+            }
+
+        def _resolve_bash_ls_dir(self, bash_language_server_version: str) -> str:
+            # legacy unversioned dir reserved for INITIAL; every other version goes into a versioned subdir
+            ls_dirname = (
+                "bash-lsp"
+                if bash_language_server_version == INITIAL_BASH_LANGUAGE_SERVER_VERSION
+                else f"bash-lsp-{bash_language_server_version}"
+            )
+            return os.path.join(self._ls_resources_dir, ls_dirname)
+
         def _create_launch_command(self, core_path: str) -> list[str]:
             return [core_path, "start"]
 
-    @staticmethod
-    def _get_initialize_params(repository_absolute_path: str) -> InitializeParams:
+    def _create_base_initialize_params(self) -> dict:
         """
         Returns the initialize params for the Bash Language Server.
         """
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
         initialize_params = {
             "locale": "en",
             "capabilities": {
@@ -124,17 +232,8 @@ class BashLanguageServer(SolidLanguageServer):
                     "symbol": {"dynamicRegistration": True},
                 },
             },
-            "processId": os.getpid(),
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
         }
-        return initialize_params  # type: ignore
+        return initialize_params
 
     def _start_server(self) -> None:
         """
@@ -170,7 +269,7 @@ class BashLanguageServer(SolidLanguageServer):
 
         log.info("Starting Bash server process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request from LSP client to LSP server and awaiting response")
         init_response = self.server.send.initialize(initialize_params)
@@ -197,22 +296,3 @@ class BashLanguageServer(SolidLanguageServer):
             self.server_ready.set()
         else:
             log.info("Bash server initialization complete")
-
-    def request_document_symbols(self, relative_file_path: str, file_buffer: LSPFileBuffer | None = None) -> DocumentSymbols:
-        # Uses the standard LSP documentSymbol request which provides reliable function detection
-        # for all bash function syntaxes including:
-        # - function name() { ... } (with function keyword)
-        # - name() { ... } (traditional syntax)
-        # - Functions with various indentation levels
-        # - Functions with comments before/after/inside
-
-        log.debug(f"Requesting document symbols via LSP for {relative_file_path}")
-
-        # Use the standard LSP approach - bash-language-server handles all function syntaxes correctly
-        document_symbols = super().request_document_symbols(relative_file_path, file_buffer=file_buffer)
-
-        # Log detection results for debugging
-        functions = [s for s in document_symbols.iter_symbols() if s.get("kind") == 12]
-        log.info(f"LSP function detection for {relative_file_path}: Found {len(functions)} functions")
-
-        return document_symbols

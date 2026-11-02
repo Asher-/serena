@@ -1,4 +1,5 @@
 """Haxe language server integration using vshaxe/haxe-language-server."""
+# SPDX-License-Identifier: MIT
 
 import glob
 import hashlib
@@ -23,10 +24,26 @@ from solidlsp.ls import (
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_types import Hover
-from solidlsp.lsp_protocol_handler.lsp_types import DiagnosticSeverity, InitializeParams
+from solidlsp.lsp_protocol_handler.lsp_types import DiagnosticSeverity
 from solidlsp.settings import SolidLSPSettings
 
 log = logging.getLogger(__name__)
+
+# Version pinning convention (see eclipse_jdtls.py for the full spec):
+#   INITIAL_* — frozen forever; legacy unversioned install dir is reserved for it.
+#   DEFAULT_* — bumped on upgrades; goes into a versioned subdir.
+INITIAL_VSHAXE_VERSION = "2.34.2"
+INITIAL_VSHAXE_SHA256 = "104d785e3f7b57a7f3debf520d9751f7e7abf3a7e78d203db1a8ff3dc7ca30e2"
+DEFAULT_VSHAXE_VERSION = "2.34.2"
+DEFAULT_VSHAXE_SHA256 = "104d785e3f7b57a7f3debf520d9751f7e7abf3a7e78d203db1a8ff3dc7ca30e2"
+
+
+def _vshaxe_sha(version: str) -> str | None:
+    if version == INITIAL_VSHAXE_VERSION:
+        return INITIAL_VSHAXE_SHA256
+    if version == DEFAULT_VSHAXE_VERSION:
+        return DEFAULT_VSHAXE_SHA256
+    return None
 
 
 _HAXE_COMPILER_REQUIREMENT = RequiredCLI(
@@ -75,8 +92,6 @@ class HaxeLanguageServer(SolidLanguageServer):
     class DependencyProvider(LanguageServerDependencyProviderSinglePath):
         # Downloaded from Open VSX (not the VS Code Marketplace) because Open VSX
         # provides stable versioned URLs and SHA256 checksums for integrity verification.
-        _DEFAULT_VSHAXE_VERSION = "2.34.2"
-        _DEFAULT_VSHAXE_SHA256 = "104d785e3f7b57a7f3debf520d9751f7e7abf3a7e78d203db1a8ff3dc7ca30e2"
 
         def _get_or_install_core_dependency(self) -> str:
             """Find the Haxe Language Server binary.
@@ -103,7 +118,9 @@ class HaxeLanguageServer(SolidLanguageServer):
                 return vscode_server_path
 
             # 3. Check resource dir / download from Open VSX
-            haxe_ls_dir = os.path.join(self._ls_resources_dir, "haxe-lsp")
+            version = self._custom_settings.get("version", DEFAULT_VSHAXE_VERSION)
+            ls_dirname = "haxe-lsp" if version == INITIAL_VSHAXE_VERSION else f"haxe-lsp-{version}"
+            haxe_ls_dir = os.path.join(self._ls_resources_dir, ls_dirname)
             server_js_path = os.path.join(haxe_ls_dir, "bin", "server.js")
             if os.path.exists(server_js_path):
                 log.info(f"Found Haxe Language Server at {server_js_path}")
@@ -118,7 +135,6 @@ class HaxeLanguageServer(SolidLanguageServer):
                     "  3. Set ls_path in serena_config.yml under ls_specific_settings.haxe"
                 )
 
-            version = self._custom_settings.get("version", self._DEFAULT_VSHAXE_VERSION)
             downloaded_path = self._download_from_open_vsx(haxe_ls_dir, version)
             if downloaded_path:
                 return downloaded_path
@@ -155,16 +171,17 @@ class HaxeLanguageServer(SolidLanguageServer):
                 vsix_path = os.path.join(tempfile.gettempdir(), "vshaxe.vsix")
                 urllib.request.urlretrieve(download_url, vsix_path)
 
-                # Verify SHA256 checksum only for the default (pinned) version
-                if version == cls._DEFAULT_VSHAXE_VERSION:
+                # Verify SHA256 checksum only when the resolved version is one of our pinned ones (INITIAL or current DEFAULT)
+                expected_sha = _vshaxe_sha(version)
+                if expected_sha is not None:
                     sha256 = hashlib.sha256()
                     with open(vsix_path, "rb") as f:
                         for chunk in iter(lambda: f.read(8192), b""):
                             sha256.update(chunk)
-                    if sha256.hexdigest().lower() != cls._DEFAULT_VSHAXE_SHA256:
+                    if sha256.hexdigest().lower() != expected_sha:
                         os.remove(vsix_path)
                         raise RuntimeError(
-                            f"SHA256 checksum mismatch for vshaxe VSIX. Expected {cls._DEFAULT_VSHAXE_SHA256}, "
+                            f"SHA256 checksum mismatch for vshaxe VSIX. Expected {expected_sha}, "
                             f"got {sha256.hexdigest()}. The file may be corrupted or tampered with."
                         )
                     log.info("SHA256 checksum verified")
@@ -212,13 +229,11 @@ class HaxeLanguageServer(SolidLanguageServer):
             "dump",
         ]
 
-    def _get_initialize_params(self, repository_absolute_path: str) -> InitializeParams:
+    def _create_base_initialize_params(self) -> dict:
         """Return initialize params for the Haxe Language Server.
 
         displayArguments are resolved from user-configured buildFile or auto-discovered .hxml files.
         """
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
-
         # 1. Check for user-configured .hxml path
         configured_build_file = self._custom_settings.get("buildFile")
         if configured_build_file:
@@ -226,7 +241,7 @@ class HaxeLanguageServer(SolidLanguageServer):
             display_arguments = [configured_build_file]
         else:
             # 2. Auto-discover .hxml files recursively
-            display_arguments = self._discover_hxml_file(repository_absolute_path)
+            display_arguments = self._discover_hxml_file(self.repository_root_path)
 
         init_options: dict = {"displayArguments": display_arguments}
         rename_source_folders = self._custom_settings.get("renameSourceFolders")
@@ -241,7 +256,14 @@ class HaxeLanguageServer(SolidLanguageServer):
             "locale": "en",
             "capabilities": {
                 "textDocument": {
-                    "synchronization": {"didSave": True},
+                    "publishDiagnostics": {
+                        "relatedInformation": True,
+                        "versionSupport": False,
+                        "tagSupport": {"valueSet": [1, 2]},
+                        "codeDescriptionSupport": True,
+                        "dataSupport": True,
+                    },
+                    "synchronization": {"dynamicRegistration": True, "didSave": True},
                     "completion": {"completionItem": {"snippetSupport": True}},
                     "definition": {},
                     "references": {},
@@ -261,17 +283,8 @@ class HaxeLanguageServer(SolidLanguageServer):
                 },
             },
             "initializationOptions": init_options,
-            "processId": os.getpid(),
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
         }
-        return initialize_params  # type: ignore[return-value]
+        return initialize_params
 
     @staticmethod
     def _discover_hxml_file(repository_absolute_path: str) -> list[str]:
@@ -380,7 +393,7 @@ class HaxeLanguageServer(SolidLanguageServer):
 
         log.info("Starting Haxe server process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request from LSP client to LSP server and awaiting response")
         self.server.send.initialize(initialize_params)

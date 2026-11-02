@@ -2,35 +2,19 @@
 Provides Lean 4 specific instantiation of the LanguageServer class.
 Uses the built-in Lean 4 language server (lean --server).
 """
+# SPDX-License-Identifier: MIT
 
 import logging
-import os
-import pathlib
 import shutil
-from typing import cast
 
 from overrides import override
 
-from solidlsp.language_servers.common import RequiredCLI
 from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.settings import SolidLSPSettings
-from solidlsp.util import supervise
+from solidlsp.util.subprocess_util import subprocess_run
 
 log = logging.getLogger(__name__)
-
-
-_LEAN_CLI_REQUIREMENT = RequiredCLI(
-    name="lean",
-    rationale=(
-        "The Lean 4 language server is invoked as 'lean --server'; without the\nlean toolchain on PATH there is no process to start."
-    ),
-    install_hints=[
-        "elan (recommended): curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh",
-        "Install page: https://github.com/leanprover/elan",
-    ],
-)
 
 
 class Lean4LanguageServer(SolidLanguageServer):
@@ -46,7 +30,15 @@ class Lean4LanguageServer(SolidLanguageServer):
             self._repository_root_path = repository_root_path
 
         def _get_or_install_core_dependency(self) -> str:
-            return _LEAN_CLI_REQUIREMENT.resolve_or_raise()
+            lean_path = shutil.which("lean")
+            if lean_path is None:
+                raise RuntimeError(
+                    "lean is not installed or not in PATH.\n"
+                    "Please install Lean 4 via elan: https://github.com/leanprover/elan\n"
+                    "  curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh\n"
+                    "After installation, make sure 'lean' is available on your PATH."
+                )
+            return lean_path
 
         def _create_launch_command(self, core_path: str) -> list[str]:
             return [core_path, "--server"]
@@ -60,7 +52,7 @@ class Lean4LanguageServer(SolidLanguageServer):
                 log.warning("lake not found on PATH; cross-file references may not work")
                 return env
             try:
-                result = supervise.run(
+                result = subprocess_run(
                     [lake_path, "env"],
                     check=False,
                     cwd=self._repository_root_path,
@@ -101,16 +93,11 @@ class Lean4LanguageServer(SolidLanguageServer):
     def is_ignored_dirname(self, dirname: str) -> bool:
         return super().is_ignored_dirname(dirname) or dirname in [".lake", "build"]
 
-    @staticmethod
-    def _get_initialize_params(repository_absolute_path: str) -> InitializeParams:
+    def _create_base_initialize_params(self) -> dict:
         """
         Returns the initialize params for the Lean 4 Language Server.
         """
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
         initialize_params = {
-            "processId": os.getpid(),
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
             "capabilities": {
                 "textDocument": {
                     "synchronization": {"didSave": True, "dynamicRegistration": True},
@@ -129,20 +116,15 @@ class Lean4LanguageServer(SolidLanguageServer):
                             "documentationFormat": ["markdown", "plaintext"],
                         },
                     },
+                    "publishDiagnostics": {"relatedInformation": True},
                 },
                 "workspace": {
                     "workspaceFolders": True,
                     "didChangeConfiguration": {"dynamicRegistration": True},
                 },
             },
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
         }
-        return cast(InitializeParams, initialize_params)
+        return initialize_params
 
     def _start_server(self) -> None:
         """Start the Lean 4 language server process."""
@@ -164,7 +146,7 @@ class Lean4LanguageServer(SolidLanguageServer):
 
         log.info("Starting Lean 4 language server process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request from LSP client to LSP server and awaiting response")
         init_response = self.server.send.initialize(initialize_params)

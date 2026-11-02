@@ -3,10 +3,989 @@
 Status of the `main` branch. Changes prior to the next official version change will appear here.
 
 * General:
+  - More flexible inclusion/exclusion definitions: 
+    - Allow tool exclusions/inclusions to use tool marker names (e.g. `ToolMarkerCanEdit`)
+    - Allow API exclusions to include `marker:editing` to exclude all editing functionality
+  - Fix: `planning` mode now correctly excludes all editing tools/functions (#2210)
+  - Fix: project-level `ls_specific_settings` replaced the global settings for the same language server
+    silently. Since the replacement is per language rather than per key, a project block that only set
+    `ls_path`, for example, dropped every global key such as `ls_extra_args`, leaving no trace. The
+    replacement behaviour is unchanged, but the global keys hidden by a project block are now logged (#2188).
+
+* JetBrains:
+  - Fix: When applying a non-symbolic edit, do not raise a post-edit exception during IDE file refresh
+    if the IDE's plugin server is not reachable.
+
+* Language Servers:
+  - Fix: detect Elixir installed via a Windows batch launcher
+  - Extend allowed types in persisted symbol caches, fixing cache loading issues with `clangd`
+    when overriding values like `ls_path`, `clangd_version` or `compile_commands_dir`
+  - Add GraphQL language server support (experimental) via `graphql-language-service-cli` (`graphql-lsp`) for
+    `.graphql`/`.gql` files. Document symbols, hover and cross-file go-to-definition require a graphql-config file
+    (`.graphqlrc.yml` / `graphql.config.*`) at the repository root; without one, Serena logs an actionable message
+    instead of waiting out the startup timeout. Find-references is unsupported (not implemented by the upstream server)
+  - Fix: tsserver reports the range of a single top-level `const`/`let`/`var` declaration starting
+    at the identifier and ending before the statement's semicolon, excluding a leading `export`,
+    the keyword, and the trailing `;` (unlike `function`/`class` declarations, whose range already
+    includes their keyword). `replace_symbol_body` then dropped the prefix and the semicolon from
+    the body and replacement range, so re-supplying them in a full-statement edit either duplicated
+    the prefix and produced invalid syntax (`export const twice = ...` became `export const export
+    const twice = ...`, returned as `OK`) or, once only the prefix was fixed, left a harmless but
+    incorrect double semicolon behind (`... n * 3;;`). Mirrors the range-start fix already applied
+    to Go's `type`/`var`/`const` declarations, and the range-end fix already applied to Nix's
+    attribute declarations (#1956)
+  - Fix: C/C++ (clangd) reference searches returned at most 1000 references; clangd is now started with
+    `--limit-references=0` unless `ls_extra_args` already sets a limit
+  - C/C++ (clangd) logs errors only (`--log=error`) instead of a line for every request and parse, unless
+    `ls_extra_args` sets `--log` or Serena logs at debug level
+  - Fix: every line a language server wrote to stderr was followed by an empty line in Serena's log
+
+# v2.1.0 (2026-10-19)
+
+* General:
+  - Fix: Re-establish compatibility with the Claude Desktop client in chat mode (code mode was not affected).
+    The client filters out the parameter `session_id`, which was introduced for several tools with v2.0.0.
+    The parameter was renamed to `session`.
+  - Fix: the MCP registry manifest (`server.json`) declared Serena's own CLI arguments as runtime
+    arguments, so clients installing Serena from the MCP registry generated a launch command with a
+    stray package spec, and project auto-activation failed
+  - Fix: logs stopped updating when using SSE or streamable HTTP because Uvicorn's logging
+    configuration closed the Serena's log handlers. This is due to a bug in the MCP SDK,
+    in which the logging configuration override was effectively hard-coded.
+    We now patch Uvicorn's log config constructor to prevent this.
+    This affected both dashboard log retrieval and file logs written by Serena.
+   
+* Dashboard:
+  - Add a welcome pane for users with an unset `web_dashboard_open_on_launch` preference,
+    allowing them to choose whether the dashboard opens whenever Serena starts. The dashboard
+    continues to open automatically until a preference is configured.
+  - Show an `[untrusted]` indicator beside the active project name for untrusted projects,
+    with a formatted tooltip explaining the limitations and a link to the trusted-projects
+    documentation. Add reusable tooltip support for hover and keyboard interaction.
+
+* Security:
+  - Fix: typescript-language-server loaded `node_modules/typescript/lib/tsserver.js` from the project
+    whenever the project provided one, so merely opening an untrusted repository executed JavaScript
+    supplied by that repository. tsserver is now pinned to the TypeScript installation managed by
+    Serena unless the project is trusted; loading the project's own TypeScript has become a
+    trust-gated feature (#2129)
+
+* Language Servers:
+  - Add VB.NET language server support (via the Roslyn-based `Microsoft.CodeAnalysis.LanguageServer`,
+    also shared with the C# language server)
+  - Fix: the Intelephense settings `maxMemory` and `maxFileSize` had no effect, because they were passed
+    as initialization options, which Intelephense does not read; `maxMemory` now limits the heap of the
+    server process, and `maxFileSize` is passed as `intelephense.files.maxSize`
+  - Fix: Explicit symbol and diagnostics requests now validate their input paths against the project's
+    trust policy. Symlinks to files outside the project root are rejected in untrusted projects;
+    links within the project and outside-root links in trusted projects remain supported (#2163).
+  - Fix: Project-wide symbol discovery now skips file and directory symlinks in untrusted projects.
+    In trusted projects, ignore rules consistently apply to unresolved alias paths, and symlinks to
+    targets outside the project root no longer cause discovery to fail (#2163).
+  - Scala: add opt-in setting `terminate_bloop_on_stop` to terminate the Bloop build-server daemons
+    that Metals leaves running after shutdown (#1816)
+  - Performance: Speed up project-wide symbol discovery by reusing directory-entry metadata for ignore
+    checks and avoiding repeated ancestor-directory checks for files.
+  - Add `typescript_tsgo`, which uses the native language server of TypeScript 7 (`tsc --lsp`) and installs
+    the `typescript` package automatically (#1402)
+
+# v2.0.0 (2026-10-13)
+
+* Licensing:
+  - **Serena is now GPL-licensed**:  
+    The Serena application is now licensed under GPL-3.0-or-later. 
+    SolidLSP (`src/solidlsp`) remains MIT-licensed. 
+    See `LICENSE` for the overview, the historical cutoff and the rationale.
+    The change is not retroactive: earlier releases and commits remain available under MIT.
+  - Source files now carry `SPDX-License-Identifier` headers
+  - Contributions require acceptance of the new Contributor License Agreement (`CLA.md`), enforced via CLA assistant;
+    see `CONTRIBUTING.md`
+
+* General:
+  - **Introducing the Serena REPL**:   
+    Add the Serena REPL as a new agent interface, reducing the tool set to a minimum and providing
+    a general code execution environment for all Serena operations.
+    This has several significant advantages over regular tool executions.  
+    Please refer to our [documentation](https://oraios.github.io/serena/01-about/035_tools.html) for details.
+  - Add `auth_secret` to `serena_config.yml` for authenticating communication between Serena components
+    and services. When missing, null, or empty, a random UUID is generated and persisted; existing values
+    are preserved
+  - Fix: Tiktoken usage counting now treats special-token literals in tool input and output as ordinary text
+  - Improve speed of file system operations, particularly enumeration of all source files of a project,
+    which is particularly relevant for file system refresh operations when using the LSP backend.
+  - Fix: Repeated comments in `serena_config.yml` 
+  - Fix: MCP server now reports Serena's version instead of the installed MCP SDK version (#1889)
+  - Fix: importing Serena no longer loads the `anthropic` package unless the Anthropic token counter is
+    actually used; the unconditional import added seconds to CLI/MCP startup on some machines (#2012)
+  - Fix: Parallel agents auto-registering projects could overwrite each other's changes to the global
+    project list in `serena_config.yml`
+  - Fix: the reload-merge-write in `_persist_projects` (the residual half of the fix above) had no
+    cross-process lock, so two Serena instances could still lose a registration change if their
+    persist calls overlapped; it is now wrapped in a `filelock.FileLock` (#2101)
+  - Perf: `search_for_pattern` resolved each match's line number by rescanning the file from the
+    beginning (O(n) per match, O(n*m) total for m matches); coordinates are now resolved via the new
+    `TextCoordinates` abstraction (cached line starts + binary search)
+  - Fix: `replace_lines` deleted the line range and inserted the replacement as two separate writes, so a
+    failure while inserting left the file with the range already removed; the replacement is now applied
+    within a single edit, like `replace_symbol_body` and `replace_content`
+  - Fix: `TextUtils.insert_text_at_position` returned a wrong position when the inserted text merged
+    with an adjacent character into a single newline sequence (e.g. a `\n` inserted directly after an
+    existing `\r`); the position is now determined from the resulting text
+  - Fix: `search_for_pattern` reported "no matches" for a regular expression that does not compile,
+    because the compilation happened inside the per-file error handling that exists to skip
+    unreadable files; an invalid pattern is now rejected up front, as `search_text` documents and
+    as the replacement tools already do
+  - Fix: process-tree cleanup signaled descendant language-server processes without waiting for them,
+    which could leave grandchildren as zombies; cleanup now waits for the discovered descendants (#1464)
+  - Fix: `read_only` restriction in project definition was not applied to base tool set when in single-project context (#1938)
+  - Fix: a tsserver crash was only surfaced by the first cross-file query of a TypeScript language
+    server instance; later queries skipped the check together with the indexing wait and returned
+    an empty result as if the symbol had no references. Every cross-file query now raises
+    `TypeScriptServerCrashedError` once a crash has been observed
+  - Fix: `MultiFileContentReplacer` accounted for the exclusivity of the match end in neither
+    `ReplacementOccurrence.end_line` nor the region rendered by `render_occurrence_diff`, so a
+    replacement whose pattern consumed a line break reported the match as ending on the following
+    line and displayed that line as both removed and added; a line break terminating a file was
+    likewise displayed as an additional line; this now applies the same rule `search_text` has used
+    since #1708 (#2080)
+  - Fix: `SerenaConfig.project_names` / `project_paths` were cached and never invalidated after
+    projects were added or removed mid-session, so user-facing project lists and error messages
+    stayed stale; the lists are no longer cached
+  - Docs: `trusted_project_path_patterns` now documents how to trust a single project. Trust is decided by
+    the project's root path, so a `<project root>/**` entry matches only paths below the root and therefore
+    trusts no project at all; the template now shows the bare root form alongside the parent-directory
+    glob (#2001)
+  - Session IDs are now created and tracked internally by Serena instead of being derived from the
+    MCP session, since the MCP SDK v2 no longer provides session identifiers and client session usage
+    was inconsistent anyway. Tools that need a session id (e.g. `activate_project`, the REPL tool) now
+    take it as an explicit parameter, obtained from `initial_instructions`
+  - Performance: `Project.gather_source_files` transitively re-derived from the filesystem, for every path, 
+    whether that path was a file or a directory; related methods/functions now receive the information
+    as a parameter where it is already known (#2077)
+  - Fix: a request whose write to the language server's stdin failed stayed pending until its
+    timeout, because `StdioLanguageServer._send_payload` logged the failure and returned. The
+    failure now surfaces as `LanguageServerTerminatedException`, the signal the restart path acts
+    on, both for a broken pipe and for a stdin that shutdown had already closed (#2004)
+
+* Security:
+  - Behaviour change: Following symbolic links is no longer possible for untrusted projects.
+    In an untrusted project, symbolic links are now ignored entirely: they are neither followed when 
+    the project's files are enumerated nor accepted as a path when a file is requested; trusted projects 
+    keep following links as before (#2144)
+  - Fix: the line-based and symbol-level editing tools did not apply the path-confinement check at
+    all and now validate the file path like the other file tools (#2144)
+
+* CLI:
+  - Fix: `project index` crashed while writing `.serena/logs/indexing.txt` when a failed file's path or
+    error contained characters outside the locale encoding (e.g. CJK names on Windows); the log is now
+    written as UTF-8
+  - Add `download-ls-dependencies` to prefetch runtime dependencies of the given language servers
+    for environments with restricted network access (#664)
+  - Fix: `project health-check` reported `Health check passed - All tools working correctly` and
+    exited 0 even when `FindReferencingSymbolsTool` had raised, because that failure was logged as
+    a warning while the verdict checked `FindSymbolTool` only. A reference-search failure now fails
+    the check; a symbol with no references is still a pass
+  - Add `project remove`, which unregisters a project from the project list in `serena_config.yml`,
+    addressed either by name or by path. Only the registry entry is removed; the project's own files,
+    including its project configuration, are left untouched (#2029)
+  - Fix `project index-file` command not using only the relevant language server to index the given file (#1965)
+  
+* Tools:
+  - Fix: `replace_in_files` now rejects occurrence IDs from a preview when the file content or matched
+    range has changed, preventing an outdated selection from silently replacing a different match
+  - Fix: `$!N` backreferences in regex-mode replacements expanded to the literal template text
+    (e.g. `EA_INPUT$!1(...)`) when the referenced group existed but did not participate in the
+    match (e.g. a group inside an optional construct that was skipped); unmatched groups now expand
+    to the empty string, and a reference to a group that the search expression does not define
+    raises a clear error instead of a raw `IndexError`. In literal mode, the replacement is now
+    used verbatim (`$!N` sequences need no escaping) instead of failing with a backreference error
+  - Fix: `find_file` documented a `skip_ignored_files` parameter that did not exist; the parameter is now
+    implemented and defaults to `False` (previous hardcoded behaviour)
+  - Fix: `jetbrains_rename` tool docstring claimed `rename_in_comments` / `rename_in_text_occurrences`
+    default to `True`; the code defaults are `False`
+  - Fix: the Claude Code system-prompt override mapped tasks to tool names that do not exist
+    (`rename`, `_safe_delete`, `inline_symbol`, `type_hierarchy`); the mapping now uses the actual
+    tool names
+  - Fix: the file-editing tools saved the edited file with `open(path, "w")`, which truncates it
+    before the new content is complete, so a crash, an OOM kill or a full disk partway through the
+    write could leave a source file empty or half-written. Saves now go through the same atomic
+    temp-file-plus-`os.replace` helper that the memory writes already use. The helper resolves
+    symlinks first, so a symlinked file is still written through to its target rather than being
+    replaced by a regular file (#1958)
+
+* Memories:
+  - Fix: `move_memory` / rename only checked write access on the destination name, so a tool-context
+    rename could relocate a read-only memory; both source and destination are now checked
+  - Fix: `save_memory`/`edit_memory` wrote directly to the memory file with `open(path, "w")`, which
+    truncates it before the new content is written; a crash, OOM kill, or full disk partway through
+    the write could destroy the previous, valid content instead of just losing the update. Both now
+    write through a temp-file-plus-`os.replace` helper, matching the approach `save_yaml()` already
+    uses for settings files (#1958)
+  - Fix: renaming a memory through the `rename_memory` tool raised `PermissionError` when another memory
+    marked read-only by `read_only_memory_patterns` referenced it, after the rename had already been
+    applied, leaving the memory graph half-updated; reference propagation in tool contexts now covers
+    only writable memories, as documented, while the CLI still propagates into read-only ones
+
+* JetBrains:
+  - Fix: Concurrent Serena sessions activating different projects at the same time with
+    `jetbrains_launch_command` set would each independently launch the IDE, racing each other for
+    the IDE's own config-directory lock; JetBrains IDE launches are now serialized per launch
+    command and Serena waits for the plugin server to become reachable before proceeding (#1864)
+
+* Hooks:
+  - Fix: Codex's documented hook wiring only routes `remind` through `PreToolUse` on `Bash`, so its
+    reset-on-Serena-tool-use branch was unreachable there and reminder counters never cleared after a
+    successful Serena call. Add a `serena-hooks reset` command and a `PostToolUse` example matched to
+    Serena's own tools to close the gap (#1852)
+  - Add ZCode support (context `zcode`, hooks) #1837
+  - Add Codex plan-mode context and enforcement hooks driven by each tool's edit-capability metadata. #1854
+  - Document safer Codex hook defaults, timeouts, status messages, event mappings and troubleshooting guidance.
+  - Add DSH (DeepSeek Harness) as a Claude-compatible `serena-hooks` client, including activate, remind,
+    cleanup and auto-approve commands (#1869)
+  - Fix: `remind` did not count searches and source-file reads which Claude Code (2.1.117+ native builds),
+    CodeBuddy and ZCode run via their `Bash` tool; shell commands are now classified for these clients too,
+    including compound commands such as `cd repo && rg foo` (#1845)
+
+* Dashboard:
+  - Fix: DashboardManager's unsupported-mode fallback warning logged the literal text
+    `{fallback_mode.value}` because only the first string fragment was an f-string
+  - Fix: On macOS, the tray manager refreshed the tray menu straight from the Flask request handlers
+    for `/register`, `/update_project` and `/unregister` and from the alive-check thread. That reaches
+    `NSStatusItem.setMenu_()` off the main thread, which AppKit forbids and which recent macOS
+    versions punish with SIGTRAP, so the tray-manager process died within seconds of every agent
+    start and the tray icon never became usable. Menu refreshes are now marshalled onto the main
+    thread (#2038)
+
+* Language Servers:
+  - Fix: Vue companion TypeScript indexing now respects project ignore patterns and ignored
+    directory names, avoiding opening ignored release snapshots, vendored components and build output
+  - Add: configurable JDTLS Maven/Gradle import, `updateBuildConfiguration`, and autobuild settings under `ls_specific_settings.java` (#1976)
+  - Fix: Angular, Vue and Svelte language servers opened `.tsx`/`.jsx` files with `typescript`/`javascript`
+    language IDs, so JSX symbol ranges truncated at multi-line expressions (same class of bug as the
+    typescript-language-server fix; `typescriptreact`/`javascriptreact` are now used). Regression tests
+    cover the languageId mapping for both the primary and companion servers, plus fixture `.tsx` files
+    that assert symbol ranges are not truncated (mirroring #1436). Svelte's `$/onDidChangeTsOrJsFile`
+    mirror now keys off TS/JS extensions (`_is_ts_file`) so `.tsx`/`.jsx` edits stay in sync with the
+    companion TypeScript snapshot after the languageId change.
+  - Fix: nixd's built-in `options` configuration now uses a schema-valid provider map (#1948)
+  - Scala: bump the default Metals version from 1.6.4 to 1.6.8. 1.6.4 bootstraps sbt-bloop 2.0.17,
+    which is not published for sbt 2, so `bloopInstall` fails to resolve and no build server is ever
+    started for an sbt 2 project.
+  - Fix: `SafeZipExtractor` discarded Unix executable permission bits stored in extracted
+    archives' `ZipInfo.external_attr` (a long-standing stdlib `zipfile` limitation,
+    tracked upstream at https://github.com/python/cpython/pull/150061), leaving every
+    extracted file with default, non-executable permissions. This broke language servers
+    whose archive contains more than the single top-level launcher script that
+    per-language-server setup code re-chmods, e.g. the Kotlin Language Server's bundled
+    JetBrains Runtime (`jbr/bin/java` and native libs), whose launcher failed to exec it
+    with a permission error. Executable bits are now restored for every extracted file (#2100)
+  - Add Astro language server support via `@astrojs/language-server` with a companion TypeScript language server (`@astrojs/ts-plugin`) for cross-file code intelligence (#2085)
+  - Fix: Dart analysis server no longer receives rootUri/rootPath, which added the monorepo root as an extra analysis root and could pin a CPU core at idle (#2045)
+  - Fix: The C# language server opened every `.csproj` found anywhere under the repository root,
+    without consulting the project's ignore settings. On repositories that vendor third-party or
+    sample C# projects, this loads projects the server cannot restore on every start, and their
+    restore failures bury the diagnostics of the projects the user actually works on. Project
+    discovery now skips `.csproj` files matched by the project's ignore patterns
+  - Kotlin: 
+    - Downgrade back to the initially used version 261.13587.0 of the language server,
+      because all newer builds keep expiring after a short period of time.
+    - Update download URLs to use download.jetbrains.com instead of download-cdn #2152
+  - Fix: Godot's GDScript parser can report a symbol's end column one column past the
+    line-end convention every other language server follows (closing a node's range from
+    the next lookahead token instead of the last consumed one, when that lookahead is a
+    synthesized newline); `replace_symbol_body` on the last function in a file silently
+    consumed the separating blank line as a result. `GodotLanguageServer` now corrects this
+    specific, measured overshoot when building its high-level document symbols (#1974)
+  - Fix: High-level document symbol cache was not invalidated when the LS-specific low-level result 
+    version changed
+  - Fix: A language server's cache directory was determined by the language_id rather than 
+    the language server identifier's key. The two identifiers coincided in most cases.
+  - Add DSH (DeepSeek Harness) as a Claude-compatible `serena-hooks` client, including activate, remind,
+    cleanup and auto-approve commands (#1869)
+  - Bump the bundled pyrefly to 1.2.0: 1.1.1 advertises `workspace/willRenameFiles` but answers it with `null`;
+    1.2.0 answers with the import edits (measured on the Python test repo: the two absolute importers of a
+    renamed module; a relative import of it, `from .models import`, is not rewritten by either)
+  - Fix: TypeScript and VTS now disable automatic type acquisition as intended, while VTS
+    preserves explicit user settings across initialization and configuration requests (#1989)
+    VTS initialization options now override defaults per top-level key rather than replacing the
+    entire configuration; a user-provided `typescript` block replaces the ATA default too.
+    `initializationOptions` takes precedence over the legacy `initialization_options` alias.
+  - Add experimental Devsense PHP Language Server support through the `php_devsense` language key and
+    pinned npm-managed `devsense-php-ls` installation (#710)
+  - Fix: Erlang support now uses the maintained Erlang Language Platform (ELP) instead of the archived Erlang LS; Serena downloads a verified platform release (#771)
+  - Fix: activating an additional TypeScript workspace folder could open a root-level tool
+    config (`vitest.config.ts`, `jest.config.ts`, etc.) adjacent to `tsconfig.json` instead of
+    a real source file, starting the wrong inferred project and silently losing cross-package
+    references (#2090)
+  - Fix: a C# file created after the project was already indexed was analyzed by Roslyn as a
+    standalone Miscellaneous Files document instead of being folded into the loaded project,
+    causing phantom diagnostics on the new file and on files referencing its symbols (#1961)
+  - Add FreeBSD mapping to platform detection
+  - Remove unnecessary platform checks from the following language servers, expanding the set of
+    supported platforms accordingly: Elixir Tools, Intelephense, Perl, TypeScript, VTS
+  - Fix: the managed Solidity language server could report no diagnostics on macOS when Hardhat could not write
+    its global state under ``~/Library``; Serena now gives the child process an isolated home-directory view
+    via ``solidity_state_dir`` without changing the parent process's ``HOME`` (#1817)
+  - Add Fatou support as an alternative Julia language server (`julia_fatou`)
+  - Fix: C# properties/fields whose type contains a literal `(`, e.g. a tuple type like
+    `(int X, string Y)`, had their name corrupted to include a trailing `:` because the
+    parenthesis in the type was mistaken for a method's parameter list; `find_symbol` on
+    the real name then returned nothing
+  - Fix: TypeScript's `_has_waited_for_cross_file_references` latch was set after the first
+    cross-file query and never reset, so a later query that opened a file from a project tsserver
+    had not loaded yet (e.g. a monorepo package) skipped the indexing wait even while that
+    project's own `$/progress` indexing was still in flight (#1937)
+  - Fix: Nextflow's `_flush_deferred_workspace_scan` marked the workspace scan flushed even when both
+    of its `completion` probes failed, permanently skipping the flush (and silencing retries) for the
+    rest of the session (#1871)
+  - Fix: Exceptions raised during `LanguageServerManager.start` did not stop the language server subprocess if it was
+    already started (#1949)
+  - Add: Installed Python packages can provide generic external language-server adapters through the
+    `serena.language_servers` entry-point group for explicit use in `project.yml`
+  - Add `java.custom_jre_path` to launch JDTLS with a validated external Java executable when the bundled
+    JRE is too old for the installed JDTLS or project (#1469)
+  - Fix: Nixd hover requests could return an empty first response while initial analysis was completing;
+    retry the request within a bounded interval and keep the Nix hover regression coverage non-blocking while
+    the current nixd fixture position remains unsupported (#1040)
+  - Fix: Nixd could return a transient empty hover response while initial analysis was completing;
+    retry the request within a bounded interval and exercise Nix hover coverage against a supported
+    nixpkgs-backed selector (#1040)
+  - Add the experimental Rust-based EmmyLua Analyzer backend as `lua_emmylua`, with managed
+    cross-platform downloads and SHA-256 verification; the default `lua` backend remains unchanged
+  - Fix: Dart's `$/analyzerStatus` notifications were logged as unhandled-method warnings during analysis (#1855)
+  - Fix: `DartLanguageServer._start_server` discarded both `$/analyzerStatus` and
+    `experimental/serverStatus`, the two notifications the Dart analysis server sends to report
+    indexing progress, and returned as soon as `initialized` was sent instead of waiting for either
+    one; a request issued right after activation (`find_symbol`, `find_referencing_symbols`) could
+    return before the workspace scan finished. Serena now waits (bounded by 60s) for either signal to
+    report completion, matching the pattern already used for pyright, basedpyright and rust-analyzer
+  - Fix: clojure-lsp was not told that Serena sends `workspace/didChangeWatchedFiles`, so changes made
+    outside Serena's own edit tools (a git checkout, another editor, a build step) need not invalidate
+    its analysis; symbol queries could then answer from a stale index, e.g. `find_symbol` returning a
+    body from the position the symbol used to occupy (#1593)
+  - Fix: Scala cross-file queries waited a fixed 5s after the first file was opened, which on a cold
+    Metals is long before its build import, indexing and compilation have finished; the first
+    `find_referencing_symbols` of a session could return a fraction of the references with nothing to
+    indicate it was incomplete. Serena now declares work-done progress support and waits for the work
+    Metals reports, bounded by the new `indexing_timeout`, `indexing_start_grace` and
+    `indexing_quiet_period` settings
+  - Fix: the Angular language server waited for ngserver's `projectLoadingFinish` after `initialized`,
+    but ngserver loads the project lazily, on the first document open — so the notification could not
+    arrive, every startup burned the full wait, and the first symbol query of a session ran against an
+    unresolved project, silently returning incomplete cross-file references. Serena now opens one `.ts`
+    file to trigger the load before waiting (skipped for projects without a `tsconfig.json`, where
+    ngserver loads nothing)
+  - The Angular language server now supports `additional_workspace_folders`: the extra folders are
+    activated at startup and the companion TypeScript server is given the same workspace folders,
+    ignore patterns and encoding as the main server, so cross-package queries reach code outside the
+    app. `.ts` references are now the union of what ngserver reports (template usages) and what the
+    companion reports (callers in another project — an extra workspace folder, or a second
+    `tsconfig.json` in a monorepo); neither is complete on its own
+  - Fix: Angular post-edit diagnostics for `.ts` files waited out the 2.5s publish timeout on every
+    edited file, because ngserver never publishes for an ordinary TypeScript error (it publishes for
+    `.html` templates, and for a `.ts` file whose inline template has an error); they are now read
+    from the companion TypeScript server, which publishes for both
+  - Fix: a `tsserver` crash mid-indexing (e.g. a V8 heap OOM) sent the same `$/progress` "end"
+    event as a normal completion, so `find_referencing_symbols` and other cross-file queries
+    silently returned an empty result instead of surfacing the crash. The crash is now detected
+    independently via the `window/logMessage` notification tsserver already sends, and the
+    affected wait now raises instead of reporting success (#1814)
+  - Fix: two Serena instances activating the same project concurrently launched their Kotlin LSP
+    processes against the same on-disk index storage location, so the second instance's requests
+    were repeatedly cancelled by the first instance's server. A Kotlin LSP process now claims that
+    storage directory via a lock; a single instance (including across restarts) still gets the
+    same directory, and a second concurrent instance gets a directory of its own instead of
+    contending for the first one's (#1966)
+  - Fix: the per-instance fallback storage directory introduced by the concurrent-instance fix above
+    was never removed, so every lock collision permanently leaked a multi-MB IntelliJ index directory;
+    it is now deleted when the instance releases its storage lock
+  - Fix: document symbol caching did not account for language-server-specific post-processing of
+    symbols, which was applied outside the caches; the processing of language servers that post-process
+    symbols (e.g. Go, Nix, Fortran, F#, Vue) was therefore repeated on every request or, if it mutated
+    symbols in place, re-applied to already processed cached results
+  - Elixir: Bump Expert to v0.1.10, fixing several behavioural issues (#2098)
+  - Fix: the AL language server executable was only searched for in a platform-specific subdirectory of
+    the extension's `bin` directory (`bin/win32/...` on Windows). Some AL extension builds (e.g.
+    18.0.2732683, as opposed to the 18.0.2242655 that Serena pins) have no such subdirectories and
+    place the executable directly in `bin`, so activating an AL project failed with "AL Language
+    Server executable not found" for users whose VS Code extension was on such a build. Both layouts
+    are now probed, the platform subdirectory first (#2069)
+  - Fix: C# solution/project discovery traversed and opened paths matched by the configured ignore
+    patterns (incl. `.gitignore`), slowing down startup and loading ignored projects in Roslyn (#1999)
+  - Remove support for migration of legacy cache format (document_symbols_cache_v23-06-25.pkl)
+  - Fix: Avoid file/package symbols leaking into the high-level document symbol cache 
+    as a result of `request_full_symbol_tree` linking document root symbols to file symbols
+    by modifying the cached symbols in place; shallow copies are now made before linking (#2126)
+  - Fix: `find_referencing_symbols` dropped callers that have the same name and kind as the target
+    symbol (e.g. `a.run` calling `b.run` in Gleam) whenever the language server listed them after the
+    target's declaration, mistaking them for imports; a referencing symbol is now only treated as an
+    import if the reference lies within its name (#2133)
+
+* Dependencies:
+  - Fix: declare `click` as a direct dependency; all three console scripts (`serena`, `serena-agent`,
+    `serena-hooks`) import it but it was only available transitively
+  - Remove the redundant `dotenv` dependency; the `dotenv` module is provided by `python-dotenv`
+  - Update `PyJWT` from 2.12.0 to 2.13.0
+  - Upgrade the `mcp` SDK from 1.28.1 to 2.2.0
+  - Upgrade `urllib3` from 2.7.0 to 2.8.0
+
+# v1.7.0 (2026-08-09)
+
+* General:
+  - Fix: Race conditions in ProjectServer when used by multiple clients in parallel   
+  - Fix: `GitignoreParser` interpolated a directory's name unescaped into gitignore pattern position;
+    a directory named with pattern metacharacters (e.g. a stray `***`) could turn a scoped pattern
+    into one matching far more than intended, silently excluding most or all of the project from
+    indexing #1806
+  - Fix: cleanup of an independently-started LSP process and its children required enumerating the
+    system process table (`psutil`), which can be denied even for processes Serena owns in a
+    sandboxed environment; cleanup now signals the known process group directly (#1818)
+  - Fix: the README, the Language Support docs page and the project template omitted several already-supported language servers
+  - Fix: a tool call exceeding the timeout blocked the task executor indefinitely; the executor now
+    recovers without user-induced cancellation
+  - Add Grok Build support (context `grok`, setup CLI, hooks)
+  - The `languages` key in project configurations was changed to `language_servers` to better reflect
+    the actual semantics (configurations are automatically migrated)
+  - Fix: glob matching bare `*` and `?` in non-`**` patterns matched across `/`, contradicting documented behaviour #1732
+  - Project activation errors are now reported to the client in Serena's system prompt, instead of failures 
+    being visible only in the log. This applies both to a failed activation of an explicitly given project and to a 
+    failed `--project-from-cwd` auto-detection (#1773).
+  - Enclose sub-prompts in XML-like tags to make scopes explicit
+  - Prompts and prompt templates:
+    - Allow initial project prompts and project-specific newly activated modes to use templating
+    - Support function `embed_memory` in prompt templates to inline a memory's contents
+
+* Security:
+  - ProjectServer: Configure trusted hosts (local hosts only) when listening on localhost
+  - SerenaDashboardTrayManager: Configure trusted hosts (local hosts only)
+  - Use sandboxed environment for prompt templating, preventing attackers from using custom prompts to
+    execute commands in an uncontrolled manner
+
+* CLI:
+  - Fix: `start-mcp-server` help text for `--project-from-cwd` falsely promised a fallback to the CWD, which was 
+    removed in v1.0.0 #1773
+  - Improve `project health-check`:
+    - Fix: Process always exited with code 0, even when the check failed, so callers 
+      (CI, scripts) could not act on its verdict; it now exits with code 1 on failure. A `find_symbol` 
+      result without any matches is now reported as a failure rather than as a warning.
+    - Disable symbol groupers, remove flawed pattern search test
+
+* Tools:
+  - `find_symbol`, `jet_brains_find_symbol`: Change tool description to improve tool search results in clients that load tools dynamically
+  - `get_current_config`: Result now includes language server status #1782
+  - More liberal handling of ignored paths in file access tools:
+    - Tools that explicitly target a single file (`create_text_file`, `read_file`, `replace_content`) no longer 
+      consider ignored paths in general, i.e. all files can be accessed. 
+      When a path is explicitly accessed, we should not try to prevent it; the agent is assumed to have a good reason 
+      for doing so.
+    - Tools that traverse a subtree of the project (`list_dir`, `find_file`, `search_for_pattern`) now all have an 
+      option `skip_ignored_files` (whether to skip ignored sub-paths).
+      Note that if the base path is itself ignored, ignored paths cannot be considered.
+  - `read_file`: More lenient index handling, allowing negative indices for `end_index`
+
+* JetBrains:
+  - `jet_brains_find_symbol`: Disallow wildcard-only search, delegating to overview tool if request is for file
+
+* Language Servers: 
+  - Add Gleam language server support (via the `gleam lsp` server bundled with the Gleam compiler)
+  - Allow language server priorities to be configured in `serena_config.yml` (for auto-detection during 
+    project creation) 
+  - Add support for Nextflow (language server `nextflow`), using the official
+    [Nextflow language server](https://github.com/nextflow-io/language-server); the JAR is downloaded
+    automatically, a Java 17+ runtime is required
+  - Add `python_basedpyright` as an alternative Python language server
+  - Java/JDTLS: stop downloading and loading the unused IntelliCode completion-ranking bundle; the retired
+    `intellicode_version`, `intellicode_xmx` and `intellicode_xms` settings remain accepted but are ignored #1821
+  - Kotlin: update the managed Kotlin LSP from `261.13587.0` to `262.9593.0`, including support for the
+    new platform-specific archive layout and Windows ARM64 builds
+  - Add support for Wolfram Language via the official [WolframResearch LSPServer](https://github.com/WolframResearch/LSPServer) paclet.
+    Requires Wolfram Mathematica 13.0+ or Wolfram Engine 12.1+. Set `WOLFRAM_PATH` environment variable or configure
+    `ls_path` in `ls_specific_settings`. Supports .wl and .wls files with diagnostics, document symbols,
+    within-file references, hover documentation, and formatting.
+  - Nix/nixd: support custom `ls_path` launchers and external JSON settings through `config_path` #1737
+  - Fix: Nix/nixd diagnostics now use published diagnostics instead of the unsupported
+    `textDocument/diagnostic` request, which terminated nixd #1802
+  - Fix: `get_diagnostics_for_file` crashed with `SolidLSPException` for any Ansible file with at least
+    one lint finding, because `ansible-language-server` doesn't implement `textDocument/documentSymbol`
+    and the request used to map diagnostics onto owning symbols just threw. `AnsibleLanguageServer` now
+    overrides that request to return `None` directly, so diagnostics fall back to being grouped under
+    the file-level path as already documented #1758
+  - Fix: pull-diagnostics fallback in `request_text_document_diagnostics` no longer swallows
+    `LanguageServerTerminatedException`, so a crash during a diagnostics pull triggers the existing
+    language-server restart path instead of silently returning no diagnostics #1770
+  - Fix: F#'s `module <Name>` declarations reported a `selectionRange` pointing at the `module`
+    keyword instead of at `<Name>`, so looking up hover/references from a module symbol's position
+    returned the keyword's own docs instead of the module's #925
+  - Fix: Erlang functions could not be addressed by any tool taking an exact name path, because
+    Erlang LS identifies them as `name/arity` and `/` separates name path components. The arity is
+    now separated by `#` instead (e.g. `create_user#4`), so the reported name path round-trips and
+    `find_referencing_symbols`/`replace_symbol_body`/`insert_after_symbol` work on Erlang
+    functions #1797
+  - Fix: `LSPFileBuffer`: a stale content hash could be returned if files are kept open 
+    and file contents were not read before trying to retrieve the hash value  
+  - Fix: Change semantics of file opening (`open_file`) in the language server from "open file (if not already open)"
+    to "ensure that the language server has the (current) contents of the file" (by sending `textDocument/didOpen`
+    or `textDocument/didChange`), as this is always the intention of calling the method.
+    If files were kept open in the language server (which the Svelte and Vue language servers did),
+    the language server was not necessarily informed about updated contents.
+  - Add Deno support (experimental; language server `deno`, backed by the Deno CLI's built-in
+    `deno lsp`). Understands Deno module resolution (`npm:` / `jsr:` / `https:` imports) and the
+    `Deno.*` globals, which the plain TypeScript language server does not. Overlaps TypeScript on
+    file extensions, so it is not auto-detected and must be selected explicitly; requires the
+    `deno` CLI on PATH
+  - Fix: `find_referencing_symbols` reported file-level containers for references located inside Go
+    struct bodies, interface bodies and `const` groups; improve the logic for finding the nearest
+    enclosing symbol, adding the helper function `SymbolKind.is_container` (which is now also
+    applied to identify high-level symbols that should appear in symbol overiews).
+  - Rust: reduce rust-analyzer memory usage and reload churn by disabling cache priming and Cargo autoreload while preserving diagnostics.
+  - `typescript`: Fix: on large projects, the first `find_referencing_symbols`/`request_references` call
+    could silently race tsserver's project load and return incomplete results, because the fixed 2s
+    grace for tsserver to *start* reporting `$/progress` (distinct from the separate, already
+    configurable `indexing_timeout` used to wait for it to *drain*) was hardcoded and not large enough
+    for projects where the initial project-graph resolution itself takes longer than that. The grace
+    is now `indexing_start_grace` (default 5.0s), configurable the same way as `indexing_timeout` and
+    `server_ready_timeout` #1586
+  - Fix: On Linux, a language server process spawned in its own session (the default) is no longer
+    orphaned when Serena is killed without a chance to shut down cleanly (e.g. SIGKILL, OOM) #1490
+  - Language servers and their dependency providers now go through the `subprocess_run` helper instead of
+    calling `subprocess.run` directly (e.g. for installation processes), so all such subprocesses get 
+    `stdin=DEVNULL` and can no longer interfere with the stdio MCP connection #1748
+  - `scala`: Fix: Metals asks via `window/showMessageRequest` whether to import a workspace it has not
+    seen before, and Serena had no handler, so the request failed with `MethodNotFound` and Metals gave
+    up on the import ("Unexpected error initializing server"). No build server was ever connected and
+    every cross-file query fell back to the presentation compiler, which sees one file at a time, unless
+    the project happened to have been imported beforehand by another editor. The three prompts that lead
+    to a build server are now answered; anything else is dismissed, including the choice between several
+    build definitions in one workspace. `ls_specific_settings.scala.auto_import_build: false` opts out
+  - `scala`: Fix: in a repository whose builds live below its root, Metals was given only the repository
+    root as a workspace folder, and its own one-level search takes just the first build it finds — so in
+    a monorepo all but one build were served with no build target, silently returning no cross-file
+    references. The build roots are now detected and passed as workspace folders, one Metals service per
+    build; `ls_specific_settings.scala.project_roots` and `project_root_scan_depth` override the
+    detection #1766
+
+* Dashboard:
+  - Fix: Serena PyPI version check triggered by callback on main thread could delay agent startup #1774
+  - Improvements in `tray_manager` interface mode:
+    - Fix: on macOS, the `tray_manager` interface put an icon in the Dock and in the app switcher
+      (should only use menu bar icon)
+    - On Serena shutdown, message the tray manager before lengthy project shutdowns
+    - Fix: When dead ports are detected (Serena instance gone), explicitly update the tray menu 
+      immediately (may not update automatically)
+  - Use `tray_manager` interface as new default on macOS
+
+* Hooks:
+  - Add `serena-hooks --client=grok`, including Grok-native PreToolUse allow/deny output.
+  - Use `SessionEnd` for Codex 0.145.0+ cleanup hooks and document the known `Stop` compatibility issue affecting older Codex versions.
+  - PreToolUse remind hook: coerce non-string shell command values instead of failing, and recognize
+    `target_file`/`targetFile` file-path keys (shared payload parsing, applies to all hook clients).
+  - Fix hook input parsing for clients that emit raw control characters in JSON string values #1743.
+
+# v1.6.1 (2026-07-21)
+
+* General:
+  - Fix: `FileUtils.read_file`'s `charset_normalizer` fallback (used when a file cannot be decoded with
+    the project's configured `encoding`) decoded the raw bytes directly and therefore skipped the
+    universal-newline translation that the primary read path applies. CR characters from disk thus
+    reached Serena's in-memory file contents, where the rest of the code assumes LF-normalized text and
+    the `line_ending` setting is meant to be the single point of line-ending translation on write. The
+    fallback now normalizes line endings to LF, consistently with the primary path.
+  - Fix: a symbol whose LSP range ended exactly one line past EOF, at column 0 (the convention for
+    a range covering whole lines through the end of the file), raised `IndexError` in
+    `SymbolBody.get_text`. That one well-defined case is now corrected to end at the actual last
+    line; any other out-of-range end position now raises `InvalidTextLocationError` instead,
+    rather than guessing at a body that could be wrong #1498
+
+* Language Servers:
+  - Fix: Properly differentiate between raw and high-level symbol cache fingerprints, avoiding unnecessary
+    invalidations of the raw cache when only the derived high-level representation changes
+  - Fix: Language servers were not notified of external file system changes, causing some
+    symbolic operations (such as `find_referencing_symbols`) to report stale information.
+    An explicit file system polling mechanism is now used to detect changes prior to the affected
+    tool executions.
+  - Fix: Order of ignore patterns passed to language servers was not respected #1729 
+  - Improve uv-based language server launch command compatibility: Use the more widely supported 
+    `uv tool run` instead of `uv x` #1721
+  - Java (JDT-LS): add `runtimes` to `ls_specific_settings.java`, a list of extra JRE/JDK entries
+    (`name`, `path`, optional `default`/`sources`/`javadoc`) passed through to JDT-LS's
+    `java.configuration.runtimes`. Fixes silently broken JDK type resolution (`java.lang.Object`
+    and other JDK types reported as "cannot be resolved") for projects whose source/target level
+    exceeds the bundled JDK 21 JRE JDT-LS registers by default; configured runtimes extend rather
+    than replace that bundled default. #1478
+  - `gopls`: Fix `replace_symbol_body` corrupting single `type`/`var`/`const` declarations by
+    duplicating the leading keyword (e.g. `type Foo` becoming `type type Foo`). gopls reports the
+    symbol range of such declarations starting at the identifier rather than the keyword (unlike
+    `func` declarations); the range is now extended to include the keyword so the body and the
+    replacement range stay consistent.
+  - `typescript` / `typescript_vts`: No longer ignore directories named `coverage`. This was intended to skip
+    coverage-report output, but matched by bare dirname and so also hid legitimate source directories named
+    `coverage` (e.g. `src/routes/coverage/`) from symbol tools. Generated report dirs are already covered by
+    gitignore. Fixes #1523.
+  - Fix: Restore `erlang` support (broken since v1.6.0 due to an implementation error) 
+
+* Tools:
+  - Fix: `search_for_pattern` marked one line too many as matched whenever a match ended with a line
+    break, because the match's exclusive end index was mapped to a line number directly and therefore
+    resolved to the start of the following line. The line the match ends on is now determined correctly,
+    which also keeps `context_lines_after` aligned.
+  - `safe_delete`: Add heuristic to delete superfluous empty lines after a deletion
+  - `search_for_pattern`: on overflow, the shortening chain now emits each match's first line (full when
+    it fits, otherwise truncated with a trailing '...' and a note) before falling back to bare line
+    numbers, so agents can pick the right match without re-reading files. #1640
+
+* Language Servers:
+  - PHP: treat `.phtml` files as PHP sources by default (all PHP language servers) #1710
+  - PHP/Intelephense: expose `file_filter` via `ls_specific_settings["php"]`, so that additional
+    extensions containing PHP sources (e.g. Drupal's `.module` / `.install` / `.inc` / `.theme`)
+    become visible to the symbol tools and are indexed by the language server #1710
+  - Fix: an LSP `ContentModified` (-32801) response was surfaced as a hard `SolidLSPException`
+    instead of being retried, as the spec expects for requests a client declared it will reissue.
+    `send_request` now retries such responses for methods declared via a server's
+    `retryOnContentModified` capability; rust-analyzer declares `textDocument/hover`, fixing the
+    flaky `test_find_symbol[rust_add_function]` on windows-latest. #1724
+
+* JetBrains:
+  - Allow external files from dependencies (specified via references like "<ext:FileUtil.class|472e0a13>") to be
+    - read via `ReadFileTool` 
+    - searched via `SearchForPatternTool`
+    - used in `JetBrainsFindDeclarationTool`
+    when using plugin version 2023.3.3+
+
+* Dashboard:
+  - The version display now indicates when a newer Serena version is available
+  - Fix: the "Last Execution" panel stayed on "Loading..." forever when there was no logged execution
+    (e.g. a fresh server / no tool run yet), because `loadLastExecution()` only rendered the panel when
+    the backend returned a non-null execution; the empty state is now rendered via the existing
+    `displayLastExecution(null)` path, mirroring the other panels #1713
+
+* Dependencies:
+  - Bump `mcp` from 1.27.0 to 1.28.1
+  - Bump `anthropic` from 0.59.0 to 0.117.0
+
+# v1.6.0 (2026-07-16)
+
+* General:
+  - Speed up MCP startup when auto-creating projects at startup (e.g. using `--project-from-cwd`) by
+    determining the project's languages in a background thread #1683
+  - Fix: in `glob_to_regex` / `search_text(is_glob=True)`, a `?` wildcard matched two characters instead
+    of one (it emitted `..` rather than `.`); it now matches a single character, consistent with the
+    `?` semantics documented for `glob_match` and the `test_??.py` example in `search_text`'s docstring.
+  - Add notion of trusted projects via new global configuration setting `trusted_project_path_patterns`.
+    Current effects:
+    - `ls_specific_settings` defined in project configurations will only be applied for trusted projects
+    - `activation_command` (and `activation_command_timeout`) defined in project configurations will only
+      be executed for trusted projects: an optional shell command run in the project root before the
+      language backend initialises (e.g. to generate source files a language server needs to index).
+      Exit code is the primary completion signal; `activation_command_timeout` (default 180s) is a safety
+      backstop — on expiry the process is killed and activation continues. Failures and timeouts are
+      logged but do not abort activation.
+  - Fix: context or mode argument referencing a known name (e.g. `--context anitgravity`) could result in   
+    incorrect file access if a corresponding local file existed (e.g. `./antigravity` binary);
+    file access is now guarded with path detection (file ending or path separator must be present)
+  - Adjust prompt generation mechanism to use newly introduced tool name mapping `tool_names`, allowing
+    prompts to directly use tool names that match the active language backend (and removing the need
+    for additional prompts that explain tool name differences)
+  - Improve quoting/escaping of arguments in shell executions on Windows (via `oslex` dependency)
+  - Fix: a registered project whose root directory was deleted while Serena was already running could break
+    `activate_project`/project lookup, raising `FileNotFoundError` in `RegisteredProject.matches_root_path`
+  - Update prompts/instructions: Serena instructions manual, modes (editing, interactive) 
+  - Allow structured tool output to be configured on a per-context basis, disabling it for Claude Code
+    (which does not correctly unpack structured output) #1042
+  - Fix: Project-specific filtering of files for source files ignored the language backend. 
+    The check is really only possible for LSP. 
+  - Fix: File system permission errors during gitignore scanning were not caught #1624
+  - During project creation, language composition percentages are now computed relative to the total number 
+    of recognised source files instead of all files, i.e. unrecognised files are ignored in the percentage 
+    computation.
+  - Consider all LSP-compliant line endings ("\n", "\r\n" and "\r") in `TextUtils`, noting that 
+    only "\n" appears in files read by `FileUtils.read_file` (Serena's default reading mechanism)
+  - Fix: Apply consistent line splitting across tools, uniformly applying the LSP splitting semantics; 
+    affects `search_text` used by `search_for_pattern` tool (reported in #1684)
+  - Fix in `TextUtils` (used by editors): Deleting up to the end of the file, referencing the line one past 
+    the end of the file (particularly for files with no newline at end of file) raised `InvalidTextLocationError`
+    instead of accepting the deletion (change in `TextUtils.delete_text_between_positions`,
+    which now accepts the end position similar to `insert_text_at_position`).
+  - Fix: glob pattern expansion in `expand_braces` did not terminate with empty or unbalanced braces #1690
+  - Fix: Update model used by Anthropic token estimator
+
+* CLI:
+  - Fix `--project-from-cwd` hijacking git worktrees nested under a Serena project. `find_project_root`
+    now walks up in a single pass so the nearest project boundary wins (either a `.serena/project.yml`
+    or a `.git`, including worktree/submodule pointer files), instead of preferring an ancestor's
+    `.serena/project.yml` over a closer `.git`. This previously bound CLI agents (Claude Code, Codex,
+    Gemini) launched from inside a worktree to the parent repo, causing stale reads and misdirected edits.
+  - Fix: CLI flags on `start-mcp-server` could incorrectly be saved to the global configuration file if the
+    list of projects was modified (triggering a save of the configuration with transient overrides applied)
+
+* Tools:
+  - New tool: `replace_in_files`
+  - `get_symbols_overview`, `jet_brains_get_symbols_overview`: Improved default for `depth` parameter
+  - Add tool parameter alias support, adding `name_path` as an alias for `name_path_pattern` in `find_symbol` tools
+  - Allow `query_project` tool to access read-only tools that are not enabled in the current configuration
+  - Make tool call errors surface explicitly as errors at the MCP protocol level
+
+* Language Servers:
+  - Fix: `SolidLanguageServer.is_ignored_path` raised `FileNotFoundError` for paths that are not present
+    on disk, crashing symbol tools when a language server reported locations of generated files
+    (e.g. JDTLS reporting Lombok-generated classes under `target/classes`). Missing paths are now
+    classified by the usual ignore rules, and symbol locations resolving to non-existent files are skipped.
+  - Solidity: fix diagnostics intermittently coming back empty on slow or cold environments (macOS/Windows CI).
+  - Perl: expose `file_filter` and `ignore_dirs` via `ls_specific_settings["perl"]`, so projects with
+    non-standard extensions (e.g. `.cgi`, `.psgi`) can make those files visible to Perl::LanguageServer.
+    Configured extensions are also synced into the Perl source-file matcher (now a cached singleton),
+    keeping `find_symbol` / symbol indexing consistent with the LS; the matcher is reset on every
+    language server activation so one project's reconfiguration does not leak into the next.
+    `FilenameMatcher` gains `add_extensions` / `reset` methods. Defaults are unchanged. #1449
+  - C/C++ (clangd): improve support and documentation for Unreal Engine 5 projects.
+  - HLSL (`shader-language-server`): pass `--locked` to `cargo install` when building from source
+    on macOS (and in the manual-install instructions), honoring the crate's packaged `Cargo.lock`.
+    Without it, fresh dependency resolution pulled in shader-sense 1.4.0, which no longer compiles
+    against the pinned shader_language_server 1.3.1, breaking the macOS CI job.
+  - `typescript_vts`: Add `initialization_options` setting in `ls_specific_settings.typescript_vts`. 
+    Enables Yarn PnP setups with `typescript.tsdk` pointing at the Yarn-generated SDK.
+  - TypeScript/VTS: disable automatic typing acquisition during initialization (no network
+    downloads at startup) and replace the fixed 2-second cross-file reference wait with
+    event-based `$/progress` indexing tracking (configurable `indexing_timeout`, default 30s)
+  - C#: minor fixes in Omnisharp and Roslyn that prevented startup on some systems #1617
+  - `SvelteLanguageServer`: Fix diagnostics requests for TypeScript/JavaScript files incorrectly being
+    processed by the Svelte LS instead of the TypeScript LS.
+  - `SvelteLanguageServer`: Fix document-symbol requests for TypeScript/JavaScript files returning empty
+    results in svelte-only mode (`languages: [svelte]`. #1552
+  - Svelte + TypeScript: make companion TypeScript server raise on readiness and indexing timeouts (instead
+    of silent "proceeding anyway"), so that partial indexing surfaces as a clear failure instead of flaky/wrong
+    cross-file results; add configurable timeouts (`server_ready_timeout`, `indexing_timeout`)
+    and overridable timeout hooks (base TS stays permissive). Svelte test fixture now uses `npm ci` +
+    committed `package-lock.json`.
+  - `JuliaLanguageServer`: Fix the stdio MCP server exiting right after `initialize` ("tools fetch failed")
+    when `julia` is enabled. #1577
+  - `Java`: invalidate JDTLS workspace cache when Java import settings change #1576
+  - `Java`: use `JAVA_HOME` for Gradle import when `use_system_java_home` is enabled and `gradle_java_home`
+    is unset. #1657
+  - `Java`: stop hard-ignoring directories named `target`/`build`/`bin`/`out`/`classes`/`dist`/`lib` in
+    `EclipseJDTLS`. These are all valid Java package identifiers, so ignoring them by name hid legitimate
+    source from the symbol tools even when they were not gitignored. Removed the hardcoded override; real
+    build output is already excluded via `.gitignore`. #1645
+  - Improve quoting of arguments in shell executions
+  - Add LaTeX support (experimental) via [texlab](https://github.com/latex-lsp/texlab).
+  - Add QML support via Qt's [`qmlls`](https://doc.qt.io/qt-6/qtqml-tool-qmlls.html) language
+    server (requires Qt 6 with `qmlls`/`qmlls6` on PATH). #1381
+  - PHP: add support for PHPantom as alternative to the already supported PHP LS #1554.
+  - Add new launch command customization options: `ls_args`, `ls_extra_args` and `ls_base_cmd`
+  - Add new configuration option `ls_workspace_folders` to allow indexed source folders to be specified
+    explicitly. In monorepos, this allows the set of indexed folders to be restricted to a subset of
+    the repository. #1627
+  - Rename configuration option `additional_workspace_folders` to `ls_additional_workspace_folders`
+    and support the option across all language servers (previously limited to TypeScript).
+  - `Pyright`: bump timeout for waiting for initial analysis from 5s to 60s.
+
+* JetBrains:
+  - Add configuration option `jetbrains_launch_command`, allowing Serena to spawn IDE instances automatically
+    upon project activation
+  - Fix: `jet_brains_list_inspections` failed when only default parameters were used #1615 
+  - Fix: `jet_brains_run_inspections` returned incorrectly transformed data (malforming snake-case conversion applied to all keys)
+
+* Dashboard:
+  - Make list of trusted hosts configurable, fixing host validation introduced in v1.5.2 allowing only
+    default local hostnames, effectively preventing remote connections
+  - Decouple configuration computation from the agent's task queue by introducing events for agent config/status updates.
+    This allows the dashboard to display the configuration while the project provided at startup is still initialising. #1064
+  - Fix empty executions queue displaying "Loading..."
+  - Tray manager: Add NixOS-support for AppIndicator-based trays (e.g., most Wayland-trays) to the package in flake.nix.
+  - Fix: Wait for the subprocess that opens the browser window, preventing zombie processes #1488 
+
+* Hooks:
+  - Handle tool_input passed as string gracefully instead of failing (Copilot CLI sends strings).
+
+* Memories:
+  - Make memory iteration follow symbolic links 
+  - Fix: a memory name that was absolute (e.g. `/etc/cron.d/backdoor`) or contained empty path
+    segments could write outside the `memories` folder.
+
+* Dependencies:
+  - Add dependency `oslex`
+
+* Performance:
+  - Speed up nested `.gitignore` discovery for large repositories: `GitignoreParser.should_ignore` consults only the specs on a path's ancestor chain (specs are scoped to their own directory), and the discovery walk is pruned by the global/project `ignored_paths`, so excluded subtrees are never entered. A 145k-directory tree with 4,146 nested `.gitignore` files now gathers its ignore spec in 0.4 s instead of 23 min.
+    Behaviour changes: configured `ignored_paths` now have the final say, applied after every `.gitignore` pattern in their configured order (previously a `.gitignore` negation could re-include a configured exclusion; a configured re-inclusion is no longer narrowed by a nested `.gitignore`); directory names with surrounding whitespace no longer leak their `.gitignore` onto sibling directories; gitignore-derived patterns are no longer separator-normalised on Windows, which corrupted the escape backslashes introduced in #1806.
+
+# v1.5.3 (2026-05-26)
+
+Add meta-data for the GitHub MCP registry
+
+# v1.5.2 (2026-05-26)
+
+* General:
+  - Not existing paths return `False` on is ignored checks (instead of raising an error)
+  - Add `serena-agent` CLI command so that `uvx serena-agent` can be used as entrypoint.
+  - Fortls and pyright are now installed on the fly instead of being bundled in the serena-agent package.
+
+* Dashboard:
+  - Add host validation
+
+* Hooks:
+  - Extend list of extensions that are considered code files (affects the reminder hook counter).
+
+# v1.5.1 (2026-05-18)
+
+* General:
+  - Fix `onboarding_tool`: Used incorrect path to bootstrap memory (regression in v1.5.0)  
+ 
+* Language Servers:
+  - Add CUE support via the LSP mode of the official [`cue` CLI](https://github.com/cue-lang/cue) (`cue lsp`).
+
+# v1.5.0 (2026-05-18)
+
+* General:
+  - Make tool descriptions more amenable to tool search mechanisms as now used in several clients (e.g. avoid referencing other tools' names, etc.)
+  - Onboarding is now less invasive (LLM is instructed to ask the user whether to proceed)
+
+* Language Servers:
+  - No longer store temporary files (e.g. downloads) in `~/solidlsp_tmp`; instead, use OS-specific temporary directories
+  - Add GDScript (Godot Engine) support. Serena connects over TCP to the Godot editor's built-in LSP server (port 6008, same for Godot 3 and 4) — no separate language server process to install. Godot major version is auto-detected from `config_version` in `project.godot`. Note: Godot's LSP does not implement `workspace/symbol`; first workspace-wide scans fall back to per-file requests and can be slow for large projects (results are cached to disk). See the [GDScript Setup Guide](https://oraios.github.io/serena/03-special-guides/godot_gdscript_setup_guide_for_serena.html) for details. Closes #1446.
+
+* Dashboard:
+  - UI polish: switch UI font to Inter (with system fallbacks) and use JetBrains Mono only for code/logs/paths/identifiers; refine the light/dark palette with softer borders, clearer text hierarchy, and a more nuanced shadow/elevation system; introduce a consistent spacing scale; keep the orange accent.
+  - Modal markup cleanup: extract shared CSS classes (`.modal-info`, `.modal-hint`, `.modal-prompt`, `.modal-field`, `.modal-input`, `.modal-select`, `.modal-textarea`, `.modal-actions`, `.btn-secondary`) and remove duplicated inline styles from all seven modals. Inputs and textareas get an accent-colored focus ring; the modal backdrop has a subtle blur.
+  - Add Language: replace the native `<select>` with a filterable combobox — type to filter, keyboard navigation (Up/Down/Enter/Esc), substring highlight, click-outside to close. The typed value is validated against the available languages list before submission.
+
+* Memories:
+  - Memories can now reference each other using the `mem:<name>` convention. Renames
+    propagate to all references automatically. See the [reference convention](https://oraios.github.io/serena/02-usage/045_memories.html#referencing-memories-from-other-memories).
+  - Onboarding now seeds a `memory_maintenance` memory describing the memory-style and conventions, 
+    and the agent is instructed to read it before writing any other memories. 
+    A `global/memory_maintenance` memory takes precedence over the per-project seed. 
+    See the [memory maintenance section](https://oraios.github.io/serena/02-usage/045_memories.html#the-memory-maintenance-memory).
+   
+* CLI:
+  - Add `serena memories` CLI command group: `list`, `read`, `write`, `check` (referential
+    integrity report) and `auto-prefix-references` (heuristic rewrite of bare occurrences).
+    See the [CLI subcommands](https://oraios.github.io/serena/02-usage/045_memories.html#cli-subcommands).
+
+* Tools:
+  - `search_for_pattern`: Add parameter `multiline`
+  - Delete `check_onboarding_performed` tool (instead extend project activation message)
+
+# v1.3.0 (2026-05-11)
+
+* General:
+  - Breaking change in mode definitions: Projects (project.yml) can no longer override `base_modes`.
+    Instead, they can define `added_modes` to add modes on top of base and default modes.  
+    See updated [documentation on modes](https://oraios.github.io/serena/02-usage/050_configuration.html#modes).
+  - Serena's default configuration now uses `interactive` and `editing` as `base_modes` instead of as `default_modes`.
+  - Fixed path validation in `search_for_pattern` tool (thanks to [@dodge1218](https://github.com/dodge1218) for the report)
+  - Fix: In HTTP/SSE mode, a client disconnection triggered a partial agent shutdown (project deactivation, dashboard manager & GUI viewer shutdown)
+  
+* JetBrains:
+  - Add new tools:
+    - `jet_brains_list_inspections`: Lists available IDE inspections (akin to diagnostics), optionally filtered by language or group
+    - `jet_brains_run_inspections`: Runs IDE inspections on a file and returns the results
+
+* LSP Backend:
+  - Add cross-package reference support via `additional_workspace_folders` setting (currently implemented for TypeScript).
+  - Add new tools:
+    - `find_declaration`: Finds the declaration/definition of a symbol
+    - `find_implementations`: Finds the implementations of an interface or abstract method
+    - `get_diagnostics_for_file`: Retrieves diagnostics for a specific file (errors, warnings, etc.)
+    - `get_diagnostics_for_symbol`: Retrieves diagnostics pertaining to a specific symbol
+
+* Language Servers:
+  - Add **Svelte** support via `svelte-language-server@0.18.0`, installed with npm into Serena-managed language-server resources. The `svelte` language handles `.svelte` Single File Components plus TypeScript/JavaScript files for Svelte projects; use it instead of also enabling `typescript` unless intentionally running multiple language servers.
+  - Elixir (`elixir-tools/next-ls`): Fix deadlock in monorepo projects where `mix.exs` lives in a subdirectory. The server now searches immediate subdirectories when no `mix.exs` is found at the repository root. #1444
+  - Java (`eclipse.jdt.ls`): Add upstream JDTLS mode for offline / restricted-network use. Setting both `jdtls_path` and `lombok_path` in `ls_specific_settings.java` makes Serena use an existing upstream JDTLS installation (e.g. `brew install jdtls`) and the system JDK 21+, skipping the ~500 MB vscode-java VSIX, Gradle, and IntelliCode downloads. New related setting `java_home` lets the user override the JDK used to launch JDTLS. Default behavior unchanged — the JDTLS workspace hash is preserved bit-for-bit for users on the default route, so existing project caches are reused without a one-time reindex; the launcher path is mixed into the hash only when `jdtls_path` is set, isolating upstream installations from the default workspace. #1415
+  - Java (eclipse.jdt.ls): Lombok-generated methods (getters/setters, builder(), equals/hashCode/toString, etc.) are now included in symbol-based tools (find_symbol, get_symbols_overview, edits). Added lombok_show_generated setting (default: on) to toggle this. Updated bundled vscode-java to 1.54.0-923. Issue #1432.
+  - Add Ada / SPARK support using AdaCore's [Ada Language Server](https://github.com/AdaCore/ada_language_server). Auto-downloads the official prebuilt ALS binary (linux-x64/arm64, darwin-x64/arm64, win32-x64). A single `ada` language covers both Ada and SPARK, since the server uses the same `.ads`/`.adb` files for both and distinguishes SPARK by source-level pragmas/aspects. Users can override the binary by setting `ls_specific_settings.ada.ls_path` to a pre-installed `ada_language_server` (e.g. from Alire, GNAT Studio, or the VS Code Ada extension).
+  - Add Angular (experimental) via a dual-server architecture: `@angular/language-server` (ngserver) handles standalone `.html` template files, while a companion `typescript-language-server` with `@angular/language-service` loaded as a tsserver plugin handles all `.ts` operations including inline templates. Provides type-aware navigation between templates and component classes. Requires Node.js, npm, and `@angular/core` installed in the project (`npm install` in the project root). Subsumes `typescript`+`html` for `.ts`/`.html` files when active; SCSS is not subsumed.
+  - Add HTML (experimental) using `vscode-html-language-server` from the `vscode-langservers-extracted` npm package. Provides in-file element/id symbols via documentSymbol; cross-file references are not meaningful for HTML. Also used as a companion server by the Angular LS for plain HTML documentSymbol support.
+  - Add SCSS / Sass / CSS (experimental) using [some-sass-language-server](https://github.com/wkillerud/some-sass). Handles `.scss`, `.sass`, and `.css` through one server, with full `@use`/`@forward` workspace-wide go-to-definition and find-references for variables, mixins, and functions across Sass files. The `.css` path uses the same `vscode-css-languageservice` engine that powers the standalone CSS LS; CSS feature toggles default off upstream and are flipped on at startup so symbols, hover, completion, and syntax-level diagnostics work for plain CSS as well.
+  - Add 1C / OneScript support using [BSL Language Server](https://github.com/1c-syntax/bsl-language-server/).
+  - Add support for more filenames to be considered by ccls and clangd.
+  - Clojure (`clojure-lsp`): Fix incomplete `find_referencing_symbols` results in multi-module monorepos. clojure-lsp only discovers source paths from the descriptor at the workspace root and does not recurse for sub-module `deps.edn` / `project.clj` / `shadow-cljs.edn` / `bb.edn` files, so references in sibling modules were silently missed until those files happened to be opened by `find_symbol` / `get_symbols_overview`. Serena now scans the repo for project descriptors at startup and passes the union of their declared source paths to clojure-lsp via `initializationOptions`. Project-local `.lsp/config.edn` files are honoured as-is (no override). New `ls_specific_settings.clojure` keys: `source_paths` (explicit override) and `config_edn_path` (parse `:source-paths` from a user-supplied config file).
+
+* Hooks:
+  - `serena-hooks auto-approve` now also emits an `allow` decision when Claude Code reports
+    `permission_mode == "auto"`, in addition to the existing `acceptEdits` behavior. #1386
+  - Extension: heuristics for parsing commands and firing a hook on too many greps or reads. Important for clients that, unlike claude code, don't have dedicated grep/read tools.
+  - Read hook now only fires on reads of code files (using heuristics to parse the read command string)
+  - Reminder hook now also counts and fires on usages of serena's non-symbolic tools.
+
+# v1.2.0 (2026-04-27)
+
+* General:
+  - Fix: Check for ignored path ignored `.git` folder only at the top level, not in every subdirectory (`Project._is_ignored_relative_path`) #1350
+  - `GetSymbolsOverviewTool`: ignored paths were not respected in LSP variant (fix in `SolidLanguageServer`)
+  - Fix: Duplicate comments in re-saved YAML configuration files #1285
+  - Prompt provision improvements (project activation, initial instructions):
+     - Prompt provision is now session-aware, i.e. when using the MCP server in HTTP mode, prompts are provided for each session separately, 
+       ensuring that the necessary information is always provided to the LLM
+     - Fix: Prompts of dynamically activated modes (upon project activation) were not necessarily passed to the LLM (only in the system prompt via
+       `initial_instructions`). Now they are passed directly in the activation message (and excluded from a subsequent `initial_instructions` call).
+     - Fix: Project activation message was provided more than once for case of dynamic project activation followed
+       by `initial_instructions` #1372
+     - Always provide full activation message upon calling `activate_project` (even if project was already active in the same session) #1384
+       This is necessary, because some clients (e.g. Claude Desktop) will reuse a single session across chats.
+  - Security: Forbid `".."` in memory names to disallow accessing files outside dedicated memory directories
+  - Security: Add check for tool being read-only in the project server (previously only checked in `query_project` tool, i.e. client side)
+  - Usage reporting now also includes the name of the Serena context that is used 
+  - Fix: restricted `insert_after_symbol` to raise if used on an assignment or similar (can't reliably determine the symbol range)
+  - Fix: Failure to collect project ignore spec now logs the error and downstream tasks fail fast, fixing hanging LS initialisation
+  - Improve loading of `project.yml` files: Gracefully handle user errors involving incorrect use of None/empty instead of list
+  - Project server: 
+     - `query_project`: Support use of project root instead of project name #1388
+     - `list_queryable_projects`: Return both project names and project roots 
+  - Fix: `search_for_pattern` tool returned 1-based line numbers (in contrast to all other tools); cause: implementation of `text_utils.search_text`
+  - Serena's system prompt (a.k.a. the 'Serena Instructions Manual') is now provided lazily. 
+    At MCP connection time, only a one-sentence bootstrap prompt is provided.
+    The `initial_instructions` tool provides the full prompt on demand, keeping the initial context lean.
+  - Add `serena_info` tool for on-demand retrieval of usage information
+
+* CLI:
+  - Support `serena --version` CLI command for displaying the current version #1347
+  - Extend `prompts` subcommand with `print-prompt-template` and `print-cc-system-prompt-override`, improve `list` subcommand
+
+* Clients:
+  - Document workaround to make Claude Code use Serena's tools after recent degradations caused by changes in CC harness and Opus 4.7 release.
+
+* JetBrains:
+  - Add `debug` tool: The agent can set breakpoints, inspect variables, evaluate expressions and control execution flow
+    by directly interacting with the IDE's debugger, using a REPL-style interface for maximum flexibility.  
+  - `move` and `safe_delete` tools: transform empty string to None (counteracts client errors)
+
+* Dependencies:
+  - `pywebview`: Switch back to official release (new version 6.2) #1253
+  - `mcp`: Update from `1.26.0` to `1.27.0`
+
+* Evaluations:
+  - Added new evaluations for Junie Plugin with Opus 4.6 and GLM 5.1 in Claude Code.
+
+* Language Servers:
+  - Fix: clangd capability checks now tolerate valid initialize response shape differences and invalidate cached C++ document symbols when clangd/compile commands context changes #1359                                                                                                                                                                                                            
+  - Fix: `rename_symbol` for Vue files now correctly propagates edits to the TypeScript server, enabling cross-file renames in `.vue` files 
+  - Fix: Lean4 stale cache — empty document symbol responses (returned before `lake build` completes) are no longer persisted, preventing symbols from being permanently hidden #1356
+  - Add JSON language server support via `vscode-json-languageserver` (experimental) #1391
+  - Fix: Elixir/Expert deadlock on startup — Expert's build pipeline requires a `textDocument/didOpen` notification to start; Serena now opens `mix.exs` immediately after `initialized` so Expert begins compiling instead of waiting indefinitely #1397
+
+* Dashboard:
+  - Add configurable dashboard interface mode (new global configuration setting `web_dashboard_interface`):
+    Three modes (browser, native app with tray, tray manager for aggregating multiple instances) are supported, depending on the OS
+  - Fix: Memory leaks in frontend when using Chromium-based browsers/Windows webview #1389
+
+* Hooks:
+  - Adjusted wording of startup hook, improving project activation instructions #1401.
+
+# v1.1.2 (2026-04-14)
+
+* General:
   - Support environment variable `SERENA_USAGE_REPORTING` (set to `false` to disable usage reporting)
   - Extended the list of always ignored directories (by language servers) with common cases.
+  - Improve exposed toolset: With mode switching no longer being a feature, we now fully apply tool exclusions 
+    defined by modes when in a single-project context (limiting exposed tools to a minimum)
+  - Fix: When scanning for `.gitignore` files, the presence of files that could not be made relative 
+    to the project root would cause the scan to fail. #1317
 
-JetBrains: 
+* Dashboard:
+  - Fix handling of read news, saving each read news entry separately #1338
+
+* JetBrains: 
   - Improve handling of `relative_path` parameter 
      - Improve its documentation to avoid usage errors
      - Replace escaped characters in `relative_path` with their unescaped counterparts (&lt; and &gt;)
@@ -14,8 +993,9 @@ JetBrains:
 
 * Language Servers:
   - Add mSL (mIRC Scripting Language) support (custom pygls-based language server; symbols, references, definitions)
+  - Fix initialisation issues in Vue language server #1333
 
-# 1.1.1
+# v1.1.1 (2026-04-12)
 
 * General:
   - Enable cert verification for HTTPS request to oraios-software.de #1320
@@ -27,7 +1007,7 @@ JetBrains:
   - Fix Dart LSP returning only symbol name as body instead of full method body.
 
 
-# 1.1.0
+# v1.1.0 (2026-04-11)
 
 * General:
   - **Major**: Add commands for hooks and documentation of recommended setup. Consider setting up the [recommended hooks](https://oraios.github.io/serena/02-usage/030_clients.html) !
@@ -50,7 +1030,7 @@ JetBrains:
     Some clients would terminate the MCP server in a way that did not ensure proper termination.
   - Fix: Manual server shutdown triggered by GUI tool/dashboard not cleaning everything up.
 
-# 1.0.0
+# v1.0.0 (2026-04-03)
 
 * General:
     * Add monorepo/multi-language support
@@ -102,36 +1082,36 @@ JetBrains:
 
 * Language support:
 
-  * **Add support for Lean 4** via built-in `lean --server` with cross-file reference support (requires `lean` and `lake` via [elan](https://github.com/leanprover/elan))
-  * **Add support for OCaml** via ocaml-lsp-server with cross-file reference support on OCaml 5.2+ (requires opam; see [setup guide](docs/03-special-guides/ocaml_setup_guide_for_serena.md))
-  * **Add Phpactor as alternative PHP language server** (specify `php_phpactor` as language; requires PHP 8.1+)
-  * **Add support for Fortran** via fortls language server (requires `pip install fortls`)
-  * **Add partial support for Groovy** requires user-provided Groovy language server JAR (see [setup guide](docs/03-special-guides/groovy_setup_guide_for_serena.md))
-  * **Add support for Julia** via LanguageServer.jl
-  * **Add support for Haskell** via Haskell Language Server (HLS) with automatic discovery via ghcup, stack, or system PATH; supports both Stack and Cabal projects
-  * **Add support for Scala** via Metals language server (requires some [manual setup](docs/03-special-guides/scala_setup_guide_for_serena.md))
-  * **Add support for F#** via FsAutoComplete/Ionide LSP server. 
-  * **Add support for Elm** via @elm-tooling/elm-language-server (automatically downloads if not installed; requires Elm compiler)
-  * **Add support for Perl** via Perl::LanguageServer with LSP integration for .pl, .pm, and .t files
-  * **Add support for AL (Application Language)** for Microsoft Dynamics 365 Business Central development. Requires VS Code AL extension (ms-dynamics-smb.al).
-  * **Add support for R** via the R languageserver package with LSP integration, performance optimizations, and fallback symbol extraction
-  * **Add support for Zig** via ZLS (cross-file references may not fully work on Windows)
-  * **Add support for Lua** via lua-language-server
-  * **Add support for Nix** requires nixd installation (Windows not supported)
-  * **Add experimental support for YAML** via yaml-language-server with LSP integration for .yaml and .yml files
-  * **Add support for TOML** via Taplo language server with automatic binary download, validation, formatting, and schema support for .toml files
-  * **Dart now officially supported**: Dart was always working, but now tests were added, and it is promoted to "officially supported"
-  * **Rust now uses already installed rustup**: The rust-analyzer is no longer bundled with Serena. Instead, it uses the rust-analyzer from your Rust toolchain managed by rustup. This ensures compatibility with your Rust version and eliminates outdated bundled binaries.
-  * **Kotlin now officially supported**: We now use the official Kotlin LS, tests run through and performance is good, even though the LS is in an early development stage.
-  * **Add support for Erlang** experimental, may hang or be slow, uses the recently archived [erlang_ls](https://github.com/erlang-ls/erlang_ls)
-  * **Ruby dual language server support**: Added ruby-lsp as the modern primary Ruby language server. Solargraph remains available as an experimental legacy option. ruby-lsp supports both .rb and .erb files, while Solargraph supports .rb files only.
-  * **Add support for PowerShell** via PowerShell Editor Services (PSES). Requires `pwsh` (PowerShell Core) to be installed and available in PATH. Supports symbol navigation, go-to-definition, and within-file references for .ps1 files.
-  * **Add support for MATLAB** via the official MathWorks MATLAB Language Server. Requires MATLAB R2021b or later and Node.js. Set `MATLAB_PATH` environment variable or configure `matlab_path` in `ls_specific_settings`. Supports .m, .mlx, and .mlapp files with code completion, diagnostics, go-to-definition, find references, document symbols, formatting, and rename.
-  * **Add support for Pascal** via the official Pascal Language Server.
-  * **C/C++ alternate LS (ccls)**: Add experimental, opt-in support for ccls as an alternative backend to clangd. Enable via `cpp_ccls` in project configuration. Requires `ccls` installed and ideally a `compile_commands.json` at repo root.
-  * **Add support for Solidity** via the Nomic Foundation `@nomicfoundation/solidity-language-server` (automatically installed via npm)
+  * Add support for Lean 4 via built-in `lean --server` with cross-file reference support (requires `lean` and `lake` via [elan](https://github.com/leanprover/elan))
+  * Add support for OCaml via ocaml-lsp-server with cross-file reference support on OCaml 5.2+ (requires opam; see [setup guide](docs/03-special-guides/ocaml_setup_guide_for_serena.md))
+  * Add Phpactor as alternative PHP language server (specify `php_phpactor` as language; requires PHP 8.1+)
+  * Add support for Fortran via fortls language server (requires `pip install fortls`)
+  * Add partial support for Groovy requires user-provided Groovy language server JAR (see [setup guide](docs/03-special-guides/groovy_setup_guide_for_serena.md))
+  * Add support for Julia via LanguageServer.jl
+  * Add support for Haskell via Haskell Language Server (HLS) with automatic discovery via ghcup, stack, or system PATH; supports both Stack and Cabal projects
+  * Add support for Scala via Metals language server (requires some [manual setup](docs/03-special-guides/scala_setup_guide_for_serena.md))
+  * Add support for F# via FsAutoComplete/Ionide LSP server. 
+  * Add support for Elm via @elm-tooling/elm-language-server (automatically downloads if not installed; requires Elm compiler)
+  * Add support for Perl via Perl::LanguageServer with LSP integration for .pl, .pm, and .t files
+  * Add support for AL (Application Language) for Microsoft Dynamics 365 Business Central development. Requires VS Code AL extension (ms-dynamics-smb.al).
+  * Add support for R via the R languageserver package with LSP integration, performance optimizations, and fallback symbol extraction
+  * Add support for Zig via ZLS (cross-file references may not fully work on Windows)
+  * Add support for Lua via lua-language-server
+  * Add support for Nix requires nixd installation (Windows not supported)
+  * Add experimental support for YAML via yaml-language-server with LSP integration for .yaml and .yml files
+  * Add support for TOML via Taplo language server with automatic binary download, validation, formatting, and schema support for .toml files
+  * Dart now officially supported: Dart was always working, but now tests were added, and it is promoted to "officially supported"
+  * Rust now uses already installed rustup: The rust-analyzer is no longer bundled with Serena. Instead, it uses the rust-analyzer from your Rust toolchain managed by rustup. This ensures compatibility with your Rust version and eliminates outdated bundled binaries.
+  * Kotlin now officially supported: We now use the official Kotlin LS, tests run through and performance is good, even though the LS is in an early development stage.
+  * Add support for Erlang experimental, may hang or be slow, uses the recently archived [erlang_ls](https://github.com/erlang-ls/erlang_ls)
+  * Ruby dual language server support: Added ruby-lsp as the modern primary Ruby language server. Solargraph remains available as an experimental legacy option. ruby-lsp supports both .rb and .erb files, while Solargraph supports .rb files only.
+  * Add support for PowerShell via PowerShell Editor Services (PSES). Requires `pwsh` (PowerShell Core) to be installed and available in PATH. Supports symbol navigation, go-to-definition, and within-file references for .ps1 files.
+  * Add support for MATLAB via the official MathWorks MATLAB Language Server. Requires MATLAB R2021b or later and Node.js. Set `MATLAB_PATH` environment variable or configure `matlab_path` in `ls_specific_settings`. Supports .m, .mlx, and .mlapp files with code completion, diagnostics, go-to-definition, find references, document symbols, formatting, and rename.
+  * Add support for Pascal via the official Pascal Language Server.
+  * C/C++ alternate LS (ccls): Add experimental, opt-in support for ccls as an alternative backend to clangd. Enable via `cpp_ccls` in project configuration. Requires `ccls` installed and ideally a `compile_commands.json` at repo root.
+  * Add support for Solidity via the Nomic Foundation `@nomicfoundation/solidity-language-server` (automatically installed via npm)
 
-# 0.1.4
+# v0.1.4 (2025-08-15)
 
 ## Summary
 
@@ -142,7 +1122,7 @@ Since the last release, several new languages were supported, and the Serena CLI
 We thank all external contributors who made a lot of the improvements possible!
 
 * General:
-  * **Initial instructions no longer need to be loaded by the user**
+  * Initial instructions no longer need to be loaded by the user
   * Significantly extended CLI
   * Removed `replace_regex` tool from `ide-assistant` and `codex` contexts.
     The current string replacement tool in Claude Code seems to be sufficiently efficient and is better
@@ -160,8 +1140,8 @@ We thank all external contributors who made a lot of the improvements possible!
   * Reliably detect language server termination and propagate the respective error all the way
     back to the tool application, where an unexpected termination is handled by restarting the language server
     and subsequently retrying the tool application.
-  * **Add support for Swift**
-  * **Add support for Bash**
+  * Add support for Swift
+  * Add support for Bash
   * Enhance Solargraph (Ruby) integration
     * Automatic Rails project detection via config/application.rb, Rakefile, and Gemfile analysis
     * Ruby/Rails-specific exclude patterns for improved indexing performance (vendor/, .bundle/, tmp/, log/, coverage/)
@@ -175,7 +1155,7 @@ Fixes:
   default shell reconfiguration imposed by Claude Code)
 * Additional wait for initialization in C# language server before requesting references, allowing cross-file references to be found.
 
-# 0.1.3
+# v0.1.3 (2025-07-22)
 
 ## Summary
 
@@ -199,7 +1179,7 @@ stability and performance, as well as extended functionality, improved editing t
 * `SearchForPatternTool`: Better default, extended parameters and description for restricting the search
 * Language support:
    * Better support for C# by switching from `omnisharp` to Microsoft's official C# language server.
-   * **Add support for Clojure, Elixir and Terraform. New language servers for C# and typescript.**
+   * Add support for Clojure, Elixir and Terraform. New language servers for C# and TypeScript.
    * Experimental language server implementations can now be accessed by users through configuring the `language` field
 * Configuration:
    * Add option `web_dashboard_open_on_launch` (allowing the dashboard to be enabled without opening a browser window) 
@@ -288,7 +1268,7 @@ Fixes:
     * FindSymbolTool: allow passing a file for restricting search, not just a directory (Gemini was too dumb to pass directories)
     * Native support for gitignore files for configuring files to be ignored by serena. See also
       in *Language Servers* section below.
-    * **Major Feature**: Allow Serena to switch between projects (project activation)
+    * **Project Switching**: Allow Serena to switch between projects (project activation)
         * Add central Serena configuration in `serena_config.yml`, which 
             * contains the list of available projects
             * allows to configure whether project activation is enabled
@@ -301,7 +1281,7 @@ Fixes:
 * Language Servers:
     * Fix C# language server initialization issue when the project path contains spaces
     * Native support for gitignore in overview, document-tree and find_references operations.
-      This is an **important** addition, since previously things like `venv` and `node_modules` were scanned
+      This is an important addition, since previously things like `venv` and `node_modules` were scanned
       and were likely responsible for slowness of tools and even server crashes (presumably due to OOM errors).
 * Agno: 
     * Fix Agno reloading mechanism causing failures when initializing the sqlite memory database #8

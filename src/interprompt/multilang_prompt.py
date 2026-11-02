@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 import logging
 import os
 from enum import Enum
@@ -12,12 +14,16 @@ log = logging.getLogger(__name__)
 
 
 class PromptTemplate(ToStringMixin, ParameterizedTemplateInterface):
-    def __init__(self, name: str, jinja_template_string: str) -> None:
+    def __init__(self, name: str, jinja_template_string: str, path: str) -> None:
         self.name = name
+        self.path = path
         self._jinja_template = JinjaTemplate(jinja_template_string.strip())
 
     def _tostring_exclude_private(self) -> bool:
         return True
+
+    def get_template_string(self) -> str:
+        return self._jinja_template.get_template_string()
 
     def render(self, **params: Any) -> str:
         return self._jinja_template.render(**params)
@@ -249,6 +255,7 @@ class MultiLangPromptCollection:
         self,
         name: str,
         template_str: str,
+        path: str,
         lang_code: str = DEFAULT_LANG_CODE,
         on_name_collision: Literal["skip", "overwrite", "raise"] = "raise",
     ) -> None:
@@ -259,7 +266,7 @@ class MultiLangPromptCollection:
         :param on_name_collision: how to deal with name/lang_code collisions
         """
         allow_overwrite = False
-        prompt_template = PromptTemplate(name, template_str)
+        prompt_template = PromptTemplate(name, template_str, path=path)
         mlpt = self._multi_lang_prompt_templates.get(name)
         if mlpt is None:
             mlpt = MultiLangPromptTemplate(name)
@@ -320,14 +327,15 @@ class MultiLangPromptCollection:
             except KeyError as e:
                 raise KeyError(f"Invalid yaml structure (missing 'prompts' key) in file {path}") from e
 
-            lang_code = prompts_data.get("lang", DEFAULT_LANG_CODE)
+            lang_code = data.get("lang", DEFAULT_LANG_CODE)
+
             # add the data to the collection
             for prompt_name, prompt_template_or_list in prompts_data.items():
                 if isinstance(prompt_template_or_list, list):
                     self._add_prompt_list(prompt_name, prompt_template_or_list, lang_code=lang_code, on_name_collision=on_name_collision)
                 elif isinstance(prompt_template_or_list, str):
                     self._add_prompt_template(
-                        prompt_name, prompt_template_or_list, lang_code=lang_code, on_name_collision=on_name_collision
+                        prompt_name, prompt_template_or_list, lang_code=lang_code, path=path, on_name_collision=on_name_collision
                     )
                 else:
                     raise ValueError(

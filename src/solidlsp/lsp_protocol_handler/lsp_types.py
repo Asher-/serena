@@ -8,6 +8,7 @@
 """
 This file provides the Python types corresponding to the Typescript types defined in the language server protocol.
 """
+# SPDX-License-Identifier: MIT
 
 from enum import Enum, IntEnum, IntFlag
 from typing import Any, Literal, NotRequired, Union
@@ -181,6 +182,24 @@ class SymbolKind(IntEnum):
     @classmethod
     def _missing_(cls, value: Any) -> "SymbolKind":
         return cls.Unknown
+
+    @staticmethod
+    def is_container(kind: "SymbolKind") -> bool:
+        """Returns True if the symbol kind is a container (i.e. can have children)."""
+        return kind in {
+            SymbolKind.File,
+            SymbolKind.Module,
+            SymbolKind.Namespace,
+            SymbolKind.Package,
+            SymbolKind.Class,
+            SymbolKind.Method,
+            SymbolKind.Constructor,
+            SymbolKind.Enum,
+            SymbolKind.Interface,
+            SymbolKind.Function,
+            SymbolKind.Object,
+            SymbolKind.Struct,
+        }
 
 
 class SymbolTag(IntEnum):
@@ -2456,8 +2475,8 @@ class DocumentSymbol(TypedDict):
     selectionRange: "Range"
     """ The range that should be selected and revealed when this symbol is being picked, e.g the name of a function.
     Must be contained by the `range`. """
-
-    # TODO: I think this type is missing the 'children' field - DJ
+    children: NotRequired[list["DocumentSymbol"]]
+    """ Children of this symbol, e.g. properties of a class. """
 
 
 class DocumentSymbolRegistrationOptions(TypedDict):

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 from typing import Literal, NotRequired, TypedDict
 
 JB_EXTERNAL_FILE_PREFIX = "<ext:"
@@ -89,3 +91,14 @@ class TypeHierarchyNodeDTO(TypedDict):
 class TypeHierarchyResponse(TypedDict):
     hierarchy: NotRequired[list[TypeHierarchyNodeDTO]]
     num_levels_not_included: NotRequired[int]
+
+
+class InspectionInfoDTO(TypedDict):
+    name: str
+    group_path: str
+    language: NotRequired[str]
+    description: NotRequired[str]
+
+
+class ListInspectionsResponse(TypedDict):
+    inspections: list[InspectionInfoDTO]

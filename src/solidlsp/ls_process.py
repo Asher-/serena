@@ -1,26 +1,24 @@
+# SPDX-License-Identifier: MIT
+
 import asyncio
 import json
 import logging
-import os
-import pathlib
-import platform
-import subprocess
+import socket
 import threading
 import time
-from collections.abc import Callable
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from queue import Empty, Queue
-from typing import Any
+from typing import IO, Any, AnyStr
 
-import psutil
 from sensai.util.string import ToStringMixin
 
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerIdLike
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_request import LanguageServerRequest
-from solidlsp.ls_survival import HOLDINGS, LANGUAGE_SERVER_KIND, LanguageServerState, LanguageServerStates, OpenDocument, text_digest
 from solidlsp.lsp_protocol_handler.lsp_requests import LspNotification
-from solidlsp.lsp_protocol_handler.lsp_types import ErrorCodes
+from solidlsp.lsp_protocol_handler.lsp_types import ErrorCodes, LSPErrorCodes
 from solidlsp.lsp_protocol_handler.server import (
     ENCODING,
     LSPError,
@@ -34,10 +32,27 @@ from solidlsp.lsp_protocol_handler.server import (
     make_request,
     make_response,
 )
-from solidlsp.util import supervise
-from solidlsp.util.subprocess_util import quote_arg, subprocess_kwargs
+from solidlsp.util import subprocess_util
+from solidlsp.util.subprocess_util import ManagedSubprocess
 
 log = logging.getLogger(__name__)
+
+
+DEFAULT_LS_REQUEST_TIMEOUT: float = 300.0
+"""
+Default request timeout, in seconds, when callers do not pass an explicit timeout
+"""
+
+# Per the LSP spec, `ContentModified` (-32801) means the server discarded a stale, in-flight
+# computation because the workspace changed underneath it, not that the request itself is
+# invalid. A well-behaved client is expected to retry such requests -- but only requests it has
+# declared, via `general.staleRequestSupport.retryOnContentModified` in its InitializeParams, that
+# it will retry. We honor that contract: `send_request` only retries methods a given language
+# server implementation has actually opted into via `set_content_modified_retry_methods` (see
+# `SolidLanguageServer._create_initialize_params`), so this mechanism is a no-op for any server
+# that hasn't declared such methods.
+_CONTENT_MODIFIED_MAX_ATTEMPTS = 3
+_CONTENT_MODIFIED_RETRY_DELAY = 0.2
 
 
 class LanguageServerTerminatedException(Exception):
@@ -45,10 +60,10 @@ class LanguageServerTerminatedException(Exception):
     Exception raised when the language server process has terminated unexpectedly.
     """
 
-    def __init__(self, message: str, language: Language, cause: Exception | None = None) -> None:
+    def __init__(self, message: str, ls_id: LanguageServerIdLike, cause: Exception | None = None) -> None:
         super().__init__(message)
         self.message = message
-        self.language = language
+        self.ls_id = ls_id
         self.cause = cause
 
     def __str__(self) -> str:
@@ -95,81 +110,78 @@ class Request(ToStringMixin):
             raise e
 
 
-class LanguageServerProcess:
+class LanguageServerInterface(ABC):
     """
-    Represents a language server process and provides methods for communicating with it using the
+    Represents an interface to a language server, providing methods for communicating with it using the
     Language Server Protocol (LSP).
 
     It provides methods for sending requests, responses, and notifications to the server
     and for registering handlers for requests and notifications from the server.
 
     Uses JSON-RPC 2.0 for communication with the server over stdin/stdout.
-
-    Attributes:
-        send: A LspRequest object that can be used to send requests to the server and
-            await for the responses.
-        notify: A LspNotification object that can be used to send notifications to the server.
-        cmd: A string that represents the command to launch the language server process.
-        process: A supervise.Popen object that represents the language server process.
-        request_id: An integer that represents the next available request id for the client.
-        _pending_requests: A dictionary that maps request ids to Request objects that
-            store the results or errors of the requests.
-        on_request_handlers: A dictionary that maps method names to callback functions
-            that handle requests from the server.
-        on_notification_handlers: A dictionary that maps method names to callback functions
-            that handle notifications from the server.
-        _trace_log_fn: An optional function that takes two strings (source and destination) and
-            a payload dictionary, and logs the communication between the client and the server.
-        tasks: A dictionary that maps task ids to asyncio.Task objects that represent
-            the asynchronous tasks created by the handler.
-        task_counter: An integer that represents the next available task id for the handler.
-        loop: An asyncio.AbstractEventLoop object that represents the event loop used by the handler.
-        start_independent_lsp_process: An optional boolean flag that indicates whether to start the
-        language server process in an independent process group. Default is `True`. Setting it to
-        `False` means that the language server process will be in the same process group as the
-        the current process, and any SIGINT and SIGTERM signals will be sent to both processes.
-
     """
 
     def __init__(
         self,
-        process_launch_info: ProcessLaunchInfo,
-        language: Language,
+        ls_id: LanguageServerIdLike,
         determine_log_level: Callable[[str], int],
         logger: Callable[[str, str, StringDict | str], None] | None = None,
-        start_independent_lsp_process: bool = True,
         request_timeout: float | None = None,
     ) -> None:
-        self.language = language
+        """
+        :param ls_id: the language server identifier
+        :param determine_log_level: a function for log lines read from stderr, which determines the log level
+        :param logger: the trace logger function
+        :param request_timeout: the timeout, in seconds, for all requests sent to the language server. If None, no timeout will be applied.
+        """
+        self.ls_id = ls_id
         self._determine_log_level = determine_log_level
         self.send = LanguageServerRequest(self)
+        """
+        an object that can be used to send requests to the server 
+        """
         self.notify = LspNotification(self.send_notification)
-
-        self.process_launch_info = process_launch_info
-        self.process: supervise.Popen | None = None
-        self._state: LanguageServerState | None = None
-        self._states: LanguageServerStates | None = None
-        self._state_lock = threading.Lock()
-        self._reclaimed = 0
-        self._adopted = False
-        self._is_shutting_down = False
-
+        """
+        an object that can be used to send notifications to the server
+        """
         self.request_id = 1
+        """
+        the next request id to use for requests
+        """
         self._pending_requests: dict[Any, Request] = {}
+        """
+        maps request ids to Request objects that store the results or errors of the requests
+        """
         self.on_request_handlers: dict[str, Callable[[Any], Any]] = {}
         self.on_notification_handlers: dict[str, Callable[[Any], None]] = {}
+        """
+        maps method names to callback functions that handle notifications from the server
+        """
+        self._notification_observers: list[Callable[[str, Any], None]] = []
         self._trace_log_fn = logger
-        self.tasks: dict[int, Any] = {}
         self.task_counter = 0
-        self.loop = None
-        self.start_independent_lsp_process = start_independent_lsp_process
+        self._is_stopping = False
+        """
+        Flag indicating whether the interface is in the process of stopping (or already stopped).
+        Exception handlers should check this flag to avoid logging errors that are caused by the interface being stopped.
+        """
+        self._incoming_messages_queue: Queue[bytes] = Queue()
         self._request_timeout = request_timeout
 
         # Add thread locks for shared resources to prevent race conditions
-        self._stdin_lock = threading.Lock()
         self._request_id_lock = threading.Lock()
         self._response_handlers_lock = threading.Lock()
         self._tasks_lock = threading.Lock()
+
+        self._content_modified_retry_methods: frozenset[str] = frozenset()
+        """
+        The set of LSP method names for which `send_request` will retry a `ContentModified`
+        (-32801) response instead of raising immediately. Empty by default, i.e. no retries,
+        since retrying is only correct for methods this client has told the server (via
+        `general.staleRequestSupport.retryOnContentModified`) that it will reissue; see
+        `set_content_modified_retry_methods`.
+        """
+        self._content_modified_max_attempts = _CONTENT_MODIFIED_MAX_ATTEMPTS
 
     def set_request_timeout(self, timeout: float | None) -> None:
         """
@@ -177,165 +189,92 @@ class LanguageServerProcess:
         """
         self._request_timeout = timeout
 
+    def set_content_modified_retry_methods(self, methods: Iterable[str]) -> None:
+        """
+        Declares the LSP method names for which `send_request` should retry `ContentModified`
+        (-32801) responses. This should mirror whatever methods are declared in
+        `general.staleRequestSupport.retryOnContentModified` of the InitializeParams sent to the
+        server: that declaration is a promise to the server about which requests the client will
+        reissue on cancellation, so retrying anything outside of it would contradict what the
+        server was told.
+
+        :param methods: LSP method names (e.g. ``"textDocument/hover"``) eligible for retry.
+        """
+        self._content_modified_retry_methods = frozenset(methods)
+
+    def set_content_modified_max_attempts(self, max_attempts: int) -> None:
+        """Set the bounded attempt count for declared stale requests, including the first attempt."""
+        if max_attempts < 1:
+            raise ValueError("ContentModified max_attempts must be at least 1")
+        self._content_modified_max_attempts = max_attempts
+
+    @abstractmethod
     def is_running(self) -> bool:
         """
-        Checks if the language server process is currently running.
+        Checks whether the language server interface is running
         """
-        return self.process is not None and self.process.returncode is None
 
     def start(self) -> None:
         """
-        Starts the language server process and creates a task to continuously read from its stdout to handle communications
-        from the server to the client
+        Starts communication with the language server
         """
-        child_proc_env = os.environ.copy()
-        child_proc_env.update(self.process_launch_info.env)
+        self._is_stopping = False
+        self._start()
 
-        cmd = self.process_launch_info.cmd
-        is_windows = platform.system() == "Windows"
-        if not isinstance(cmd, str) and not is_windows:
-            # Since we are using the shell, we need to convert the command list to a single string
-            # on Linux/macOS
-            cmd = " ".join(map(quote_arg, cmd))
-        log.info("Starting language server process via command: %s", self.process_launch_info.cmd)
-        kwargs = subprocess_kwargs()
-        kwargs["start_new_session"] = self.start_independent_lsp_process
-
-        # a live server this instance took over when it started or an ended instance held, or else a new one, which
-        # outlives the call that starts it and so names none
-        self._states = LanguageServerStates(self.process_launch_info.cmd, self.process_launch_info.cwd)
-        adoptable = HOLDINGS.take(self._states) or self._states.take_over()
-        self._reclaimed = 0
-        if adoptable is not None:
-            log.info("Adopting language server %s from its record", adoptable.record)
-            self.process = supervise.Popen.adopt(pathlib.Path(adoptable.record), adoptable.stdout_offset)
-            self.request_id = adoptable.request_id
-            self._state, self._adopted = adoptable, True
-        else:
-            self.process = supervise.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stdin=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=child_proc_env,
-                cwd=self.process_launch_info.cwd,
-                shell=True,
-                call_id="",
-                waiting=supervise.Waiting.of(LANGUAGE_SERVER_KIND),
-                keep=True,
-                read_only_stdin=self.process_launch_info.read_only_stdin,
-                **kwargs,
-            )
-            self._state = LanguageServerState(record=str(self.process.record), instance_pid=0)
-        self._state.hold()
-        self._save_state()
-
-        # Check if process terminated immediately
-        if self.process.returncode is not None:
-            log.error("Language server has already terminated/could not be started")
-            # Process has already terminated
-            stderr_data = self.process.stderr.read() if self.process.stderr else b""
-            error_message = stderr_data.decode("utf-8", errors="replace")
-            raise RuntimeError(f"Process terminated immediately with code {self.process.returncode}. Error: {error_message}")
-
-        # start threads to read stdout and stderr of the process
-        threading.Thread(
-            target=self._read_ls_process_stdout,
-            name=f"LSP-stdout-reader:{self.language.value}",
-            daemon=True,
-        ).start()
-        threading.Thread(
-            target=self._read_ls_process_stderr,
-            name=f"LSP-stderr-reader:{self.language.value}",
-            daemon=True,
-        ).start()
-
-    def stop(self) -> None:
+    @abstractmethod
+    def _start(self) -> None:
         """
-        Sends the terminate signal to the language server process and waits for it to exit, with a timeout, killing it if necessary
+        Starts the actual communication mechanism with the language server, calling `_handle_body` for each message received from the
+        language server
         """
-        process = self.process
-        self.process = None
-        if process:
-            self._cleanup_process(process)
-            process.release()
-        if self._states is not None and self._state is not None:
-            self._states.remove(self._state)
-        self._state = None
 
-    def _cleanup_process(self, process: supervise.Popen) -> None:
-        """Clean up a process: close stdin, terminate/kill process, close stdout/stderr."""
-        # Close stdin first to prevent deadlocks
-        # See: https://bugs.python.org/issue35539
-        self._safely_close_pipe(process.stdin)
-
-        # Terminate/kill the process if it's still running
-        if process.returncode is None:
-            self._terminate_or_kill_process(process)
-
-        # Close stdout and stderr pipes after process has exited
-        # This is essential to prevent "I/O operation on closed pipe" errors and
-        # "Event loop is closed" errors during garbage collection
-        # See: https://bugs.python.org/issue41320 and https://github.com/python/cpython/issues/88050
-        self._safely_close_pipe(process.stdout)
-        self._safely_close_pipe(process.stderr)
-
-    def _safely_close_pipe(self, pipe: Any) -> None:
-        """Safely close a pipe, ignoring any exceptions."""
-        if pipe:
-            try:
-                pipe.close()
-            except Exception:
-                pass
-
-    def _terminate_or_kill_process(self, process: supervise.Popen) -> None:
-        """Try to terminate the process gracefully, then forcefully if necessary."""
-        # First try to terminate the process tree gracefully
-        self._signal_process_tree(process, terminate=True)
-
-    def _signal_process_tree(self, process: supervise.Popen, terminate: bool = True) -> None:
-        """Send signal (terminate or kill) to the process and all its children."""
-        signal_method = "terminate" if terminate else "kill"
-
-        # Try to get the parent process
-        parent = None
-        try:
-            parent = psutil.Process(process.pid)
-        except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
-            pass
-
-        # If we have the parent process and it's running, signal the entire tree
-        if parent and parent.is_running():
-            # Signal children first
-            for child in parent.children(recursive=True):
-                try:
-                    getattr(child, signal_method)()
-                except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
-                    pass
-
-            # Then signal the parent
-            try:
-                getattr(parent, signal_method)()
-            except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
-                pass
-        else:
-            # Fall back to direct process signaling
-            try:
-                getattr(process, signal_method)()
-            except Exception:
-                pass
-
-    def shutdown(self) -> None:
+    def stop(self, timeout: float = 5.0) -> None:
         """
-        Perform the shutdown sequence for the client, including sending the shutdown request to the server and notifying it of exit
+        Terminates communication with the language server, freeing resources
+
+        :param timeout: the maximum time, in seconds, to wait for the language server to terminate before forcefully killing it
+            (if applicable)
         """
-        self._is_shutting_down = True
+        if not self.is_running():
+            log.debug("Server process not running, skipping shutdown.")
+            return
+
+        self._is_stopping = True
+
+        log.info(f"Initiating shutdown with a {timeout}s timeout...")
+        self._stop(timeout)
+
+    @abstractmethod
+    def _stop(self, timeout: float) -> None:
+        pass
+
+    def _send_shutdown(self) -> None:
+        """
+        Signals shutdown to the server
+        """
         log.info("Sending shutdown request to server")
         self.send.shutdown()
         log.info("Received shutdown response from server")
         log.info("Sending exit notification to server")
         self.notify.exit()
         log.info("Sent exit notification to server")
+
+    def _send_shutdown_in_thread(self) -> None:
+        """
+        Signals shutdown to the server in a separate thread (requests can hang),
+        and waits for the thread to complete with a timeout.
+
+        :param timeout: timeout, in seconds, to wait for the requests to be handled
+        """
+        log.debug("Sending LSP shutdown request...")
+        shutdown_thread = threading.Thread(target=self._send_shutdown)
+        shutdown_thread.daemon = True
+        shutdown_thread.start()
+        shutdown_thread.join(timeout=2.0)
+        if shutdown_thread.is_alive():
+            log.debug("LSP shutdown request timed out, proceeding to terminate...")
+        else:
+            log.debug("LSP shutdown request completed.")
 
     def _trace(self, src: str, dest: str, message: str | StringDict) -> None:
         """
@@ -344,94 +283,9 @@ class LanguageServerProcess:
         if self._trace_log_fn is not None:
             self._trace_log_fn(src, dest, message)
 
-    def _read_bytes_from_process(self, process, stream, num_bytes) -> bytes:  # type: ignore
-        """Read exactly num_bytes from process stdout"""
-        data = b""
-        while len(data) < num_bytes:
-            chunk = stream.read(num_bytes - len(data))
-            if not chunk:
-                if process.poll() is not None:
-                    raise LanguageServerTerminatedException(
-                        f"Process terminated while trying to read response (read {len(data)} of {num_bytes} bytes before termination)",
-                        language=self.language,
-                    )
-                # Process still running but no data available yet, retry after a short delay
-                time.sleep(0.01)
-                continue
-            data += chunk
-        return data
-
-    def _read_ls_process_stdout(self) -> None:
-        """
-        Continuously read from the language server process stdout and handle the messages
-        invoking the registered response and notification handlers
-        """
-        exception: Exception | None = None
-        try:
-            while self.process and self.process.stdout:
-                if self.process.poll() is not None:  # process has terminated
-                    break
-                line = self.process.stdout.readline()
-                if not line:
-                    continue
-                consumed = len(line)
-                try:
-                    num_bytes = content_length(line)
-                except ValueError:
-                    self._mark_consumed(consumed)
-                    continue
-                if num_bytes is None:
-                    self._mark_consumed(consumed)
-                    continue
-                while line and line.strip():
-                    line = self.process.stdout.readline()
-                    consumed += len(line)
-                if not line:
-                    continue
-                body = self._read_bytes_from_process(self.process, self.process.stdout, num_bytes)
-
-                self._handle_body(body)
-                self._mark_consumed(consumed + num_bytes)
-        except LanguageServerTerminatedException as e:
-            exception = e
-        except (BrokenPipeError, ConnectionResetError) as e:
-            exception = LanguageServerTerminatedException("Language server process terminated while reading stdout", self.language, cause=e)
-        except Exception as e:
-            exception = LanguageServerTerminatedException(
-                "Unexpected error while reading stdout from language server process", self.language, cause=e
-            )
-        log.info("Language server stdout reader thread has terminated")
-        if not self._is_shutting_down:
-            if exception is None:
-                exception = LanguageServerTerminatedException("Language server stdout read process terminated unexpectedly", self.language)
-            log.error(str(exception))
-            self._cancel_pending_requests(exception)
-
-    def _read_ls_process_stderr(self) -> None:
-        """
-        Continuously read from the language server process stderr and log the messages
-        """
-        try:
-            while self.process and self.process.stderr:
-                if self.process.poll() is not None:
-                    # process has terminated
-                    break
-                line = self.process.stderr.readline()
-                if not line:
-                    continue
-                line_str = line.decode(ENCODING, errors="replace")
-                level = self._determine_log_level(line_str)
-                log.log(level, line_str)
-        except Exception as e:
-            log.error("Error while reading stderr from language server process: %s", e, exc_info=e)
-        if not self._is_shutting_down:
-            log.error("Language server stderr reader thread terminated unexpectedly")
-        else:
-            log.info("Language server stderr reader thread has terminated")
-
     def _handle_body(self, body: bytes) -> None:
         """
-        Parse the body text received from the language server process and invoke the appropriate handler
+        Parses the body text received from the language server process and invokes the appropriate handler
         """
         try:
             self._receive_payload(json.loads(body))
@@ -444,12 +298,7 @@ class LanguageServerProcess:
 
     def _receive_payload(self, payload: StringDict) -> None:
         """
-        Determine if the payload received from server is for a request, response, or notification and invoke the appropriate handler.
-
-        If dispatch raises while processing a response payload, the waiting request
-        would previously have been abandoned (its future never completed), forcing
-        the caller to wait out the full request timeout. Route the error to the
-        owning request so ``send_request`` fails fast with the real cause.
+        Determine if the payload received from server is for a request, response, or notification and invoke the appropriate handler
         """
         self._trace("ls", "solidlsp", payload)
         try:
@@ -463,95 +312,13 @@ class LanguageServerProcess:
             else:
                 log.error(f"Unknown payload type: {payload}")
         except Exception as err:
-            log.error(f"Error handling server payload: {err}", exc_info=err)
-            # if this was a response, notify the waiting request so its caller doesn't hang
-            if "method" not in payload and "id" in payload:
-                raw_id = payload.get("id")
-                # the wire id can be int or numeric string; _pending_requests keys are int
-                response_id: int | None = None
-                if isinstance(raw_id, int):
-                    response_id = raw_id
-                elif isinstance(raw_id, str) and raw_id.isdigit():
-                    response_id = int(raw_id)
-                if response_id is not None:
-                    with self._response_handlers_lock:
-                        request = self._pending_requests.pop(response_id, None)
-                    if request is not None:
-                        request.on_error(err)
-
-    @property
-    def adopted(self) -> bool:
-        """
-        :return: whether this client attached to a server an ended instance started, so that what a start waits to hear
-            from a new server has been said, to that instance, and will not be said again.
-        """
-        return self._adopted
+            log.error(f"Error handling server payload: {err}")
 
     def send_notification(self, method: str, params: dict | None = None) -> None:
         """
         Send notification pertaining to the given method to the server with the given parameters
         """
-        if self._admit_notification(method, params):
-            self._send_payload(make_notification(method, params))
-
-    def _save_state(self) -> None:
-        if self._state is not None and self._states is not None:
-            self._state.request_id = self.request_id
-            self._states.save(self._state)
-
-    def _mark_consumed(self, count: int) -> None:
-        with self._state_lock:
-            if self._state is not None:
-                self._state.stdout_offset += count
-                self._save_state()
-
-                # the blocks of what was consumed freed, below the offset saved for a next instance to read on from
-                if self.process is not None and self._state.stdout_offset - self._reclaimed >= supervise.RECLAIM_BYTES:
-                    self.process.reclaim_stdout(self._state.stdout_offset)
-                    self._reclaimed = self._state.stdout_offset
-
-    def _admit_notification(self, method: str, params: dict | None) -> bool:
-        """
-        Keeps the state of the documents the server holds, and holds back what an adopted server has had.
-
-        :param method: the notification's method.
-        :param params: the notification's parameters.
-        :return: whether to send the notification.
-        """
-        state = self._state
-        if state is None or params is None:
-            return not (self._adopted and method == "initialized")
-        if method == "initialized":
-            return not self._adopted
-        if method not in ("textDocument/didOpen", "textDocument/didChange", "textDocument/didClose"):
-            return True
-
-        document = params["textDocument"]
-        uri = document["uri"]
-        admit = True
-        with self._state_lock:
-            known = state.open_documents.get(uri)
-            if method == "textDocument/didClose":
-                state.open_documents.pop(uri, None)
-            elif method == "textDocument/didChange":
-                changes = params.get("contentChanges", [])
-                whole = len(changes) == 1 and "range" not in changes[0]
-
-                # a server's versions only rise, and a client that reopened a document an adopted server holds counts from 0
-                document["version"] = max(document.get("version", 0), known.version + 1 if known is not None else 0)
-                state.open_documents[uri] = OpenDocument(document["version"], text_digest(changes[0]["text"]) if whole else None)
-            elif known is None or not self._adopted:
-                state.open_documents[uri] = OpenDocument(document.get("version", 0), text_digest(document["text"]))
-            else:
-                admit = False
-                digest = text_digest(document["text"])
-                if known.digest != digest:
-                    version = known.version + 1
-                    change = {"textDocument": {"uri": uri, "version": version}, "contentChanges": [{"text": document["text"]}]}
-                    self._send_payload(make_notification("textDocument/didChange", change))
-                    state.open_documents[uri] = OpenDocument(version, digest)
-            self._save_state()
-        return admit
+        self._send_payload(make_notification(method, params))
 
     def send_response(self, request_id: Any, params: PayloadLike) -> None:
         """
@@ -576,25 +343,13 @@ class LanguageServerProcess:
                 request.on_error(exception)
             self._pending_requests.clear()
 
-    def send_request(self, method: str, params: dict | None = None) -> PayloadLike:
+    def _send_request_once(self, method: str, params: dict | None) -> Request.Result:
         """
-        Send request to the server, register the request id, and wait for the response
+        Sends a single request to the server (no retries) and waits for its response.
         """
-        if method == "initialize" and self._adopted and self._state is not None:
-            return self._state.initialize_result
-
-        # a server told its client's pid watches it and ends with it, and a server must outlive serena
-        # (pg://brain/daemon/restart/survival): null is the protocol's own value for a client it does not watch
-        if method == "initialize" and params is not None:
-            params = {**params, "processId": None}
-
         with self._request_id_lock:
             request_id = self.request_id
             self.request_id += 1
-
-        # the next id persisted before the request is sent, so an instance adopting the server numbers past it
-        with self._state_lock:
-            self._save_state()
 
         request = Request(request_id=request_id, method=method)
         log.debug("Starting: %s", request)
@@ -607,44 +362,42 @@ class LanguageServerProcess:
         log.debug("Waiting for response to request %s with params:\n%s", method, params)
         result = request.get_result(timeout=self._request_timeout)
         log.debug("Completed: %s", request)
+        return result
 
-        if result.is_error():
-            raise SolidLSPException(f"Error processing request {method} with params:\n{params}", cause=result.error) from result.error
+    def send_request(self, method: str, params: dict | None = None) -> PayloadLike:
+        """
+        Send request to the server, register the request id, and wait for the response.
 
-        if method == "initialize" and self._state is not None:
-            with self._state_lock:
-                self._state.initialize_result = result.payload
-                self._save_state()
+        If `method` is one of the methods registered via `set_content_modified_retry_methods`,
+        a response failing with the LSP `ContentModified` error (-32801) is retried a bounded
+        number of times with a short delay instead of being surfaced to the caller immediately;
+        see `_CONTENT_MODIFIED_MAX_ATTEMPTS` above. Methods that were not registered are never
+        retried, regardless of the error, so as to not retry requests behind the server's back.
+        """
+        result = self._send_request_once(method, params)
+        if not result.is_error():
+            log.debug("Returning result:\n%s", result.payload)
+            return result.payload
 
-        log.debug("Returning result:\n%s", result.payload)
-        return result.payload
+        if method in self._content_modified_retry_methods:
+            for attempt in range(2, self._content_modified_max_attempts + 1):
+                is_content_modified = isinstance(result.error, LSPError) and result.error.code == LSPErrorCodes.ContentModified
+                if not is_content_modified:
+                    break
+                log.info("Request %s got ContentModified (-32801); retrying (%d/%d)", method, attempt, self._content_modified_max_attempts)
+                time.sleep(_CONTENT_MODIFIED_RETRY_DELAY)
+                result = self._send_request_once(method, params)
+                if not result.is_error():
+                    log.debug("Returning result:\n%s", result.payload)
+                    return result.payload
 
+        raise SolidLSPException(f"Error processing request {method} with params:\n{params}", cause=result.error) from result.error
+
+    @abstractmethod
     def _send_payload(self, payload: StringDict) -> None:
         """
-        Send the payload to the server by writing to its stdin.
-
-        A write failure means the server is gone: silently returning previously
-        left ``send_request`` callers blocked on ``Request.get_result`` until the
-        full LSP request timeout elapsed (many seconds, sometimes the full
-        configured timeout). We now cancel every pending request with the write
-        error so concurrent waiters unblock immediately, then re-raise so the
-        caller that triggered this send fails fast with the real cause.
+        Send the given payload to the server
         """
-        if not self.process or not self.process.stdin:
-            return
-        self._trace("solidlsp", "ls", payload)
-        msg = create_message(payload)
-
-        # Use lock to prevent concurrent writes to stdin that cause buffer corruption
-        with self._stdin_lock:
-            try:
-                self.process.stdin.writelines(msg)
-                self.process.stdin.flush()
-            except (BrokenPipeError, ConnectionResetError, OSError) as e:
-                log.error(f"Failed to write to stdin: {e}")
-                # free every in-flight request so their callers don't block on a dead server
-                self._cancel_pending_requests(e)
-                raise
 
     def on_request(self, method: str, cb: Callable[[Any], Any]) -> None:
         """
@@ -657,6 +410,12 @@ class LanguageServerProcess:
         Register the callback function to handle notifications from the server to the client for the given method
         """
         self.on_notification_handlers[method] = cb
+
+    def on_any_notification(self, cb: Callable[[str, Any], None]) -> None:
+        """
+        Register an observer that is invoked for every notification received from the server.
+        """
+        self._notification_observers.append(cb)
 
     def _response_handler(self, response: StringDict) -> None:
         """
@@ -709,6 +468,16 @@ class LanguageServerProcess:
         """
         method = response.get("method", "")
         params = response.get("params")
+
+        for observer in self._notification_observers:
+            try:
+                observer(method, params)
+            except asyncio.CancelledError:
+                return
+            except Exception as ex:
+                if not self._is_stopping:
+                    log.error("Error handling notification observer for method '%s': %s", method, ex, exc_info=ex)
+
         handler = self.on_notification_handlers.get(method)
         if not handler:
             log.warning("Unhandled method '%s'", method)
@@ -718,5 +487,363 @@ class LanguageServerProcess:
         except asyncio.CancelledError:
             return
         except Exception as ex:
-            if not self._is_shutting_down:
+            if not self._is_stopping:
                 log.error("Error handling notification for method '%s': %s", method, ex, exc_info=ex)
+
+
+class StdioLanguageServer(LanguageServerInterface):
+    """
+    Represents a language server interface where the language server is launched as a subprocess
+    and communication takes place over the process' stdin/stdout streams.
+    """
+
+    def __init__(
+        self,
+        process_launch_info: ProcessLaunchInfo,
+        ls_id: LanguageServerIdLike,
+        determine_log_level: Callable[[str], int],
+        logger: Callable[[str, str, StringDict | str], None] | None = None,
+        start_independent_lsp_process: bool = True,
+        request_timeout: float | None = None,
+    ) -> None:
+        """
+        :param process_launch_info: the information required to launch the language server process
+        :param ls_id: the language
+        :param determine_log_level: a function for log lines read from stderr, which determines the log level
+        :param logger: the trace logger function
+        :param start_independent_lsp_process: whether to start the language server process in an independent process group
+        :param request_timeout: the timeout, in seconds, for all requests sent to the language server. If None, no timeout will be applied.
+        """
+        super().__init__(ls_id, determine_log_level, logger, request_timeout)
+
+        self._process_launch_info = process_launch_info
+        self._process: ManagedSubprocess[bytes] | None = None
+        self._start_independent_lsp_process = start_independent_lsp_process
+        self._stdin_lock = threading.Lock()
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.returncode is None
+
+    def _start(self) -> None:
+        log.info("Starting language server process via command: %s", self._process_launch_info.cmd)
+
+        process = subprocess_util.ManagedSubprocessLauncher.get_instance().launch(
+            self._process_launch_info, name=f"LS[{self.ls_id.get_key()}]", start_new_session=self._start_independent_lsp_process
+        )
+        self._process = process
+
+        # Check if process terminated immediately
+        if process.returncode is not None:
+            log.error("Language server has already terminated/could not be started")
+            # Process has already terminated
+            stderr_data = process.stderr.read() if process.stderr else b""
+            error_message = stderr_data.decode("utf-8", errors="replace")
+            raise RuntimeError(f"Process terminated immediately with code {process.returncode}. Error: {error_message}")
+
+        # start threads to read stdout and stderr of the process
+        threading.Thread(
+            target=self._read_ls_process_stdout,
+            name=f"LSP-stdout-reader:{self.ls_id.get_key()}",
+            daemon=True,
+        ).start()
+        threading.Thread(
+            target=self._read_ls_process_stderr,
+            name=f"LSP-stderr-reader:{self.ls_id.get_key()}",
+            daemon=True,
+        ).start()
+
+    def _stop(self, timeout: float) -> None:
+        if self._process is None:
+            log.debug("Server process is None, cannot shutdown.")
+            return
+
+        try:
+            # send LSP shutdown and close stdin to signal no more input
+            try:
+                self._send_shutdown_in_thread()
+                self._safely_close_pipe(self._process.stdin)
+            except Exception as e:
+                log.debug(f"Exception during graceful shutdown: {e}")
+                # Ignore errors here, we are proceeding to terminate anyway.
+            # terminate the process
+            self._process.terminate(timeout=timeout)
+        finally:
+            self._process = None
+
+    @staticmethod
+    def _safely_close_pipe(pipe: IO[AnyStr] | None) -> None:
+        """Safely close a pipe, ignoring any exceptions."""
+        if pipe and not pipe.closed:
+            try:
+                pipe.close()
+            except Exception:
+                pass
+
+    def _read_bytes_from_process(self, process: ManagedSubprocess[bytes], stream: IO[bytes], num_bytes: int) -> bytes:
+        """Read exactly num_bytes from process stdout"""
+        data = b""
+        while len(data) < num_bytes:
+            chunk = stream.read(num_bytes - len(data))
+            if not chunk:
+                if process.poll() is not None:
+                    raise LanguageServerTerminatedException(
+                        f"Process terminated while trying to read response (read {len(data)} of {num_bytes} bytes before termination)",
+                        ls_id=self.ls_id,
+                    )
+                # Process still running but no data available yet, retry after a short delay
+                time.sleep(0.01)
+                continue
+            data += chunk
+        return data
+
+    def _read_ls_process_stdout(self) -> None:
+        """
+        Continuously read from the language server process stdout and handle the messages
+        invoking the registered response and notification handlers
+        """
+        exception: Exception | None = None
+        try:
+            while self._process and self._process.stdout:
+                if self._process.poll() is not None:  # process has terminated
+                    break
+                line = self._process.stdout.readline()
+                if not line:
+                    continue
+                try:
+                    num_bytes = content_length(line)
+                except ValueError:
+                    continue
+                if num_bytes is None:
+                    continue
+                while line and line.strip():
+                    line = self._process.stdout.readline()
+                if not line:
+                    continue
+                body = self._read_bytes_from_process(self._process, self._process.stdout, num_bytes)
+
+                self._handle_body(body)
+        except LanguageServerTerminatedException as e:
+            exception = e
+        except (BrokenPipeError, ConnectionResetError) as e:
+            exception = LanguageServerTerminatedException("Language server process terminated while reading stdout", self.ls_id, cause=e)
+        except Exception as e:
+            exception = LanguageServerTerminatedException(
+                "Unexpected error while reading stdout from language server process", self.ls_id, cause=e
+            )
+        log.info("Language server stdout reader thread has terminated")
+        if not self._is_stopping:
+            if exception is None:
+                exception = LanguageServerTerminatedException("Language server stdout read process terminated unexpectedly", self.ls_id)
+            log.error(str(exception))
+            self._cancel_pending_requests(exception)
+
+    def _read_ls_process_stderr(self) -> None:
+        """
+        Continuously read from the language server process stderr and log the messages
+        """
+        try:
+            while self._process and self._process.stderr:
+                if self._process.poll() is not None:
+                    # process has terminated
+                    break
+                line = self._process.stderr.readline()
+                if not line:
+                    continue
+                line_str = line.decode(ENCODING, errors="replace").rstrip("\r\n")
+                if not line_str:
+                    continue
+                level = self._determine_log_level(line_str)
+                log.log(level, line_str)
+        except Exception as e:
+            log.error("Error while reading stderr from language server process: %s", e, exc_info=e)
+        if not self._is_stopping:
+            log.error("Language server stderr reader thread terminated unexpectedly")
+        else:
+            log.info("Language server stderr reader thread has terminated")
+
+    def _send_payload(self, payload: StringDict) -> None:
+        # Read the process and its stdin once: `_stop` closes stdin, waits for the process to
+        # terminate and only then nulls `_process`, so a second read could see a different state
+        # than the one that was checked.
+        process = self._process
+        stdin = process.stdin if process else None
+        if not stdin:
+            return
+        self._trace("solidlsp", "ls", payload)
+        msg = create_message(payload)
+
+        # Use lock to prevent concurrent writes to stdin that cause buffer corruption
+        with self._stdin_lock:
+            try:
+                stdin.writelines(msg)
+                stdin.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError, ValueError) as e:
+                # The server is gone; a pipe that broke raises OSError, a stdin which `_stop`
+                # already closed raises ValueError. Either way fail fast with
+                # LanguageServerTerminatedException (the restart path's signal) instead of
+                # stranding the just-registered request until its timeout (#2004).
+                # Mirrors TCPLanguageServer.
+                log.error(f"Failed to write to stdin: {e}")
+                self._cancel_pending_requests(LanguageServerTerminatedException("Stdio send error", self.ls_id, cause=e))
+                return
+
+
+@dataclass
+class TCPConnectionInfo:
+    """Connection parameters for an LSP server reachable over a TCP socket."""
+
+    host: str = "127.0.0.1"
+    port: int = 6008
+    connection_timeout: float = 30.0
+    retry_interval: float = 1.0
+
+
+class TCPLanguageServer(LanguageServerInterface):
+    """LanguageServerInterface that connects to an already-running LSP server over TCP.
+
+    Unlike :class:`StdioLanguageServer`, this class does not own the server process — it
+    connects to an externally-managed server (e.g. the Godot editor) and simply closes
+    the socket on stop. No LSP ``shutdown``/``exit`` sequence is sent, because the remote
+    server is expected to keep running after Serena disconnects.
+    """
+
+    def __init__(
+        self,
+        connection_info: TCPConnectionInfo,
+        ls_id: LanguageServerIdLike,
+        determine_log_level: Callable[[str], int],
+        logger: Callable[[str, str, StringDict | str], None] | None = None,
+        request_timeout: float | None = None,
+    ) -> None:
+        super().__init__(ls_id, determine_log_level, logger, request_timeout)
+        self._connection_info = connection_info
+        self._sock: socket.socket | None = None
+        self._file: Any = None  # socket.makefile("rb") - buffered reader
+        self._write_lock = threading.Lock()
+
+    def is_running(self) -> bool:
+        return self._sock is not None
+
+    def _start(self) -> None:
+        deadline = time.monotonic() + self._connection_info.connection_timeout
+        last_exc: Exception | None = None
+        while True:
+            try:
+                sock = socket.create_connection((self._connection_info.host, self._connection_info.port), timeout=5.0)
+                sock.settimeout(None)
+                self._sock = sock
+                self._file = sock.makefile("rb")
+                log.info("TCPLanguageServer connected to %s:%d", self._connection_info.host, self._connection_info.port)
+                break
+            except OSError as exc:
+                last_exc = exc
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(
+                        f"Could not connect to {self._connection_info.host}:{self._connection_info.port} "
+                        f"within {self._connection_info.connection_timeout}s"
+                    ) from last_exc
+                log.debug(
+                    "TCPLanguageServer: connection failed (%s), retrying in %.1fs (%.0fs left)",
+                    exc,
+                    self._connection_info.retry_interval,
+                    remaining,
+                )
+                time.sleep(min(self._connection_info.retry_interval, remaining))
+
+        threading.Thread(
+            target=self._read_loop,
+            name=f"LSP-tcp-reader:{self.ls_id.get_key()}",
+            daemon=True,
+        ).start()
+
+    def _stop(self, timeout: float) -> None:
+        # Close the socket first — this unblocks any readline() in the reader thread.
+        # BufferedReader.close() acquires an internal lock that readline() holds while
+        # blocked waiting for data; closing the socket first causes readline() to return
+        # with an error, releasing the lock before we call f.close().
+        sock = self._sock
+        self._sock = None
+        f = self._file
+        self._file = None
+        if sock:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                sock.close()
+            except Exception:
+                pass
+        if f:
+            try:
+                f.close()
+            except Exception:
+                pass
+
+    def _send_payload(self, payload: StringDict) -> None:
+        sock = self._sock
+        if sock is None:
+            return
+        self._trace("solidlsp", "ls", payload)
+        data = b"".join(create_message(payload))
+        with self._write_lock:
+            try:
+                sock.sendall(data)
+            except OSError as e:
+                log.error("Failed to write to TCP language server: %s", e)
+                self._sock = None
+                self._file = None
+                self._cancel_pending_requests(LanguageServerTerminatedException("TCP send error", self.ls_id, cause=e))
+
+    def _read_loop(self) -> None:
+        """Read Content-Length-framed LSP messages from the TCP socket and dispatch them."""
+        exception: Exception | None = None
+        try:
+            while self._sock is not None:
+                f = self._file
+                if f is None:
+                    break
+                try:
+                    line = f.readline()
+                except OSError as exc:
+                    if not self._is_stopping:
+                        exception = LanguageServerTerminatedException("TCP read error", self.ls_id, cause=exc)
+                    break
+                if not line:
+                    break
+                try:
+                    num_bytes = content_length(line)
+                except ValueError:
+                    continue
+                if num_bytes is None:
+                    continue
+                while line and line.strip():
+                    try:
+                        line = f.readline()
+                    except OSError:
+                        line = b""
+                        break
+                if not line:
+                    continue
+                try:
+                    body = f.read(num_bytes)
+                except OSError as exc:
+                    if not self._is_stopping:
+                        exception = LanguageServerTerminatedException("TCP read error", self.ls_id, cause=exc)
+                    break
+                if len(body) < num_bytes:
+                    break
+                self._handle_body(body)
+        except Exception as exc:
+            exception = LanguageServerTerminatedException("Unexpected error in TCP language server read loop", self.ls_id, cause=exc)
+        log.info("TCP language server read loop has terminated")
+        if not self._is_stopping:
+            if exception is None:
+                exception = LanguageServerTerminatedException("TCP language server read loop terminated unexpectedly", self.ls_id)
+            log.error(str(exception))
+            self._cancel_pending_requests(exception)
+            # Clear the socket so is_running() returns False, allowing _ensure_functional_ls
+            # to detect the broken connection and restart the language server.
+            self._sock = None
+            self._file = None

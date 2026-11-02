@@ -1,11 +1,11 @@
-# type: ignore
 import os
 
 import pytest
 
 from solidlsp.language_servers.scala_language_server import ScalaLanguageServer
-from solidlsp.ls_config import Language, LanguageServerConfig
+from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.settings import SolidLSPSettings
+from test.solidlsp.util.diagnostics import assert_file_diagnostics
 
 pytest.skip("Scala must be compiled for these tests to run through, which is a huge hassle", allow_module_level=True)
 
@@ -17,11 +17,11 @@ pytestmark = pytest.mark.scala
 @pytest.fixture(scope="module")
 def scala_ls():
     repo_root = os.path.abspath("test/resources/repos/scala")
-    config = LanguageServerConfig(code_language=Language.SCALA)
+    config = LanguageServerConfig(ls_id=LanguageServerId.SCALA)
     solidlsp_settings = SolidLSPSettings()
     ls = ScalaLanguageServer(config, repo_root, solidlsp_settings)
 
-    with ls.start_server():
+    with ls.start_server_context():
         yield ls
 
 
@@ -62,3 +62,12 @@ def test_scala_find_definition_and_references_across_files(scala_ls):
     assert first_def["range"]["start"]["character"] == 6
     assert first_def["range"]["end"]["line"] == 7
     assert first_def["range"]["end"]["character"] == 14
+
+
+def test_file_diagnostics(scala_ls) -> None:
+    assert_file_diagnostics(
+        scala_ls,
+        "src/main/scala/com/example/DiagnosticsSample.scala",
+        (),
+        min_count=1,
+    )

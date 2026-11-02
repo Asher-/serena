@@ -1,6 +1,7 @@
 """
 Defines wrapper objects around the types returned by LSP to ensure decoupling between LSP versions and SolidLSP
 """
+# SPDX-License-Identifier: MIT
 
 from __future__ import annotations
 
@@ -347,7 +348,7 @@ class Diagnostic(TypedDict):
     """ The severity of the diagnostic. """
     message: str
     """ The diagnostic message. """
-    code: str
+    code: NotRequired[str | int]
     """ The code of the diagnostic. """
     source: NotRequired[str]
     """ The source of the diagnostic, e.g. the name of the tool that produced it. """

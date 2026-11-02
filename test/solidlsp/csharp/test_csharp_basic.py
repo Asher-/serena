@@ -2,28 +2,25 @@ import os
 import tempfile
 from pathlib import Path
 from typing import cast
-from unittest.mock import Mock, patch
 
 import pytest
-from sensai.util import logging
 
-from serena.util.logging import SuspendedLoggersContext
 from solidlsp import SolidLanguageServer
 from solidlsp.language_servers.csharp_language_server import (
     CSharpLanguageServer,
     breadth_first_file_scan,
     find_solution_or_project_file,
 )
-from solidlsp.ls_config import Language, LanguageServerConfig
+from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_types import SymbolKind
 from solidlsp.ls_utils import SymbolUtils
-from solidlsp.settings import SolidLSPSettings
+from test.conftest import find_identifier_position, get_repo_path, ls_has_verified_implementation_support
 from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name, request_all_symbols
 
 
 @pytest.mark.csharp
 class TestCSharpLanguageServer:
-    @pytest.mark.parametrize("language_server", [Language.CSHARP], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.CSHARP], indirect=True)
     def test_find_symbol(self, language_server: SolidLanguageServer) -> None:
         """Test finding symbols in the full symbol tree."""
         symbols = language_server.request_full_symbol_tree()
@@ -31,7 +28,7 @@ class TestCSharpLanguageServer:
         assert SymbolUtils.symbol_tree_contains_name(symbols, "Calculator"), "Calculator class not found in symbol tree"
         assert SymbolUtils.symbol_tree_contains_name(symbols, "Add"), "Add method not found in symbol tree"
 
-    @pytest.mark.parametrize("language_server", [Language.CSHARP], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.CSHARP], indirect=True)
     def test_get_document_symbols(self, language_server: SolidLanguageServer) -> None:
         """Test getting document symbols from a C# file."""
         file_path = os.path.join("Program.cs")
@@ -49,7 +46,7 @@ class TestCSharpLanguageServer:
         assert "Program" in class_names
         assert "Calculator" in class_names
 
-    @pytest.mark.parametrize("language_server", [Language.CSHARP], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.CSHARP], indirect=True)
     def test_find_referencing_symbols(self, language_server: SolidLanguageServer) -> None:
         """Test finding references using symbol selection range."""
         file_path = os.path.join("Program.cs")
@@ -69,7 +66,7 @@ class TestCSharpLanguageServer:
             "Program.cs should reference Add method (tried all positions in selectionRange)"
         )
 
-    @pytest.mark.parametrize("language_server", [Language.CSHARP], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.CSHARP], indirect=True)
     def test_nested_namespace_symbols(self, language_server: SolidLanguageServer) -> None:
         """Test getting symbols from nested namespace."""
         file_path = os.path.join("Models", "Person.cs")
@@ -93,7 +90,7 @@ class TestCSharpLanguageServer:
         assert "ToString" in symbol_names, "ToString method not found"
         assert "IsAdult" in symbol_names, "IsAdult method not found"
 
-    @pytest.mark.parametrize("language_server", [Language.CSHARP], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.CSHARP], indirect=True)
     def test_find_referencing_symbols_across_files(self, language_server: SolidLanguageServer) -> None:
         """Test finding references to Calculator.Subtract method across files."""
         # First, find the Subtract method in Program.cs
@@ -132,7 +129,7 @@ class TestCSharpLanguageServer:
         refs_second_call = language_server.request_references(file_path, sel_start["line"], sel_start["character"] + 1)
         assert refs_second_call == refs, "Second call to request_references should return the same results"
 
-    @pytest.mark.parametrize("language_server", [Language.CSHARP], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.CSHARP], indirect=True)
     def test_hover_includes_type_information(self, language_server: SolidLanguageServer) -> None:
         """Test that hover information is available and includes type information."""
         file_path = os.path.join("Models", "Person.cs")
@@ -176,6 +173,55 @@ class TestCSharpLanguageServer:
         assert "bool" in method_hover_text, f"Hover should include 'bool' return type, got: {method_hover_text}"
         assert "IsAdult" in method_hover_text, f"Hover should include 'IsAdult' method name, got: {method_hover_text}"
 
+    if ls_has_verified_implementation_support(LanguageServerId.CSHARP):
+
+        @pytest.mark.parametrize("language_server", [LanguageServerId.CSHARP], indirect=True)
+        def test_find_implementations(self, language_server: SolidLanguageServer) -> None:
+            repo_path = get_repo_path(LanguageServerId.CSHARP)
+            pos = find_identifier_position(repo_path / "Services" / "IGreeter.cs", "FormatGreeting")
+            assert pos is not None, "Could not find IGreeter.FormatGreeting in fixture"
+
+            implementations = language_server.request_implementation("Services/IGreeter.cs", *pos)
+            assert implementations, "Expected at least one implementation of IGreeter.FormatGreeting"
+            assert any("ConsoleGreeter.cs" in implementation.get("relativePath", "") for implementation in implementations), (
+                f"Expected ConsoleGreeter.FormatGreeting in implementations, got: {implementations}"
+            )
+
+        @pytest.mark.parametrize("language_server", [LanguageServerId.CSHARP], indirect=True)
+        def test_request_implementing_symbols(self, language_server: SolidLanguageServer) -> None:
+            repo_path = get_repo_path(LanguageServerId.CSHARP)
+            pos = find_identifier_position(repo_path / "Services" / "IGreeter.cs", "FormatGreeting")
+            assert pos is not None, "Could not find IGreeter.FormatGreeting in fixture"
+
+            implementing_symbols = language_server.request_implementing_symbols("Services/IGreeter.cs", *pos)
+            assert implementing_symbols, "Expected implementing symbols for IGreeter.FormatGreeting"
+            assert any(
+                symbol.get("name") == "FormatGreeting" and "ConsoleGreeter.cs" in symbol["location"].get("relativePath", "")
+                for symbol in implementing_symbols
+            ), f"Expected ConsoleGreeter.FormatGreeting symbol, got: {implementing_symbols}"
+
+
+class TestCSharpExtractBaseNameAndType:
+    """Regression tests for _extract_base_name_and_type, no running language server needed."""
+
+    @pytest.mark.parametrize(
+        ("roslyn_name", "expected"),
+        [
+            # Property whose type is a tuple: the literal '(' in the type must not be
+            # mistaken for a method's parameter list.
+            ("Position : (int X, string Y)", ("Position", ": (int X, string Y)")),
+            ("Name : string", ("Name", ": string")),
+            ("Add(int, int) : int", ("Add", "(int, int) : int")),
+            ("ToString()", ("ToString", "()")),
+            ("SimpleMethod", ("SimpleMethod", "")),
+            # Both still have a '(' before the first " : ", so they keep the method branch.
+            ("GetPair() : (int, int)", ("GetPair", "() : (int, int)")),
+            ("Merge((int, int) a, (int, int) b) : void", ("Merge", "((int, int) a, (int, int) b) : void")),
+        ],
+    )
+    def test_extract_base_name_and_type(self, roslyn_name: str, expected: tuple[str, str]) -> None:
+        assert CSharpLanguageServer._extract_base_name_and_type(roslyn_name) == expected
+
 
 @pytest.mark.csharp
 class TestCSharpSolutionProjectOpening:
@@ -208,6 +254,23 @@ class TestCSharpSolutionProjectOpening:
 
             # file1.txt should be found first (breadth-first)
             assert filenames[0] == "file1.txt"
+
+    def test_breadth_first_file_scan_skips_ignored_paths(self):
+        """Test that breadth_first_file_scan neither yields ignored files nor traverses ignored directories."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+
+            # Create a project, an ignored directory containing a project and an ignored project file
+            (temp_path / "src").mkdir()
+            (temp_path / "src" / "App.csproj").touch()
+            (temp_path / "vendor" / "nested").mkdir(parents=True)
+            (temp_path / "vendor" / "nested" / "Vendored.csproj").touch()
+            (temp_path / "Generated.csproj").touch()
+
+            ignored_paths = {"vendor", "Generated.csproj"}
+            files = list(breadth_first_file_scan(str(temp_path), lambda relative_path: relative_path in ignored_paths))
+
+            assert [os.path.relpath(f, temp_path) for f in files] == [os.path.join("src", "App.csproj")]
 
     def test_find_solution_or_project_file_with_solution(self):
         """Test that find_solution_or_project_file prefers .sln files."""
@@ -286,64 +349,6 @@ class TestCSharpSolutionProjectOpening:
             # Should still prefer .sln file even though it's deeper
             assert result == str(solution_file)
 
-    @patch("solidlsp.language_servers.csharp_language_server.CSharpLanguageServer.DependencyProvider._ensure_server_installed")
-    @patch("solidlsp.language_servers.csharp_language_server.CSharpLanguageServer._start_server")
-    def test_csharp_language_server_logs_solution_discovery(self, mock_start_server, mock_ensure_server_installed):
-        """Test that CSharpLanguageServer logs solution/project discovery during initialization."""
-        mock_ensure_server_installed.return_value = ("/usr/bin/dotnet", "/path/to/server.dll")
-
-        # Create test directory with solution file
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
-            solution_file = temp_path / "TestSolution.sln"
-            solution_file.touch()
-
-            mock_config = Mock(spec=LanguageServerConfig)
-            mock_config.ignored_paths = []
-
-            # Create CSharpLanguageServer instance
-            mock_settings = Mock(spec=SolidLSPSettings)
-            mock_settings.ls_resources_dir = "/tmp/test_ls_resources"
-            mock_settings.project_data_path = str(temp_path / "project_data")
-
-            with SuspendedLoggersContext():
-                logging.getLogger().setLevel(logging.DEBUG)
-                with logging.MemoryLoggerContext() as mem_log:
-                    CSharpLanguageServer(mock_config, str(temp_path), mock_settings)
-
-                    # Verify that logger was called with solution file discovery
-                    expected_log_msg = f"Found solution/project file: {solution_file}"
-                    assert expected_log_msg in mem_log.get_log()
-
-    @patch("solidlsp.language_servers.csharp_language_server.CSharpLanguageServer.DependencyProvider._ensure_server_installed")
-    @patch("solidlsp.language_servers.csharp_language_server.CSharpLanguageServer._start_server")
-    def test_csharp_language_server_logs_no_solution_warning(self, mock_start_server, mock_ensure_server_installed):
-        """Test that CSharpLanguageServer logs warning when no solution/project files are found."""
-        # Mock the server installation
-        mock_ensure_server_installed.return_value = ("/usr/bin/dotnet", "/path/to/server.dll")
-
-        # Create empty test directory
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
-
-            # Mock logger to capture log messages
-            mock_config = Mock(spec=LanguageServerConfig)
-            mock_config.ignored_paths = []
-
-            mock_settings = Mock(spec=SolidLSPSettings)
-            mock_settings.ls_resources_dir = "/tmp/test_ls_resources"
-            mock_settings.project_data_path = str(temp_path / "project_data")
-
-            # Create CSharpLanguageServer instance
-            with SuspendedLoggersContext():
-                logging.getLogger().setLevel(logging.DEBUG)
-                with logging.MemoryLoggerContext() as mem_log:
-                    CSharpLanguageServer(mock_config, str(temp_path), mock_settings)
-
-                    # Verify that logger was called with warning about no solution/project files
-                    expected_log_msg = "No .sln/.slnx or .csproj file found, language server will attempt auto-discovery"
-                    assert expected_log_msg in mem_log.get_log()
-
     def test_solution_and_project_opening_with_real_test_repo(self):
         """Test solution and project opening with the actual C# test repository."""
         # Get the C# test repo path
@@ -362,7 +367,7 @@ class TestCSharpSolutionProjectOpening:
         # Verify the file actually exists
         assert os.path.exists(result)
 
-    @pytest.mark.parametrize("language_server", [Language.CSHARP], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.CSHARP], indirect=True)
     def test_bare_symbol_names(self, language_server) -> None:
         all_symbols = request_all_symbols(language_server)
         malformed_symbols = []

@@ -1,26 +1,28 @@
 """
 The Serena Model Context Protocol (MCP) Server
 """
+# SPDX-License-Identifier: GPL-3.0-or-later
 
 import dataclasses
-import hashlib
 import os
 import re
 import shutil
+import stat
+import threading
 from collections.abc import Iterator, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
-from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Self, TypeVar
+from uuid import uuid4
 
 import yaml
 from filelock import FileLock
 from ruamel.yaml.comments import CommentedMap
 from sensai.util import logging
-from sensai.util.logging import LogTime, datetime_tag
+from sensai.util.logging import LogTime
 from sensai.util.string import ToStringMixin
 
 from serena.constants import (
@@ -32,14 +34,16 @@ from serena.constants import (
     SERENA_FILE_ENCODING,
     SERENA_MANAGED_DIR_NAME,
 )
-from serena.util.inspection import determine_programming_language_composition
-from serena.util.yaml import YamlCommentNormalisation, load_yaml, normalise_yaml_comments, save_yaml, transfer_missing_yaml_comments
-from solidlsp.ls_config import Language
+from serena.util.inspection import compute_language_server_support_composition
+from serena.util.text_utils import GlobMatcher
+from serena.util.yaml import YamlCommentNormalisation, load_yaml, normalise_yaml_comments, save_yaml, transfer_yaml_comments
+from solidlsp.ls_config import LanguageServerIdLike, LanguageServerRegistry
 
 from ..analytics import RegisteredTokenCountEstimator
-from ..util.class_decorators import singleton
+from ..language_backend import BuiltinLanguageBackend, LanguageBackend, LanguageBackendRegistry
 from ..util.cli_util import ask_yes_no
 from ..util.dataclass import get_dataclass_default
+from .serena_paths import SerenaPaths
 
 if TYPE_CHECKING:
     from ..project import Project
@@ -49,87 +53,6 @@ T = TypeVar("T")
 DEFAULT_TOOL_TIMEOUT: float = 240
 DictType = dict | CommentedMap
 TDict = TypeVar("TDict", bound=DictType)
-
-
-@singleton
-class SerenaPaths:
-    """
-    Provides paths to various Serena-related directories and files.
-    """
-
-    def __init__(self) -> None:
-        home_dir = os.getenv("SERENA_HOME")
-        if home_dir is None or home_dir.strip() == "":
-            home_dir = str(Path.home() / SERENA_MANAGED_DIR_NAME)
-        else:
-            home_dir = home_dir.strip()
-        self.serena_user_home_dir: str = home_dir
-        """
-        the path to the Serena home directory, where the user's configuration/data is stored.
-        This is ~/.serena by default, but it can be overridden via the SERENA_HOME environment variable.
-        """
-        self.user_prompt_templates_dir: str = os.path.join(self.serena_user_home_dir, "prompt_templates")
-        """
-        directory containing prompt templates defined by the user.
-        Prompts defined by the user take precedence over Serena's built-in prompt templates.
-        """
-        self.user_contexts_dir: str = os.path.join(self.serena_user_home_dir, "contexts")
-        """
-        directory containing contexts defined by the user. 
-        If a name of a context matches a name of a context in SERENAS_OWN_CONTEXT_YAMLS_DIR, 
-        the user context will override the default context definition.
-        """
-        self.user_modes_dir: str = os.path.join(self.serena_user_home_dir, "modes")
-        """
-        directory containing modes defined by the user.
-        If a name of a mode matches a name of a mode in SERENAS_OWN_MODES_YAML_DIR,
-        the user mode will override the default mode definition.
-        """
-        self.news_snippet_id_file: str = os.path.join(self.serena_user_home_dir, "last_read_news_snippet_id.txt")
-        """
-        file containing the ID of the last read news snippet
-        """
-        self.news_etag_file: str = os.path.join(self.serena_user_home_dir, "news_etag.txt")
-        """
-        file containing the ETag of the last fetched remote news JSON
-        """
-        self.news_file: str = os.path.join(self.serena_user_home_dir, "news.json")
-        """
-        local cache of the remote news JSON file
-        """
-        self.news_dir: str = os.path.join(REPO_ROOT, "news")
-        """
-        repository news directory containing the source HTML snippets and generated news.json
-        """
-        global_memories_path = Path(os.path.join(self.serena_user_home_dir, "memories", "global"))
-        global_memories_path.mkdir(parents=True, exist_ok=True)
-        self.global_memories_path = global_memories_path
-        """
-        directory where global memories are stored, i.e. memories that are available across all projects
-        """
-        self.explicit_project_roots_file: str = os.path.join(self.serena_user_home_dir, "session_project_roots.json")
-        """
-        file recording the project root each MCP session explicitly activated. Backs
-        SerenaAgent._explicit_project_roots_by_session so the record outlives the daemon process and a
-        session that activated a project is restored to it after a restart rather than being stranded.
-        """
-        self.last_returned_log_file_path: str | None = None
-        """
-        the path to the last log file returned by `get_next_log_file_path`. If this is not None, the logs
-        are currently being written to this file
-        """
-
-    def get_next_log_file_path(self, prefix: str) -> str:
-        """
-        :param prefix: the filename prefix indicating the type of the log file
-        :return: the full path to the log file to use
-        """
-        log_dir = os.path.join(self.serena_user_home_dir, "logs", datetime.now().strftime("%Y-%m-%d"))
-        os.makedirs(log_dir, exist_ok=True)
-        self.last_returned_log_file_path = os.path.join(log_dir, prefix + "_" + datetime_tag() + f"_{os.getpid()}" + ".txt")
-        return self.last_returned_log_file_path
-
-    # TODO: Paths from constants.py should be moved here
 
 
 @dataclass
@@ -143,11 +66,11 @@ class ToolInclusionDefinition:
 
     excluded_tools: Sequence[str] = ()
     """
-    the names of tools to exclude from use [incremental mode]
+    the names of tools (or markers) to exclude from use [incremental mode]
     """
     included_optional_tools: Sequence[str] = ()
     """
-    the names of optional tools to include [incremental mode]
+    the names of (optional/disabled) tools (or markers) to include [incremental mode]
     """
     fixed_tools: Sequence[str] = ()
     """
@@ -171,35 +94,75 @@ class NamedToolInclusionDefinition(ToolInclusionDefinition):
 
 
 @dataclass
+class ApiInclusionDefinition:
+    """
+    Defines which APIs to include/exclude in Serena's operation.
+    A single API inclusion/exclusion can either be a full facade (facade name, which encompasses all of its methods, e.g. "lsp")
+    or a method of a facade (facade name + method name, e.g. "lsp.find_symbol").
+    Exclusions can additionally define `marker:editing` to exclude functions capable of modifying the project.
+    """
+
+    MARKER_EDITING = "marker:editing"
+
+    included_apis: Sequence[str] = ()
+    excluded_apis: Sequence[str] = ()
+
+
+@dataclass
+class NamedApiInclusionDefinition(ApiInclusionDefinition):
+    name: str | None = None
+
+    def __str__(self) -> str:
+        return f"ApiInclusionDefinition[{self.name}]"
+
+
+@dataclass
 class ModeSelectionDefinition:
-    base_modes: Sequence[str] | None = None
     default_modes: Sequence[str] | None = None
 
 
-class LanguageBackend(Enum):
-    LSP = "LSP"
+@dataclass
+class ModeSelectionDefinitionWithBaseModes(ModeSelectionDefinition):
+    base_modes: Sequence[str] | None = ("interactive", "editing")
     """
-    Use the language server protocol (LSP), spawning freely available language servers
-    via the SolidLSP library that is part of Serena
+    the base modes to use, which are always guaranteed to be included
     """
-    JETBRAINS = "JetBrains"
+
+
+@dataclass
+class ModeSelectionDefinitionWithAddedModes(ModeSelectionDefinition):
+    added_modes: Sequence[str] | None = None
+
+
+class AgentInterface(Enum):
     """
-    Use the Serena plugin in your JetBrains IDE.
-    (requires the plugin to be installed and the project being worked on to be open in your IDE)
+    The interface through which the agent (LLM) accesses Serena's functionality.
+    """
+
+    TOOLS = "tools"
+    """
+    The classic tool interface: each operation is a separate tool, and the set of tools is configurable
+    (via tool inclusions/exclusions in the configuration, context, modes and project).
+    """
+    REPL = "REPL"
+    """
+    The REPL interface: operations are accessed programmatically via the serena_repl tool, which executes Python code.
+    The set of tools is fixed (the REPL tool and the tools required for session management) and tool inclusions/exclusions
+    do not apply; the operations available in the REPL are configured via API inclusions/exclusions instead.
     """
 
     @staticmethod
-    def from_str(backend_str: str) -> "LanguageBackend":
-        for backend in LanguageBackend:
-            if backend.value.lower() == backend_str.lower():
-                return backend
-        raise ValueError(f"Unknown language backend '{backend_str}': valid values are {[b.value for b in LanguageBackend]}")
+    def from_str(interface_str: str) -> "AgentInterface":
+        for interface in AgentInterface:
+            if interface.value.lower() == interface_str.lower():
+                return interface
+        raise ValueError(f"Unknown agent interface '{interface_str}': valid values are {[i.value for i in AgentInterface]}")
 
-    def is_lsp(self) -> bool:
-        return self == LanguageBackend.LSP
+    def is_tools(self) -> bool:
+        return self == AgentInterface.TOOLS
 
-    def is_jetbrains(self) -> bool:
-        return self == LanguageBackend.JETBRAINS
+    def is_repl(self) -> bool:
+        return self == AgentInterface.REPL
 
 
 class LineEnding(Enum):
@@ -232,7 +195,7 @@ class LineEnding(Enum):
 
 
 @dataclass
-class SharedConfig(ModeSelectionDefinition, ToolInclusionDefinition, ToStringMixin):
+class SharedConfig(ToolInclusionDefinition, ApiInclusionDefinition, ToStringMixin):
     """Shared between SerenaConfig and ProjectConfig, the latter used to override values in the form
     (same as in ModeSelectionDefinition).
     The defaults here shall be none and should be set to the global default values in SerenaConfig.
@@ -240,6 +203,7 @@ class SharedConfig(ModeSelectionDefinition, ToolInclusionDefinition, ToStringMix
 
     symbol_info_budget: float | None = None
     language_backend: LanguageBackend | None = None
+    agent_interface: AgentInterface | None = None
     line_ending: LineEnding | None = None
     read_only_memory_patterns: list[str] = field(default_factory=list)
     ignored_memory_patterns: list[str] = field(default_factory=list)
@@ -258,31 +222,119 @@ Uses $projectDir and $projectFolderName as placeholders.
 """
 
 
+class ProjectConfigAutoGenerationMode(Enum):
+    NONE = "none"
+    """
+    no auto-generation
+    """
+    SYNCHRONOUS = "sync"
+    """
+    synchronous auto-generation, i.e. the configuration is fully generated before returning from the function call
+    """
+    ASYNCHRONOUS = "async"
+    """
+    asynchronous auto-generation, where time-consuming configuration parts (currently only the 
+    list of programming languages) are determined in a background thread and initialised as empty 
+    """
+
+    def is_autogen_enabled(self):
+        return self != ProjectConfigAutoGenerationMode.NONE
+
+
 @dataclass(kw_only=True)
-class ProjectConfig(SharedConfig):
+class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
     project_name: str
-    languages: list[Language]
+    language_servers: list[LanguageServerIdLike]
     ignored_paths: list[str] = field(default_factory=list)
+    ls_workspace_folders: list[str] = field(default_factory=lambda: ["."])
+    ls_additional_workspace_folders: list[str] = field(default_factory=list)
     read_only: bool = False
     ignore_all_files_in_gitignore: bool = True
     initial_prompt: str = ""
     encoding: str = DEFAULT_SOURCE_FILE_ENCODING
+    activation_command: str | None = None
+    activation_command_timeout: float = 180.0
 
     # internal fields which are not mapped to/from the configuration file (must start with "_")
     _local_override_keys: list[str] = field(default_factory=list)
 
-    # class-level constants
+    # class-level members
     SERENA_PROJECT_FILE = "project.yml"
     SERENA_LOCAL_PROJECT_FILE = "project.local.yml"
-    FIELDS_WITHOUT_DEFAULTS = {"project_name", "languages"}
+    FIELDS_WITHOUT_DEFAULTS = {"project_name", "language_servers"}
+    RENAMED_FIELDS = {"additional_workspace_folders": "ls_additional_workspace_folders", "languages": "language_servers"}
     YAML_COMMENT_NORMALISATION = YamlCommentNormalisation.LEADING
     """
     the comment normalisation strategy to use when loading/saving project configuration files.
     The template file must match this configuration (i.e. it must use leading comments if this is set to LEADING).
     """
+    _async_completion_events = {}
+    """
+    maps the object id of a ProjectConfig instance to an event which is set when the asynchronous auto-generation of 
+    the configuration is complete (if applicable).
+    """
+    _save_lock = threading.Lock()
 
     def _tostring_includes(self) -> list[str]:
         return ["project_name"]
+
+    @classmethod
+    def _determine_project_language_servers(
+        cls, project_root: str, interactive: bool, serena_config: "SerenaConfig"
+    ) -> list[LanguageServerIdLike]:
+        log.info("Determining suitable language servers for the project")
+
+        # determine language servers to be considered and their priorities
+        # the registry is the single source of truth — it includes both built-in enum members
+        # and externally-registered adapters (via solidlsp.language_server_registration entry points).
+        # priorities are user-configurable per-key via serena_config.ls_priorities (works for both kinds).
+        ls_priorities: dict[LanguageServerIdLike, int] = {}
+        registry = LanguageServerRegistry.get_instance()
+        for ls_id in registry.iter_registered_ls_ids():
+            priority = serena_config.get_ls_priority(ls_id)
+            if priority > 0:
+                ls_priorities[ls_id] = priority
+
+        log.debug("Language server priorities: %s", ls_priorities)
+        ls_composition = compute_language_server_support_composition(project_root, list(ls_priorities.keys()))
+        log.info("Project composition: %s", ls_composition)
+
+        if len(ls_composition) == 0:
+            log.warning(
+                "No source files for supported language servers were found in %s. "
+                "Creating project with no configured language servers. "
+                "Symbol-related tools (e.g. find_symbol, get_symbols_overview) will not work "
+                "when using the LSP backend. You can add languages later via the Serena dashboard "
+                "or by manually editing the project configuration.",
+                project_root,
+            )
+            language_servers_to_use = []
+        else:
+            # sort languages by number of files found
+            languages_and_percentages = sorted(ls_composition.items(), key=lambda item: (item[1], ls_priorities[item[0]]), reverse=True)
+            # find the language with the highest percentage and enable it
+            top_language_pair = languages_and_percentages[0]
+            other_language_pairs = languages_and_percentages[1:]
+            language_servers_to_use = [top_language_pair[0]]
+            # if in interactive mode, ask the user which other languages to enable
+            if len(other_language_pairs) > 0 and interactive:
+                print(
+                    "Detected and enabled main language server '%s' (%.2f%% of source files)."
+                    % (top_language_pair[0].get_key(), top_language_pair[1])
+                )
+                print(f"Additionally detected {len(other_language_pairs)} other applicable language servers.\n")
+                print("Note: Enable only servers for languages you need symbolic retrieval/editing capabilities for.")
+                print("      Additional language servers use resources and some may require additional")
+                print("      system-level installations/configuration (see Serena documentation).")
+                print("\nWhich additional language servers do you want to enable?")
+                for ls_id, perc in other_language_pairs:
+                    enable = ask_yes_no("Enable %s (%.2f%% of source files)?" % (ls_id.get_key(), perc), default=False)
+                    if enable:
+                        language_servers_to_use.append(ls_id)
+                print()
+
+        log.info("Using language servers: %s", language_servers_to_use)
+        return language_servers_to_use
 
     @classmethod
     def autogenerate(
@@ -290,9 +342,10 @@ class ProjectConfig(SharedConfig):
         project_root: str | Path,
         serena_config: "SerenaConfig",
         project_name: str | None = None,
-        languages: list[Language] | None = None,
+        languages: list[LanguageServerIdLike] | None = None,
         save_to_disk: bool = True,
         interactive: bool = False,
+        asynchronous: bool = False,
     ) -> Self:
         """
         Autogenerate a project configuration for a given project root.
@@ -304,8 +357,12 @@ class ProjectConfig(SharedConfig):
         :param languages: the languages of the project; if None, they will be determined automatically
         :param save_to_disk: whether to save the project configuration to disk
         :param interactive: whether to run in interactive CLI mode, asking the user for input where appropriate
+        :param asynchronous: whether to run in asynchronous mode, where time-consuming configuration parts (currently only the
+            determination of the list of programming languages) are determined in a background thread and initialised as empty
         :return: the project configuration
         """
+        if interactive and asynchronous:
+            raise ValueError("Cannot use interactive mode with asynchronous auto-generation")
         project_root = Path(project_root).resolve()
         if not project_root.exists():
             raise FileNotFoundError(f"Project root not found: {project_root}")
@@ -313,61 +370,66 @@ class ProjectConfig(SharedConfig):
             log.info("Project root: %s", project_root)
             project_folder_name = project_root.name
             project_name = project_name or project_folder_name
+            use_asynchronous_language_determination = False
             if languages is None:
-                # determine languages automatically
-                log.info("Determining programming languages used in the project")
-                language_composition = determine_programming_language_composition(str(project_root))
-                log.info("Language composition: %s", language_composition)
-                if len(language_composition) == 0:
-                    log.warning(
-                        "No source files for supported language servers were found in %s. "
-                        "Creating project with no configured languages. "
-                        "Symbol-related tools (e.g. find_symbol, get_symbols_overview) will not work "
-                        "when using the LSP backend. You can add languages later via the Serena dashboard "
-                        "or by manually editing the project configuration.",
-                        project_root,
-                    )
-                    languages_to_use: list[str] = []
+                if asynchronous:
+                    use_asynchronous_language_determination = True
+                    languages_to_use = []  # temporarily empty, will be determined in background thread
                 else:
-                    # sort languages by number of files found
-                    languages_and_percentages = sorted(
-                        language_composition.items(), key=lambda item: (item[1], item[0].get_priority()), reverse=True
+                    determined_languages = cls._determine_project_language_servers(
+                        str(project_root), interactive=interactive, serena_config=serena_config
                     )
-                    # find the language with the highest percentage and enable it
-                    top_language_pair = languages_and_percentages[0]
-                    other_language_pairs = languages_and_percentages[1:]
-                    languages_to_use = [top_language_pair[0].value]
-                    # if in interactive mode, ask the user which other languages to enable
-                    if len(other_language_pairs) > 0 and interactive:
-                        print(
-                            "Detected and enabled main language '%s' (%.2f%% of source files)."
-                            % (top_language_pair[0].value, top_language_pair[1])
-                        )
-                        print(f"Additionally detected {len(other_language_pairs)} other language(s).\n")
-                        print("Note: Enable only languages you need symbolic retrieval/editing capabilities for.")
-                        print("      Additional language servers use resources and some languages may require additional")
-                        print("      system-level installations/configuration (see Serena documentation).")
-                        print("\nWhich additional languages do you want to enable?")
-                        for lang, perc in other_language_pairs:
-                            enable = ask_yes_no("Enable %s (%.2f%% of source files)?" % (lang.value, perc), default=False)
-                            if enable:
-                                languages_to_use.append(lang.value)
-                        print()
-                log.info("Using languages: %s", languages_to_use)
+                    languages_to_use = [l.get_key() for l in determined_languages]
             else:
-                languages_to_use = [lang.value for lang in languages]
+                languages_to_use = [lang.get_key() for lang in languages]
             config_with_comments, _ = cls._load_yaml_dict(PROJECT_TEMPLATE_FILE)
             config_with_comments["project_name"] = project_name
-            config_with_comments["languages"] = languages_to_use
+            config_with_comments["language_servers"] = languages_to_use
 
+            project_yml_path = serena_config.get_project_yml_location(str(project_root))
             if save_to_disk:
-                project_yml_path = serena_config.get_project_yml_location(str(project_root))
                 log.info("Saving project configuration to %s", project_yml_path)
-                save_yaml(project_yml_path, config_with_comments)
+                with cls._save_lock:
+                    save_yaml(project_yml_path, config_with_comments)
                 project_local_yml_path = os.path.join(os.path.dirname(project_yml_path), cls.SERENA_LOCAL_PROJECT_FILE)
                 shutil.copy(PROJECT_LOCAL_TEMPLATE_FILE, project_local_yml_path)
 
-            return cls._from_dict(config_with_comments, local_override_keys=[])
+            project_config = cls._from_dict(config_with_comments, local_override_keys=[])
+
+            # if asynchronous language determination is used, start a background thread which updates and saves the configuration
+            # and set an event which can be awaited to ensure that the configuration is complete
+            if use_asynchronous_language_determination:
+                event = threading.Event()
+                project_config._async_completion_events[id(project_config)] = event
+
+                def async_language_determination():
+                    try:
+                        with LogTime("Asynchronous language determination", logger=log):
+                            project_config.language_servers = cls._determine_project_language_servers(
+                                str(project_root), interactive=False, serena_config=serena_config
+                            )
+                            if save_to_disk:
+                                project_config.save(project_yml_path)
+                    finally:
+                        event.set()
+
+                threading.Thread(target=async_language_determination, name="project-language-determination", daemon=True).start()
+
+            return project_config
+
+    def await_asynchronous_completion(self):
+        """
+        Wait for the asynchronous auto-generation of the configuration to complete (if applicable), ensuring
+        that, in particular, the list of programming languages is complete, which may be determined asynchronously
+        when first creating the project configuration.
+        """
+        event = ProjectConfig._async_completion_events.get(id(self))
+        if event is None:
+            return
+        if not event.is_set():
+            log.info("Waiting for asynchronous auto-generation of project configuration to complete ...")
+            event.wait()
+            log.info("Asynchronous auto-generation of project configuration completed.")
 
     @classmethod
     def default_project_yml_path(cls, project_root: str | Path) -> str:
@@ -400,9 +462,22 @@ class ProjectConfig(SharedConfig):
           and `was_complete` will always be True.
         """
         data = load_yaml(yml_path, comment_normalisation=comment_normalisation)
+        was_complete = True
+
+        # backward compatibility
+        # NOTE: This must also work for project.local.yml files, which may be highly incomplete
+        # * handle single "language" field
+        if "language" in data and not ("languages" in data or "language_servers" in data):
+            data["language_servers"] = [data["language"]]
+            del data["language"]
+        # * handle renamed fields
+        for old_key, new_key in cls.RENAMED_FIELDS.items():
+            if old_key in data and new_key not in data:
+                data[new_key] = data[old_key]
+                del data[old_key]
+                was_complete = False
 
         # apply defaults
-        was_complete = True
         if apply_defaults:
             for field_info in dataclasses.fields(cls):
                 key = field_info.name
@@ -415,12 +490,9 @@ class ProjectConfig(SharedConfig):
                     default_value = get_dataclass_default(cls, key)
                     data.setdefault(key, default_value)
 
-        # backward compatibility
-        # NOTE: This must also work for project.local.yml files, which may be highly incomplete
-        # * handle single "language" field
-        if "languages" not in data and "language" in data:
-            data["languages"] = [data["language"]]
-            del data["language"]
+        # Note: Checks for validity of fields must not happen here but in _from_dict.
+        # Here, the data may be incomplete, because this function is also used for
+        # loading project.local.yml files.
 
         return data, was_complete
 
@@ -433,20 +505,25 @@ class ProjectConfig(SharedConfig):
             the ProjectConfig dataclass
         :param local_override_keys: the list of keys that have been overridden from project.local.yml
         """
+        # map languages to list of enum items, checking for errors
         lang_name_mapping = {"javascript": "typescript"}
-        languages: list[Language] = []
-        for language_str in data["languages"]:
-            orig_language_str = language_str
-            try:
-                language_str = language_str.lower()
-                if language_str in lang_name_mapping:
-                    language_str = lang_name_mapping[language_str]
-                language = Language(language_str)
-                languages.append(language)
-            except ValueError as e:
-                raise ValueError(
-                    f"Invalid language: {orig_language_str}.\nValid language_strings are: {[l.value for l in Language]}"
-                ) from e
+        ls_ids: list[LanguageServerIdLike] = []
+        ls_registry = LanguageServerRegistry.get_instance()
+        for ls_str in data["language_servers"]:
+            ls_str = ls_str.lower()
+            if ls_str in lang_name_mapping:
+                ls_str = lang_name_mapping[ls_str]
+            ls_id = ls_registry.resolve(ls_str)
+            ls_ids.append(ls_id)
+
+        # Validate activation_command_timeout
+        activation_command_timeout_raw = data.get("activation_command_timeout", 180.0)
+        try:
+            activation_command_timeout = float(activation_command_timeout_raw)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"activation_command_timeout must be a number, got: {activation_command_timeout_raw}") from e
+        if activation_command_timeout <= 0:
+            raise ValueError(f"activation_command_timeout must be positive, got: {activation_command_timeout}")
 
         # Validate symbol_info_budget
         symbol_info_budget_raw = data["symbol_info_budget"]
@@ -460,21 +537,36 @@ class ProjectConfig(SharedConfig):
                 raise ValueError(f"symbol_info_budget cannot be negative, got: {symbol_info_budget}")
 
         language_backend_value = data.get("language_backend")
-        language_backend = LanguageBackend.from_str(language_backend_value) if language_backend_value else None
+        language_backend = LanguageBackendRegistry.get_instance().resolve(language_backend_value) if language_backend_value else None
+        agent_interface_value = data.get("agent_interface")
+        agent_interface = AgentInterface.from_str(agent_interface_value) if agent_interface_value else None
 
         line_ending_value = data.get("line_ending")
         line_ending = LineEnding.from_str(line_ending_value) if line_ending_value else None
 
+        # gracefully handle user errors: incorrect use of None/empty where a list is required
+        ignored_paths = data["ignored_paths"] or []
+        fixed_tools = data["fixed_tools"] or []
+        excluded_tools = data["excluded_tools"] or []
+        included_optional_tools = data["included_optional_tools"] or []
+        excluded_apis = data.get("excluded_apis") or []
+        included_apis = data.get("included_apis") or []
+        additional_workspace_folders = data.get("ls_additional_workspace_folders") or []
+
+        if "base_modes" in data and data["base_modes"] is not None:
+            log.warning("The base_modes setting in project.yml is deprecated and will be ignored.")
+
         return cls(
             project_name=data["project_name"],
-            languages=languages,
-            ignored_paths=data["ignored_paths"],
-            # normalise the three tuple-defaulted sequence fields to tuple so that an in-memory
-            # ProjectConfig built from an incomplete yml (where the default () was injected) compares
-            # equal to one reloaded from disk (where ruamel has re-serialised the tuple as a list).
-            excluded_tools=tuple(data["excluded_tools"]),
-            fixed_tools=tuple(data["fixed_tools"]),
-            included_optional_tools=tuple(data["included_optional_tools"]),
+            language_servers=ls_ids,
+            ignored_paths=ignored_paths,
+            ls_workspace_folders=data["ls_workspace_folders"],
+            ls_additional_workspace_folders=additional_workspace_folders,
+            excluded_tools=excluded_tools,
+            fixed_tools=fixed_tools,
+            included_optional_tools=included_optional_tools,
+            excluded_apis=excluded_apis,
+            included_apis=included_apis,
             read_only=data["read_only"],
             read_only_memory_patterns=data.get("read_only_memory_patterns", []),
             ignored_memory_patterns=data.get("ignored_memory_patterns", []),
@@ -483,10 +575,13 @@ class ProjectConfig(SharedConfig):
             encoding=data["encoding"],
             line_ending=line_ending,
             language_backend=language_backend,
-            base_modes=data["base_modes"],
+            agent_interface=agent_interface,
+            added_modes=data["added_modes"],
             default_modes=data["default_modes"],
             symbol_info_budget=symbol_info_budget,
             ls_specific_settings=data.get("ls_specific_settings", {}),
+            activation_command=data.get("activation_command"),
+            activation_command_timeout=activation_command_timeout,
             _local_override_keys=local_override_keys,
         )
 
@@ -503,8 +598,9 @@ class ProjectConfig(SharedConfig):
                 del d[k]
 
         # map fields using non-primitive types to a YAML-compatible representation
-        d["languages"] = [lang.value for lang in self.languages]
-        d["language_backend"] = self.language_backend.value if self.language_backend is not None else None
+        d["language_servers"] = [lang.get_key() for lang in self.language_servers]
+        d["language_backend"] = self.language_backend.get_key() if self.language_backend is not None else None
+        d["agent_interface"] = self.agent_interface.value if self.agent_interface is not None else None
         d["line_ending"] = self.line_ending.value if self.line_ending is not None else None
 
         return d
@@ -514,13 +610,18 @@ class ProjectConfig(SharedConfig):
         return os.path.join(os.path.dirname(project_yml_path), cls.SERENA_LOCAL_PROJECT_FILE)
 
     @classmethod
-    def load(cls, project_root: Path | str, serena_config: "SerenaConfig", autogenerate: bool = False) -> Self:
+    def load(
+        cls,
+        project_root: Path | str,
+        serena_config: "SerenaConfig",
+        autogen: ProjectConfigAutoGenerationMode = ProjectConfigAutoGenerationMode.NONE,
+    ) -> Self:
         """
         Load a ProjectConfig instance from the path to the project root.
 
         :param project_root: the path to the project root
         :param serena_config: the global Serena configuration
-        :param autogenerate: whether to auto-generate the configuration if it does not exist
+        :param autogen: the auto-generation mode to apply if the project configuration does not yet exist
         """
         project_root = Path(project_root)
         project_folder_name = project_root.name
@@ -529,8 +630,8 @@ class ProjectConfig(SharedConfig):
 
         # auto-generate if necessary
         if not os.path.exists(yaml_path):
-            if autogenerate:
-                return cls.autogenerate(project_root, serena_config)
+            if autogen.is_autogen_enabled():
+                return cls.autogenerate(project_root, serena_config, asynchronous=autogen == ProjectConfigAutoGenerationMode.ASYNCHRONOUS)
             else:
                 raise FileNotFoundError(f"Project configuration file not found: {yaml_path}")
 
@@ -577,34 +678,35 @@ class ProjectConfig(SharedConfig):
         config_path = project_yml_path
         log.info("Saving updated project configuration to %s", config_path)
 
-        # get the current configuration as a dictionary
-        cur_dict = self._to_yaml_dict()
+        with self._save_lock:
+            # get the current configuration as a dictionary
+            cur_dict = self._to_yaml_dict()
 
-        # load commented map from the original file and update all non-overridden keys
-        config_with_comments, _ = self._load_yaml_dict(config_path, self.YAML_COMMENT_NORMALISATION)
-        for key in cur_dict:
-            if key not in self._local_override_keys:
-                config_with_comments[key] = cur_dict[key]
+            # load commented map from the original file and update all non-overridden keys
+            config_with_comments, _ = self._load_yaml_dict(config_path, self.YAML_COMMENT_NORMALISATION)
+            for key in cur_dict:
+                if key not in self._local_override_keys:
+                    config_with_comments[key] = cur_dict[key]
 
-        # transfer missing comments from the template file
-        template_config, _ = self._load_yaml_dict(PROJECT_TEMPLATE_FILE, self.YAML_COMMENT_NORMALISATION)
-        transfer_missing_yaml_comments(template_config, config_with_comments, self.YAML_COMMENT_NORMALISATION, force_update_all=True)
+            # transfer missing comments from the template file
+            template_config, _ = self._load_yaml_dict(PROJECT_TEMPLATE_FILE, self.YAML_COMMENT_NORMALISATION)
+            transfer_yaml_comments(template_config, config_with_comments, self.YAML_COMMENT_NORMALISATION, force_update_all=True)
 
-        # save project.yml
-        save_yaml(config_path, config_with_comments)
+            # save project.yml
+            save_yaml(config_path, config_with_comments)
 
-        # update project.local.yml to reflect overridden keys if necessary
-        if save_project_local_yml:
-            project_local_yml_path = self._project_local_yml_path(project_yml_path)
-            if self._local_override_keys and os.path.exists(project_local_yml_path):
-                log.info("Saving updated local project configuration to %s", project_local_yml_path)
-                local_config_with_comments, _ = self._load_yaml_dict(
-                    project_local_yml_path, comment_normalisation=YamlCommentNormalisation.NONE, apply_defaults=False
-                )
-                for key in self._local_override_keys:
-                    if key in cur_dict:
-                        local_config_with_comments[key] = cur_dict[key]
-                save_yaml(project_local_yml_path, local_config_with_comments)
+            # update project.local.yml to reflect overridden keys if necessary
+            if save_project_local_yml:
+                project_local_yml_path = self._project_local_yml_path(project_yml_path)
+                if self._local_override_keys and os.path.exists(project_local_yml_path):
+                    log.info("Saving updated local project configuration to %s", project_local_yml_path)
+                    local_config_with_comments, _ = self._load_yaml_dict(
+                        project_local_yml_path, comment_normalisation=YamlCommentNormalisation.NONE, apply_defaults=False
+                    )
+                    for key in self._local_override_keys:
+                        if key in cur_dict:
+                            local_config_with_comments[key] = cur_dict[key]
+                    save_yaml(project_local_yml_path, local_config_with_comments)
 
 
 class RegisteredProject(ToStringMixin):
@@ -624,9 +726,6 @@ class RegisteredProject(ToStringMixin):
         self.project_root = Path(project_root).resolve()
         self.project_config = project_config
         self._project_instance = project_instance
-        # the instance a change to the project configuration dropped (see reload_if_changed), handed to the instance
-        # get_project_instance builds in its place
-        self._replaced_project_instance: Optional["Project"] = None
 
     def _tostring_exclude_private(self) -> bool:
         return True
@@ -644,8 +743,21 @@ class RegisteredProject(ToStringMixin):
         )
 
     @classmethod
-    def from_project_root(cls, project_root: str | Path, serena_config: "SerenaConfig") -> "RegisteredProject":
-        project_config = ProjectConfig.load(project_root, serena_config=serena_config)
+    def from_project_root(
+        cls,
+        project_root: str | Path,
+        serena_config: "SerenaConfig",
+        autogen: ProjectConfigAutoGenerationMode = ProjectConfigAutoGenerationMode.NONE,
+    ) -> "RegisteredProject":
+        """
+        Creates a RegisteredProject instance from a project root path, which must exist on disk.
+
+        :param project_root: path to an existing directory
+        :param serena_config: the Serena configuration
+        :param autogen: the auto-generation mode to use for the project configuration if it does not yet exist
+        :return: the RegisteredProject instance
+        """
+        project_config = ProjectConfig.load(project_root, serena_config=serena_config, autogen=autogen)
         return RegisteredProject(
             project_root=str(project_root),
             project_config=project_config,
@@ -656,72 +768,33 @@ class RegisteredProject(ToStringMixin):
         Check if the given path matches the project root path.
 
         :param path: the path to check
-        :return: True if the path matches the project root, False otherwise
+        :return: True if the path matches the project root, False otherwise (including the case
+            where this project's root directory no longer exists, e.g. a removed git worktree)
         """
         try:
             return self.project_root.samefile(Path(path).resolve())
         except OSError:
-            # a registered root that no longer exists on disk (e.g. the project directory was moved
-            # or deleted after registration) cannot match any path; report no-match rather than
-            # letting the FileNotFoundError abort resolution of unrelated registered projects
+            # typically raised if the path does not exist (e.g., a removed git worktree)
             return False
 
     def get_project_instance(self, serena_config: "SerenaConfig") -> "Project":
         """
         Returns the project instance for this registered project, loading it if necessary.
-        An instance loaded after :meth:`reload_if_changed` dropped one is handed the dropped instance as the one it replaces.
         """
         if self._project_instance is None:
             from ..project import Project
-
-            serena_config.place_data_folder_outside_project(self.project_root)
 
             with LogTime(f"Loading project instance for {self}", logger=log):
                 self._project_instance = Project(
                     project_root=str(self.project_root),
                     project_config=self.project_config,
                     serena_config=serena_config,
-                    replaced_project=self._replaced_project_instance,
                 )
-            self._replaced_project_instance = None
         return self._project_instance
-
-    def reload_if_changed(self, serena_config: "SerenaConfig") -> bool:
-        """
-        Reloads the project configuration from disk (``project.yml``, including the ``project.local.yml`` override)
-        and, if it differs from the cached configuration, replaces the cached configuration and drops any
-        memoized project instance so that the next :meth:`get_project_instance` call builds a fresh
-        :class:`Project` reflecting the on-disk state, handing it the dropped instance as the one it replaces.
-
-        :param serena_config: the global Serena configuration (used to resolve the project.yml path)
-        :return: True if the on-disk configuration differed from the cached one and the cache was updated;
-            False if the configuration was unchanged or could not be loaded (e.g., the project.yml file no
-            longer exists or is malformed). In the latter case the cached configuration is preserved.
-        """
-        try:
-            new_config = ProjectConfig.load(self.project_root, serena_config=serena_config)
-        except Exception as e:
-            log.warning(
-                "Could not reload project configuration for %s from disk: %s. Keeping cached configuration.",
-                self.project_root,
-                e,
-            )
-            return False
-        if new_config == self.project_config:
-            return False
-        log.info(
-            "Detected on-disk change to project configuration for %s; dropping cached project instance.",
-            self.project_root,
-        )
-        self.project_config = new_config
-        if self._project_instance is not None:
-            self._replaced_project_instance = self._project_instance
-        self._project_instance = None
-        return True
 
 
 @dataclass(kw_only=True)
-class SerenaConfig(SharedConfig):
+class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
     """
     Holds the Serena agent configuration, which is typically loaded from a YAML configuration file
     (when instantiated via :method:`from_config_file`), which is updated when projects are added or removed.
@@ -731,14 +804,28 @@ class SerenaConfig(SharedConfig):
     # *** fields that are mapped directly to/from the configuration file (DO NOT RENAME) ***
 
     projects: list[RegisteredProject] = field(default_factory=list)
+    auth_secret: str = field(default_factory=lambda: str(uuid4()), repr=False)
+    """
+    shared secret for authenticating communication between Serena components and services.
+    A random UUID is generated and persisted when the configuration setting is missing or empty.
+    """
     gui_log_window: bool = False
     log_level: int = logging.INFO
     trace_lsp_communication: bool = False
     web_dashboard: bool = True
-    web_dashboard_open_on_launch: bool = True
+    web_dashboard_open_on_launch: bool | None = None
+    web_dashboard_interface: str | None = None
     web_dashboard_listen_address: str = "127.0.0.1"
+    web_dashboard_trusted_hosts: list[str] = field(default_factory=lambda: ["127.0.0.1", "localhost"])
     jetbrains_plugin_server_address: str = "127.0.0.1"
+    jetbrains_launch_command: str | None = None
+    """
+    JetBrains IDE launch command, which can be used to auto-start an IDE instance on demand.
+    """
     tool_timeout: float = DEFAULT_TOOL_TIMEOUT
+    """
+    timeout for tool calls in seconds; if a tool takes longer than this, it is aborted and an error is returned.
+    """
 
     token_count_estimator: str = RegisteredTokenCountEstimator.CHAR_COUNT.name
     """Only relevant if `record_tool_usage` is True; the name of the token count estimator to use for tool usage statistics.
@@ -769,12 +856,31 @@ class SerenaConfig(SharedConfig):
       - "/projects-metadata/$projectFolderName/.serena" (stores data in a central location)
     """
 
+    trusted_project_path_patterns: list[str] = field(default_factory=lambda: ["**"])
+    """
+    list of glob patterns for project root directories that are considered trusted.
+    The default "**" considers all project roots as trusted, which is necessary for backward compatibility.
+    The default will apply if a user does not yet have the setting, while new users will get the value
+    defined in the configuration template file. 
+    """
+
+    ls_priorities: dict[str, int] | None = None
+    """
+    mapping from language server keys to their priority (higher number = higher priority).
+    """
+
     # settings with overridden defaults
-    language_backend: LanguageBackend = LanguageBackend.LSP
+
+    agent_interface: AgentInterface = AgentInterface.TOOLS
+    """
+    the agent interface to use (unless overridden by the active project's configuration).
+    Defaults to TOOLS for backward compatibility (as users without this settings will get this default).
+    The default for new users is defined in the template file.
+    """
+    language_backend: LanguageBackend = field(default_factory=lambda: BuiltinLanguageBackend.LSP.get_instance())
     """
     the language backend to use for code understanding features
     """
-    default_modes: Sequence[str] | None = ("interactive", "editing")
     line_ending: LineEnding = LineEnding.NATIVE
     symbol_info_budget: float = 10.0
     """
@@ -784,6 +890,7 @@ class SerenaConfig(SharedConfig):
     If the budget is exceeded, Serena stops issuing further requests and returns partial info results.
     0 disables the budget (no early stopping). Negative values are invalid.
     """
+
     # *** fields that are NOT mapped to/from the configuration file ***
 
     _loaded_commented_yaml: CommentedMap | None = None
@@ -792,16 +899,13 @@ class SerenaConfig(SharedConfig):
     the path to the configuration file to which updates of the configuration shall be saved;
     if None, the configuration is not saved to disk
     """
-    _project_roots_on_file: set[str] = field(default_factory=set)
-    """
-    the project roots this instance has accounted for: those the configuration file listed when it was read, then those
-    in ``projects`` at each write; what ``projects`` differs by from them is what this instance registered or removed since
-    """
+    _projects_at_load: set[str] = field(default_factory=set, repr=False)
+    """Project roots present when this configuration instance was last persisted."""
 
     # *** static members ***
 
     CONFIG_FILE = "serena_config.yml"
-    CONFIG_FIELDS_WITH_TYPE_CONVERSION = {"projects", "language_backend", "line_ending"}
+    CONFIG_FIELDS_WITH_TYPE_CONVERSION = {"projects", "language_backend", "agent_interface", "line_ending"}
 
     # *** methods ***
     @classmethod
@@ -876,6 +980,17 @@ class SerenaConfig(SharedConfig):
             log.info(f"Serena configuration file not found at {config_file_path}, autogenerating...")
             cls._generate_config_file(config_file_path)
 
+        # restrict access to the owner's read/write permissions (as the config file contains secrets)
+        if os.name == "posix":
+            current_mode = stat.S_IMODE(os.stat(config_file_path).st_mode)
+            if current_mode != 0o600:
+                try:
+                    os.chmod(config_file_path, 0o600)
+                except Exception as e:
+                    log.error("Failed to restrict permissions of Serena configuration %s to 0600: %s", config_file_path, e)
+                else:
+                    log.info("Changed permissions of Serena configuration %s from %04o to 0600", config_file_path, current_mode)
+
         # load the configuration
         log.info(f"Loading Serena configuration from {config_file_path}")
         try:
@@ -898,12 +1013,16 @@ class SerenaConfig(SharedConfig):
             assert hasattr(instance, field_name)
             setattr(instance, field_name, get_value_or_default(field_name))
 
+        # generate a persistent authentication secret for explicitly unset settings
+        if not instance.auth_secret:
+            instance.auth_secret = str(uuid4())
+            num_migrations += 1
+
         # read projects
         if "projects" not in loaded_commented_yaml:
             raise SerenaConfigError("`projects` key not found in Serena configuration. Please update your `serena_config.yml` file.")
-        instance._project_roots_on_file = cls._project_roots_of(loaded_commented_yaml)
         instance.projects = []
-        for path in loaded_commented_yaml["projects"]:
+        for path in loaded_commented_yaml["projects"] or []:
             path = Path(path).resolve()
             try:
                 path_exists = path.exists()
@@ -918,26 +1037,48 @@ class SerenaConfig(SharedConfig):
                 if path is None:
                     continue
                 num_migrations += 1
-            project_config = ProjectConfig.load(path, serena_config=instance)  # instance is sufficiently populated
+            try:
+                project_config = ProjectConfig.load(path, serena_config=instance)  # instance is sufficiently populated
+            except Exception as e:
+                log.error(
+                    "Failed to load project configuration for %s: %s. "
+                    "This project will be skipped. Fix or delete its "
+                    ".serena/project.yml (or remove it from "
+                    "serena_config.yml) to re-enable it.",
+                    path,
+                    e,
+                )
+                continue
             project = RegisteredProject(
                 project_root=str(path),
                 project_config=project_config,
             )
             instance.projects.append(project)
 
+        instance._projects_at_load = {str(project.project_root) for project in instance.projects}
+
         # determine language backend
         language_backend = get_dataclass_default(SerenaConfig, "language_backend")
         if "language_backend" in loaded_commented_yaml:
             backend_str = loaded_commented_yaml["language_backend"]
-            language_backend = LanguageBackend.from_str(backend_str)
+            language_backend = LanguageBackendRegistry.get_instance().resolve(backend_str)
         else:
             # backward compatibility (migrate Boolean field "jetbrains")
             if "jetbrains" in loaded_commented_yaml:
                 num_migrations += 1
                 if loaded_commented_yaml["jetbrains"]:
-                    language_backend = LanguageBackend.JETBRAINS
+                    language_backend = BuiltinLanguageBackend.JETBRAINS.get_instance()
                 del loaded_commented_yaml["jetbrains"]
         instance.language_backend = language_backend
+
+        # determine agent interface
+        agent_interface: AgentInterface | None = get_dataclass_default(SerenaConfig, "agent_interface")
+        if "agent_interface" in loaded_commented_yaml:
+            agent_interface_value = loaded_commented_yaml["agent_interface"]
+            agent_interface = AgentInterface.from_str(agent_interface_value)
+        else:
+            num_migrations += 1
+        instance.agent_interface = agent_interface
 
         # determine line ending
         line_ending_value = loaded_commented_yaml.get("line_ending")
@@ -965,7 +1106,7 @@ class SerenaConfig(SharedConfig):
         # re-save the configuration file if any migrations were performed
         if num_migrations > 0:
             log.info("Legacy configuration was migrated; re-saving configuration file")
-            instance.save()
+            instance._save()
 
         return instance
 
@@ -993,18 +1134,54 @@ class SerenaConfig(SharedConfig):
             log.error(f"Error migrating configuration file: {e}")
             return None
 
-    @cached_property
+    def set_builtin_language_backend(self, backend: BuiltinLanguageBackend) -> None:
+        """
+        Sets the built-in language backend to use for code understanding features.
+
+        :param backend: the language backend to set
+        """
+        self.language_backend = backend.get_instance()
+
+    @classmethod
+    def init(cls, builtin_language_backend: BuiltinLanguageBackend) -> "SerenaConfig":
+        """
+        Supports the config initialisation CLI command, allowing the user to configure fundamental settings before
+        the first launch.
+
+        :param builtin_language_backend: the language backend to use
+        :return: the created SerenaConfig instance
+        """
+        config = cls.from_config_file()
+        config.language_backend = builtin_language_backend.get_instance()
+        config._save()
+        return config
+
+    def with_headless_mode_overrides(self) -> "SerenaConfig":
+        """
+        Modifies this instance to apply overrides for headless mode, where any GUI/user interaction-based features are disabled.
+        This is intended to be applied for cases where a `SerenaConfig` instance is needed to instantiate a `SerenaAgent` instance
+        while the user is not expected to interact with the system (e.g. a CLI command or a test).
+
+        :return: the instance with overrides applied for headless mode
+        """
+        self.gui_log_window = False
+        self.web_dashboard = False
+        self.jetbrains_launch_command = None
+        return self
+
+    @property
     def project_paths(self) -> list[str]:
         return sorted(str(project.project_root) for project in self.projects)
 
-    @cached_property
+    @property
     def project_names(self) -> list[str]:
         return sorted(project.project_config.project_name for project in self.projects)
 
     def get_registered_project(self, project_root_or_name: str, autoregister: bool = False) -> Optional[RegisteredProject]:
         """
         :param project_root_or_name: path to the project root or the name of the project
-        :param autoregister: whether to register the project if it exists but is not registered yet
+        :param autoregister: whether to auto-register projects that are not yet registered in Serena's global configuration
+            but have an existing project configuration file. Project configuration files are never auto-generated.
         :return: the registered project, or None if not found
         """
         # look for project by name
@@ -1024,7 +1201,7 @@ class SerenaConfig(SharedConfig):
             for project in self.projects:
                 if project.matches_root_path(project_root_or_name):
                     return project
-        # no registered project found; auto-register if project configuration exists
+        # no registered project found; optionally auto-register if a project configuration already exists
         if autoregister:
             config_path = self.get_project_yml_location(project_root_or_name)
             if os.path.isfile(config_path):
@@ -1043,18 +1220,34 @@ class SerenaConfig(SharedConfig):
 
     def add_registered_project(self, registered_project: RegisteredProject) -> None:
         """
-        Adds a registered project, saving the configuration file.
+        Adds a registered project, persisting the updated project list
         """
         self.projects.append(registered_project)
-        self.save()
+        self._persist_projects()
 
-    def add_project_from_path(self, project_root: Path | str) -> "Project":
+    def remove_registered_project(self, registered_project: RegisteredProject) -> None:
         """
-        Add a new project to the Serena configuration from a given path, auto-generating the project
+        Removes the given registered project, persisting the updated project list.
+        Only the registry entry is removed; the project's own files, including its project
+        configuration file, are left untouched.
+
+        Unlike :meth:`remove_project`, which resolves the project by name, this removes the
+        given entry itself and is therefore unambiguous when several registered projects
+        share a name.
+
+        :param registered_project: the project to remove, which must be an element of :attr:`projects`
+        """
+        self.projects.remove(registered_project)
+        self._persist_projects()
+
+    def add_project_from_path(self, project_root: Path | str, asynchronous_autogen: bool = False) -> "Project":
+        """
+        Adds a new project to the Serena configuration from a given path, auto-generating the project
         with defaults if it does not exist.
         Will raise a FileExistsError if a project already exists at the path.
 
         :param project_root: the path to the project to add
+        :param asynchronous_autogen: whether to use asynchronous auto-generation for the project configuration
         :return: the project that was added
         """
         from ..project import Project
@@ -1071,9 +1264,8 @@ class SerenaConfig(SharedConfig):
                     f"Project with path {project_root} was already added with name '{already_registered_project.project_name}'."
                 )
 
-        self.place_data_folder_outside_project(project_root)
-
-        project_config = ProjectConfig.load(project_root, serena_config=self, autogenerate=True)
+        autogen = ProjectConfigAutoGenerationMode.ASYNCHRONOUS if asynchronous_autogen else ProjectConfigAutoGenerationMode.SYNCHRONOUS
+        project_config = ProjectConfig.load(project_root, serena_config=self, autogen=autogen)
 
         new_project = Project(
             project_root=str(project_root),
@@ -1093,13 +1285,75 @@ class SerenaConfig(SharedConfig):
                 break
         else:
             raise ValueError(f"Project '{project_name}' not found in Serena configuration; valid project names: {self.project_names}")
-        self.save()
+        self._persist_projects()
 
-    def save(self) -> None:
+    def is_dashboard_opened_on_launch(self) -> bool:
         """
-        Saves the configuration to the file from which it was loaded (if any). The project roots another process registered
-        or removed since this instance last read or wrote the file stay as that process left them; every other field takes
-        this instance's value.
+        Returns whether the web dashboard is to be opened on launch
+        """
+        if self.web_dashboard_open_on_launch is None:  # not yet configured, so show on first launch
+            return True
+        return self.web_dashboard_open_on_launch
+
+    def save_web_dashboard_open_on_launch(self, value: bool) -> None:
+        """Save the dashboard launch preference without persisting transient configuration overrides."""
+        # persist against the latest disk configuration under the shared file lock
+        if self.config_file_path is not None:
+            with FileLock(self.config_file_path + ".lock"):
+                persisted = SerenaConfig.from_config_file()
+                persisted.web_dashboard_open_on_launch = value
+                persisted._save()
+
+        # update the running configuration only after persistence succeeds
+        self.web_dashboard_open_on_launch = value
+
+    def _persist_projects(self) -> None:
+        """Persist this instance's project-list changes without undoing concurrent edits.
+
+        The disk copy is reloaded because multiple agent processes may update the global
+        configuration concurrently. The instance baseline lets us distinguish this instance's
+        removals and additions from changes made by another process: unchanged baseline projects
+        follow the current disk copy, while removed baseline projects are filtered out and newly
+        added instance projects are appended.
+
+        The reload-merge-write sequence is itself not atomic, so it is wrapped in a cross-process
+        file lock: without it, two agent processes racing through this method can each read the
+        disk copy before the other writes, and the later write silently discards whichever
+        process's change was not yet on disk when the other one read.
+        """
+        if self.config_file_path is None:
+            return
+
+        with FileLock(self.config_file_path + ".lock"):
+            persisted = SerenaConfig.from_config_file()
+            current_projects_by_path = {str(project.project_root): project for project in self.projects}
+            current_paths = set(current_projects_by_path)
+            removed_paths = self._projects_at_load - current_paths
+            added_paths = current_paths - self._projects_at_load
+
+            combined_projects = []
+            handled_project_paths = set()
+            for project in persisted.projects:
+                project_path = str(project.project_root)
+                if project_path not in removed_paths:
+                    combined_projects.append(project)
+                    handled_project_paths.add(project_path)
+            for project_path in added_paths:
+                if project_path not in handled_project_paths:
+                    combined_projects.append(current_projects_by_path[project_path])
+                    handled_project_paths.add(project_path)
+
+            persisted.projects = combined_projects
+            persisted._save()
+            self._projects_at_load = current_paths
+
+    def _save(self) -> None:
+        """
+        Saves the full configuration to the file from which it was loaded (if any)
+
+        NOTE: This method is private, because it is not usually safe to save a configuration instance used
+          at runtime, because it often contains transient overrides (e.g. specified through the CLI)
+          that should never be persisted back to the configuration file.
         """
         if self.config_file_path is None:
             return
@@ -1112,8 +1366,14 @@ class SerenaConfig(SharedConfig):
         for field_name in self._iter_config_file_mapped_fields_without_type_conversion():
             commented_yaml[field_name] = getattr(self, field_name)
 
+        # convert project objects into list of paths
+        commented_yaml["projects"] = sorted({str(project.project_root) for project in self.projects})
+
         # convert language backend to string
-        commented_yaml["language_backend"] = self.language_backend.value
+        commented_yaml["language_backend"] = self.language_backend.get_key()
+
+        # convert agent interface to string (None if not configured)
+        commented_yaml["agent_interface"] = self.agent_interface.value if self.agent_interface is not None else None
 
         # convert line ending to string
         commented_yaml["line_ending"] = self.line_ending.value
@@ -1124,25 +1384,9 @@ class SerenaConfig(SharedConfig):
         # For some keys, we force updates, because old comments are problematic/misleading.
         normalise_yaml_comments(commented_yaml, YamlCommentNormalisation.LEADING_WITH_CONVERSION_FROM_TRAILING)
         template_yaml = load_yaml(SERENA_CONFIG_TEMPLATE_FILE, comment_normalisation=YamlCommentNormalisation.LEADING)
-        transfer_missing_yaml_comments(template_yaml, commented_yaml, YamlCommentNormalisation.LEADING, force_update_all=True)
+        transfer_yaml_comments(template_yaml, commented_yaml, YamlCommentNormalisation.LEADING, force_update_all=True)
 
-        # the project roots the file holds now, with this instance's own registrations and removals applied, read and
-        # replaced under one lock so that no other process's save falls between the two
-        with FileLock(self.config_file_path + ".lock"):
-            on_file = self._project_roots_of(load_yaml(self.config_file_path)) if os.path.exists(self.config_file_path) else set()
-            own = {str(project.project_root) for project in self.projects}
-            roots = (on_file | (own - self._project_roots_on_file)) - (self._project_roots_on_file - own)
-            commented_yaml["projects"] = sorted(roots)
-            save_yaml(self.config_file_path, commented_yaml)
-            self._project_roots_on_file = own
-
-    @staticmethod
-    def _project_roots_of(loaded_yaml: CommentedMap) -> set[str]:
-        """
-        :param loaded_yaml: the loaded contents of a configuration file.
-        :return: the resolved project roots it lists.
-        """
-        return {str(Path(root).resolve()) for root in loaded_yaml.get("projects") or []}
+        save_yaml(self.config_file_path, commented_yaml)
 
     @staticmethod
     def _resolve_serena_folder_location(template: str, placeholders: dict[str, str]) -> str:
@@ -1189,69 +1433,21 @@ class SerenaConfig(SharedConfig):
         """
         Resolves the location of the project's .serena data folder using fallback logic:
 
-        1. If the folder at the configured path (``project_serena_folder_location``) holds a project.yml, use it.
-        2. Otherwise, if the folder at the default location inside the project root holds one, use that.
-        3. Otherwise, if a folder exists in the serena home directory (:meth:`get_home_project_serena_folder`), use that.
-        4. Otherwise, use the folder that exists at the configured path, then the one at the default location.
-        5. If none exists, return the configured path (for creation).
+        1. If the folder exists at the configured path (``project_serena_folder_location``), use it.
+        2. Otherwise, if it exists at the default location inside the project root, use that.
+        3. If neither exists, return the configured path (for creation).
 
         :param project_root: the absolute path to the project root directory
         :return: the resolved absolute path to the .serena data folder
         :raises SerenaConfigError: if the configured template contains an unknown placeholder
         """
         configured_path = self.get_configured_project_serena_folder(project_root)
-        default_path = os.path.join(str(project_root), SERENA_MANAGED_DIR_NAME)
-        for folder in (configured_path, default_path):
-            if self._holds_project_yml(folder):
-                return folder
-        home_path = self.get_home_project_serena_folder(project_root)
-        if os.path.isdir(home_path):
-            return home_path
         if os.path.isdir(configured_path):
             return configured_path
+        default_path = os.path.join(str(project_root), SERENA_MANAGED_DIR_NAME)
         if configured_path != default_path and os.path.isdir(default_path):
             return default_path
         return configured_path
-
-    @classmethod
-    def _holds_project_yml(cls, folder: str) -> bool:
-        """
-        :param folder: the path of a project's data folder
-        :return: whether the folder holds a project.yml
-        """
-        return os.path.isfile(os.path.join(folder, ProjectConfig.SERENA_PROJECT_FILE))
-
-    def place_data_folder_outside_project(self, project_root: str | Path) -> None:
-        """
-        Creates the data folder of a project outside its directory when the directory holds no project.yml, so that
-        activating the directory writes nothing inside it. A configured location outside the project directory is
-        created where it is configured, so that it is resolved ahead of a data folder inside the project that holds no
-        project.yml; for any other location, the folder is created in the serena home directory.
-
-        :param project_root: the absolute path to the project root directory
-        """
-        configured_path = self.get_configured_project_serena_folder(project_root)
-        default_path = os.path.join(str(project_root), SERENA_MANAGED_DIR_NAME)
-        if self._holds_project_yml(configured_path) or self._holds_project_yml(default_path):
-            return
-        if not Path(configured_path).resolve().is_relative_to(Path(project_root).resolve()):
-            os.makedirs(configured_path, exist_ok=True)
-            return
-        os.makedirs(self.get_home_project_serena_folder(project_root), exist_ok=True)
-
-    @staticmethod
-    def get_home_project_serena_folder(project_root: str | Path) -> str:
-        """
-        Returns the location in the serena home directory of the data folder of a project whose directory holds
-        none of its own. The folder is named after the project directory and a digest of its absolute path, so that
-        two directories of the same name never share one.
-
-        :param project_root: the absolute path to the project root directory
-        :return: the absolute path of the project's data folder in the serena home directory
-        """
-        resolved_root = str(Path(project_root).resolve())
-        digest = hashlib.sha256(resolved_root.encode("utf-8")).hexdigest()[:16]
-        return os.path.join(SerenaPaths().serena_user_home_dir, "projects", f"{Path(resolved_root).name}-{digest}")
 
     def get_project_yml_location(self, project_root: str | Path) -> str:
         """
@@ -1268,6 +1464,65 @@ class SerenaConfig(SharedConfig):
         """
         Propagate settings from this configuration to individual components that are statically configured
         """
-        from serena.tools import JetBrainsPluginClient
+        from serena.jetbrains.jetbrains_plugin_client import JetBrainsPluginClient
 
         JetBrainsPluginClient.set_server_address(self.jetbrains_plugin_server_address)
+
+    def is_trusted_project_path(self, project_root: str | Path) -> bool:
+        """
+        Checks if the given project root path matches any of the trusted project root patterns.
+
+        :param project_root: the path to the project root directory
+        :return: True if the project root is trusted, False otherwise
+        """
+        project_root_str = str(project_root)
+        for pattern in self.trusted_project_path_patterns:
+            if GlobMatcher(pattern).matches(project_root_str):
+                return True
+        return False
+
+    def determine_agent_interface(self, project_config: "ProjectConfig | None" = None, log_choice: bool = False) -> AgentInterface:
+        """
+        Determines the effective agent interface: the project configuration takes precedence over the global configuration;
+        if neither configures an interface, the tool interface is used.
+
+        :param project_config: the configuration of the project to be activated, if any
+        :param log_choice: whether to log the choice
+        :return: the effective agent interface
+        """
+        if project_config is not None and project_config.agent_interface is not None:
+            agent_interface, source = project_config.agent_interface, "project configuration"
+        elif self.agent_interface is not None:
+            agent_interface, source = self.agent_interface, "global configuration"
+        else:
+            agent_interface, source = AgentInterface.TOOLS, "default"
+        if log_choice:
+            log.info(f"Using agent interface '{agent_interface.value}' ({source})")
+        return agent_interface
+
+    def determine_language_backend(self, project_config: ProjectConfig | None = None, log_choice: bool = False) -> LanguageBackend:
+        language_backend = self.language_backend
+        if project_config and project_config.language_backend is not None:
+            language_backend = project_config.language_backend
+            if log_choice:
+                log.info(f"Using language backend as configured in project: {language_backend.name}")
+        else:
+            if log_choice:
+                log.info(f"Using language backend from global configuration: {language_backend.name}")
+        return language_backend
+
+    def get_ls_priority(self, ls_id: LanguageServerIdLike) -> int:
+        """
+        Gets the priority value associated with a language server
+
+        :param ls_id: identifies the language server
+        :return: the integer priority
+        """
+        if self.ls_priorities is not None:
+            try:
+                configured_value = self.ls_priorities.get(ls_id.get_key())
+                if configured_value is not None:
+                    return int(configured_value)
+            except Exception as e:
+                log.error("Error reading language priority for %s: %s. Using default priority.", ls_id.get_key(), e)
+        return ls_id.get_priority()

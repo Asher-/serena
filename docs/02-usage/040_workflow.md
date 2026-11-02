@@ -13,60 +13,68 @@ setting up a project with Serena typically involves the following steps:
 4. **Working on coding tasks**: Using Serena to help you with actual coding tasks in the project
 
 (project-creation-indexing)=
-## Project Creation & Indexing
+## Project Creation
 
 Project creation is the process of defining fundamental project settings that are relevant to Serena's operation.
 
 You can create a project either  
+ * explicitly, using the project creation command (see below), or
  * implicitly, by just activating a directory as a project while already in a conversation; this will use default settings for your project (skip to the next section).
- * explicitly, using the project creation command, or
 
 ### Explicit Project Creation
 
 To explicitly create a project, use the following command while in the project directory:
 
-    serena project create [options]
+    serena project create [options] [project directory]
 
- * For an empty project, you will need to specify the programming language
-   (e.g., `--language python`). 
- * For an existing project, the main programming language will be detected automatically,
-   but you can choose to explicitly specify multiple languages by passing the `--language` parameter
-   multiple times (e.g. `--language python --language typescript`).
+ * The project directory defaults to the current directory if not specified.
+ * For an existing project, the programming languages will be detected based on
+   the source files present, and the main language will be activated automatically.
+   If multiple languages are detected, you will be prompted whether you want to enable them.  
+ * For an empty project, you can optionally specify one or more languages
+   to be activated explicitly via the `--language` parameter
+   (e.g. `--language python --language typescript`).
  * You can optionally specify a custom project name with `--name my-name`.
  * You can immediately index the project after creation with `--index`.
 
 (project-config)=
-#### Project Configuration
+## Project Configuration
 
 After creation, you can adjust the project settings in the generated `.serena/project.yml` file
 within the project directory.
 
 The file allows you to configure ...
-  * the set of programming languages for which language servers are spawned (not relevant when using the JetBrains plugin)
-    Note that you can dynamically add/remove language servers while Serena is running via the [Dashboard](060_dashboard).
+  * the name by which you want to refer to the project (relevant when telling the LLM to dynamically activate the project)
+  * the set of built-in language servers and explicitly registered external adapters for which servers are spawned
+    (not relevant when using the JetBrains plugin). External adapter IDs become available after their Python package is installed;
+    see [External Language Server Adapters](../03-special-guides/external_language_server_registration.md).
+    The [Dashboard](060_dashboard) can dynamically add or remove built-in language servers and installed, registered external
+    adapters while Serena is running. It does not install adapter packages or offer unregistered adapter IDs.
   * the [language backend](per-project-language-backend) to use for this project (overriding the global setting)
   * the encoding used in source files
   * ignore rules
   * write access
+  * the list of workspace folders to be processed by language servers (when using the LSP backend)
   * an initial prompt that shall be passed to the LLM whenever the project is activated
-  * the name by which you want to refer to the project (relevant when telling the LLM to dynamically activate the project)
-  * the set of tools and modes to use by default
+  * a shell command to run upon project activation (prior to language backend initialisation)
+  * the set of tools and modes to use for the project
+  * and some other settings.
 
 For detailed information on the parameters and possible settings, see the 
 [template file](https://github.com/oraios/serena/blob/main/src/serena/resources/project.template.yml).
 
 :::{note}
-Many settings in project.yml *extend* or *override* settings in the global configuration file `serena_config.yml`.
+Many settings in project.yml *extend* or *override* settings in [Serena's global configuration](global-config).
 So use the project configuration specifically for aspects that apply only to the particular project.
 :::
 
-**Local Overrides**. The project.yml file is intended to be versioned together with the project.
+**Local Overrides**. The `project.yml` file is intended to be versioned together with the project.
 You can specify local overrides for the settings in a `project.local.yml` file in the same directory
 (which, by default, is ignored by git). 
 Any keys defined therein will override the respective key in `project.yml`.
 
 (indexing)=
-### Indexing
+## Indexing
 
 :::{note}
 Indexing is not a relevant operation when using the JetBrains plugin, as indexing is handled by the IDE.
@@ -78,7 +86,7 @@ that requires symbol information.
 
 While in the project directory, run this command:
    
-    <serena> project index
+    serena project index
 
 Indexing has to be called only once. During regular usage, Serena will automatically update the index whenever files change.
 
@@ -112,9 +120,17 @@ and to store memories, which it can then draw upon in future interactions.
 
 In general, **memories** provide a way for Serena to store and retrieve 
 information about the project, relevant conventions, and other relevant aspects.
+Memories may reference each other using the `` `mem:NAME` `` convention; references
+are kept in sync across renames, and a `serena memories check` command is available
+to report stale references.
 
-For more information on this, including how to manage
-or disable these features, see [Memories & Onboarding](045_memories).
+During the first onboarding, Serena seeds a `memory_maintenance` memory describing the
+conventions (style, references) that subsequent memories should follow, and the
+agent is instructed to read it before writing any project-specific memories.
+
+For more information on this, including the target memory layout, the `mem:` reference
+convention, the `serena memories` CLI subcommands, and how to manage or disable these
+features, see [Memories & Onboarding](045_memories).
 
 
 ## Preparing Your Project

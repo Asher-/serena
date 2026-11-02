@@ -7,11 +7,11 @@ You can pass the following entries in ``ls_specific_settings["ruby"]``:
       Serena when no project-local or global ruby-lsp is already available
       (default: the bundled Serena version).
 """
+# SPDX-License-Identifier: MIT
 
 import json
 import logging
 import os
-import pathlib
 import shutil
 import subprocess
 import threading
@@ -19,11 +19,11 @@ import threading
 from overrides import override
 
 from solidlsp.ls import SolidLanguageServer
-from solidlsp.ls_config import Language, LanguageServerConfig
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams, InitializeResult
+from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
+from solidlsp.lsp_protocol_handler.lsp_types import InitializeResult
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
-from solidlsp.util import supervise
+from solidlsp.util.subprocess_util import subprocess_run
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +68,7 @@ class RubyLsp(SolidLanguageServer):
             "public/packs",  # Webpacker output
             "public/webpack",  # Webpack output
             "public/assets",  # Rails compiled assets
+            ".ruby-lsp",
         ]
         return super().is_ignored_dirname(dirname) or dirname in ruby_ignored_dirs
 
@@ -108,7 +109,7 @@ class RubyLsp(SolidLanguageServer):
         Setup runtime dependencies for ruby-lsp and return the command list to start the server.
         Installation strategy: Bundler project > global ruby-lsp > gem install ruby-lsp at the pinned version
         """
-        ls_specific_settings = solidlsp_settings.get_ls_specific_settings(Language.RUBY)
+        ls_specific_settings = solidlsp_settings.get_ls_specific_settings(LanguageServerId.RUBY)
         ruby_lsp_version = ls_specific_settings.get("ruby_lsp_version", RUBY_LSP_VERSION)
         # Detect Ruby version manager environment
         # Using the version manager's exec wrapper ensures commands run with the correct Ruby version
@@ -164,7 +165,7 @@ class RubyLsp(SolidLanguageServer):
 
         # Check if Ruby is installed
         try:
-            result = supervise.run(ruby_cmd + ["--version"], check=True, capture_output=True, cwd=repository_root_path, text=True)
+            result = subprocess_run(ruby_cmd + ["--version"], check=True, capture_output=True, cwd=repository_root_path, text=True)
             ruby_version = result.stdout.strip()
             log.info(f"Ruby version: {ruby_version}")
 
@@ -247,7 +248,7 @@ class RubyLsp(SolidLanguageServer):
         # Try to install ruby-lsp globally
         log.info("ruby-lsp not found, attempting to install globally...")
         try:
-            supervise.run(
+            subprocess_run(
                 ["gem", "install", "ruby-lsp", "-v", ruby_lsp_version],
                 check=True,
                 capture_output=True,
@@ -329,16 +330,13 @@ class RubyLsp(SolidLanguageServer):
 
         return base_patterns
 
-    def _get_initialize_params(self) -> InitializeParams:
+    def _create_base_initialize_params(self) -> dict:
         """
         Returns ruby-lsp specific initialization parameters.
         """
         exclude_patterns = self._get_ruby_exclude_patterns(self.repository_root_path)
 
         initialize_params = {
-            "processId": os.getpid(),
-            "rootPath": self.repository_root_path,
-            "rootUri": pathlib.Path(self.repository_root_path).as_uri(),
             "capabilities": {
                 "workspace": {
                     "workspaceEdit": {"documentChanges": True},
@@ -371,7 +369,7 @@ class RubyLsp(SolidLanguageServer):
             },
         }
 
-        return initialize_params  # type: ignore
+        return initialize_params
 
     def _start_server(self) -> None:
         """
@@ -437,7 +435,7 @@ class RubyLsp(SolidLanguageServer):
 
         log.info("Starting ruby-lsp server process")
         self.server.start()
-        initialize_params = self._get_initialize_params()
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request from LSP client to LSP server and awaiting response")
         log.info(f"Sending init params: {json.dumps(initialize_params, indent=4)}")

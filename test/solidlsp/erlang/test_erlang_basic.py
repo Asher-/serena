@@ -8,24 +8,24 @@ like request_references using the test repository.
 import pytest
 
 from solidlsp import SolidLanguageServer
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
+from test.conftest import language_server_tests_enabled
 from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name, request_all_symbols
-
-from . import ERLANG_LS_UNAVAILABLE, ERLANG_LS_UNAVAILABLE_REASON
+from test.solidlsp.util.diagnostics import assert_file_diagnostics
 
 
 @pytest.mark.erlang
-@pytest.mark.skipif(ERLANG_LS_UNAVAILABLE, reason=f"Erlang LS not available: {ERLANG_LS_UNAVAILABLE_REASON}")
+@pytest.mark.skipif(not language_server_tests_enabled(LanguageServerId.ERLANG), reason="Erlang tests are disabled")
 class TestErlangLanguageServerBasics:
     """Test basic functionality of the Erlang language server."""
 
-    @pytest.mark.parametrize("language_server", [Language.ERLANG], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.ERLANG], indirect=True)
     def test_language_server_initialization(self, language_server: SolidLanguageServer) -> None:
         """Test that the Erlang language server initializes properly."""
         assert language_server is not None
-        assert language_server.language == Language.ERLANG
+        assert language_server.ls_id == LanguageServerId.ERLANG
 
-    @pytest.mark.parametrize("language_server", [Language.ERLANG], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.ERLANG], indirect=True)
     def test_document_symbols(self, language_server: SolidLanguageServer) -> None:
         """Test document symbols retrieval for Erlang files."""
         try:
@@ -43,7 +43,7 @@ class TestErlangLanguageServerBasics:
             else:
                 raise
 
-    @pytest.mark.parametrize("language_server", [Language.ERLANG], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.ERLANG], indirect=True)
     def test_bare_symbol_names(self, language_server) -> None:
         all_symbols = request_all_symbols(language_server)
         malformed_symbols = []
@@ -55,3 +55,12 @@ class TestErlangLanguageServerBasics:
                 f"Found malformed symbols: {[format_symbol_for_assert(sym) for sym in malformed_symbols]}",
                 pytrace=False,
             )
+
+    @pytest.mark.parametrize("language_server", [LanguageServerId.ERLANG], indirect=True)
+    def test_file_diagnostics(self, language_server: SolidLanguageServer) -> None:
+        assert_file_diagnostics(
+            language_server,
+            "src/diagnostics_sample.erl",
+            (),
+            min_count=1,
+        )

@@ -239,6 +239,55 @@ class BannerRotation {
     }
 }
 
+// A formatted tooltip kept within the viewport and available to keyboard users.
+class DashboardTooltip {
+    #anchor;
+    #tooltip;
+    #events = new AbortController();
+
+    constructor(anchor, tooltip) {
+        this.#anchor = anchor;
+        this.#tooltip = tooltip;
+        const options = {signal: this.#events.signal};
+        const wrapper = anchor.parentElement;
+        wrapper.addEventListener('mouseenter', () => this.#show(), options);
+        wrapper.addEventListener('mouseleave', () => {
+            if (!wrapper.contains(document.activeElement)) this.#hide();
+        }, options);
+        anchor.addEventListener('focus', () => this.#show(), options);
+        anchor.addEventListener('blur', () => this.#hide(), options);
+        anchor.addEventListener('keydown', event => {
+            if (event.key === 'Escape') this.#hide();
+        }, options);
+        const reposition = () => {
+            if (!this.#tooltip.hidden) this.#show();
+        };
+        window.addEventListener('resize', reposition, options);
+        document.addEventListener('scroll', reposition, {...options, capture: true});
+    }
+
+    #show() {
+        // position below the trigger, or above it when there is insufficient room
+        this.#tooltip.hidden = false;
+        const anchor = this.#anchor.getBoundingClientRect();
+        const tooltip = this.#tooltip.getBoundingClientRect();
+        const left = Math.max(12, Math.min(anchor.left, window.innerWidth - tooltip.width - 12));
+        const top = anchor.bottom + tooltip.height + 12 <= window.innerHeight
+            ? anchor.bottom : Math.max(12, anchor.top - tooltip.height);
+        this.#tooltip.style.left = `${left}px`;
+        this.#tooltip.style.top = `${top}px`;
+    }
+
+    #hide() {
+        this.#tooltip.hidden = true;
+    }
+
+    destroy() {
+        this.#hide();
+        this.#events.abort();
+    }
+}
+
 class Dashboard {
     constructor() {
         let self = this;
@@ -246,9 +295,11 @@ class Dashboard {
         // Page state
         this.currentPage = 'overview';
         this.configData = null;
+        this.dashboardWelcomeDismissed = false;
         this.lastConfigDataJson = null; // Cache for comparison
         this.jetbrainsMode = false;
         this.activeProjectName = null;
+        this.projectTrustTooltip = null;
         this.languageToRemove = null;
         this.currentMemoryName = null;
         this.originalMemoryContent = null;
@@ -296,6 +347,10 @@ class Dashboard {
         this.$availableContextsDisplay = $('#available-contexts-display');
         this.$addLanguageModal = $('#add-language-modal');
         this.$modalLanguageSelect = $('#modal-language-select');
+        this.$modalLanguageCombobox = $('#modal-language-combobox');
+        this.$modalLanguageOptions = $('#modal-language-options');
+        this.$modalLanguageEmpty = $('#modal-language-empty');
+        this.modalLanguageAvailable = [];
         this.$modalProjectName = $('#modal-project-name');
         this.$modalAddBtn = $('#modal-add-btn');
         this.$modalCancelBtn = $('#modal-cancel-btn');
@@ -346,6 +401,8 @@ class Dashboard {
         this.outputChart = null;
 
         // Register event handlers
+        $('#dashboard-auto-open-enable').click(() => this.saveDashboardOpenOnLaunch(true));
+        $('#dashboard-auto-open-disable').click(() => this.saveDashboardOpenOnLaunch(false));
         this.$saveLogsBtn.click(this.saveLogs.bind(this));
         this.$copyLogsBtn.click(this.copyLogs.bind(this));
         this.$clearLogsBtn.click(this.clearLogs.bind(this));
@@ -360,6 +417,7 @@ class Dashboard {
         this.$modalAddBtn.click(this.addLanguageFromModal.bind(this));
         this.$modalCancelBtn.click(this.closeLanguageModal.bind(this));
         this.$modalClose.click(this.closeLanguageModal.bind(this));
+        this.bindLanguageCombobox();
         this.$removeModalOkBtn.click(this.confirmRemoveLanguageOk.bind(this));
         this.$removeModalCancelBtn.click(this.closeRemoveLanguageModal.bind(this));
         this.$modalCloseRemove.click(this.closeRemoveLanguageModal.bind(this));
@@ -485,32 +543,9 @@ class Dashboard {
 
         // Initialize the application
         this.loadToolNames().then(function () {
-            // Start on overview page
             self.loadNews();
-            self.loadConfigOverview();
-            self.startConfigPolling();
-            self.startExecutionsPolling();
-        });
-        // Initialize heartbeat interval
-        setInterval(this.heartbeat.bind(this), 250);
-    }
-
-    heartbeat() {
-        let self = this;
-        $.ajax({
-            url: '/heartbeat',
-            type: 'GET',
-            success: function (response) {
-                self.heartbeatFailureCount = 0;
-            },
-            error: function (xhr, status, error) {
-                self.heartbeatFailureCount++;
-                console.error('Heartbeat failure; count = ', self.heartbeatFailureCount);
-                if (self.heartbeatFailureCount >= 1) {
-                    console.log('Server appears to be down, closing tab');
-                    window.close();
-                }
-            },
+            // start on overview page
+            self.navigateToPage("overview");
         });
     }
 
@@ -541,7 +576,6 @@ class Dashboard {
         // Start appropriate polling for the page
         if (page === 'overview') {
             this.loadNews();
-            this.loadConfigOverview();
             this.startConfigPolling();
             this.startExecutionsPolling();
         } else if (page === 'logs') {
@@ -590,6 +624,7 @@ class Dashboard {
                     self.configData = response;
                     self.jetbrainsMode = response.jetbrains_mode;
                     self.activeProjectName = response.active_project.name;
+                    $('#dashboard-welcome').toggle(!self.dashboardWelcomeDismissed && response.web_dashboard_open_on_launch === null);
                     self.displayConfig(response);
                     self.displayBasicStats(response.tool_stats_summary);
                     self.displayProjects(response.registered_projects);
@@ -599,11 +634,8 @@ class Dashboard {
                 } else {
                     console.log('Config unchanged, skipping display update');
                 }
-                // language-server status is orthogonal to config.yml state — a language listed in
-                // config.languages may still be unavailable if its LSP crashed at startup, and a
-                // restart can flip an unavailable language back to active without any config edit
-                self.loadLanguageServerStatus();
-            }, error: function (xhr, status, error) {
+            },
+            error: function (xhr, status, error) {
                 console.error('Error loading config overview:', error);
                 self.$configDisplay.html('<div class="error-message">Error loading configuration</div>');
                 self.$basicStatsDisplay.html('<div class="error-message">Error loading stats</div>');
@@ -611,88 +643,95 @@ class Dashboard {
                 self.$availableToolsDisplay.html('<div class="error-message">Error loading tools</div>');
                 self.$availableModesDisplay.html('<div class="error-message">Error loading modes</div>');
                 self.$availableContextsDisplay.html('<div class="error-message">Error loading contexts</div>');
-            }, complete: function () {
+            },
+            complete: function () {
                 self.waitingForConfigPollingResult = false;
             }
         });
     }
 
-    loadLanguageServerStatus() {
-        // fetches per-language LSP state (active + unavailable with exception text) and applies it
-        // as visual decoration (green/red accent, tooltip with error) onto the language badges the
-        // config section already rendered. Safe to call on every poll — the decoration is idempotent
-        const self = this;
+    saveDashboardOpenOnLaunch(value) {
+        this.dashboardWelcomeDismissed = true;
+        $('#dashboard-welcome').hide();
         $.ajax({
-            url: '/get_language_server_status',
-            type: 'GET',
-            success: function (response) {
-                self.applyLanguageServerStatus(response);
+            url: '/save_web_dashboard_open_on_launch',
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({web_dashboard_open_on_launch: value}),
+            success: (response) => {
+                if (response.status !== 'success') {
+                    alert(response.message || 'Could not queue the preference change. Please reload to try again.');
+                }
             },
-            error: function (xhr, status, error) {
-                console.error('Error loading language server status:', error);
-            }
-        });
-    }
-
-    applyLanguageServerStatus(status) {
-        // strip prior decoration so a language that recovered (unavailable → active) loses its error state
-        const $badges = $('.language-badge');
-        $badges.removeClass('active unavailable').removeAttr('title');
-        const active = new Set(status.active || []);
-        const unavailable = status.unavailable || {};
-        $badges.each(function () {
-            const $badge = $(this);
-            // language text is the badge's first text node; the remove-× is a child span, not text
-            const language = $badge.contents().filter(function () { return this.nodeType === 3; }).first().text().trim();
-            if (Object.prototype.hasOwnProperty.call(unavailable, language)) {
-                $badge.addClass('unavailable');
-                $badge.attr('title', 'Language server unavailable: ' + unavailable[language]);
-            } else if (active.has(language)) {
-                $badge.addClass('active');
-                $badge.attr('title', 'Language server running');
+            error: () => {
+                alert('Could not queue the preference change. Please reload to try again.');
             }
         });
     }
 
     startConfigPolling() {
+        this.loadConfigOverview();
         this.configPollInterval = setInterval(this.loadConfigOverview.bind(this), 1000);
     }
 
     startExecutionsPolling() {
+        this.loadExecutions()
         // Poll every 1 second for executions (independent of config polling)
         // This ensures stuck executions can still be cancelled even if config polling is blocked
-        this.loadExecutions()
-        this.executionsPollInterval = setInterval(() => {
-            this.loadQueuedExecutions();
-            this.loadLastExecution();
-        }, 1000);
+        this.executionsPollInterval = setInterval(this.loadExecutions.bind(this), 1000);
     }
 
     displayConfig(config) {
         try {
+            // release tooltip listeners before replacing the configuration display
+            this.projectTrustTooltip?.destroy();
+            this.projectTrustTooltip = null;
+
             // Check if tools and memories sections are currently expanded
             const $existingToolsContent = $('#tools-content');
             const $existingMemoriesContent = $('#memories-content');
             const wasToolsExpanded = $existingToolsContent.is(':visible');
+            const wasFunctionsExpanded = $('#functions-content').is(':visible');
             const wasMemoriesExpanded = $existingMemoriesContent.is(':visible');
 
             let html = '<div class="config-grid">';
 
-            html += '<div class="config-label">Version:</div><div class="config-value">' + config.serena_version + '</div>';
+            html += '<div class="config-label">Version:</div><div class="config-value">' + config.serena_version;
+            if (config.newer_serena_version) {
+                html += ' <a class="newer-version-badge" href="https://github.com/oraios/serena/releases" target="_blank" rel="noopener">'
+                    + 'newer version available: ' + config.newer_serena_version + '</a>';
+            }
+            html += '</div>';
 
             // Project info
             html += '<div class="config-label">Active Project:</div>';
+            html += '<div class="config-value">';
             if (config.active_project.name && config.active_project.path) {
                 const configPath = config.active_project.path + '/.serena/project.yml';
-                html += '<div class="config-value"><span title="Project configuration in ' + configPath + '">' + config.active_project.name + '</span></div>';
+                html += '<span title="Project configuration in ' + this.escapeHtml(configPath) + '">' + this.escapeHtml(config.active_project.name) + '</span>';
             } else {
-                html += '<div class="config-value">' + (config.active_project.name || 'None') + '</div>';
+                html += this.escapeHtml(config.active_project.name || 'None');
             }
+            if (config.active_project.name && config.active_project.is_trusted === false) {
+                html += ' <span class="project-trust-indicator">'
+                    + '<a id="project-untrusted" href="https://oraios.github.io/serena/02-usage/050_configuration.html#trusted-projects" '
+                    + 'target="_blank" rel="noopener noreferrer" aria-describedby="project-trust-tooltip">[untrusted]</a>'
+                    + '<span id="project-trust-tooltip" class="dashboard-tooltip" role="tooltip" hidden>'
+                    + '<strong>Untrusted projects are subject to several limitations:</strong>'
+                    + '<span>In particular, some project settings (e.g. LS-specific settings, activation commands) '
+                    + 'will be ignored, and symbolic links within the project will not be followed.</span>'
+                    + '<span class="tooltip-hint">Click to learn more.</span></span></span>';
+            }
+            html += '</div>';
 
-            html += '<div class="config-label">Languages:</div>';
-            if (this.jetbrainsMode) {
-                html += '<div class="config-value">Using JetBrains backend</div>';
-            } else {
+            html += '<div class="config-label">Interface:</div>';
+            html += '<div class="config-value">' + config.agent_interface + '</div>';
+
+            html += '<div class="config-label">Backend:</div>';
+            html += '<div class="config-value">' + config.language_backend + '</div>';
+
+            if (!this.jetbrainsMode) {
+                html += '<div class="config-label">Language Servers:</div>';
                 html += '<div class="config-value">';
                 if (config.languages && config.languages.length > 0) {
                     html += '<div class="languages-container">';
@@ -711,7 +750,7 @@ class Dashboard {
                         if (this.isAddingLanguage) {
                             html += '<div id="add-language-spinner" class="language-spinner">';
                         } else {
-                            html += '<button id="add-language-btn" class="btn language-add-btn">+ Add Language</button>';
+                            html += '<button id="add-language-btn" class="btn language-add-btn">+ Add</button>';
                             html += '<div id="add-language-spinner" class="language-spinner" style="display:none;">';
                         }
                         html += '<div class="spinner"></div>';
@@ -760,6 +799,32 @@ class Dashboard {
             html += '</div>';
             html += '</div>';
 
+            // Active functions of the REPL's facades - collapsible (REPL interface only)
+            if (config.facades) {
+                const enabledMethodCount = config.facades.reduce(function (count, facade) {
+                    return count + facade.methods.filter(function (method) { return method.is_enabled; }).length;
+                }, 0);
+                html += '<div style="margin-top: 20px;">';
+                html += '<h3 class="collapsible-header" id="functions-header" style="font-size: 16px; margin: 0;">';
+                html += '<span>Active Functions (' + enabledMethodCount + ')</span>';
+                html += '<span class="toggle-icon' + (wasFunctionsExpanded ? ' expanded' : '') + '">▼</span>';
+                html += '</h3>';
+                html += '<div class="collapsible-content" id="functions-content" style="' + (wasFunctionsExpanded ? '' : 'display:none;') + ' margin-top: 10px;">';
+                config.facades.forEach(function (facade) {
+                    html += '<div class="facade-block">';
+                    html += '<div class="facade-name' + (facade.is_enabled ? '' : ' disabled') + '">s.' + facade.name + '</div>';
+                    html += '<div class="tools-grid">';
+                    facade.methods.forEach(function (method) {
+                        const title = facade.name + '.' + method.name + (method.is_enabled ? '' : ' (disabled)');
+                        html += '<div class="tool-item' + (method.is_enabled ? '' : ' disabled') + '" title="' + title + '">' + method.name + '</div>';
+                    });
+                    html += '</div>';
+                    html += '</div>';
+                });
+                html += '</div>';
+                html += '</div>';
+            }
+
             // Available memories - collapsible (show if memories exist or if project exists)
             if (config.active_project && config.active_project.name) {
                 html += '<div style="margin-top: 20px;">';
@@ -793,6 +858,12 @@ class Dashboard {
             html += '</div>';
 
             this.$configDisplay.html(html);
+
+            // connect the trust explanation to its link for mouse and keyboard interaction
+            const trustIndicator = document.getElementById('project-untrusted');
+            if (trustIndicator) {
+                this.projectTrustTooltip = new DashboardTooltip(trustIndicator, document.getElementById('project-trust-tooltip'));
+            }
 
             // Attach event handlers for the dynamically created add language button
             $('#add-language-btn').click(this.openLanguageModal.bind(this));
@@ -828,6 +899,15 @@ class Dashboard {
             $('#create-memory-btn').click(this.openCreateMemoryModal.bind(this));
 
             // Re-attach collapsible handler for the newly created tools header
+            $('#functions-header').click(function () {
+                const $header = $(this);
+                const $content = $('#functions-content');
+                const $icon = $header.find('.toggle-icon');
+
+                $content.slideToggle(300);
+                $icon.toggleClass('expanded');
+            });
+
             $('#tools-header').click(function () {
                 const $header = $(this);
                 const $content = $('#tools-content');
@@ -908,7 +988,7 @@ class Dashboard {
 
         let html = '';
         tools.forEach(function (tool) {
-            html += '<div class="info-item" title="' + tool.name + '">' + tool.name + '</div>';
+            html += '<div class="info-item" title="' + tool.name + '"><code>' + tool.name + '</code></div>';
         });
 
         this.$availableToolsDisplay.html(html);
@@ -946,53 +1026,67 @@ class Dashboard {
 
     // ===== Executions Methods =====
 
-    loadQueuedExecutions() {
+    loadQueuedExecutions(onComplete) {
         let self = this;
         $.ajax({
-            url: '/queued_task_executions', type: 'GET', success: function (response) {
+            url: '/queued_task_executions', type: 'GET',
+            success: function (response) {
                 if (response.status === 'success') {
                     self.displayActiveExecutionsQueue(response.queued_executions || []);
                 } else {
                     console.error('Error loading executions:', response.message);
                 }
-            }, error: function (xhr, status, error) {
+            },
+            error: function (xhr, status, error) {
                 console.error('Error loading executions:', error);
                 self.$activeExecutionQueueDisplay.html('<div class="error-message">Error loading executions</div>');
-            }
+            },
+            complete: onComplete
         });
     }
 
-    loadLastExecution() {
+    loadLastExecution(onComplete) {
         let self = this;
         $.ajax({
-            url: '/last_execution', type: 'GET', success: function (response) {
+            url: '/last_execution', type: 'GET',
+            success: function (response) {
                 if (response.status === 'success') {
                     if (response.last_execution !== null && response.last_execution.logged) {
                         self.displayLastExecution(response.last_execution);
+                    } else {
+                        self.displayLastExecution(null);
                     }
                 } else {
                     console.error('Error loading last execution:', response.message);
                 }
-            }, error: function (xhr, status, error) {
+            },
+            error: function (xhr, status, error) {
                 console.error('Error loading last execution:', error);
                 self.$lastExecutionDisplay.html('<div class="error-message">Error loading last execution</div>');
-            }
+            },
+            complete: onComplete
         });
     }
 
     loadExecutions() {
+        const self = this;
         if (this.waitingForExecutionsPollingResult) {
             console.log('Still waiting for previous executions poll result, skipping this poll');
-        } else {
+        }
+        else {
             this.waitingForExecutionsPollingResult = true;
             console.log('Polling for executions...');
-            this.loadQueuedExecutions();
-            this.loadLastExecution();
+            this.loadQueuedExecutions(function() {
+                self.loadLastExecution(function() {
+                    self.waitingForExecutionsPollingResult = false;
+                });
+            });
         }
     }
 
     displayActiveExecutionsQueue(executions) {
         if (!executions || executions.length === 0) {
+            this.$activeExecutionQueueDisplay.html('<div class="loaded">No executions queued.</div>');
             return;
         }
 
@@ -1784,7 +1878,10 @@ class Dashboard {
 
     closeLanguageModal() {
         this.$addLanguageModal.fadeOut(200);
-        this.$modalLanguageSelect.empty();
+        this.closeLanguageDropdown();
+        this.$modalLanguageSelect.val('');
+        this.$modalLanguageOptions.empty();
+        this.modalLanguageAvailable = [];
         this.$modalAddBtn.prop('disabled', false).text('Add Language');
     }
 
@@ -1792,19 +1889,19 @@ class Dashboard {
         let self = this;
         $.ajax({
             url: '/get_available_languages', type: 'GET', success: function (response) {
-                const languages = response.languages || [];
-                // Clear all existing options
-                self.$modalLanguageSelect.empty();
+                const languages = (response.languages || []).slice().sort();
+                self.modalLanguageAvailable = languages;
+                self.$modalLanguageSelect.val('');
 
                 if (languages.length === 0) {
-                    // Show message if no languages available
-                    self.$modalLanguageSelect.append($('<option>').val('').text('No languages available to add'));
+                    self.$modalLanguageOptions.empty().hide();
+                    self.$modalLanguageEmpty.show();
+                    self.$modalLanguageSelect.prop('disabled', true).attr('placeholder', 'No languages available');
                     self.$modalAddBtn.prop('disabled', true);
                 } else {
-                    // Add language options
-                    languages.forEach(function (language) {
-                        self.$modalLanguageSelect.append($('<option>').val(language).text(language));
-                    });
+                    self.$modalLanguageEmpty.hide();
+                    self.$modalLanguageSelect.prop('disabled', false).attr('placeholder', 'Type to filter…');
+                    self.renderLanguageOptions('');
                     self.$modalAddBtn.prop('disabled', false);
                 }
             }, error: function (xhr, status, error) {
@@ -1813,12 +1910,141 @@ class Dashboard {
         });
     }
 
+    renderLanguageOptions(filter) {
+        const self = this;
+        const needle = (filter || '').toLowerCase();
+        const matches = this.modalLanguageAvailable.filter(function (lang) {
+            return lang.toLowerCase().includes(needle);
+        });
+
+        this.$modalLanguageOptions.empty();
+        if (matches.length === 0) {
+            this.$modalLanguageOptions.append(
+                $('<li class="no-match"></li>').text('No matches')
+            );
+        } else {
+            matches.forEach(function (lang, idx) {
+                let label = lang;
+                if (needle) {
+                    const i = lang.toLowerCase().indexOf(needle);
+                    if (i !== -1) {
+                        const before = lang.slice(0, i);
+                        const hit = lang.slice(i, i + needle.length);
+                        const after = lang.slice(i + needle.length);
+                        label = $('<span></span>')
+                            .append(document.createTextNode(before))
+                            .append($('<mark></mark>').text(hit))
+                            .append(document.createTextNode(after))
+                            .html();
+                    }
+                }
+                const $li = $('<li role="option"></li>')
+                    .attr('data-value', lang)
+                    .html(label);
+                if (idx === 0) {
+                    $li.addClass('highlighted');
+                }
+                $li.on('mousedown', function (e) {
+                    e.preventDefault(); // keep input focus
+                    self.selectLanguage(lang);
+                });
+                self.$modalLanguageOptions.append($li);
+            });
+        }
+    }
+
+    openLanguageDropdown() {
+        if (this.modalLanguageAvailable.length === 0) return;
+        this.renderLanguageOptions(this.$modalLanguageSelect.val());
+        this.$modalLanguageOptions.show();
+        this.$modalLanguageCombobox.addClass('open');
+    }
+
+    closeLanguageDropdown() {
+        this.$modalLanguageOptions.hide();
+        this.$modalLanguageCombobox.removeClass('open');
+    }
+
+    selectLanguage(lang) {
+        this.$modalLanguageSelect.val(lang);
+        this.closeLanguageDropdown();
+    }
+
+    moveLanguageHighlight(delta) {
+        const $items = this.$modalLanguageOptions.find('li:not(.no-match)');
+        if ($items.length === 0) return;
+        let idx = $items.index($items.filter('.highlighted'));
+        idx = (idx + delta + $items.length) % $items.length;
+        $items.removeClass('highlighted');
+        const $target = $items.eq(idx).addClass('highlighted');
+        const target = $target[0];
+        if (target && target.scrollIntoView) {
+            target.scrollIntoView({ block: 'nearest' });
+        }
+    }
+
+    bindLanguageCombobox() {
+        const self = this;
+        this.$modalLanguageSelect
+            .off('focus.combobox click.combobox input.combobox keydown.combobox')
+            .on('focus.combobox click.combobox', function () { self.openLanguageDropdown(); })
+            .on('input.combobox', function () {
+                self.renderLanguageOptions(self.$modalLanguageSelect.val());
+                self.openLanguageDropdown();
+            })
+            .on('keydown.combobox', function (e) {
+                const key = e.key;
+                if (key === 'ArrowDown') {
+                    e.preventDefault();
+                    if (self.$modalLanguageOptions.is(':visible')) {
+                        self.moveLanguageHighlight(1);
+                    } else {
+                        self.openLanguageDropdown();
+                    }
+                } else if (key === 'ArrowUp') {
+                    e.preventDefault();
+                    self.moveLanguageHighlight(-1);
+                } else if (key === 'Enter') {
+                    const $hl = self.$modalLanguageOptions.find('li.highlighted:not(.no-match)');
+                    if ($hl.length) {
+                        e.preventDefault();
+                        self.selectLanguage($hl.attr('data-value'));
+                    }
+                } else if (key === 'Escape') {
+                    if (self.$modalLanguageOptions.is(':visible')) {
+                        e.stopPropagation(); // don't close the modal
+                        self.closeLanguageDropdown();
+                    }
+                }
+            });
+
+        this.$modalLanguageCombobox
+            .off('click.caret')
+            .on('click.caret', '.combobox-caret', function () {
+                self.$modalLanguageSelect.trigger('focus');
+                self.openLanguageDropdown();
+            });
+
+        $(document).off('mousedown.langCombobox').on('mousedown.langCombobox', function (e) {
+            if (!self.$modalLanguageCombobox.is(':visible')) return;
+            if (!$.contains(self.$modalLanguageCombobox[0], e.target)) {
+                self.closeLanguageDropdown();
+            }
+        });
+    }
+
     addLanguageFromModal() {
-        const selectedLanguage = this.$modalLanguageSelect.val();
-        if (!selectedLanguage) {
-            alert('No language selected or no languages available to add');
+        const typed = (this.$modalLanguageSelect.val() || '').trim();
+        const matched = this.modalLanguageAvailable.find(function (l) {
+            return l.toLowerCase() === typed.toLowerCase();
+        });
+        if (!matched) {
+            alert(typed
+                ? 'Unknown language: ' + typed + '. Pick one from the dropdown.'
+                : 'No language selected.');
             return;
         }
+        const selectedLanguage = matched;
 
         const self = this;
 

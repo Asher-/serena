@@ -1,10 +1,10 @@
 """
 Provides PHP specific instantiation of the LanguageServer class using Intelephense.
 """
+# SPDX-License-Identifier: MIT
 
 import logging
 import os
-import pathlib
 import shutil
 from time import sleep
 
@@ -12,8 +12,7 @@ from overrides import override
 
 from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
-from solidlsp.ls_utils import PlatformId, PlatformUtils
-from solidlsp.lsp_protocol_handler.lsp_types import Definition, DefinitionParams, InitializeParams, LocationLink
+from solidlsp.lsp_protocol_handler.lsp_types import Definition, DefinitionParams, DidChangeConfigurationParams, LocationLink
 from solidlsp.settings import SolidLSPSettings
 
 from ..lsp_protocol_handler import lsp_types
@@ -21,15 +20,27 @@ from .common import RuntimeDependency, RuntimeDependencyCollection, build_npm_in
 
 log = logging.getLogger(__name__)
 
+# Version pinning convention (see eclipse_jdtls.py for the full spec):
+#   INITIAL_* — frozen forever; legacy unversioned install dir is reserved for it.
+#   DEFAULT_* — bumped on upgrades; goes into a versioned subdir.
+INITIAL_INTELEPHENSE_VERSION = "1.14.4"
+DEFAULT_INTELEPHENSE_VERSION = "1.14.4"
+
 
 class Intelephense(SolidLanguageServer):
     """
     Provides PHP specific instantiation of the LanguageServer class using Intelephense.
 
     You can pass the following entries in ls_specific_settings["php"]:
-        - maxMemory: sets intelephense.maxMemory
-        - maxFileSize: sets intelephense.files.maxSize
+        - maxMemory: the maximum heap size of the server process in MB, applied as Node.js option
+          --max-old-space-size (like VS Code's intelephense.maxMemory)
+        - maxFileSize: sets intelephense.files.maxSize, the maximum size (in bytes) of files to index
         - ignore_vendor: whether or ignore directories named "vendor" (default: true)
+        - file_filter: list of additional file extensions (with leading dot) to treat as PHP
+          sources, e.g. [".module", ".inc"]. The extensions are added to the defaults (".php",
+          ".phtml") of Serena's PHP source-file matcher and are pushed to Intelephense via
+          files.associations, such that the symbol tools and the language server treat the
+          same files as PHP sources (see #1710).
     """
 
     @override
@@ -41,29 +52,17 @@ class Intelephense(SolidLanguageServer):
             """
             Setup runtime dependencies for Intelephense and return the path to the executable.
             """
-            platform_id = PlatformUtils.get_platform_id()
-
-            valid_platforms = [
-                PlatformId.LINUX_x64,
-                PlatformId.LINUX_arm64,
-                PlatformId.OSX,
-                PlatformId.OSX_x64,
-                PlatformId.OSX_arm64,
-                PlatformId.WIN_x64,
-                PlatformId.WIN_arm64,
-            ]
-            assert platform_id in valid_platforms, f"Platform {platform_id} is not supported by Intelephense at the moment"
-
             # Verify both node and npm are installed
             is_node_installed = shutil.which("node") is not None
             assert is_node_installed, "node is not installed or isn't in PATH. Please install NodeJS and try again."
             is_npm_installed = shutil.which("npm") is not None
             assert is_npm_installed, "npm is not installed or isn't in PATH. Please install npm and try again."
-            intelephense_version = self._custom_settings.get("intelephense_version", "1.14.4")
+            intelephense_version = self._custom_settings.get("intelephense_version", DEFAULT_INTELEPHENSE_VERSION)
             npm_registry = self._custom_settings.get("npm_registry")
 
-            # Install intelephense if not already installed
-            intelephense_ls_dir = os.path.join(self._ls_resources_dir, "php-lsp")
+            # legacy unversioned dir reserved for INITIAL; every other version goes into a versioned subdir
+            ls_dirname = "php-lsp" if intelephense_version == INITIAL_INTELEPHENSE_VERSION else f"php-lsp-{intelephense_version}"
+            intelephense_ls_dir = os.path.join(self._ls_resources_dir, ls_dirname)
             os.makedirs(intelephense_ls_dir, exist_ok=True)
             intelephense_executable_path = os.path.join(intelephense_ls_dir, "node_modules", ".bin", "intelephense")
             if not os.path.exists(intelephense_executable_path):
@@ -87,6 +86,15 @@ class Intelephense(SolidLanguageServer):
         def _create_launch_command(self, core_path: str) -> list[str]:
             return [core_path, "--stdio"]
 
+        @override
+        def create_launch_command_env(self) -> dict[str, str]:
+            # the heap size is an option of the Node.js process, which Intelephense cannot change once started
+            max_memory = self._custom_settings.get("maxMemory")
+            if max_memory is None:
+                return {}
+            existing_node_options = os.environ.get("NODE_OPTIONS", "").strip()
+            return {"NODE_OPTIONS": f"{existing_node_options} --max-old-space-size={int(max_memory)}".strip()}
+
     def __init__(self, config: LanguageServerConfig, repository_root_path: str, solidlsp_settings: SolidLSPSettings):
         super().__init__(config, repository_root_path, None, "php", solidlsp_settings)
         self.request_id = 0
@@ -100,14 +108,19 @@ class Intelephense(SolidLanguageServer):
             self._ignored_dirnames.add("vendor")
         log.info(f"Ignoring the following directories for PHP projects: {', '.join(sorted(self._ignored_dirnames))}")
 
+        # extend the source-file matcher with any additional extensions configured via `file_filter`,
+        # such that Serena's symbol tools treat the added extensions as PHP sources as well (#1710)
+        file_filter = self._custom_settings.get("file_filter")
+        if file_filter:
+            self.ls_id.get_source_fn_matcher().add_extensions(*file_filter)
+
     def _create_dependency_provider(self) -> LanguageServerDependencyProvider:
         return self.DependencyProvider(self._custom_settings, self._ls_resources_dir)
 
-    def _get_initialize_params(self, repository_absolute_path: str) -> InitializeParams:
+    def _create_base_initialize_params(self) -> dict:
         """
         Returns the initialization params for the Intelephense Language Server.
         """
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
         initialize_params = {
             "locale": "en",
             "capabilities": {
@@ -128,15 +141,6 @@ class Intelephense(SolidLanguageServer):
                     "symbol": {"dynamicRegistration": True},
                 },
             },
-            "processId": os.getpid(),
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
         }
         initialization_options = {}
         # Add license key if provided via environment variable
@@ -144,15 +148,8 @@ class Intelephense(SolidLanguageServer):
         if license_key:
             initialization_options["licenceKey"] = license_key
 
-        max_memory = self._custom_settings.get("maxMemory")
-        max_file_size = self._custom_settings.get("maxFileSize")
-        if max_memory is not None:
-            initialization_options["intelephense.maxMemory"] = max_memory
-        if max_file_size is not None:
-            initialization_options["intelephense.files.maxSize"] = max_file_size
-
         initialize_params["initializationOptions"] = initialization_options
-        return initialize_params  # type: ignore
+        return initialize_params
 
     def _start_server(self) -> None:
         """Start Intelephense server process"""
@@ -173,7 +170,7 @@ class Intelephense(SolidLanguageServer):
 
         log.info("Starting Intelephense server process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request from LSP client to LSP server and awaiting response")
         init_response = self.server.send.initialize(initialize_params)
@@ -187,6 +184,22 @@ class Intelephense(SolidLanguageServer):
         assert "documentSymbolProvider" in capabilities, "Server must support document symbols"
 
         self.server.notify.initialized({})
+
+        # push the files configuration: the file associations derived from the source-file matcher
+        # (the default extensions plus any configured via `file_filter`), such that Intelephense
+        # indexes the same set of files that Serena's symbol tools treat as PHP sources (#1710),
+        # and the configured maximum file size. This cannot be passed in
+        # the initialize request: Intelephense reads configuration exclusively from
+        # workspace/didChangeConfiguration (its initializationOptions only cover storagePath,
+        # globalStoragePath, clearCache and licenceKey).
+        associations = [f"*{ext}" for ext in self.ls_id.get_source_fn_matcher().file_extensions]
+        files_config: dict[str, list[str] | int] = {"associations": associations}
+        max_file_size = self._custom_settings.get("maxFileSize")
+        if max_file_size is not None:
+            files_config["maxSize"] = int(max_file_size)
+        intelephense_config: DidChangeConfigurationParams = {"settings": {"intelephense": {"files": files_config}}}
+        log.info(f"Sending workspace/didChangeConfiguration with files configuration: {files_config}")
+        self.server.notify.workspace_did_change_configuration(intelephense_config)
 
         # Intelephense server is typically ready immediately after initialization
         # TODO: This is probably incorrect; the server does send an initialized notification, which we could wait for!

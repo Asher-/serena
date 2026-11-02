@@ -2,23 +2,29 @@
 Provides Ansible specific instantiation of the LanguageServer class using ansible-language-server.
 Contains various configurations and settings specific to Ansible YAML files (playbooks, roles, etc.).
 """
+# SPDX-License-Identifier: MIT
 
 import fnmatch
 import logging
 import os
-import pathlib
 import shutil
 from typing import Any, ClassVar
 
 from overrides import override
 
 from solidlsp.language_servers.common import RuntimeDependency, RuntimeDependencyCollection, build_npm_install_command
-from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
+from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, LSPFileBuffer, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
+from solidlsp.lsp_protocol_handler.lsp_types import DocumentSymbol, SymbolInformation
 from solidlsp.settings import SolidLSPSettings
 
 log = logging.getLogger(__name__)
+
+# Version pinning convention (see eclipse_jdtls.py for the full spec):
+#   INITIAL_* — frozen forever; legacy unversioned install dir is reserved for it.
+#   DEFAULT_* — bumped on upgrades; goes into a versioned subdir.
+INITIAL_ANSIBLE_LANGUAGE_SERVER_VERSION = "1.2.3"
+DEFAULT_ANSIBLE_LANGUAGE_SERVER_VERSION = "1.2.3"
 
 
 def _deep_merge(base: dict, override: dict) -> None:
@@ -109,9 +115,17 @@ class AnsibleLanguageServer(SolidLanguageServer):
         return False
 
     @override
-    def is_ignored_path(self, relative_path: str, ignore_unsupported_files: bool = True) -> bool:
+    def is_ignored_path(
+        self,
+        relative_path: str,
+        ignore_unsupported_files: bool = True,
+        dir_entry: os.DirEntry | None = None,
+        check_path_for_ignored_dirnames: bool = True,
+    ) -> bool:
         # standard ignore rules (extension, gitignore, etc.)
-        if super().is_ignored_path(relative_path, ignore_unsupported_files):
+        if super().is_ignored_path(
+            relative_path, ignore_unsupported_files, dir_entry=dir_entry, check_path_for_ignored_dirnames=check_path_for_ignored_dirnames
+        ):
             return True
 
         # for yml/yaml files, check if they are in ansible-specific paths
@@ -120,6 +134,15 @@ class AnsibleLanguageServer(SolidLanguageServer):
                 return True
 
         return False
+
+    @override
+    def _request_raw_document_symbols(
+        self, relative_file_path: str, file_data: LSPFileBuffer | None
+    ) -> list[SymbolInformation] | list[DocumentSymbol] | None:
+        # ansible-language-server does not implement textDocument/documentSymbol and the
+        # maintainers have declined to add it (see ansible/vscode-ansible#601, closed NOT_PLANNED).
+        # Skip the request entirely rather than sending a request we know will fail.
+        return None
 
     @staticmethod
     def _determine_log_level(line: str) -> int:
@@ -162,7 +185,9 @@ class AnsibleLanguageServer(SolidLanguageServer):
             assert is_node_installed, "node is not installed or isn't in PATH. Please install Node.js and try again."
             is_npm_installed = shutil.which("npm") is not None
             assert is_npm_installed, "npm is not installed or isn't in PATH. Please install npm and try again."
-            ansible_language_server_version = self._custom_settings.get("ansible_language_server_version", "1.2.3")
+            ansible_language_server_version = self._custom_settings.get(
+                "ansible_language_server_version", DEFAULT_ANSIBLE_LANGUAGE_SERVER_VERSION
+            )
             npm_registry = self._custom_settings.get("npm_registry")
 
             deps = RuntimeDependencyCollection(
@@ -180,8 +205,13 @@ class AnsibleLanguageServer(SolidLanguageServer):
                 ]
             )
 
-            # install ansible-language-server if not already installed
-            ansible_ls_dir = os.path.join(self._ls_resources_dir, "ansible-lsp")
+            # legacy unversioned dir reserved for INITIAL; every other version goes into a versioned subdir
+            ls_dirname = (
+                "ansible-lsp"
+                if ansible_language_server_version == INITIAL_ANSIBLE_LANGUAGE_SERVER_VERSION
+                else f"ansible-lsp-{ansible_language_server_version}"
+            )
+            ansible_ls_dir = os.path.join(self._ls_resources_dir, ls_dirname)
             ansible_executable_path = os.path.join(ansible_ls_dir, "node_modules", ".bin", "ansible-language-server")
 
             # handle Windows executable extension
@@ -204,14 +234,12 @@ class AnsibleLanguageServer(SolidLanguageServer):
         def _create_launch_command(self, core_path: str) -> list[str]:
             return [core_path, "--stdio"]
 
-    def _get_initialize_params(self, repository_absolute_path: str) -> InitializeParams:
+    def _create_base_initialize_params(self) -> dict:
         """Returns the initialize params for the Ansible Language Server.
 
         Reads shortcut keys and the ``ansible_settings`` dict from ``_custom_settings``
         to build ``initializationOptions``.
         """
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
-
         # default ansible settings, populated from shortcut keys
         ansible_settings: dict[str, Any] = {
             "ansible": {
@@ -269,18 +297,9 @@ class AnsibleLanguageServer(SolidLanguageServer):
                     "symbol": {"dynamicRegistration": True},
                 },
             },
-            "processId": os.getpid(),
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
             "initializationOptions": {"ansible": ansible_settings},
         }
-        return initialize_params  # type: ignore
+        return initialize_params
 
     def _start_server(self) -> None:
         """Starts the Ansible Language Server, waits for the server to be ready."""
@@ -312,7 +331,7 @@ class AnsibleLanguageServer(SolidLanguageServer):
 
         log.info("Starting Ansible server process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request from LSP client to LSP server and awaiting response")
         init_response = self.server.send.initialize(initialize_params)

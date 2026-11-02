@@ -2,20 +2,25 @@
 Provides YAML specific instantiation of the LanguageServer class using yaml-language-server.
 Contains various configurations and settings specific to YAML files.
 """
+# SPDX-License-Identifier: MIT
 
 import logging
 import os
-import pathlib
 import shutil
 from typing import Any
 
 from solidlsp.language_servers.common import RuntimeDependency, RuntimeDependencyCollection, build_npm_install_command
 from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.settings import SolidLSPSettings
 
 log = logging.getLogger(__name__)
+
+# Version pinning convention (see eclipse_jdtls.py for the full spec):
+#   INITIAL_* — frozen forever; legacy unversioned install dir is reserved for it.
+#   DEFAULT_* — bumped on upgrades; goes into a versioned subdir.
+INITIAL_YAML_LANGUAGE_SERVER_VERSION = "1.19.2"
+DEFAULT_YAML_LANGUAGE_SERVER_VERSION = "1.19.2"
 
 
 class YamlLanguageServer(SolidLanguageServer):
@@ -66,7 +71,7 @@ class YamlLanguageServer(SolidLanguageServer):
             assert is_node_installed, "node is not installed or isn't in PATH. Please install NodeJS and try again."
             is_npm_installed = shutil.which("npm") is not None
             assert is_npm_installed, "npm is not installed or isn't in PATH. Please install npm and try again."
-            yaml_language_server_version = self._custom_settings.get("yaml_language_server_version", "1.19.2")
+            yaml_language_server_version = self._custom_settings.get("yaml_language_server_version", DEFAULT_YAML_LANGUAGE_SERVER_VERSION)
             npm_registry = self._custom_settings.get("npm_registry")
 
             deps = RuntimeDependencyCollection(
@@ -80,8 +85,13 @@ class YamlLanguageServer(SolidLanguageServer):
                 ]
             )
 
-            # Install yaml-language-server if not already installed
-            yaml_ls_dir = os.path.join(self._ls_resources_dir, "yaml-lsp")
+            # legacy unversioned dir reserved for INITIAL; every other version goes into a versioned subdir
+            ls_dirname = (
+                "yaml-lsp"
+                if yaml_language_server_version == INITIAL_YAML_LANGUAGE_SERVER_VERSION
+                else f"yaml-lsp-{yaml_language_server_version}"
+            )
+            yaml_ls_dir = os.path.join(self._ls_resources_dir, ls_dirname)
             yaml_executable_path = os.path.join(yaml_ls_dir, "node_modules", ".bin", "yaml-language-server")
 
             # Handle Windows executable extension
@@ -103,12 +113,10 @@ class YamlLanguageServer(SolidLanguageServer):
         def _create_launch_command(self, core_path: str) -> list[str]:
             return [core_path, "--stdio"]
 
-    @staticmethod
-    def _get_initialize_params(repository_absolute_path: str) -> InitializeParams:
+    def _create_base_initialize_params(self) -> dict:
         """
         Returns the initialize params for the YAML Language Server.
         """
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
         initialize_params = {
             "locale": "en",
             "capabilities": {
@@ -131,15 +139,6 @@ class YamlLanguageServer(SolidLanguageServer):
                     "symbol": {"dynamicRegistration": True},
                 },
             },
-            "processId": os.getpid(),
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
             "initializationOptions": {
                 "yaml": {
                     "schemaStore": {"enable": True, "url": "https://www.schemastore.org/api/json/catalog.json"},
@@ -150,7 +149,7 @@ class YamlLanguageServer(SolidLanguageServer):
                 }
             },
         }
-        return initialize_params  # type: ignore
+        return initialize_params
 
     def _start_server(self) -> None:
         """
@@ -173,7 +172,7 @@ class YamlLanguageServer(SolidLanguageServer):
 
         log.info("Starting YAML server process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request from LSP client to LSP server and awaiting response")
         init_response = self.server.send.initialize(initialize_params)

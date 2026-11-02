@@ -1,30 +1,51 @@
 """
 Provides Groovy specific instantiation of the LanguageServer class. Contains various configurations and settings specific to Groovy.
 """
+# SPDX-License-Identifier: MIT
 
 import dataclasses
 import logging
 import os
-import pathlib
 import shlex
+from typing import cast
 
 from solidlsp.ls import SolidLanguageServer
-from solidlsp.ls_config import Language, LanguageServerConfig
+from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.ls_utils import FileUtils, PlatformUtils
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
 
 log = logging.getLogger(__name__)
 
 VSCODE_JAVA_ALLOWED_HOSTS = ("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com")
-VSCODE_JAVA_SHA256_BY_PLATFORM = {
+
+# Version pinning convention (see eclipse_jdtls.py for the full spec):
+#   INITIAL_* — frozen forever; legacy unversioned install dir is reserved for it.
+#   DEFAULT_* — bumped on upgrades; goes into a versioned subdir.
+INITIAL_VSCODE_JAVA_VERSION = "1.42.0-561"
+INITIAL_VSCODE_JAVA_SHA256_BY_PLATFORM = {
     "win-x64": "ef195b45bd260976ad2e84618f4044b5d7248deed41d647573f0ee22c4233df3",
     "linux-x64": "7660b7b527be6fda46a917966b34d828e7416d5cc84287b29b88e7b99c1737f9",
     "linux-arm64": "e15bc9b2a665d3453203402621b5441062aa41b0ec2d140661f439326fd248c1",
     "osx-x64": "03ae1db1a22c15561a620f1b722d6797d35d4faaa7c4666dbe6ca2715089852f",
     "osx-arm64": "bc00c2699d4b8d478eb9a1621db9d6d3a12ea0dcc247a9cd8040e8ac19c03933",
 }
+DEFAULT_VSCODE_JAVA_VERSION = "1.42.0-561"
+DEFAULT_VSCODE_JAVA_SHA256_BY_PLATFORM = {
+    "win-x64": "ef195b45bd260976ad2e84618f4044b5d7248deed41d647573f0ee22c4233df3",
+    "linux-x64": "7660b7b527be6fda46a917966b34d828e7416d5cc84287b29b88e7b99c1737f9",
+    "linux-arm64": "e15bc9b2a665d3453203402621b5441062aa41b0ec2d140661f439326fd248c1",
+    "osx-x64": "03ae1db1a22c15561a620f1b722d6797d35d4faaa7c4666dbe6ca2715089852f",
+    "osx-arm64": "bc00c2699d4b8d478eb9a1621db9d6d3a12ea0dcc247a9cd8040e8ac19c03933",
+}
+
+
+def _vscode_java_sha(version: str, platform_key: str) -> str | None:
+    if version == INITIAL_VSCODE_JAVA_VERSION:
+        return INITIAL_VSCODE_JAVA_SHA256_BY_PLATFORM[platform_key]
+    if version == DEFAULT_VSCODE_JAVA_VERSION:
+        return DEFAULT_VSCODE_JAVA_SHA256_BY_PLATFORM[platform_key]
+    return None
 
 
 @dataclasses.dataclass
@@ -63,7 +84,7 @@ class GroovyLanguageServer(SolidLanguageServer):
         ls_jar_options = []
 
         if solidlsp_settings.ls_specific_settings:
-            groovy_settings = solidlsp_settings.get_ls_specific_settings(Language.GROOVY)
+            groovy_settings = solidlsp_settings.get_ls_specific_settings(LanguageServerId.GROOVY)
             jar_options_str = groovy_settings.get("ls_jar_options", "")
             if jar_options_str:
                 ls_jar_options = shlex.split(jar_options_str)
@@ -92,8 +113,8 @@ class GroovyLanguageServer(SolidLanguageServer):
         Setup runtime dependencies for Groovy Language Server and return paths.
         """
         platform_id = PlatformUtils.get_platform_id()
-        groovy_settings = solidlsp_settings.get_ls_specific_settings(Language.GROOVY)
-        vscode_java_version = groovy_settings.get("vscode_java_version", "1.42.0-561")
+        groovy_settings = solidlsp_settings.get_ls_specific_settings(LanguageServerId.GROOVY)
+        vscode_java_version = groovy_settings.get("vscode_java_version", DEFAULT_VSCODE_JAVA_VERSION)
         vscode_java_tag = f"v{vscode_java_version.rsplit('-', 1)[0]}"
 
         # Verify platform support
@@ -106,7 +127,7 @@ class GroovyLanguageServer(SolidLanguageServer):
         java_path = None
 
         if solidlsp_settings and solidlsp_settings.ls_specific_settings:
-            groovy_settings = solidlsp_settings.get_ls_specific_settings(Language.GROOVY)
+            groovy_settings = solidlsp_settings.get_ls_specific_settings(LanguageServerId.GROOVY)
             custom_java_home = groovy_settings.get("ls_java_home_path")
             if custom_java_home:
                 log.info(f"Using custom Java home path from configuration: {custom_java_home}")
@@ -128,35 +149,35 @@ class GroovyLanguageServer(SolidLanguageServer):
                         "archiveType": "zip",
                         "java_home_path": "extension/jre/21.0.7-win32-x86_64",
                         "java_path": "extension/jre/21.0.7-win32-x86_64/bin/java.exe",
-                        "sha256": VSCODE_JAVA_SHA256_BY_PLATFORM["win-x64"] if vscode_java_version == "1.42.0-561" else None,
+                        "sha256": _vscode_java_sha(vscode_java_version, "win-x64"),
                     },
                     "linux-x64": {
                         "url": f"https://github.com/redhat-developer/vscode-java/releases/download/{vscode_java_tag}/java-linux-x64-{vscode_java_version}.vsix",
                         "archiveType": "zip",
                         "java_home_path": "extension/jre/21.0.7-linux-x86_64",
                         "java_path": "extension/jre/21.0.7-linux-x86_64/bin/java",
-                        "sha256": VSCODE_JAVA_SHA256_BY_PLATFORM["linux-x64"] if vscode_java_version == "1.42.0-561" else None,
+                        "sha256": _vscode_java_sha(vscode_java_version, "linux-x64"),
                     },
                     "linux-arm64": {
                         "url": f"https://github.com/redhat-developer/vscode-java/releases/download/{vscode_java_tag}/java-linux-arm64-{vscode_java_version}.vsix",
                         "archiveType": "zip",
                         "java_home_path": "extension/jre/21.0.7-linux-aarch64",
                         "java_path": "extension/jre/21.0.7-linux-aarch64/bin/java",
-                        "sha256": VSCODE_JAVA_SHA256_BY_PLATFORM["linux-arm64"] if vscode_java_version == "1.42.0-561" else None,
+                        "sha256": _vscode_java_sha(vscode_java_version, "linux-arm64"),
                     },
                     "osx-x64": {
                         "url": f"https://github.com/redhat-developer/vscode-java/releases/download/{vscode_java_tag}/java-darwin-x64-{vscode_java_version}.vsix",
                         "archiveType": "zip",
                         "java_home_path": "extension/jre/21.0.7-macosx-x86_64",
                         "java_path": "extension/jre/21.0.7-macosx-x86_64/bin/java",
-                        "sha256": VSCODE_JAVA_SHA256_BY_PLATFORM["osx-x64"] if vscode_java_version == "1.42.0-561" else None,
+                        "sha256": _vscode_java_sha(vscode_java_version, "osx-x64"),
                     },
                     "osx-arm64": {
                         "url": f"https://github.com/redhat-developer/vscode-java/releases/download/{vscode_java_tag}/java-darwin-arm64-{vscode_java_version}.vsix",
                         "archiveType": "zip",
                         "java_home_path": "extension/jre/21.0.7-macosx-aarch64",
                         "java_path": "extension/jre/21.0.7-macosx-aarch64/bin/java",
-                        "sha256": VSCODE_JAVA_SHA256_BY_PLATFORM["osx-arm64"] if vscode_java_version == "1.42.0-561" else None,
+                        "sha256": _vscode_java_sha(vscode_java_version, "osx-arm64"),
                     },
                 },
             }
@@ -165,7 +186,7 @@ class GroovyLanguageServer(SolidLanguageServer):
             java_home_relative_path = java_dependency["java_home_path"]
             java_relative_path = java_dependency["java_path"]
             java_download_url = java_dependency["url"]
-            java_archive_type = java_dependency["archiveType"]
+            java_archive_type = cast(FileUtils.ArchiveType, java_dependency["archiveType"])
             assert java_home_relative_path is not None
             assert java_relative_path is not None
             assert java_download_url is not None
@@ -174,7 +195,9 @@ class GroovyLanguageServer(SolidLanguageServer):
             static_dir = os.path.join(cls.ls_resources_dir(solidlsp_settings), "groovy_language_server")
             os.makedirs(static_dir, exist_ok=True)
 
-            java_dir = os.path.join(static_dir, "java")
+            # legacy unversioned "java" dir reserved for INITIAL; every other version goes into a versioned subdir
+            java_dirname = "java" if vscode_java_version == INITIAL_VSCODE_JAVA_VERSION else f"java-{vscode_java_version}"
+            java_dir = os.path.join(static_dir, java_dirname)
             os.makedirs(java_dir, exist_ok=True)
 
             java_home_path = os.path.join(java_dir, java_home_relative_path)
@@ -205,7 +228,7 @@ class GroovyLanguageServer(SolidLanguageServer):
         Find Groovy Language Server JAR file
         """
         if solidlsp_settings and solidlsp_settings.ls_specific_settings:
-            groovy_settings = solidlsp_settings.get_ls_specific_settings(Language.GROOVY)
+            groovy_settings = solidlsp_settings.get_ls_specific_settings(LanguageServerId.GROOVY)
             config_jar_path = groovy_settings.get("ls_jar_path")
             if config_jar_path and os.path.exists(config_jar_path):
                 log.info(f"Using Groovy LS JAR from configuration: {config_jar_path}")
@@ -221,19 +244,11 @@ class GroovyLanguageServer(SolidLanguageServer):
             "   Ensure the JAR file is available at the configured path\n"
         )
 
-    @staticmethod
-    def _get_initialize_params(repository_absolute_path: str) -> InitializeParams:
+    def _create_base_initialize_params(self) -> dict:
         """
         Returns the initialize params for the Groovy Language Server.
         """
-        if not os.path.isabs(repository_absolute_path):
-            repository_absolute_path = os.path.abspath(repository_absolute_path)
-
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
         initialize_params = {
-            "clientInfo": {"name": "Serena Groovy Client", "version": "1.0.0"},
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
             "capabilities": {
                 "textDocument": {
                     "synchronization": {"dynamicRegistration": True, "didSave": True},
@@ -259,15 +274,8 @@ class GroovyLanguageServer(SolidLanguageServer):
                     }
                 },
             },
-            "processId": os.getpid(),
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
         }
-        return initialize_params  # type: ignore
+        return initialize_params
 
     def _start_server(self) -> None:
         """
@@ -293,7 +301,7 @@ class GroovyLanguageServer(SolidLanguageServer):
 
         log.info("Starting Groovy server process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request from LSP client to LSP server and awaiting response")
         init_response = self.server.send.initialize(initialize_params)

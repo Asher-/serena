@@ -1,30 +1,29 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+from typing import TYPE_CHECKING, cast
+
+from sensai.util.helper import mark_used
+
 from serena.tools import Tool, ToolMarkerDoesNotRequireActiveProject, ToolMarkerOptional
 
+if TYPE_CHECKING:
+    from serena.repl.api.cfg_api import ConfigApi
 
-class GetLanguageServerStatusTool(Tool, ToolMarkerOptional, ToolMarkerDoesNotRequireActiveProject):
+
+class ConfigApiMixin:
     """
-    Reports a JSON snapshot of the active project's per-language language-server state,
-    mirroring the dashboard's ``/get_language_server_status`` response. Useful for checking
-    which LSPs actually started (and which failed) without having to reactivate the project.
+    Mixin for tools which delegate to the configuration API.
+    The API is imported locally, since the API module refers to the tools (as corresponding tools).
     """
 
-    def apply(self) -> str:
-        """
-        Returns a JSON object with two keys:
-          * ``active``: sorted list of languages (by :class:`Language` ``.value``) whose servers
-            are currently running in the manager for the active project.
-          * ``unavailable``: mapping from language value to a short textual description of the
-            exception captured when that language's server failed to start or restart.
+    def _api(self) -> "ConfigApi":
+        from serena.repl.api.cfg_api import ConfigApi
 
-        Both collections are empty when there is no active project or no language-server manager
-        has been constructed yet.
-        """
-        active = sorted(lang.value for lang in self.agent.get_active_lsp_languages())
-        unavailable = {lang.value: str(exc) for lang, exc in self.agent.get_unavailable_lsp_languages().items()}
-        return self._to_json({"active": active, "unavailable": unavailable})
+        tool = cast(Tool, cast(object, self))
+        return ConfigApi(tool.agent)
 
 
-class OpenDashboardTool(Tool, ToolMarkerOptional, ToolMarkerDoesNotRequireActiveProject):
+class OpenDashboardTool(Tool, ToolMarkerOptional, ToolMarkerDoesNotRequireActiveProject, ConfigApiMixin):
     """
     Opens the Serena web dashboard in the default web browser.
     The dashboard provides logs, session information, and tool usage statistics.
@@ -34,10 +33,7 @@ class OpenDashboardTool(Tool, ToolMarkerOptional, ToolMarkerDoesNotRequireActive
         """
         Opens the Serena web dashboard in the default web browser.
         """
-        if self.agent.open_dashboard():
-            return f"Serena web dashboard has been opened in the user's default web browser: {self.agent.get_dashboard_url()}"
-        else:
-            return f"Serena web dashboard could not be opened automatically; tell the user to open it via {self.agent.get_dashboard_url()}"
+        return self._api().open_dashboard()
 
 
 class ActivateProjectTool(Tool, ToolMarkerDoesNotRequireActiveProject):
@@ -45,18 +41,17 @@ class ActivateProjectTool(Tool, ToolMarkerDoesNotRequireActiveProject):
     Activates a project based on the project name or path.
     """
 
-    def apply(self, project: str) -> str:
+    def apply(self, project: str, session: str) -> str:
         """
         Activates the project with the given name or path.
 
         :param project: the name of a registered project to activate or a path to a project directory
+        :param session: your Serena session id, as provided in Serena's instructions (call `initial_instructions` if you do not have one)
         """
+        # NOTE: Parameter `session` cannot be called `session_id` because of a bug in the Claude Desktop client.
         is_new_activation = self.agent.activate_project_from_path_or_name(project)
-        if not is_new_activation:
-            result = "Project was already active."
-        else:
-            result = self.agent.get_project_activation_message()
-        result += "\nIMPORTANT: If you have not yet read the 'Serena Instructions Manual', do it now before continuing!"
+        mark_used(is_new_activation)
+        result = self.agent.get_project_activation_message(session)
         return result
 
 
@@ -75,7 +70,7 @@ class RemoveProjectTool(Tool, ToolMarkerDoesNotRequireActiveProject, ToolMarkerO
         return f"Successfully removed project '{project_name}' from configuration."
 
 
-class GetCurrentConfigTool(Tool):
+class GetCurrentConfigTool(Tool, ConfigApiMixin):
     """
     Prints the current configuration of the agent, including the active and available projects, tools, contexts, and modes.
     """
@@ -84,4 +79,4 @@ class GetCurrentConfigTool(Tool):
         """
         Print the current configuration of the agent, including the active and available projects, tools, contexts, and modes.
         """
-        return self.agent.get_current_config_overview()
+        return self._api().get_current_config()

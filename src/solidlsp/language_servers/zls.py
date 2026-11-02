@@ -1,6 +1,7 @@
 """
 Provides Zig specific instantiation of the LanguageServer class using ZLS (Zig Language Server).
 """
+# SPDX-License-Identifier: MIT
 
 import logging
 import os
@@ -12,10 +13,9 @@ from overrides import override
 
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
-from solidlsp.util import supervise
+from solidlsp.util.subprocess_util import subprocess_run
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ class ZigLanguageServer(SolidLanguageServer):
     def _get_zig_version() -> str | None:
         """Get the installed Zig version or None if not found."""
         try:
-            result = supervise.run(["zig", "version"], capture_output=True, text=True, check=False)
+            result = subprocess_run(["zig", "version"], capture_output=True, text=True, check=False)
             if result.returncode == 0:
                 return result.stdout.strip()
         except FileNotFoundError:
@@ -49,7 +49,7 @@ class ZigLanguageServer(SolidLanguageServer):
     def _get_zls_version() -> str | None:
         """Get the installed ZLS version or None if not found."""
         try:
-            result = supervise.run(["zls", "--version"], capture_output=True, text=True, check=False)
+            result = subprocess_run(["zls", "--version"], capture_output=True, text=True, check=False)
             if result.returncode == 0:
                 return result.stdout.strip()
         except FileNotFoundError:
@@ -100,12 +100,10 @@ class ZigLanguageServer(SolidLanguageServer):
         super().__init__(config, repository_root_path, ProcessLaunchInfo(cmd="zls", cwd=repository_root_path), "zig", solidlsp_settings)
         self.request_id = 0
 
-    @staticmethod
-    def _get_initialize_params(repository_absolute_path: str) -> InitializeParams:
+    def _create_base_initialize_params(self) -> dict:
         """
         Returns the initialize params for the Zig Language Server.
         """
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
         initialize_params = {
             "locale": "en",
             "capabilities": {
@@ -132,6 +130,7 @@ class ZigLanguageServer(SolidLanguageServer):
                         "dynamicRegistration": True,
                         "contentFormat": ["markdown", "plaintext"],
                     },
+                    "publishDiagnostics": {"relatedInformation": True},
                 },
                 "workspace": {
                     "workspaceFolders": True,
@@ -139,15 +138,6 @@ class ZigLanguageServer(SolidLanguageServer):
                     "configuration": True,
                 },
             },
-            "processId": os.getpid(),
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
             "initializationOptions": {
                 # ZLS specific options based on schema.json
                 # Critical paths for ZLS to understand the project
@@ -177,7 +167,7 @@ class ZigLanguageServer(SolidLanguageServer):
                 "inlay_hints_hide_redundant_param_names_last_token": False,
             },
         }
-        return initialize_params  # type: ignore[return-value]
+        return initialize_params
 
     def _start_server(self) -> None:
         """Start ZLS server process"""
@@ -198,7 +188,7 @@ class ZigLanguageServer(SolidLanguageServer):
 
         log.info("Starting ZLS server process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request from LSP client to LSP server and awaiting response")
         init_response = self.server.send.initialize(initialize_params)

@@ -1,41 +1,39 @@
-import asyncio
-import contextvars
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 import inspect
 import json
 from abc import ABC
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
-from types import TracebackType
-from typing import TYPE_CHECKING, Any, Protocol, Self, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
 from mcp import Implementation
-from mcp.server.fastmcp import Context
-from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata, func_metadata
+from mcp.server.mcpserver import Context
+from mcp.server.mcpserver.utilities.func_metadata import FuncMetadata, func_metadata
 from sensai.util import logging
+from sensai.util.helper import mark_used
 from sensai.util.string import dict_string
 
-from serena.config.serena_config import LanguageBackend
-from serena.project import MemoriesManager, Project
+from serena.code_editor import EditedFileContext
+from serena.lsp.lsp_diagnostics import DiagnosticsContext
+from serena.memories.memory_manager import MemoryManager
+from serena.project import Project
 from serena.prompt_factory import PromptFactory
+from serena.repl.facade import SUCCESS_RESULT
 from serena.util.class_decorators import singleton
 from serena.util.inspection import iter_subclasses
+from serena.util.text_utils import TextOutputUtils
 from solidlsp.ls_exceptions import SolidLSPException
 
 if TYPE_CHECKING:
     from serena.agent import SerenaAgent
-    from serena.code_editor import CodeEditor, LanguageServerCodeEditor
+    from serena.code_editor import CodeEditor
     from serena.symbol import LanguageServerSymbolRetriever
-    from serena.task_executor import TaskExecutor
-    from serena.util.file_lifecycle import WritePrecondition
 
+
+mark_used(SUCCESS_RESULT, EditedFileContext)  # backward compatibility
 log = logging.getLogger(__name__)
 T = TypeVar("T")
-SUCCESS_RESULT = "OK"
-AGENT_ID_ARGUMENT = "_serena_agent_id"
-"""the reserved tool-call argument carrying the calling subagent's agent id, which a PreToolUse hook adds"""
-
-SESSION_ID_ARGUMENT = "_serena_session_id"
-"""the reserved tool-call argument carrying the calling Claude Code session's session id, which a PreToolUse hook adds"""
 
 
 class Component(ABC):
@@ -53,8 +51,8 @@ class Component(ABC):
         return self.agent.prompt_factory
 
     @property
-    def memories_manager(self) -> "MemoriesManager":
-        return self.project.memories_manager
+    def memory_manager(self) -> "MemoryManager":
+        return self.project.memory_manager
 
     def create_language_server_symbol_retriever(self) -> "LanguageServerSymbolRetriever":
         from serena.symbol import LanguageServerSymbolRetriever
@@ -66,28 +64,8 @@ class Component(ABC):
     def project(self) -> Project:
         return self.agent.get_active_project_or_raise()
 
-    def create_code_editor(self, write_precondition: "WritePrecondition | None" = None) -> "CodeEditor":
-        """
-        :param write_precondition: the condition the editor's save of the file it names evaluates immediately before
-            replacing that file; ``None`` saves unconditionally.
-        :return: a code editor for the agent's language backend.
-        """
-        from ..code_editor import JetBrainsCodeEditor
-
-        match self.agent.get_language_backend():
-            case LanguageBackend.LSP:
-                return self.create_ls_code_editor(write_precondition)
-            case LanguageBackend.JETBRAINS:
-                return JetBrainsCodeEditor(project=self.project, write_precondition=write_precondition)
-            case _:
-                raise ValueError
-
-    def create_ls_code_editor(self, write_precondition: "WritePrecondition | None" = None) -> "LanguageServerCodeEditor":
-        from ..code_editor import LanguageServerCodeEditor
-
-        if not self.agent.is_using_language_server():
-            raise Exception("Cannot create LanguageServerCodeEditor; agent is not in language server mode.")
-        return LanguageServerCodeEditor(self.create_language_server_symbol_retriever(), write_precondition=write_precondition)
+    def create_code_editor(self) -> "CodeEditor":
+        return self.agent.get_language_backend().create_code_editor(self.project)
 
 
 class ToolMarker:
@@ -96,14 +74,7 @@ class ToolMarker:
     """
 
 
-class ToolMarkerNamesProjectRoot(ToolMarker):
-    """
-    Marker class for all tools whose result opens with the line ``root: <absolute path>``, naming the root of the project the
-    call resolved against: the cursor views and, through :class:`ToolMarkerCanEdit`, the write results.
-    """
-
-
-class ToolMarkerCanEdit(ToolMarkerNamesProjectRoot):
+class ToolMarkerCanEdit(ToolMarker):
     """
     Marker class for all tools that can perform editing operations on files.
     """
@@ -144,21 +115,17 @@ class ApplyMethodProtocol(Protocol):
         pass
 
 
-@dataclass(frozen=True)
-class ToolCallTimeout:
+class ToolCallError(Exception):
     """
-    The typed result of a tool call that did not complete within its deadline.
-
-    :ivar tool_name: the name of the tool whose call exceeded the deadline.
-    :ivar deadline_seconds: the deadline, in seconds, the call was allowed.
+    Represents an error raised during a tool call execution
     """
 
-    tool_name: str
-    deadline_seconds: float
+    def __init__(self, error_message: str):
+        super().__init__(error_message)
+        self._error_message = error_message
 
-    def render(self) -> str:
-        """Render the agent-facing timeout state."""
-        return f"Error: tool '{self.tool_name}' timed out: it did not complete within its deadline of {self.deadline_seconds:g} s."
+    def get_error_message(self) -> str:
+        return self._error_message
 
 
 class Tool(Component):
@@ -174,6 +141,9 @@ class Tool(Component):
 
     _last_tool_call_client_str: str | None = None
     """We can only get the client info from within a tool call. Each tool call will update this variable."""
+
+    def __init__(self, agent: "SerenaAgent"):
+        super().__init__(agent)
 
     @staticmethod
     def _sanitize_input_param(raw_param: str) -> str:
@@ -245,12 +215,12 @@ class Tool(Component):
         """Gets the docstring for the tool application, used by the MCP server."""
         return self.get_apply_docstring_from_cls()
 
-    def get_apply_fn_metadata(self) -> FuncMetadata:
+    def get_apply_fn_metadata(self, structured_output: bool | None = None) -> FuncMetadata:
         """Gets the metadata for the tool application function, used by the MCP server."""
-        return self.get_apply_fn_metadata_from_cls()
+        return self.get_apply_fn_metadata_from_cls(structured_output=structured_output)
 
     @classmethod
-    def get_apply_fn_metadata_from_cls(cls) -> FuncMetadata:
+    def get_apply_fn_metadata_from_cls(cls, structured_output: bool | None = None) -> FuncMetadata:
         """Get the metadata for the apply method from the class (static metadata).
         Needed for creating MCP tools in a separate process without running into serialization issues.
         """
@@ -263,7 +233,15 @@ class Tool(Component):
             if apply_fn is None:
                 raise AttributeError(f"apply method not defined in {cls}. Did you forget to implement it?")
 
-        return func_metadata(apply_fn, skip_names=["self", "cls"])
+        return func_metadata(apply_fn, skip_names=["self", "cls"], structured_output=structured_output)
+
+    def _format_tool_params(self, params: dict) -> str:
+        """
+        Formats the tool parameters for logging
+        :param params: the parameters to format
+        :return: a string to be displayed in log messages, e.g. "param1=value1, param2=value2"
+        """
+        return dict_string(params)
 
     def _log_tool_application(self, frame: Any) -> None:
         params = {}
@@ -275,7 +253,14 @@ class Tool(Component):
                 params.update(value)
             else:
                 params[param] = value
-        log.info(f"{self.get_name_from_cls()}: {dict_string(params)}")
+        log.info(f"{self.get_name_from_cls()}: {self._format_tool_params(params)}")
+
+    def _resolve_max_answer_chars(self, max_answer_chars: int) -> int:
+        """
+        :param max_answer_chars: the maximum number of answer characters as passed to the tool; -1 for the configured default
+        :return: the effective maximum
+        """
+        return self.agent.serena_config.default_max_tool_answer_chars if max_answer_chars == -1 else max_answer_chars
 
     def _limit_length(
         self,
@@ -291,26 +276,13 @@ class Tool(Component):
             version of the result. They are tried in order until one fits within ``max_answer_chars``.
         :return: the result string, potentially replaced by a shortened version
         """
-        if max_answer_chars == -1:
-            max_answer_chars = self.agent.serena_config.default_max_tool_answer_chars
-        if max_answer_chars <= 0:
-            raise ValueError(f"Must be positive or the default (-1), got: {max_answer_chars=}")
-        if (n_chars := len(result)) > max_answer_chars:
-            too_long_msg = (
-                f"The answer is too long ({n_chars} characters). " + "You can adjust your query or raise the max_answer_chars parameter."
-            )
-            if shortened_result_factories is not None:
-                # try each shortening closure in order;
-                for make_shorter in shortened_result_factories:
-                    shortened = make_shorter()
-                    candidate = f"{too_long_msg}\n{shortened}"
-                    if len(candidate) <= max_answer_chars:
-                        return candidate
-            result = too_long_msg
-        return result
+        max_answer_chars = self._resolve_max_answer_chars(max_answer_chars)
+        return TextOutputUtils.limit_length(
+            result=result, max_answer_chars=max_answer_chars, shortened_result_factories=shortened_result_factories
+        )
 
     def is_active(self) -> bool:
-        return self.agent.tool_is_active(self.get_name())
+        return self.agent.get_active_tools().contains_tool_name(self.get_name())
 
     def is_readonly(self) -> bool:
         return not self.can_edit()
@@ -318,109 +290,24 @@ class Tool(Component):
     def is_symbolic(self) -> bool:
         return issubclass(self.__class__, ToolMarkerSymbolicRead) or issubclass(self.__class__, ToolMarkerSymbolicEdit)
 
-    def _issue_call(self, log_call: bool, catch_exceptions: bool, mcp_ctx: Context | None, **kwargs) -> "TaskExecutor.Task[str]":  # type: ignore
+    @classmethod
+    def get_param_aliases(cls) -> dict[str, str]:
         """
-        Issues a call of the tool, with logging and exception handling, as a task on the executor of the calling session.
-
-        :return: the issued task, whose future completes with the call's result
+        :return: a mapping of parameter aliases for the apply method, where the key is the alias and the value is the actual parameter name.
+            This can be used to define alternative parameter names for the same parameter.
         """
-        # derive a per-session key in three tiers, each with its own eviction trigger:
-        #   1. pipe transport (src/serena/pipe.py) supplies the project_root via
-        #      _PIPE_SESSION_ID_VAR -- the project_root IS the session_id under
-        #      plan://Serena:serena/serena-pipe-session-id-is-the-session-id. Eviction
-        #      is driven by pipe-socket disconnect via SerenaAgent.evict_pipe_session,
-        #      NOT by transport GC.
-        #   2. streamable-http with the multiplexer forwarding the inbound CC client's
-        #      Mcp-Session-Id as X-Forwarded-Mcp-Session-Id (per
-        #      plan://Serena:serena/streamable-http-cc-session-id-pass-through-v2)
-        #      -- keyed on the CC session so two CC sessions through one persistent
-        #      multiplexer<->serena session do not collide on _active_projects_by_session.
-        #      The slot persists for the daemon's lifetime; it is no longer evicted
-        #      by a periodic idle-TTL sweeper (removed).
-        #      No weakref.finalize is registered against mcp_ctx.session for this tier,
-        #      so SSE-connection churn between the multiplexer and serena does NOT
-        #      wipe a still-named CC owner's per-session slot.
-        #   3. legacy direct-stdio / streamable-http without the multiplexer -- falls back
-        #      to id(mcp_ctx.session) and emits a one-time warning per session. Eviction
-        #      is driven by mcp_ctx.session GC via weakref.finalize, which is the correct
-        #      trigger here because the SDK session IS the CC session boundary on this path.
-        from serena.agent import _ACTIVE_PROJECT_VAR, _CALL_HOLD_VAR, _MCP_CALL_IN_FLIGHT, _PIPE_SESSION_ID_VAR, _SESSION_KEY_VAR
+        return {}
 
-        pipe_session_id = _PIPE_SESSION_ID_VAR.get()
+    def apply_ex(self, log_call: bool = True, catch_exceptions: bool = True, mcp_ctx: Context | None = None, **kwargs) -> str:
+        """
+        Applies the tool with logging and exception handling, using the given keyword arguments.
+        This method either returns a string result or raises a ToolCallError in case of an error during tool application
+        (but if `catch_exception is enabled, it will return the error message as a string instead of raising the exception).
 
-        # the calling Claude Code session's session id and the calling subagent's agent id, which a PreToolUse hook adds
-        # as reserved arguments; they are part of the session key and never arguments of the tool's apply
-        session_id: str | None = kwargs.pop(SESSION_ID_ARGUMENT, None) or None
-        agent_id: str | None = kwargs.pop(AGENT_ID_ARGUMENT, None) or None
-
-        session_key: str | int | None = None
-        # X-Forwarded-Project-Dir captured on the main thread for the no-project self-heal
-        # inside the worker (the task() closure reads it; it is never reassigned there, so no
-        # nonlocal is needed). Stays None on the pipe path and when no project root is forwarded.
-        forwarded_project_root: str | None = None
-        if pipe_session_id is not None:
-            # tier 1: pipe transport. Eviction driven by pipe-socket disconnect (T6 of
-            # plan://Serena:serena/serena-pipe-implementation), so we deliberately skip
-            # the mcp_ctx GC finalizer registration -- it would tie cleanup to the SDK's
-            # transport-layer Session lifetime, the very transport-churn instability the
-            # pipe redesign exists to eliminate.
-            session_key = pipe_session_id
-        elif mcp_ctx is not None:
-            try:
-                # tier 2: read X-Forwarded-Mcp-Session-Id from the inbound HTTP request.
-                # FastMCP exposes the underlying transport request via either
-                # request_context.request or request -- both case-insensitive
-                # Starlette-style header maps. weakref.finalize admits multiple
-                # finalizers per target, so distinct CC session ids seen on the same
-                # persistent mcp_ctx.session each get their own finalizer that fires
-                # when the multiplexer disconnects and the persistent session is GC'd.
-                forwarded_cc_session_id: str | None = None
-                req_candidates: list = []
-                request_context = getattr(mcp_ctx, "request_context", None)
-                if request_context is not None:
-                    req_candidates.append(getattr(request_context, "request", None))
-                req_candidates.append(getattr(mcp_ctx, "request", None))
-                for req in req_candidates:
-                    if req is None:
-                        continue
-                    headers = getattr(req, "headers", None)
-                    if headers is None:
-                        continue
-                    try:
-                        candidate = headers.get("x-forwarded-mcp-session-id") or headers.get("X-Forwarded-Mcp-Session-Id")
-                    except Exception:
-                        candidate = None
-                    if candidate:
-                        forwarded_cc_session_id = candidate
-                        # both forwarded-CC headers ride the same request (multiplexer sets
-                        # X-Forwarded-Project-Dir alongside X-Forwarded-Mcp-Session-Id), so read
-                        # the project root here for the active-project self-heal at the gate below.
-                        try:
-                            forwarded_project_root = headers.get("x-forwarded-project-dir") or headers.get("X-Forwarded-Project-Dir")
-                        except Exception:
-                            forwarded_project_root = None
-                        break
-                if forwarded_cc_session_id:
-                    # each Claude Code session reaching serena through the client's connection holds its own session
-                    # under the client's forwarded session id (pg://serena/session/project/separation), and each agent
-                    # of it its own session within that (pg://serena/session/project/agent); a call carrying neither
-                    # identifier is keyed on the forwarded session id alone
-                    session_key = forwarded_cc_session_id
-                    if session_id is not None:
-                        session_key = f"{session_key}/session/{session_id}"
-                    if agent_id is not None:
-                        session_key = f"{session_key}/agent/{agent_id}"
-                else:
-                    # tier 3: legacy direct-stdio / streamable-http without the multiplexer.
-                    # id(mcp_ctx.session) is unique for the lifetime of a Session but unstable
-                    # across streamable-http per-request task churn; emit a one-time warning
-                    # per session for observability so the legacy path stays visible in logs.
-                    session_key = id(mcp_ctx.session)
-                    self.agent._register_session_finalizer(mcp_ctx.session, session_key)
-                    self.agent._warn_missing_forwarded_session_id_once(session_key)
-            except Exception as e:
-                log.info(f"Failed to derive MCP session key: {e}.")
-
+        :param log_call: whether to log the tool call and its result
+        :param catch_exceptions: whether to catch exceptions and return their messages as strings, instead of raising a ToolCallError
+        """
+        # obtain session ID and client info
         if mcp_ctx is not None:
             try:
                 client_params = mcp_ctx.session.client_params
@@ -430,87 +317,35 @@ class Tool(Component):
                     if client_str != self.get_last_tool_call_client_str():
                         log.debug(f"Updating client info: {client_info}")
                         self.set_last_tool_call_client_str(client_str)
-            except BaseException as e:
+            except Exception as e:
                 log.info(f"Failed to get client info: {e}.")
 
-        def apply_call() -> str:
+        def task() -> str:
             apply_fn = self.get_apply_fn()
+
             try:
                 if not self.is_active():
-                    return f"Error: Tool '{self.get_name_from_cls()}' is not active. Active tools: {self.agent.get_active_tool_names()}"
-            except Exception as e:
-                return f"RuntimeError while checking if tool {self.get_name_from_cls()} is active: {e}"
+                    raise ToolCallError(
+                        f"Tool '{self.get_name_from_cls()}' is not active. Active tools: {self.agent.get_active_tool_names()}"
+                    )
 
-            if log_call:
-                self._log_tool_application(inspect.currentframe())
-            try:
+                if log_call:
+                    self._log_tool_application(inspect.currentframe())
+
                 # check whether the tool requires an active project and language server
                 if not isinstance(self, ToolMarkerDoesNotRequireActiveProject):
                     if self.agent.get_active_project() is None:
-                        # self-heal a stranded session whose per-session active-project slot is
-                        # empty. Exactly two outcomes, and neither of them is a guess:
-                        #  (1) this session EXPLICITLY activated a project earlier -- recorded in
-                        #      _explicit_project_roots_by_session, or, when the daemon has restarted
-                        #      since and wiped that map, in the durable store backing it. Restore
-                        #      THAT root, or fail loud. Consulting only the in-memory map made every
-                        #      daemon restart look like "this session never activated anything"
-                        #      (bug://serena/agent/session/activation/persistence).
-                        #  (2) no record at all: FAIL. The multiplexer forwards the inbound CC
-                        #      client's cwd as X-Forwarded-Project-Dir and serena used to activate it
-                        #      here (the self-reclaim of plan serena-session-state-self-reclaim-impl,
-                        #      commit 5febf634). That convenience IS the reported defect: a caller who
-                        #      meant to work in a worktree gets silently bound to the main checkout
-                        #      and only finds out from the damage. The forwarded root is now offered
-                        #      in the error text as a suggestion the caller may pass deliberately;
-                        #      serena never binds a root it merely inferred.
-                        # Keyed via _SESSION_KEY_VAR set on this worker so concurrent sessions never
-                        # cross-bind. The per-session slot is re-read here unlocked, as it was when this
-                        # task started. Entering the heal branch twice is benign:
-                        # activate_project_from_path_or_name re-registers the same root idempotently, so
-                        # a redundant re-activation cannot corrupt the slot.
-                        healed = False
-                        if session_key is not None and self.agent._active_projects_by_session.get(session_key) is None:
-                            explicit_root = self.agent._explicit_project_roots_by_session.get(session_key)
-                            if explicit_root is None:
-                                # the in-memory map died with the previous process; the durable store
-                                # is what lets a restarted session still be recognised as one that
-                                # chose its own project.
-                                explicit_root = self.agent._explicit_project_root_store.get(session_key)
-                            if explicit_root is not None:
-                                try:
-                                    self.agent.activate_project_from_path_or_name(explicit_root, record_explicit=False)
-                                    healed = self.agent.get_active_project() is not None
-                                except Exception as e:
-                                    log.error(
-                                        f"Self-heal restore of explicitly-activated project root "
-                                        f"{explicit_root!r} failed: {e}."
-                                    )
-                                if not healed:
-                                    # fail loud: never fall through to the forwarded origin here.
-                                    return (
-                                        f"Error: this MCP session's active project could not be restored. "
-                                        f"It had activated {explicit_root!r}, but re-activation failed and the "
-                                        f"daemon will NOT silently switch you to a different project. "
-                                        f"Call `activate_project({explicit_root!r})` to continue."
-                                    )
-                        if not healed:
-                            suggestion = (
-                                f" Your client's working directory is {forwarded_project_root!r} -- "
-                                f"pass that if it is the project you want."
-                                if forwarded_project_root
-                                else ""
-                            )
-                            return (
-                                "Error: No active project for this MCP session. "
-                                "Call `activate_project(<absolute path of your project root>)` "
-                                "before any other Serena tool. Serena will not pick a project root "
-                                "for you: binding one it merely inferred is how a session silently "
-                                "ends up operating on the wrong checkout." + suggestion
-                            )
+                        raise ToolCallError(
+                            "No active project. Ask the user to provide the project path or to select a project from this list of known projects: "
+                            + f"{self.agent.serena_config.project_names}"
+                        )
+
+                # construct apply kwargs, adding session_id if the tool is session-aware
+                apply_kwargs = dict(kwargs)
 
                 # apply the actual tool
                 try:
-                    result = apply_fn(**kwargs)
+                    result = apply_fn(**apply_kwargs)
                 except SolidLSPException as e:
                     if e.is_language_server_terminated():
                         affected_language = e.get_affected_language()
@@ -519,7 +354,7 @@ class Tool(Component):
                                 f"Language server terminated while executing tool ({e}). Restarting the language server and retrying ..."
                             )
                             self.agent.get_language_server_manager_or_raise().restart_language_server(affected_language)
-                            result = apply_fn(**kwargs)
+                            result = apply_fn(**apply_kwargs)
                         else:
                             log.error(
                                 f"Language server terminated while executing tool ({e}), but affected language is unknown. Not retrying."
@@ -529,17 +364,14 @@ class Tool(Component):
                         raise
 
                 # record tool usage
-                self.agent.record_tool_usage(kwargs, result, self)
+                self.agent.record_tool_usage(apply_kwargs, result, self)
 
+            except ToolCallError:
+                raise
             except Exception as e:
-                if not catch_exceptions:
-                    raise
-                msg = f"Error executing tool: {e.__class__.__name__} - {e}"
-                log.error(f"Error executing tool: {e}", exc_info=e)
-                result = msg
-
-            if isinstance(self, ToolMarkerNamesProjectRoot):
-                result = self._with_project_root(result, self.agent.get_active_project())
+                msg = f"{e.__class__.__name__}: {e}"
+                log.error(msg, exc_info=e)
+                raise ToolCallError(msg)
 
             if log_call:
                 log.info(f"Result: {result}")
@@ -553,165 +385,74 @@ class Tool(Component):
 
             return result
 
-        def task() -> str:
-            # pin the project this session holds as the session's executor starts the call, not the one it held when
-            # the call arrived: the executor runs one session's calls one at a time in arrival order, so a call issued
-            # after its session's activate_project runs against the project that activation bound, and every reader
-            # of the active project inside the call sees that one project (pg://serena/session/project/order). The call
-            # holds that project until it ends, so no release stops its language servers under the call
-            # (pg://serena/session/project/instance/shutdown)
-            call_hold = self.agent._pin_session_project_for_call(session_key) if session_key is not None else None
-            if call_hold is not None:
-                _CALL_HOLD_VAR.set(call_hold)
-                if call_hold.project is not None:
-                    _ACTIVE_PROJECT_VAR.set(call_hold.project)
-            try:
-                return apply_call()
-            finally:
-                if call_hold is not None:
-                    self.agent._unpin_project_for_call(call_hold)
-
-        # bind this call's session into the context the task is issued from: issue_task routes the task to the
-        # executor of the bound session, and the task body runs in a copy of this context (see TaskExecutor.Task),
-        # so every reader of the active project inside the call sees the project of *this* session. Marking the
-        # call MCP-bound arms the zero-crossover guards, which refuse any fall-through to the daemon-wide executor
-        # or the legacy single slots while it is in flight.
-        def issue() -> "TaskExecutor.Task[str]":
-            if mcp_ctx is not None or pipe_session_id is not None:
-                _MCP_CALL_IN_FLIGHT.set(True)
-            if session_key is not None:
-                _SESSION_KEY_VAR.set(session_key)
-            return self.agent.issue_task(task, name=self.__class__.__name__, timeout=self.agent.serena_config.tool_timeout)
-
-        return contextvars.copy_context().run(issue)
-
-    def apply_ex(self, log_call: bool = True, catch_exceptions: bool = True, mcp_ctx: Context | None = None, **kwargs) -> str:  # type: ignore
-        """
-        Applies the tool with logging and exception handling, using the given keyword arguments, blocking the calling
-        thread until the call's task completes or the tool timeout passes.
-        """
+        # execute the tool in the agent's task executor, with timeout
+        # (task timeout bounds task execution in the dispatcher once it runs, result timeout limits the time we wait)
+        tool_call_error: ToolCallError
+        timeout = self.agent.serena_config.tool_timeout
         try:
-            deadline = self.agent.serena_config.tool_timeout
-            task_exec = self._issue_call(log_call, catch_exceptions, mcp_ctx, **kwargs)
-        except Exception as e:
-            return self._error_result(e)
-        try:
-            return task_exec.result(timeout=deadline)
+            task_exec = self.agent.issue_task(task, name=self.__class__.__name__, timeout=timeout)
+            return task_exec.result(timeout=timeout)
+        except ToolCallError as e:
+            tool_call_error = e
         except TimeoutError:
-            return self._timeout_result(task_exec, deadline)
-        except Exception as e:  # cancellation; exceptions of the tool itself are caught in the task
-            return self._error_result(e)
-
-    async def apply_ex_async(self, log_call: bool = True, catch_exceptions: bool = True, mcp_ctx: Context | None = None, **kwargs) -> str:  # type: ignore
-        """
-        Applies the tool like :meth:`apply_ex`, awaiting the call's task without blocking the event loop, so that the
-        calls of other sessions are served while it runs.
-        """
-        try:
-            deadline = self.agent.serena_config.tool_timeout
-            task_exec = self._issue_call(log_call, catch_exceptions, mcp_ctx, **kwargs)
-        except Exception as e:
-            return self._error_result(e)
-        try:
-            return await asyncio.wait_for(asyncio.wrap_future(task_exec.future), timeout=deadline)
-        except TimeoutError:
-            return self._timeout_result(task_exec, deadline)
-        except asyncio.CancelledError as e:
-            # the call's task was cancelled (its session's queue was shut down) while the request awaiting it was not:
-            # answered as apply_ex answers it. A cancellation of the request itself is passed on to the request.
-            current_task = asyncio.current_task()
-            if current_task is not None and current_task.cancelling() > 0:
-                raise
-            return self._error_result(e)
-        except Exception as e:  # the task's exception, under catch_exceptions=False
-            return self._error_result(e)
-
-    @staticmethod
-    def _error_result(e: BaseException) -> str:
-        msg = f"Error: {e.__class__.__name__} - {e}"
-        log.error(msg)
-        return msg
-
-    def _timeout_result(self, task_exec: "TaskExecutor.Task[str]", deadline: float) -> str:
-        """
-        Abandons a call at its deadline.
-
-        The task's future is cancelled, which frees the session's queue for its next task; the task's thread cannot be
-        stopped and runs on, but its result is discarded. A task that completed in the meantime cannot be cancelled,
-        and its outcome stands. A write whose thread runs on can still land, so the answer to it names the root of the call's
-        project, as the result of a completed write does.
-
-        :param task_exec: the call's task
-        :param deadline: the deadline, in seconds, the call was allowed
-        :return: the typed timeout state, opened by the root line for a write, or the outcome of a task that completed at the
-            deadline
-        """
-        if not task_exec.future.cancel():
-            exception = task_exec.future.exception()
-            return task_exec.future.result() if exception is None else self._error_result(exception)
-        timeout = ToolCallTimeout(tool_name=self.get_name_from_cls(), deadline_seconds=deadline)
-        log.error(timeout.render())
-        if isinstance(self, ToolMarkerCanEdit):
-            # read in the task's context: this thread holds none of the call's bindings, so it could name another project
-            return self._with_project_root(timeout.render(), task_exec.run_in_context(self.agent.get_active_project))
-        return timeout.render()
-
-    @staticmethod
-    def _with_project_root(result: str, project: Project | None) -> str:
-        """
-        :param result: the result of a call
-        :param project: the project the call resolved against, or None if it has none
-        :return: the result, opened by the line naming the project's root. The root comes first because
-            ``hooks/track-serena-cursor-path.sh`` in brain records the first line of that form in a result (``head -n1`` over
-            its ``VIEW_ROOT`` match), and a file body the result goes on to render can hold a line of the same form.
-        """
-        return result if project is None else f"root: {project.project_root}\n{result}"
+            msg = f"Tool execution timed out after {timeout} seconds. "
+            log.error(msg)
+            tool_call_error = ToolCallError(msg)
+        except Exception as e:  # unexpected errors (exceptions in the task itself are caught and forwarded as ToolCallError)
+            msg = f"{e.__class__.__name__}: {e}"
+            log.error(msg)
+            tool_call_error = ToolCallError(msg)
+        if catch_exceptions:
+            return tool_call_error.get_error_message()
+        else:
+            raise tool_call_error
 
     @staticmethod
     def _to_json(x: Any) -> str:
-        return json.dumps(x, ensure_ascii=False)
+        return TextOutputUtils.to_json(x)
+
+    def _wrapped_tool_response(self, response: Any, message: str) -> str:
+        """
+        Wraps an existing tool response in an object with a message and the original response, i.e. returns
+        `{"message": message, "response": response}` stringified.
+        If the original response is a JSON string, it will be parsed and included as an object.
+
+        :param response: the original response (if it is a string, it will be parsed as JSON if possible)
+        :param message: the message to attach
+        :return: stringified JSON response with the message and the original response
+        """
+        response_obj = response
+        if isinstance(response, str):
+            try:
+                response_obj = json.loads(response)
+            except json.JSONDecodeError:
+                pass
+        return self._to_json({"message": message, "response": response_obj})
 
 
-class EditedFileContext:
+class EditingToolWithDiagnostics(Tool, ToolMarkerCanEdit):
     """
-    Context manager for file editing.
-
-    Create the context, then use `set_updated_content` to set the new content, the original content
-    being provided in `original_content`.
-    When exiting the context without an exception, the updated content will be written back to the file.
+    Base class for editing tools that want to capture and report changes in LSP diagnostics before and after the edit.
     """
 
-    def __init__(self, relative_path: str, code_editor: "CodeEditor"):
-        self._relative_path = relative_path
-        self._code_editor = code_editor
-        self._edited_file: CodeEditor.EditedFile | None = None
-        self._edited_file_context: Any = None
+    ENABLE_DIAGNOSTICS: bool = False
+    """
+    Global flag to enable/disable diagnostics for LSP-based editing tools derived from this class.
+    The feature is currently disabled, because per-edit diagnostics are a questionable feature, since individual
+    edits often intentionally introduce diagnostics (e.g. function signature mismatches or even syntax errors) that 
+    are then resolved in subsequent edits.
+    """
 
-    def __enter__(self) -> Self:
-        self._edited_file_context = self._code_editor.edited_file_context(self._relative_path)
-        self._edited_file = self._edited_file_context.__enter__()
-        return self
-
-    def get_original_content(self) -> str:
+    def diagnostics_context(self, *edited_relative_paths: str) -> DiagnosticsContext:
         """
-        :return: the original content of the file before any modifications.
-        """
-        assert self._edited_file is not None
-        return self._edited_file.get_contents()
+        Creates a context for use with the `with` statement, which captures the diagnostics before the edit,
+        such that changes can be reported
 
-    def set_updated_content(self, content: str) -> None:
+        :param edited_relative_paths: the relative paths of the files that are to be edited within the context
+        :return: a context which captures the diagnostics before the edit, such that changes can be reported
+            via `format_result`
         """
-        Sets the updated content of the file, which will be written back to the file
-        when the context is exited without an exception.
-
-        :param content: the updated content of the file
-        """
-        assert self._edited_file is not None
-        self._edited_file.set_contents(content)
-
-    def __exit__(self, exc_type: type[BaseException] | None, exc_value: BaseException | None, traceback: TracebackType | None) -> None:
-        assert self._edited_file_context is not None
-        self._edited_file_context.__exit__(exc_type, exc_value, traceback)
+        return DiagnosticsContext(self.agent, *edited_relative_paths, enable=self.ENABLE_DIAGNOSTICS)
 
 
 @dataclass(kw_only=True)
@@ -728,6 +469,13 @@ class RegisteredTool:
         """
         return self.tool_class.get_tool_description()
 
+    def has_marker(self, marker_cls: type[ToolMarker]) -> bool:
+        """
+        :param marker_cls: the marker class to check for
+        :return: whether the tool class has the given marker class
+        """
+        return issubclass(self.tool_class, marker_cls)
+
 
 tool_packages = ["serena.tools"]
 
@@ -740,6 +488,7 @@ class ToolRegistry:
         "summarize_changes",
         "think_about_whether_you_are_done",
         "switch_modes",
+        "check_onboarding_performed",
     ]
 
     def __init__(self) -> None:
@@ -802,11 +551,22 @@ class ToolRegistry:
         """
         return [t.tool_name for t in self._tool_dict.values() if t.is_optional]
 
+    def get_registered_tool_by_name(self, tool_name: str) -> RegisteredTool:
+        if tool_name not in self._tool_dict:
+            raise ValueError(f"Tool named '{tool_name}' not found.")
+        return self._tool_dict[tool_name]
+
     def get_tool_names(self) -> list[str]:
         """
         :return: the list of all tool names.
         """
         return list(self._tool_dict.keys())
+
+    def iter_registered_tools(self) -> Iterator[RegisteredTool]:
+        """
+        :return: an iterator over all registered tools.
+        """
+        return iter(self._tool_dict.values())
 
     def print_tool_overview(
         self, tools: Iterable[type[Tool] | Tool] | None = None, include_optional: bool = False, only_optional: bool = False

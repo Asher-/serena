@@ -2,11 +2,11 @@
 Provides Ruby specific instantiation of the LanguageServer class using Solargraph.
 Contains various configurations and settings specific to Ruby.
 """
+# SPDX-License-Identifier: MIT
 
 import json
 import logging
 import os
-import pathlib
 import re
 import shutil
 import subprocess
@@ -16,10 +16,9 @@ from overrides import override
 
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
-from solidlsp.util import supervise
+from solidlsp.util.subprocess_util import subprocess_run
 
 log = logging.getLogger(__name__)
 
@@ -43,11 +42,6 @@ class Solargraph(SolidLanguageServer):
             "ruby",
             solidlsp_settings,
         )
-        # Override internal language enum for file matching (excludes .erb files)
-        # while keeping LSP languageId as "ruby" for protocol compliance
-        from solidlsp.ls_config import Language
-
-        self.language = Language.RUBY_SOLARGRAPH
         self.analysis_complete = threading.Event()
         self.service_ready_event = threading.Event()
         self.initialize_searcher_command_available = threading.Event()
@@ -68,6 +62,7 @@ class Solargraph(SolidLanguageServer):
             "doc",  # Generated documentation
             "node_modules",  # Node modules (for Rails with JS)
             "storage",  # Active Storage files (Rails)
+            ".ruby-lsp",
         ]
         return super().is_ignored_dirname(dirname) or dirname in ruby_ignored_dirs
 
@@ -78,7 +73,7 @@ class Solargraph(SolidLanguageServer):
         """
         # Check if Ruby is installed
         try:
-            result = supervise.run(["ruby", "--version"], check=True, capture_output=True, cwd=repository_root_path, text=True)
+            result = subprocess_run(["ruby", "--version"], check=True, capture_output=True, cwd=repository_root_path, text=True)
             ruby_version = result.stdout.strip()
             log.info(f"Ruby version: {ruby_version}")
 
@@ -133,7 +128,7 @@ class Solargraph(SolidLanguageServer):
                     if bundle_cmd.startswith("bin/"):
                         bundle_full_path = os.path.join(repository_root_path, bundle_cmd)
                     else:
-                        bundle_full_path = find_executable_with_extensions(bundle_cmd)  # type: ignore[assignment]
+                        bundle_full_path = find_executable_with_extensions(bundle_cmd)
                     if bundle_full_path and os.path.exists(bundle_full_path):
                         bundle_path = bundle_full_path if bundle_cmd.startswith("bin/") else bundle_cmd
                         break
@@ -185,12 +180,12 @@ class Solargraph(SolidLanguageServer):
 
             dependency = runtime_dependencies[0]
             try:
-                result = supervise.run(
+                result = subprocess_run(
                     ["gem", "list", "^solargraph$", "-i"], check=False, capture_output=True, text=True, cwd=repository_root_path
                 )
                 if result.stdout.strip() == "false":
                     log.info("Installing Solargraph...")
-                    supervise.run(dependency["installCommand"].split(), check=True, capture_output=True, cwd=repository_root_path)
+                    subprocess_run(dependency["installCommand"].split(), check=True, capture_output=True, cwd=repository_root_path)
 
                 return "gem exec solargraph"
             except subprocess.CalledProcessError as e:
@@ -267,20 +262,15 @@ class Solargraph(SolidLanguageServer):
 
         return base_patterns
 
-    @staticmethod
-    def _get_initialize_params(repository_absolute_path: str) -> InitializeParams:
+    def _create_base_initialize_params(self) -> dict:
         """
         Returns the initialize params for the Solargraph Language Server.
         """
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
-        exclude_patterns = Solargraph._get_ruby_exclude_patterns(repository_absolute_path)
+        exclude_patterns = Solargraph._get_ruby_exclude_patterns(self.repository_root_path)
 
-        initialize_params: InitializeParams = {  # type: ignore
-            "processId": os.getpid(),
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
+        initialize_params = {
             "initializationOptions": {
-                "exclude": exclude_patterns,  # type: ignore[dict-item]
+                "exclude": exclude_patterns,
             },
             "capabilities": {
                 "workspace": {
@@ -289,19 +279,13 @@ class Solargraph(SolidLanguageServer):
                 "textDocument": {
                     "documentSymbol": {
                         "hierarchicalDocumentSymbolSupport": True,
-                        "symbolKind": {"valueSet": list(range(1, 27))},  # type: ignore[arg-type]
+                        "symbolKind": {"valueSet": list(range(1, 27))},
                     },
                 },
             },
-            "trace": "verbose",  # type: ignore[typeddict-item]
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
+            "trace": "verbose",
         }
-        return initialize_params  # type: ignore[return-value]
+        return initialize_params
 
     def _start_server(self) -> None:
         """
@@ -341,7 +325,7 @@ class Solargraph(SolidLanguageServer):
 
         log.info("Starting solargraph server process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request from LSP client to LSP server and awaiting response")
         log.info(f"Sending init params: {json.dumps(initialize_params, indent=4)}")

@@ -1,34 +1,53 @@
 """
 Provides TypeScript specific instantiation of the LanguageServer class. Contains various configurations and settings specific to TypeScript.
 """
+# SPDX-License-Identifier: MIT
 
 import logging
 import os
-import pathlib
+import re
 import shutil
 import threading
-from typing import Any, cast
+import time
+from collections.abc import Hashable
+from typing import Any
 
 from overrides import override
 from sensai.util.logging import LogTime
 
 from solidlsp import ls_types
-from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
+from solidlsp.ls import (
+    DocumentSymbols,
+    LanguageServerDependencyProvider,
+    LanguageServerDependencyProviderSinglePath,
+    LSPFileBuffer,
+    SolidLanguageServer,
+    SymbolBodyFactory,
+)
 from solidlsp.ls_config import LanguageServerConfig
-from solidlsp.ls_utils import PlatformId, PlatformUtils
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
+from solidlsp.ls_exceptions import SolidLSPException
+from solidlsp.ls_utils import PlatformUtils
+from solidlsp.lsp_protocol_handler.lsp_types import InitializeResult, MessageType
 from solidlsp.settings import SolidLSPSettings
 
 from .common import RuntimeDependency, RuntimeDependencyCollection, build_npm_install_command
 
 log = logging.getLogger(__name__)
 
+# Version pinning convention (see eclipse_jdtls.py for the full spec):
+#   INITIAL_* — frozen forever; legacy unversioned install dir is reserved for it.
+#   DEFAULT_* — bumped on upgrades; goes into a versioned subdir.
+INITIAL_TYPESCRIPT_VERSION = "5.9.3"
+DEFAULT_TYPESCRIPT_VERSION = "5.9.3"
+INITIAL_TYPESCRIPT_LANGUAGE_SERVER_VERSION = "5.1.3"
+DEFAULT_TYPESCRIPT_LANGUAGE_SERVER_VERSION = "5.1.3"
+
 # Platform-specific imports
 if os.name != "nt":  # Unix-like systems
     import pwd
 else:
     # Dummy pwd module for Windows
-    class pwd:  # type: ignore
+    class pwd:
         @staticmethod
         def getpwuid(uid: Any) -> Any:
             return type("obj", (), {"pw_name": os.environ.get("USERNAME", "unknown")})()
@@ -58,6 +77,40 @@ def prefer_non_node_modules_definition(definitions: list[ls_types.Location]) -> 
     return definitions[0]
 
 
+def _get_install_dir(ls_resources_dir: str, typescript_version: str, typescript_language_server_version: str) -> str:
+    """
+    Determines the directory into which the given combination of TypeScript and typescript-language-server
+    versions is installed.
+
+    :param ls_resources_dir: the language server's resources directory
+    :param typescript_version: the version of the `typescript` package
+    :param typescript_language_server_version: the version of the `typescript-language-server` package
+    :return: the installation directory (which contains the `node_modules` directory)
+    """
+    # legacy unversioned dir reserved for INITIAL pair; any other version combination goes into a versioned subdir
+    is_initial = (
+        typescript_version == INITIAL_TYPESCRIPT_VERSION
+        and typescript_language_server_version == INITIAL_TYPESCRIPT_LANGUAGE_SERVER_VERSION
+    )
+    ls_dirname = "ts-lsp" if is_initial else f"ts-lsp-{typescript_version}-{typescript_language_server_version}"
+    return os.path.join(ls_resources_dir, ls_dirname)
+
+
+class TypeScriptServerCrashedError(SolidLSPException):
+    """Raised when tsserver reported its own abnormal exit via window/logMessage.
+
+    typescript-language-server sends a $/progress "end" event for the in-flight
+    token as part of tearing its connection down after tsserver dies, which is
+    otherwise indistinguishable from a normal indexing completion.
+    """
+
+
+# Matches typescript-language-server's window/logMessage notification for an abnormal
+# tsserver exit, e.g. "[lspserver] [tsclient] [tsserver] Exited. Code: null. Signal: SIGABRT".
+# A clean shutdown does not produce this message.
+_TSSERVER_EXITED_PATTERN = re.compile(r"\[tsserver\]\s+Exited\b", re.IGNORECASE)
+
+
 class TypeScriptLanguageServer(SolidLanguageServer):
     """
     Provides TypeScript specific instantiation of the LanguageServer class. Contains various configurations and settings specific to TypeScript.
@@ -65,11 +118,36 @@ class TypeScriptLanguageServer(SolidLanguageServer):
     You can pass the following entries in ls_specific_settings["typescript"]:
         - typescript_version: Version of TypeScript to install (default: "5.9.3")
         - typescript_language_server_version: Version of typescript-language-server to install (default: "5.1.3")
+        - indexing_timeout: float, timeout in seconds for project indexing (default: 30.0)
+        - server_ready_timeout: float, timeout in seconds for the server-ready signal (default: 10.0)
+        - indexing_start_grace: float, timeout in seconds to wait for tsserver to *start*
+          reporting indexing progress before the first cross-file reference query (default: 5.0)
+
+    If the project is not trusted, tsserver is pinned to the TypeScript installation managed by SolidLSP
+    (see :meth:`_get_pinned_tsdk_path`); only a trusted project may have its own `node_modules/typescript`
+    loaded by typescript-language-server.
     """
+
+    @classmethod
+    def supports_implementation_request(cls) -> bool:
+        return True
+
+    # matches a line prefix that consists solely of a leading `const`/`let`/`var` declaration
+    # keyword (with an optional `export` modifier, optional indentation, and the whitespace
+    # before the declared identifier). tsserver reports the symbol range of such declarations
+    # starting at the identifier, i.e. after the keyword(s), unlike `function`/`class` declarations
+    # whose range includes the leading keyword(s). Mirrors Gopls._LEADING_DECL_KEYWORD_RE.
+    _LEADING_DECL_KEYWORD_RE = re.compile(r"(?P<indent>\s*)(?:export\s+)?(?:const|let|var)\s+")
 
     # Safety timeout for $/progress-based indexing wait. Normally the event fires
     # well within this window; the timeout is only hit if the server never sends progress.
-    INDEXING_PROGRESS_TIMEOUT = 15.0 if os.name == "nt" else 10.0
+    INDEXING_PROGRESS_TIMEOUT = 30.0
+    SERVER_READY_TIMEOUT = 10.0
+    # How long to wait for tsserver to *start* emitting $/progress after opening files, before
+    # assuming no indexing is needed. tsserver has to resolve the project graph before it can even
+    # create the first progress token, and that resolution is proportional to project size, so a
+    # large project can genuinely take longer than a small one just to begin reporting.
+    INDEXING_START_GRACE = 5.0
 
     def __init__(self, config: LanguageServerConfig, repository_root_path: str, solidlsp_settings: SolidLSPSettings):
         """
@@ -85,19 +163,76 @@ class TypeScriptLanguageServer(SolidLanguageServer):
         self.server_ready = threading.Event()
         self.initialize_searcher_command_available = threading.Event()
 
-        # Progress tracking for $/progress notifications (project indexing, etc.)
+        # tracking asynchronous diagnostics publication
+        self._published_diagnostics_timeout = 5.0
+
+        # tracking project indexing progress
         self._progress_lock = threading.Lock()
         self._active_progress_tokens: set[str] = set()
         self._indexing_complete = threading.Event()
         self._indexing_complete.set()  # Initially set (no active work)
+        # set from window/logMessage when tsserver reports its own abnormal exit;
+        # a crash mid-indexing still drains _active_progress_tokens via a $/progress
+        # "end" event, so that alone cannot distinguish a crash from real completion
+        self._crash_message: str | None = None
+
+    def _raise_if_crashed(self) -> None:
+        if self._crash_message is not None:
+            raise TypeScriptServerCrashedError(self._crash_message)
+
+    @staticmethod
+    def _tsserver_exit_message(msg: dict) -> str | None:
+        """:return: the log text if ``msg`` is tsserver reporting its own abnormal exit, else None."""
+        if msg.get("type") != MessageType.Error:
+            return None
+        message_text = str(msg.get("message", ""))
+        if _TSSERVER_EXITED_PATTERN.search(message_text):
+            return message_text
+        return None
 
     def wait_for_indexing(self, timeout: float) -> bool:
         """Block until all $/progress tokens complete.
 
         :param timeout: Maximum seconds to wait.
         :return: True if indexing completed, False on timeout.
+        :raises TypeScriptServerCrashedError: if tsserver reported an abnormal exit.
         """
-        return self._indexing_complete.wait(timeout=timeout)
+        result = self._indexing_complete.wait(timeout=timeout)
+        if result:
+            self._raise_if_crashed()
+        return result
+
+    def _wait_for_indexing_start_or_completion(self, timeout: float, start_grace: float | None = None) -> bool:
+        """Wait until TypeScript indexing has started and drained, or provably never started.
+
+        :param timeout: Maximum seconds to wait once active indexing progress is observed.
+        :param start_grace: Maximum seconds to wait for progress to begin after opening files.
+        :return: True if indexing completed or no progress began within the grace period, False on timeout.
+        :raises TypeScriptServerCrashedError: if tsserver reported an abnormal exit.
+        """
+        grace = self.INDEXING_START_GRACE if start_grace is None else start_grace
+
+        # wait for progress to begin
+        progress_deadline = time.monotonic() + grace
+        while time.monotonic() < progress_deadline:
+            with self._progress_lock:
+                if self._active_progress_tokens:
+                    break
+                if self._indexing_complete.is_set():
+                    self._raise_if_crashed()
+                    return True
+            time.sleep(0.05)
+
+        # treat absent progress as ready
+        with self._progress_lock:
+            has_active_progress = bool(self._active_progress_tokens)
+            if not has_active_progress:
+                self._indexing_complete.set()
+                self._raise_if_crashed()
+                return True
+
+        # wait for active progress to drain
+        return self.wait_for_indexing(timeout=timeout)
 
     def expect_indexing(self) -> None:
         """Signal that new files are about to be opened and async indexing should be awaited.
@@ -108,6 +243,63 @@ class TypeScriptLanguageServer(SolidLanguageServer):
         """
         self._indexing_complete.clear()
 
+    def describe_indexing_state(self) -> str:
+        """:return: compact diagnostic state for TypeScript indexing progress."""
+        with self._progress_lock:
+            active_tokens = sorted(token for token in self._active_progress_tokens if token)
+            complete = self._indexing_complete.is_set()
+
+        token_text = ", ".join(active_tokens) if active_tokens else "<none>"
+        return f"complete={complete}, active_progress_tokens={token_text}"
+
+    def _get_server_ready_timeout(self) -> float:
+        """:return: maximum seconds to wait for the TypeScript server-ready signal."""
+        return float(self._custom_settings.get("server_ready_timeout", self.SERVER_READY_TIMEOUT))
+
+    def _get_indexing_timeout(self) -> float:
+        """:return: maximum seconds to wait for TypeScript project indexing."""
+        return float(self._custom_settings.get("indexing_timeout", self.INDEXING_PROGRESS_TIMEOUT))
+
+    def _get_indexing_start_grace(self) -> float:
+        """:return: maximum seconds to wait for tsserver to start reporting indexing progress."""
+        return float(self._custom_settings.get("indexing_start_grace", self.INDEXING_START_GRACE))
+
+    def _handle_server_ready_timeout(self, timeout: float) -> None:
+        """Handle a TypeScript server-ready timeout.
+
+        The base TypeScript server keeps the historical permissive behavior. Strict companion
+        servers override this hook to fail before serving requests from a cold server.
+        """
+        log.info("Timeout waiting for TypeScript server to become ready after %.0fs, proceeding anyway", timeout)
+        self.server_ready.set()
+
+    def _handle_project_indexing_timeout(self, timeout: float) -> None:
+        """Handle a TypeScript project-indexing timeout.
+
+        The base TypeScript server keeps the historical permissive behavior. Strict companion
+        servers override this hook to fail before serving requests from a partially indexed program.
+        """
+        log.warning(
+            "TypeScript project indexing did not complete within %.0fs; proceeding anyway (%s)",
+            timeout,
+            self.describe_indexing_state(),
+        )
+
+    def _verify_initialize_response(self, init_response: InitializeResult) -> None:
+        capabilities = init_response["capabilities"]
+        if capabilities.get("textDocumentSync") != 2:
+            raise SolidLSPException(f"Unexpected textDocumentSync capability: {capabilities.get('textDocumentSync')!r}")
+        expected_completion_provider = {"triggerCharacters": [".", '"', "'", "/", "@", "<"], "resolveProvider": True}
+        if capabilities.get("completionProvider") != expected_completion_provider:
+            raise SolidLSPException(f"Unexpected completionProvider capability: {capabilities.get('completionProvider')!r}")
+
+    def _wait_for_server_ready(self) -> None:
+        server_ready_timeout = self._get_server_ready_timeout()
+        if self.server_ready.wait(timeout=server_ready_timeout):
+            log.info("TypeScript server is ready")
+        else:
+            self._handle_server_ready_timeout(server_ready_timeout)
+
     def _create_dependency_provider(self) -> LanguageServerDependencyProvider:
         return self.DependencyProvider(self._custom_settings, self._ls_resources_dir)
 
@@ -117,7 +309,6 @@ class TypeScriptLanguageServer(SolidLanguageServer):
             "node_modules",
             "dist",
             "build",
-            "coverage",
         ]
 
     @staticmethod
@@ -130,25 +321,12 @@ class TypeScriptLanguageServer(SolidLanguageServer):
             """
             Setup runtime dependencies for TypeScript Language Server and return the path to the executable.
             """
-            platform_id = PlatformUtils.get_platform_id()
-
-            valid_platforms = [
-                PlatformId.LINUX_x64,
-                PlatformId.LINUX_arm64,
-                PlatformId.OSX,
-                PlatformId.OSX_x64,
-                PlatformId.OSX_arm64,
-                PlatformId.WIN_x64,
-                PlatformId.WIN_arm64,
-            ]
-            assert platform_id in valid_platforms, (
-                f"Platform {platform_id} is not supported for multilspy javascript/typescript at the moment"
-            )
-
             # Get version settings from ls_specific_settings or use defaults
             language_specific_config = self._custom_settings
-            typescript_version = language_specific_config.get("typescript_version", "5.9.3")
-            typescript_language_server_version = language_specific_config.get("typescript_language_server_version", "5.1.3")
+            typescript_version = language_specific_config.get("typescript_version", DEFAULT_TYPESCRIPT_VERSION)
+            typescript_language_server_version = language_specific_config.get(
+                "typescript_language_server_version", DEFAULT_TYPESCRIPT_LANGUAGE_SERVER_VERSION
+            )
             npm_registry = language_specific_config.get("npm_registry")
 
             deps = RuntimeDependencyCollection(
@@ -174,38 +352,13 @@ class TypeScriptLanguageServer(SolidLanguageServer):
             is_npm_installed = shutil.which("npm") is not None
             assert is_npm_installed, "npm is not installed or isn't in PATH. Please install npm and try again."
 
-            # Install typescript and typescript-language-server if not already installed or version mismatch
-            tsserver_ls_dir = os.path.join(self._ls_resources_dir, "ts-lsp")
+            tsserver_ls_dir = _get_install_dir(self._ls_resources_dir, typescript_version, typescript_language_server_version)
             tsserver_executable_path = os.path.join(tsserver_ls_dir, "node_modules", ".bin", "typescript-language-server")
 
-            # Check if installation is needed based on executable AND version
-            version_file = os.path.join(tsserver_ls_dir, ".installed_version")
-            expected_version = f"{typescript_version}_{typescript_language_server_version}"
-
-            needs_install = False
             if not os.path.exists(tsserver_executable_path):
-                log.info(f"Typescript Language Server executable not found at {tsserver_executable_path}.")
-                needs_install = True
-            elif os.path.exists(version_file):
-                with open(version_file) as f:
-                    installed_version = f.read().strip()
-                if installed_version != expected_version:
-                    log.info(
-                        f"TypeScript Language Server version mismatch: installed={installed_version}, expected={expected_version}. Reinstalling..."
-                    )
-                    needs_install = True
-            else:
-                # No version file exists, assume old installation needs refresh
-                log.info("TypeScript Language Server version file not found. Reinstalling to ensure correct version...")
-                needs_install = True
-
-            if needs_install:
-                log.info("Installing TypeScript Language Server dependencies...")
+                log.info(f"Typescript Language Server executable not found at {tsserver_executable_path}. Installing...")
                 with LogTime("Installation of TypeScript language server dependencies", logger=log):
                     deps.install(tsserver_ls_dir)
-                # Write version marker file
-                with open(version_file, "w") as f:
-                    f.write(expected_version)
                 log.info("TypeScript language server dependencies installed successfully")
 
             if not os.path.exists(tsserver_executable_path):
@@ -217,13 +370,66 @@ class TypeScriptLanguageServer(SolidLanguageServer):
         def _create_launch_command(self, core_path: str) -> list[str]:
             return [core_path, "--stdio"]
 
-    def _get_initialize_params(self, repository_absolute_path: str) -> InitializeParams:
+    def _get_language_id_for_file(self, relative_file_path: str) -> str:
+        # JSX is parsed as TS without this, which silently truncates symbol
+        # ranges at the first multi-line JSX expression.
+        if relative_file_path.endswith(".tsx"):
+            return "typescriptreact"
+        if relative_file_path.endswith(".jsx"):
+            return "javascriptreact"
+        return self.language_id
+
+    def _get_pinned_tsdk_path(self) -> str:
         """
-        Returns the initialize params for the TypeScript Language Server.
+        :return: the path of the TypeScript ``lib`` directory to which tsserver is to be pinned, i.e. the
+            TypeScript installation that is managed by SolidLSP rather than provided by the project
         """
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
+        install_dir = _get_install_dir(
+            self._ls_resources_dir,
+            self._custom_settings.get("typescript_version", DEFAULT_TYPESCRIPT_VERSION),
+            self._custom_settings.get("typescript_language_server_version", DEFAULT_TYPESCRIPT_LANGUAGE_SERVER_VERSION),
+        )
+        return os.path.join(install_dir, "node_modules", "typescript", "lib")
+
+    def _create_tsserver_initialization_options(self) -> dict[str, Any]:
+        """
+        Creates the ``tsserver`` entry of the initialization options, which pins the TypeScript version that
+        typescript-language-server loads.
+
+        Given no pinned path, typescript-language-server prefers the workspace's own
+        ``node_modules/typescript/lib/tsserver.js`` over the version installed by SolidLSP, i.e. JavaScript
+        taken from the project is executed as soon as the language server starts. Only a trusted project may
+        therefore be left unpinned.
+
+        :return: the options to be added to ``initializationOptions`` (empty for a trusted project)
+        :raises SolidLSPException: if the project is untrusted and no managed TypeScript installation exists,
+            which is the case if the launch command is user-provided (``ls_path``/``ls_base_cmd``)
+        """
+        if self.config.is_project_trusted:
+            return {}
+        tsdk_path = self._get_pinned_tsdk_path()
+        if not os.path.isdir(tsdk_path):
+            raise SolidLSPException(
+                f"Cannot pin tsserver for untrusted project {self.repository_root_path}: no TypeScript "
+                f"installation at {tsdk_path}. Refusing to continue without the pin, because the project's "
+                f"own node_modules/typescript would be executed instead. Either mark the project as trusted, "
+                f"or drop the 'ls_path'/'ls_base_cmd' setting for typescript so that the TypeScript "
+                f"installation is managed here."
+            )
+        log.info("Project is not trusted; pinning tsserver to %s", tsdk_path)
+        return {"tsserver": {"path": tsdk_path}}
+
+    def _create_base_initialize_params(self) -> dict:
         initialize_params = {
             "locale": "en",
+            # Disable Automatic Type Acquisition (ATA): with ATA enabled, tsserver fetches
+            # @types/* packages from npm in the background during indexing, which makes startup
+            # slow, network-dependent, and nondeterministic (and can hang on offline/locked-down
+            # machines). Serena relies on the types already installed in the project instead.
+            "initializationOptions": {
+                "disableAutomaticTypingAcquisition": True,
+                **self._create_tsserver_initialization_options(),
+            },
             "capabilities": {
                 "textDocument": {
                     "synchronization": {"didSave": True, "dynamicRegistration": True},
@@ -239,9 +445,11 @@ class TypeScriptLanguageServer(SolidLanguageServer):
                     "signatureHelp": {"dynamicRegistration": True},
                     "codeAction": {"dynamicRegistration": True},
                     "rename": {"dynamicRegistration": True, "prepareSupport": True},
+                    "publishDiagnostics": {"relatedInformation": True},
                 },
                 "workspace": {
                     "workspaceFolders": True,
+                    "configuration": True,
                     "didChangeConfiguration": {"dynamicRegistration": True},
                     "symbol": {"dynamicRegistration": True},
                 },
@@ -249,17 +457,8 @@ class TypeScriptLanguageServer(SolidLanguageServer):
                     "workDoneProgress": True,  # Enables $/progress notifications for project loading
                 },
             },
-            "processId": os.getpid(),
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
         }
-        return cast(InitializeParams, initialize_params)
+        return initialize_params
 
     def _start_server(self) -> None:
         """
@@ -289,11 +488,19 @@ class TypeScriptLanguageServer(SolidLanguageServer):
         def execute_client_command_handler(params: dict) -> list:
             return []
 
+        def configuration_handler(params: dict) -> list:
+            items = params.get("items", [])
+            return [{} for _ in items]
+
         def do_nothing(params: dict) -> None:
             return
 
         def window_log_message(msg: dict) -> None:
             log.info(f"LSP: window/logMessage: {msg}")
+            crash_text = self._tsserver_exit_message(msg)
+            if crash_text is not None:
+                log.warning(f"tsserver reported an abnormal exit: {crash_text}")
+                self._crash_message = f"tsserver exited abnormally: {crash_text}"
 
         def handle_typescript_version(params: dict) -> None:
             """
@@ -348,6 +555,7 @@ class TypeScriptLanguageServer(SolidLanguageServer):
                         self._indexing_complete.set()
 
         self.server.on_request("client/registerCapability", register_capability_handler)
+        self.server.on_request("workspace/configuration", configuration_handler)
         self.server.on_notification("window/logMessage", window_log_message)
         self.server.on_request("workspace/executeClientCommand", execute_client_command_handler)
         self.server.on_request("window/workDoneProgress/create", work_done_progress_create)
@@ -357,46 +565,282 @@ class TypeScriptLanguageServer(SolidLanguageServer):
 
         log.info("Starting TypeScript server process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info(
             "Sending initialize request from LSP client to LSP server and awaiting response",
         )
         init_response = self.server.send.initialize(initialize_params)
-
-        # TypeScript-specific capability checks
-        assert init_response["capabilities"]["textDocumentSync"] == 2
-        assert "completionProvider" in init_response["capabilities"]
-        assert init_response["capabilities"]["completionProvider"] == {
-            "triggerCharacters": [".", '"', "'", "/", "@", "<"],
-            "resolveProvider": True,
-        }
+        self._verify_initialize_response(init_response)
 
         self.server.notify.initialized({})
-        if self.server_ready.wait(timeout=10.0):
-            log.info("TypeScript server is ready")
-        else:
-            log.info("Timeout waiting for TypeScript server to become ready, proceeding anyway")
-            # Fallback: assume server is ready after timeout
-            self.server_ready.set()
+        self._wait_for_server_ready()
 
         # Wait for any async project loading to complete.
         # typescript-language-server may send $/progress for "Initializing JS/TS
         # language features…" after initialized. If no progress is sent,
         # _indexing_complete stays SET and wait() returns immediately.
+        indexing_timeout = self._get_indexing_timeout()
         log.info("Waiting for TypeScript project indexing to complete (if async)...")
-        if self.wait_for_indexing(timeout=self.INDEXING_PROGRESS_TIMEOUT):
+        if self.wait_for_indexing(timeout=indexing_timeout):
             log.info("TypeScript project indexing complete")
         else:
+            self._handle_project_indexing_timeout(indexing_timeout)
+
+        self._activate_additional_workspaces()
+
+    @override
+    def _find_representative_source_file(self, directory: str) -> str | None:
+        """Find a TypeScript file suitable for triggering project loading.
+
+        Prefers a file under a `src` subdirectory adjacent to tsconfig.json (the
+        conventional source root), so a root-level tool config that tsconfig excludes
+        (vitest.config.ts, jest.config.ts, etc.) is not picked over the project's real
+        source tree. Falls back to a file directly adjacent to tsconfig.json, then to
+        the first .ts/.tsx file found anywhere in the directory.
+        """
+        for root, dirs, files in os.walk(directory):
+            dirs[:] = [d for d in dirs if not self.is_ignored_dirname(d)]
+            if "tsconfig.json" in files:
+                src_dir = os.path.join(root, "src")
+                if os.path.isdir(src_dir):
+                    for src_root, src_dirs, src_files in os.walk(src_dir):
+                        src_dirs[:] = [d for d in src_dirs if not self.is_ignored_dirname(d)]
+                        for f in src_files:
+                            if f.endswith((".ts", ".tsx")) and not f.endswith(".d.ts"):
+                                return os.path.join(src_root, f)
+                for f in files:
+                    if f.endswith((".ts", ".tsx")) and not f.endswith(".d.ts"):
+                        return os.path.join(root, f)
+
+        for root, dirs, files in os.walk(directory):
+            dirs[:] = [d for d in dirs if not self.is_ignored_dirname(d)]
+            for f in files:
+                if f.endswith((".ts", ".tsx")) and not f.endswith(".d.ts"):
+                    return os.path.join(root, f)
+        return None
+
+    @override
+    def _signal_expect_indexing(self) -> None:
+        self.expect_indexing()
+
+    @override
+    def _wait_for_additional_workspace_indexing(self) -> None:
+        timeout = self._get_indexing_timeout()
+        if self.wait_for_indexing(timeout=timeout):
+            log.info("Additional workspace indexing complete")
+        else:
             log.warning(
-                "TypeScript project indexing did not complete within %.0fs; proceeding anyway",
-                self.INDEXING_PROGRESS_TIMEOUT,
+                "Additional workspace indexing did not complete within %.0fs; proceeding anyway (%s)",
+                timeout,
+                self.describe_indexing_state(),
             )
 
     @override
-    def _get_wait_time_for_cross_file_referencing(self) -> float:
-        return 2
+    def _get_published_diagnostics_uri(self, request_uri: str) -> str:
+        if os.name != "nt" or not request_uri.startswith("file:///"):
+            return request_uri
+
+        path_part = request_uri[len("file:///") :]
+        if len(path_part) >= 2 and path_part[0].isalpha() and path_part[1] == ":":
+            return f"file:///{path_part[0].lower()}%3A{path_part[2:]}"
+        return request_uri
+
+    @override
+    def _get_published_diagnostics_wait_timeout(self, pull_diagnostics_failed: bool) -> float:
+        return self._published_diagnostics_timeout
+
+    @override
+    def _pre_open_for_cross_file_references(self) -> None:
+        if not self._has_waited_for_cross_file_references:
+            self.expect_indexing()
+
+    @override
+    def _wait_for_cross_file_references_if_needed(self) -> None:
+        # checked before the latch: a crash observed after the first query's wait would otherwise
+        # never be raised, and the query would return an empty result as if it were complete
+        self._raise_if_crashed()
+
+        timeout = self._get_indexing_timeout()
+        if not self._has_waited_for_cross_file_references:
+            start_grace = self._get_indexing_start_grace()
+            self._log_cross_file_indexing_wait_outcome(
+                self._wait_for_indexing_start_or_completion(timeout=timeout, start_grace=start_grace), timeout
+            )
+            self._has_waited_for_cross_file_references = True
+            return
+
+        # The latch above only covers the first query; a later one can still open a file from a
+        # project tsserver has not loaded before, starting a fresh $/progress cycle to drain.
+        with self._progress_lock:
+            indexing_in_progress = bool(self._active_progress_tokens)
+        if indexing_in_progress:
+            self._log_cross_file_indexing_wait_outcome(self.wait_for_indexing(timeout=timeout), timeout)
+
+    def _log_cross_file_indexing_wait_outcome(self, completed: bool, timeout: float) -> None:
+        if completed:
+            log.info("TypeScript cross-file indexing complete")
+        else:
+            log.warning(
+                "TypeScript cross-file indexing did not complete within %.0fs; proceeding (%s)", timeout, self.describe_indexing_state()
+            )
 
     @override
     def _get_preferred_definition(self, definitions: list[ls_types.Location]) -> ls_types.Location:
         return prefer_non_node_modules_definition(definitions)
+
+    @override
+    def _document_symbols_cache_fingerprint(self) -> Hashable:
+        # bump whenever _build_document_symbols_from_raw_symbols below changes what it returns,
+        # so a pre-existing on-disk cache from before this override existed gets invalidated
+        return 3
+
+    @override
+    def _build_document_symbols_from_raw_symbols(self, relative_file_path: str, file_buffer: LSPFileBuffer) -> DocumentSymbols:
+        # Override to extend single `const`/`let`/`var` declaration ranges on both ends: a leading
+        # `export` and the declaration keyword, and a trailing statement-terminating semicolon.
+        # tsserver excludes both from such ranges (unlike `function`/`class` declarations, whose
+        # range already includes the keyword), which causes replace_symbol_body to drop them from
+        # the symbol body and replacement range. Re-supplying a dropped leading keyword duplicates
+        # the prefix and corrupts the file (`export const` becomes `export const export const`);
+        # re-supplying a dropped trailing semicolon (as naturally happens when the replacement is
+        # itself a full statement) produces a harmless but incorrect double semicolon. See
+        # _extend_ts_symbol_range_to_include_leading_keyword and
+        # _extend_ts_symbol_range_to_include_trailing_semicolon.
+        # IMPORTANT: Update _document_symbols_cache_fingerprint() when changing this method.
+        document_symbols = super()._build_document_symbols_from_raw_symbols(relative_file_path, file_buffer=file_buffer)
+        if not document_symbols.root_symbols:
+            return document_symbols
+
+        # obtain the file lines and a body factory to recompute the bodies of extended symbols
+        with self._open_file_context(relative_file_path, file_buffer, open_in_ls=False) as file_data:
+            file_lines = file_data.split_lines()
+            body_factory = SymbolBodyFactory(file_data)
+
+            # extend ranges recursively, operating on copies so the cached symbols are not mutated;
+            # see Gopls._build_document_symbols_from_raw_symbols for why child `parent` back-pointers are left aimed
+            # at the original (un-extended) nodes
+            def extend_symbol_and_children(symbol: ls_types.UnifiedSymbolInformation) -> ls_types.UnifiedSymbolInformation:
+                extended = self._extend_ts_symbol_range_to_include_leading_keyword(symbol, file_lines, body_factory)
+                extended = self._extend_ts_symbol_range_to_include_trailing_semicolon(extended, file_lines, body_factory)
+                children = symbol.get("children")
+                if children:
+                    if extended is symbol:
+                        extended = symbol.copy()
+                    extended["children"] = [extend_symbol_and_children(child) for child in children]
+                return extended
+
+            extended_root_symbols = [extend_symbol_and_children(sym) for sym in document_symbols.root_symbols]
+
+        return DocumentSymbols(extended_root_symbols)
+
+    def _extend_ts_symbol_range_to_include_leading_keyword(
+        self,
+        symbol: ls_types.UnifiedSymbolInformation,
+        file_lines: list[str],
+        body_factory: SymbolBodyFactory,
+    ) -> ls_types.UnifiedSymbolInformation:
+        """
+        Extend a TypeScript/JavaScript symbol's body range to include a leading `export`/
+        `const`/`let`/`var`.
+
+        tsserver reports the range of a single `const`/`let`/`var` declaration starting at the
+        declared identifier (after the keyword(s)), whereas the range of a `function`/`class`
+        declaration includes its leading keyword. This asymmetry makes :meth:`replace_symbol_body`
+        omit the keyword(s) from both the displayed body and the replacement range, so re-supplying
+        them in an edit duplicates the prefix (e.g. ``export const twice = ...`` becomes
+        ``export const export const twice = ...``).
+
+        :param symbol: the symbol whose range may be extended.
+        :param file_lines: the lines of the file in which the symbol is defined.
+        :param body_factory: the factory used to recompute the symbol body from the extended range.
+        :return: a copy of the symbol with an extended range, or the original symbol if no leading
+            `export`/`const`/`let`/`var` precedes the identifier on the start line (e.g. for
+            functions/classes, or for destructuring declarations whose keyword sits before the
+            opening bracket rather than directly before this identifier).
+        """
+        # determine whether only `export`/`const`/`let`/`var` precedes the identifier on the start line
+        range_info = symbol["range"]
+        start_line = range_info["start"]["line"]
+        start_char = range_info["start"]["character"]
+        if start_line >= len(file_lines):
+            return symbol
+        prefix = file_lines[start_line][:start_char]
+        match = self._LEADING_DECL_KEYWORD_RE.fullmatch(prefix)
+        if match is None:
+            return symbol
+
+        # extend the range start back to the keyword (excluding indentation), updating both the
+        # symbol range and its location range so the replacement range covers the keyword(s)
+        new_start = ls_types.Position(line=start_line, character=len(match.group("indent")))
+        extended = symbol.copy()
+        extended["range"] = ls_types.Range(start=new_start, end=range_info["end"])
+        location = extended.get("location")
+        if location:
+            location = location.copy()
+            if "range" in location:
+                location["range"] = ls_types.Range(start=new_start, end=location["range"]["end"])
+            extended["location"] = location
+
+        # recompute the body from the now-extended location range so the displayed body stays
+        # consistent with the replacement range; the stale body must be removed first, since the
+        # factory returns an existing SymbolBody as-is and otherwise reads the updated location range
+        extended.pop("body", None)
+        extended["body"] = body_factory.create_symbol_body(extended)
+        return extended
+
+    def _extend_ts_symbol_range_to_include_trailing_semicolon(
+        self,
+        symbol: ls_types.UnifiedSymbolInformation,
+        file_lines: list[str],
+        body_factory: SymbolBodyFactory,
+    ) -> ls_types.UnifiedSymbolInformation:
+        """
+        Extend a TypeScript/JavaScript symbol's body range to include a trailing statement-
+        terminating semicolon, if one immediately follows the range's current end.
+
+        tsserver reports the range of statement declarations (e.g. `const`/`let`/`var`) as the
+        underlying expression, excluding the semicolon that terminates the statement. Replacing
+        the body with a full statement (as naturally happens when the replacement is copied from
+        the body :meth:`request_document_symbols`/`find_symbol` itself returned, semicolon
+        included, per the leading-keyword extension above) then leaves the file's own original
+        semicolon in place *after* the replaced range, producing a harmless but incorrect double
+        semicolon rather than the single one the replacement supplied.
+
+        Mirrors ``NixdLanguageServer._extend_nix_symbol_range_to_include_semicolon``, adapted to
+        recompute the body from the shared ``body_factory``/``file_lines`` already available here
+        rather than re-reading the file.
+
+        :param symbol: the symbol whose range may be extended.
+        :param file_lines: the lines of the file in which the symbol is defined.
+        :param body_factory: the factory used to recompute the symbol body from the extended range.
+        :return: a copy of the symbol with an extended range, or the original symbol if no
+            semicolon immediately follows the range's end (e.g. for `function`/`class`
+            declarations, which are not semicolon-terminated).
+        """
+        range_info = symbol["range"]
+        end_line = range_info["end"]["line"]
+        end_char = range_info["end"]["character"]
+        if end_line >= len(file_lines):
+            return symbol
+        line = file_lines[end_line]
+        if end_char >= len(line) or line[end_char] != ";":
+            return symbol
+
+        # extend the range end past the semicolon, updating both the symbol range and its
+        # location range so the replacement range covers it
+        new_end = ls_types.Position(line=end_line, character=end_char + 1)
+        extended = symbol.copy()
+        extended["range"] = ls_types.Range(start=range_info["start"], end=new_end)
+        location = extended.get("location")
+        if location:
+            location = location.copy()
+            if "range" in location:
+                location["range"] = ls_types.Range(start=location["range"]["start"], end=new_end)
+            extended["location"] = location
+
+        # recompute the body from the now-extended location range, for the same reason as in
+        # _extend_ts_symbol_range_to_include_leading_keyword
+        extended.pop("body", None)
+        extended["body"] = body_factory.create_symbol_body(extended)
+        return extended

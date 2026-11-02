@@ -5,11 +5,13 @@ Contains various configurations and settings specific to PowerShell scripting.
 You can pass the following entries in ``ls_specific_settings["powershell"]``:
     - pses_version: Override the pinned PowerShell Editor Services version
       downloaded by Serena (default: the bundled Serena version).
+    - psscriptanalyzer_version: Override the pinned PSScriptAnalyzer version
+      saved into the bundled PowerShell Editor Services module path.
 """
+# SPDX-License-Identifier: MIT
 
 import logging
 import os
-import pathlib
 import platform
 import shutil
 import tempfile
@@ -19,37 +21,44 @@ from pathlib import Path
 
 from overrides import override
 
-from solidlsp.language_servers.common import RequiredCLI
-from solidlsp.ls import RawDocumentSymbol, SolidLanguageServer
-from solidlsp.ls_config import Language, LanguageServerConfig
+from solidlsp import ls_types
+from solidlsp.ls import LSPConstants, RawDocumentSymbol, SolidLanguageServer
+from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.ls_types import SymbolKind
 from solidlsp.ls_utils import FileUtils
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
+from solidlsp.util.subprocess_util import subprocess_run
 
 log = logging.getLogger(__name__)
 
 # PowerShell Editor Services version to download
-PSES_VERSION = "4.4.0"
-PSES_SHA256 = "690b91092989a0f66e6f43986166aaef69d64b559a9fda51feed882e1103fbcc"
+# Version pinning convention (see eclipse_jdtls.py for the full spec):
+#   INITIAL_* — frozen forever; legacy unversioned install dir is reserved for it.
+#   DEFAULT_* — bumped on upgrades; goes into a versioned subdir.
+INITIAL_PSES_VERSION = "4.4.0"
+INITIAL_PSES_SHA256 = "690b91092989a0f66e6f43986166aaef69d64b559a9fda51feed882e1103fbcc"
+DEFAULT_PSES_VERSION = "4.4.0"
+DEFAULT_PSES_SHA256 = "690b91092989a0f66e6f43986166aaef69d64b559a9fda51feed882e1103fbcc"
+
+
+def _pses_sha(version: str) -> str | None:
+    if version == INITIAL_PSES_VERSION:
+        return INITIAL_PSES_SHA256
+    if version == DEFAULT_PSES_VERSION:
+        return DEFAULT_PSES_SHA256
+    return None
+
+
+def _pses_install_dir(ls_resources_dir: str, version: str) -> Path:
+    # legacy unversioned dir reserved for INITIAL; every other version goes into a versioned subdir
+    if version == INITIAL_PSES_VERSION:
+        return Path(ls_resources_dir) / "powershell"
+    return Path(ls_resources_dir) / f"powershell-{version}"
+
+
 PSES_ALLOWED_HOSTS = ("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com")
-
-
-_PWSH_CLI_REQUIREMENT = RequiredCLI(
-    name="pwsh",
-    rationale=(
-        "PowerShell Editor Services runs inside a PowerShell 7+ host process;\n"
-        "without pwsh on PATH there is nothing to launch the editor-services\n"
-        "script in."
-    ),
-    install_hints=[
-        "Homebrew (macOS): brew install --cask powershell",
-        "Winget (Windows): winget install Microsoft.PowerShell",
-        "Linux: https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-linux",
-        "Official releases: https://github.com/PowerShell/PowerShell",
-    ],
-)
+PSSCRIPTANALYZER_VERSION = "1.25.0"
 
 
 class PowerShellLanguageServer(SolidLanguageServer):
@@ -111,7 +120,9 @@ class PowerShellLanguageServer(SolidLanguageServer):
     @classmethod
     def _get_pses_path(cls, solidlsp_settings: SolidLSPSettings) -> str | None:
         """Get the path to PowerShell Editor Services installation."""
-        install_dir = Path(cls.ls_resources_dir(solidlsp_settings)) / "powershell"
+        ps_settings = solidlsp_settings.get_ls_specific_settings(LanguageServerId.POWERSHELL)
+        pses_version = ps_settings.get("pses_version", DEFAULT_PSES_VERSION)
+        install_dir = _pses_install_dir(cls.ls_resources_dir(solidlsp_settings), pses_version)
         start_script = install_dir / "PowerShellEditorServices" / "Start-EditorServices.ps1"
 
         if start_script.exists():
@@ -122,14 +133,14 @@ class PowerShellLanguageServer(SolidLanguageServer):
     @classmethod
     def _download_pses(cls, solidlsp_settings: SolidLSPSettings) -> str:
         """Download and install PowerShell Editor Services."""
-        ps_settings = solidlsp_settings.get_ls_specific_settings(Language.POWERSHELL)
-        pses_version = ps_settings.get("pses_version", PSES_VERSION)
+        ps_settings = solidlsp_settings.get_ls_specific_settings(LanguageServerId.POWERSHELL)
+        pses_version = ps_settings.get("pses_version", DEFAULT_PSES_VERSION)
         download_url = (
             f"https://github.com/PowerShell/PowerShellEditorServices/releases/download/v{pses_version}/PowerShellEditorServices.zip"
         )
 
-        # Create installation directory
-        install_dir = Path(cls.ls_resources_dir(solidlsp_settings)) / "powershell"
+        # Create installation directory; legacy unversioned dir reserved for INITIAL only
+        install_dir = _pses_install_dir(cls.ls_resources_dir(solidlsp_settings), pses_version)
         install_dir.mkdir(parents=True, exist_ok=True)
 
         log.info(f"Downloading PowerShell Editor Services from {download_url}...")
@@ -137,7 +148,7 @@ class PowerShellLanguageServer(SolidLanguageServer):
             download_url,
             str(install_dir),
             "zip",
-            expected_sha256=PSES_SHA256 if pses_version == PSES_VERSION else None,
+            expected_sha256=_pses_sha(pses_version),
             allowed_hosts=PSES_ALLOWED_HOSTS,
         )
 
@@ -150,27 +161,54 @@ class PowerShellLanguageServer(SolidLanguageServer):
 
     @classmethod
     def _setup_runtime_dependency(cls, solidlsp_settings: SolidLSPSettings) -> tuple[str, str, str]:
-        """Check that required PowerShell runtime dependencies are available.
-
-        Resolves the PowerShell Core executable and downloads PowerShell Editor Services
-        on demand.
-
-        :return: a tuple ``(pwsh_path, start_script_path, bundled_modules_path)``.
-        :raises RuntimeError: if pwsh cannot be located on PATH or in any known install
-            location.
         """
-        # preflight: resolve pwsh via PATH and platform-specific install locations
+        Check if required PowerShell runtime dependencies are available.
+        Downloads PowerShell Editor Services if not present.
+
+        Returns:
+            tuple: (pwsh_path, start_script_path, bundled_modules_path)
+
+        """
+        # Check for PowerShell Core
         pwsh_path = cls._get_pwsh_path()
         if not pwsh_path:
-            raise _PWSH_CLI_REQUIREMENT.build_missing_error()
+            raise RuntimeError(
+                "PowerShell Core (pwsh) is not installed or not in PATH. "
+                "Please install PowerShell 7+ from https://github.com/PowerShell/PowerShell"
+            )
 
-        # ensure PSES is installed; download on miss
+        # Check for PowerShell Editor Services
         pses_path = cls._get_pses_path(solidlsp_settings)
         if not pses_path:
             log.info("PowerShell Editor Services not found. Downloading...")
             pses_path = cls._download_pses(solidlsp_settings)
 
+        # The bundled modules path is the directory containing PowerShellEditorServices
         bundled_modules_path = str(Path(pses_path).parent)
+        psscriptanalyzer_version = solidlsp_settings.get_ls_specific_settings(LanguageServerId.POWERSHELL).get(
+            "psscriptanalyzer_version", PSSCRIPTANALYZER_VERSION
+        )
+        psscriptanalyzer_path = Path(bundled_modules_path) / "PSScriptAnalyzer" / psscriptanalyzer_version
+        if not psscriptanalyzer_path.exists():
+            log.info(f"PSScriptAnalyzer {psscriptanalyzer_version} not found. Installing...")
+            subprocess_run(
+                [
+                    pwsh_path,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-Command",
+                    (
+                        "Save-Module "
+                        "-Name PSScriptAnalyzer "
+                        f"-RequiredVersion '{psscriptanalyzer_version}' "
+                        f"-Path '{bundled_modules_path}' "
+                        "-Force "
+                        "-ErrorAction Stop"
+                    ),
+                ],
+                check=True,
+                capture_output=False,
+            )
 
         return pwsh_path, pses_path, bundled_modules_path
 
@@ -239,12 +277,10 @@ class PowerShellLanguageServer(SolidLanguageServer):
 
         return original_name
 
-    @staticmethod
-    def _get_initialize_params(repository_absolute_path: str) -> InitializeParams:
+    def _create_base_initialize_params(self) -> dict:
         """
         Returns the initialize params for the PowerShell Editor Services.
         """
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
         initialize_params = {
             "locale": "en",
             "capabilities": {
@@ -288,17 +324,8 @@ class PowerShellLanguageServer(SolidLanguageServer):
                     },
                 },
             },
-            "processId": os.getpid(),
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
         }
-        return initialize_params  # type: ignore[return-value]
+        return initialize_params
 
     def _start_server(self) -> None:
         """
@@ -337,7 +364,7 @@ class PowerShellLanguageServer(SolidLanguageServer):
 
         log.info("Starting PowerShell Editor Services process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request from LSP client to LSP server and awaiting response")
         init_response = self.server.send.initialize(initialize_params)
@@ -359,3 +386,35 @@ class PowerShellLanguageServer(SolidLanguageServer):
             self.server_ready.set()
         else:
             log.info("PowerShell Editor Services initialization complete")
+
+    @override
+    def request_text_document_diagnostics(
+        self,
+        relative_file_path: str,
+        start_line: int = 0,
+        end_line: int = -1,
+        min_severity: int = 4,
+    ) -> list[ls_types.Diagnostic]:
+        uri = self._validate_text_document_diagnostics_request(relative_file_path, start_line, end_line, min_severity)
+        published_uri = self._get_published_diagnostics_uri(uri)
+        diagnostics_before_request = self._get_published_diagnostics_generation(published_uri)
+
+        with self.open_file(relative_file_path):
+            self.server.notify.did_save_text_document(
+                {  # ty: ignore[invalid-argument-type]  # dict built from LSPConstants keys; shape matches the TypedDict
+                    LSPConstants.TEXT_DOCUMENT: {
+                        LSPConstants.URI: uri,
+                    }
+                }
+            )
+            diagnostics = self._wait_for_relevant_published_diagnostics(
+                uri=published_uri,
+                after_generation=diagnostics_before_request,
+                timeout=self._get_published_diagnostics_wait_timeout(True),
+                allow_cached=True,
+            )
+
+        if diagnostics is None:
+            return []
+
+        return self._filter_diagnostics(diagnostics, start_line, end_line, min_severity)

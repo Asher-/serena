@@ -6,28 +6,27 @@ like request_references using the Swift test repository.
 """
 
 import os
-import platform
 
 import pytest
 
 from serena.project import Project
 from serena.util.text_utils import LineType
 from solidlsp import SolidLanguageServer
-from solidlsp.ls_config import Language
-from test.conftest import is_ci
+from solidlsp.ls_config import LanguageServerId
+from test.conftest import is_ci, language_server_tests_enabled
 from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name, request_all_symbols
+from test.solidlsp.util.diagnostics import assert_file_diagnostics
 
-# Skip Swift tests on Windows due to complex GitHub Actions configuration
-WINDOWS_SKIP = platform.system() == "Windows"
-WINDOWS_SKIP_REASON = "GitHub Actions configuration for Swift on Windows is complex, skipping for now."
-
-pytestmark = [pytest.mark.swift, pytest.mark.skipif(WINDOWS_SKIP, reason=WINDOWS_SKIP_REASON)]
+pytestmark = [
+    pytest.mark.swift,
+    pytest.mark.skipif(not language_server_tests_enabled(LanguageServerId.SWIFT), reason="Swift tests are disabled"),
+]
 
 
 class TestSwiftLanguageServerBasics:
     """Test basic functionality of the Swift language server."""
 
-    @pytest.mark.parametrize("language_server", [Language.SWIFT], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.SWIFT], indirect=True)
     def test_goto_definition_calculator_class(self, language_server: SolidLanguageServer) -> None:
         """Test goto_definition on Calculator class usage."""
         file_path = os.path.join("src", "main.swift")
@@ -46,7 +45,7 @@ class TestSwiftLanguageServerBasics:
         start_line = calculator_def.get("range", {}).get("start", {}).get("line")
         assert start_line == 15, f"Calculator class definition should be at line 16, got {start_line + 1}"
 
-    @pytest.mark.parametrize("language_server", [Language.SWIFT], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.SWIFT], indirect=True)
     def test_goto_definition_user_struct(self, language_server: SolidLanguageServer) -> None:
         """Test goto_definition on User struct usage."""
         file_path = os.path.join("src", "main.swift")
@@ -65,7 +64,7 @@ class TestSwiftLanguageServerBasics:
         start_line = user_def.get("range", {}).get("start", {}).get("line")
         assert start_line == 25, f"User struct definition should be at line 26, got {start_line + 1}"
 
-    @pytest.mark.parametrize("language_server", [Language.SWIFT], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.SWIFT], indirect=True)
     def test_goto_definition_calculator_method(self, language_server: SolidLanguageServer) -> None:
         """Test goto_definition on Calculator method usage."""
         file_path = os.path.join("src", "main.swift")
@@ -83,7 +82,7 @@ class TestSwiftLanguageServerBasics:
         start_line = add_def.get("range", {}).get("start", {}).get("line")
         assert start_line == 16, f"add method definition should be at line 17, got {start_line + 1}"
 
-    @pytest.mark.parametrize("language_server", [Language.SWIFT], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.SWIFT], indirect=True)
     def test_goto_definition_cross_file(self, language_server: SolidLanguageServer) -> None:
         """Test goto_definition across files - Utils struct."""
         utils_file = os.path.join("src", "utils.swift")
@@ -102,7 +101,7 @@ class TestSwiftLanguageServerBasics:
         assert utils_def.get("uri", "").endswith("utils.swift"), "Definition should be in utils.swift"
 
     @pytest.mark.xfail(is_ci, reason="Test is flaky in CI")  # See #1040
-    @pytest.mark.parametrize("language_server", [Language.SWIFT], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.SWIFT], indirect=True)
     def test_request_references_calculator_class(self, language_server: SolidLanguageServer) -> None:
         """Test request_references on the Calculator class."""
         # Get references to the Calculator class in main.swift
@@ -125,7 +124,7 @@ class TestSwiftLanguageServerBasics:
         assert len(line_5_refs) > 0, "Calculator should be referenced at line 5"
 
     @pytest.mark.xfail(is_ci, reason="Test is flaky in CI")  # See #1040
-    @pytest.mark.parametrize("language_server", [Language.SWIFT], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.SWIFT], indirect=True)
     def test_request_references_user_struct(self, language_server: SolidLanguageServer) -> None:
         """Test request_references on the User struct."""
         # Get references to the User struct in main.swift
@@ -147,7 +146,7 @@ class TestSwiftLanguageServerBasics:
         assert len(line_9_refs) > 0, "User should be referenced at line 9"
 
     @pytest.mark.xfail(is_ci, reason="Test is flaky in CI")  # See #1040
-    @pytest.mark.parametrize("language_server", [Language.SWIFT], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.SWIFT], indirect=True)
     def test_request_references_utils_struct(self, language_server: SolidLanguageServer) -> None:
         """Test request_references on the Utils struct."""
         # Get references to the Utils struct in utils.swift
@@ -171,7 +170,7 @@ class TestSwiftLanguageServerBasics:
 
 
 class TestSwiftProjectBasics:
-    @pytest.mark.parametrize("project", [Language.SWIFT], indirect=True)
+    @pytest.mark.parametrize("project", [LanguageServerId.SWIFT], indirect=True)
     def test_retrieve_content_around_line(self, project: Project) -> None:
         """Test retrieve_content_around_line functionality with various scenarios."""
         file_path = os.path.join("src", "main.swift")
@@ -202,7 +201,7 @@ class TestSwiftProjectBasics:
 
         # Scenario 3: Search for struct definitions
         struct_pattern = r"struct\s+\w+"
-        matches = project.search_source_files_for_pattern(struct_pattern)
+        matches = project.search_project_files_for_pattern(struct_pattern)
         assert len(matches) > 0, "Should find struct definitions"
         # Should find User struct
         user_matches = [m for m in matches if "User" in str(m)]
@@ -210,7 +209,7 @@ class TestSwiftProjectBasics:
 
         # Scenario 4: Search for class definitions
         class_pattern = r"class\s+\w+"
-        matches = project.search_source_files_for_pattern(class_pattern)
+        matches = project.search_project_files_for_pattern(class_pattern)
         assert len(matches) > 0, "Should find class definitions"
         # Should find Calculator and Circle classes
         calculator_matches = [m for m in matches if "Calculator" in str(m)]
@@ -220,13 +219,13 @@ class TestSwiftProjectBasics:
 
         # Scenario 5: Search for enum definitions
         enum_pattern = r"enum\s+\w+"
-        matches = project.search_source_files_for_pattern(enum_pattern)
+        matches = project.search_project_files_for_pattern(enum_pattern)
         assert len(matches) > 0, "Should find enum definitions"
         # Should find Status enum
         status_matches = [m for m in matches if "Status" in str(m)]
         assert len(status_matches) > 0, "Should find Status enum"
 
-    @pytest.mark.parametrize("language_server", [Language.SWIFT], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.SWIFT], indirect=True)
     def test_bare_symbol_names(self, language_server) -> None:
         all_symbols = request_all_symbols(language_server)
         malformed_symbols = []
@@ -238,3 +237,12 @@ class TestSwiftProjectBasics:
                 f"Found malformed symbols: {[format_symbol_for_assert(sym) for sym in malformed_symbols]}",
                 pytrace=False,
             )
+
+    @pytest.mark.parametrize("language_server", [LanguageServerId.SWIFT], indirect=True)
+    def test_file_diagnostics(self, language_server: SolidLanguageServer) -> None:
+        assert_file_diagnostics(
+            language_server,
+            "src/diagnostics_sample.swift",
+            (),
+            min_count=1,
+        )

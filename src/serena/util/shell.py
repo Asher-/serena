@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 import os
 import subprocess
 from dataclasses import asdict, dataclass
@@ -96,7 +98,7 @@ def subprocess_check_output(
 ) -> str:
     output = supervise.check_output(
         args, stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=timeout, env=os.environ.copy(), cwd=cwd, **subprocess_kwargs()
-    ).decode(encoding)  # type: ignore
+    ).decode(encoding)
     if strip:
         output = output.strip()
     return output

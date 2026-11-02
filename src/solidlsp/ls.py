@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 import dataclasses
 import hashlib
 import json
@@ -8,23 +10,33 @@ import shutil
 import threading
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Hashable, Iterator
+from collections.abc import Callable, Hashable, Iterator, Sequence
 from contextlib import contextmanager
 from copy import copy
+from dataclasses import dataclass
 from pathlib import Path, PurePath
-from time import perf_counter, sleep
-from typing import Self, Union, cast
+from time import monotonic, perf_counter, sleep
+from typing import Any, Self, Union, cast
 
 import pathspec
-from sensai.util.pickle import getstate, load_pickle
+from ruamel.yaml.scalarstring import DoubleQuotedScalarString, SingleQuotedScalarString
+from sensai.util.helper import mark_used
+from sensai.util.pickle import getstate
 from sensai.util.string import ToStringMixin
 
 from serena.util.file_system import match_path
 from serena.util.text_utils import MatchedConsecutiveLines
 from solidlsp import ls_types
-from solidlsp.ls_config import FilenameMatcher, Language, LanguageServerConfig
-from solidlsp.ls_exceptions import SolidLSPException
-from solidlsp.ls_process import LanguageServerProcess
+from solidlsp.dependency_provider import (
+    LanguageServerDependencyProvider,
+    LanguageServerDependencyProviderBaseCommand,
+    LanguageServerDependencyProviderSinglePath,
+    LanguageServerDependencyProviderUvx,
+)
+from solidlsp.initialize_params import DefaultInitializeParamsBuilder, InitializeParamsBuilder
+from solidlsp.ls_config import FilenameMatcher, LanguageServerConfig
+from solidlsp.ls_exceptions import InvalidTextLocationError, SolidLSPException
+from solidlsp.ls_process import DEFAULT_LS_REQUEST_TIMEOUT, LanguageServerInterface, StdioLanguageServer
 from solidlsp.ls_types import UnifiedSymbolInformation
 from solidlsp.ls_utils import FileUtils, PathUtils, TextUtils
 from solidlsp.lsp_protocol_handler import lsp_types
@@ -35,9 +47,11 @@ from solidlsp.lsp_protocol_handler.lsp_types import (
     DefinitionParams,
     DocumentSymbol,
     ImplementationParams,
+    InitializeParams,
     LocationLink,
     RenameParams,
     SymbolInformation,
+    SymbolKind,
 )
 from solidlsp.lsp_protocol_handler.server import (
     LSPError,
@@ -46,6 +60,7 @@ from solidlsp.lsp_protocol_handler.server import (
 )
 from solidlsp.settings import SolidLSPSettings
 from solidlsp.util.cache import load_cache, save_cache
+from solidlsp.util.pickle_util import SafePickleLoader
 
 RawDocumentSymbol = Union[DocumentSymbol, SymbolInformation]
 """
@@ -55,6 +70,14 @@ The `DocumentSymbol` is the preferred type, but the legacy type `SymbolInformati
 """
 
 log = logging.getLogger(__name__)
+
+# backward compatibility (support old imports of these classes from this module)
+mark_used(
+    LanguageServerDependencyProvider,
+    LanguageServerDependencyProviderBaseCommand,
+    LanguageServerDependencyProviderUvx,
+    LanguageServerDependencyProviderSinglePath,
+)
 
 _debug_enabled = log.isEnabledFor(logging.DEBUG)
 """Serves as a flag that triggers additional computation when debug logging is enabled."""
@@ -89,6 +112,7 @@ class LSPFileBuffer:
         self.language_server = language_server
         self.uri = uri
         self._read_file_modified_date: float | None = None
+        self._read_file_modified_date_passed_to_ls: float | None = None
         self._contents: str | None = None
         self.version = version
         self.language_id = language_id
@@ -102,97 +126,85 @@ class LSPFileBuffer:
     def _open_in_ls(self) -> None:
         """
         Open the file in the language server if it is not already open.
+        If it is already open, make sure the language server has the latest contents of the file.
         """
-        if self._is_open_in_ls:
-            return
-        self._is_open_in_ls = True
-        self.language_server.server.notify.did_open_text_document(
-            {
-                LSPConstants.TEXT_DOCUMENT: {  # type: ignore
-                    LSPConstants.URI: self.uri,
-                    LSPConstants.LANGUAGE_ID: self.language_id,
-                    LSPConstants.VERSION: 0,
-                    LSPConstants.TEXT: self.contents,
+        if not self._is_open_in_ls:
+            self._is_open_in_ls = True
+            current_contents = self.contents
+            self._read_file_modified_date_passed_to_ls = self._read_file_modified_date
+            self.language_server.server.notify.did_open_text_document(
+                {  # ty: ignore[invalid-argument-type]  # dict built from LSPConstants keys; shape matches the TypedDict
+                    LSPConstants.TEXT_DOCUMENT: {
+                        LSPConstants.URI: self.uri,
+                        LSPConstants.LANGUAGE_ID: self.language_id,
+                        LSPConstants.VERSION: self.version,
+                        LSPConstants.TEXT: current_contents,
+                    }
                 }
-            }
-        )
+            )
+        else:
+            # file already open: check if contents have changed and notify if so
+            current_contents = self.contents
+            if self._read_file_modified_date != self._read_file_modified_date_passed_to_ls:
+                self._read_file_modified_date_passed_to_ls = self._read_file_modified_date
+                # A VersionedTextDocumentIdentifier's version must increase after each change,
+                # like the range-based didChange notifications sent for edits do. Reusing the
+                # previous number makes diagnostics/resolve data for the old and the new text
+                # indistinguishable to servers that key on it (rust-analyzer, pyright).
+                self.version += 1
+                self.language_server.server.notify.did_change_text_document(
+                    {  # ty: ignore[invalid-argument-type]  # dict built from LSPConstants keys; shape matches the TypedDict
+                        LSPConstants.TEXT_DOCUMENT: {
+                            LSPConstants.URI: self.uri,
+                            LSPConstants.VERSION: self.version,
+                        },
+                        LSPConstants.CONTENT_CHANGES: [
+                            {
+                                LSPConstants.TEXT: current_contents,
+                            }
+                        ],
+                    }
+                )
 
     def close(self) -> None:
         if self._is_open_in_ls:
             self.language_server.server.notify.did_close_text_document(
-                {
-                    LSPConstants.TEXT_DOCUMENT: {  # type: ignore
+                {  # ty: ignore[invalid-argument-type]  # dict built from LSPConstants keys; shape matches the TypedDict
+                    LSPConstants.TEXT_DOCUMENT: {
                         LSPConstants.URI: self.uri,
                     }
                 }
             )
 
     def ensure_open_in_ls(self) -> None:
-        """Ensure that the file is opened in the language server."""
+        """
+        Ensure that the file is opened in the language server (or, if it is already open,
+        that the language server is made aware of the file's updated contents in case it
+        has changed on disk).
+        """
         self._open_in_ls()
 
-    def reload_from_disk(self, force: bool = False) -> bool:
+    def _invalidate_cached_data(self, mtime: float | None = None) -> float | None:
         """
-        Reloads the buffer from disk and notifies the language server of the full
-        new contents (via didChange) when the file on disk has been modified since
-        the last read. This is needed because external mutations (e.g. git
-        operations during a project re-activation) invalidate both the in-memory
-        cache and the language server's document copy — the contents getter's
-        cache-invalidation alone is not enough, because it refreshes the buffer
-        but leaves the language server serving stale document symbols until the
-        next explicit LSP edit.
+        Invalidates cached data (file contents, hash) if the file was modified since it was read
 
-        :param force: whether to reload even though the file on disk has not been
-            modified since the last read -- the case of an edit applied to the buffer
-            whose save failed, leaving the file on disk as it was
-        :return: True if a reload was performed, False if the buffer was already
-            in sync with disk
+        :param: the current modification time if it was already read
         """
-        # no prior read → nothing to reload; the first read through the contents
-        # property will populate the cache naturally
-        if self._read_file_modified_date is None:
-            return False
-
-        file_modified_date = self.abs_path.stat().st_mtime
-        if not force and file_modified_date <= self._read_file_modified_date:
-            return False
-
-        # refresh the in-memory buffer from disk
-        self._read_file_modified_date = file_modified_date
-        self._contents = FileUtils.read_file(str(self.abs_path), self.encoding)
-        self._content_hash = None
-
-        # resync the language server's copy via a full-document didChange; an
-        # incremental delta would be meaningless because the whole file was
-        # rewritten externally
-        if self._is_open_in_ls:
-            self.version += 1
-            self.language_server.server.notify.did_change_text_document(
-                {
-                    LSPConstants.TEXT_DOCUMENT: {  # type: ignore
-                        LSPConstants.URI: self.uri,
-                        LSPConstants.VERSION: self.version,
-                    },
-                    LSPConstants.CONTENT_CHANGES: [{"text": self._contents}],
-                }
-            )
-        return True
+        if self._read_file_modified_date is not None:
+            if mtime is None:
+                mtime = self.abs_path.stat().st_mtime
+            if mtime > self._read_file_modified_date:
+                self._contents = None
+                self._content_hash = None
 
     @property
     def contents(self) -> str:
         file_modified_date = self.abs_path.stat().st_mtime
-
-        # if contents are cached, check if they are stale (file modification since last read) and invalidate if so
-        if self._contents is not None:
-            assert self._read_file_modified_date is not None
-            if file_modified_date > self._read_file_modified_date:
-                self._contents = None
-
+        self._invalidate_cached_data(file_modified_date)
         if self._contents is None:
             self._read_file_modified_date = file_modified_date
             self._contents = FileUtils.read_file(str(self.abs_path), self.encoding)
             self._content_hash = None
-
         return self._contents
 
     @contents.setter
@@ -208,6 +220,7 @@ class LSPFileBuffer:
 
     @property
     def content_hash(self) -> str:
+        self._invalidate_cached_data()
         if self._content_hash is None:
             self._content_hash = hashlib.md5(self.contents.encode(self.encoding)).hexdigest()
         return self._content_hash
@@ -238,17 +251,38 @@ class SymbolBody(ToStringMixin):
         return ["_lines"]
 
     def get_text(self) -> str:
+        end_line = self._end_line
+        end_col = self._end_col
+        if end_line >= len(self._lines):
+            if end_line == len(self._lines) and end_col == 0:
+                # LSP convention: a range covering whole lines through EOF sometimes ends
+                # at the start of the following, non-existent line (exactly one line past
+                # the last valid index, at column 0). That is well-defined: it means
+                # "through EOF", so treat it as ending at the end of the actual last line.
+                end_line = len(self._lines) - 1
+                end_col = len(self._lines[end_line])
+            else:
+                # Any other out-of-range end position (further past EOF, or exactly one
+                # line past EOF but not at column 0) is not the well-defined convention
+                # above; applying the same correction there would silently assume that
+                # a column meant for a nonexistent line still applies to the corrected
+                # one, which can produce a garbage body. Reject it instead of guessing.
+                raise InvalidTextLocationError(
+                    f"Symbol range end (line {self._end_line}, col {self._end_col}) is out of bounds "
+                    f"for a file with {len(self._lines)} lines"
+                )
+
         # extract relevant lines
-        symbol_body = "\n".join(self._lines[self._start_line : self._end_line + 1])
+        symbol_body = "\n".join(self._lines[self._start_line : end_line + 1])
 
         # remove leading content from the first line
         symbol_body = symbol_body[self._start_col :]
 
         # remove trailing content from the last line
-        last_line = self._lines[self._end_line]
-        trailing_length = len(last_line) - self._end_col
+        last_line = self._lines[end_line]
+        trailing_length = len(last_line) - end_col
         if trailing_length > 0:
-            symbol_body = symbol_body[: -(len(last_line) - self._end_col)]
+            symbol_body = symbol_body[: -(len(last_line) - end_col)]
 
         return symbol_body
 
@@ -269,10 +303,10 @@ class SymbolBodyFactory:
             return existing_body
 
         assert "location" in symbol
-        start_line = symbol["location"]["range"]["start"]["line"]  # type: ignore
-        end_line = symbol["location"]["range"]["end"]["line"]  # type: ignore
-        start_col = symbol["location"]["range"]["start"]["character"]  # type: ignore
-        end_col = symbol["location"]["range"]["end"]["character"]  # type: ignore
+        start_line = symbol["location"]["range"]["start"]["line"]
+        end_line = symbol["location"]["range"]["end"]["line"]
+        start_col = symbol["location"]["range"]["start"]["character"]
+        end_col = symbol["location"]["range"]["end"]["character"]
         return SymbolBody(self._lines, start_line, start_col, end_line, end_col)
 
 
@@ -316,168 +350,9 @@ class DocumentSymbols:
         return self._all_symbols, self.root_symbols
 
 
-class SymbolRangeIndex:
-    """
-    ... fast lookup of the innermost container symbol for a position in a file.
-
-    Precomputes a flat list of candidate container-kind symbols (classes,
-    methods, functions) and variable-kind symbols, each unpacked to its range
-    tuple, and sorts the list so that a single forward scan of the candidates
-    can short-circuit once the sought-after line is passed. Serves
-    :py:meth:`SolidLanguageServer.request_containing_symbol` and the inner
-    loop of :py:meth:`SolidLanguageServer.request_referencing_symbols`, which
-    previously walked the entire document-symbol set for every lookup.
-
-    Instances are cached per ``(relative_file_path, content_hash)`` on the
-    owning :py:class:`SolidLanguageServer`, so content changes signalled via
-    ``didChange`` naturally invalidate the cache entry through the hash-based
-    staleness check.
-    """
-
-    _CONTAINER_KIND_PRIORITY = 0
-    _VARIABLE_KIND_PRIORITY = 1
-
-    def __init__(
-        self,
-        document_symbols: "DocumentSymbols",
-        container_symbol_kinds: set[ls_types.SymbolKind],
-    ) -> None:
-        candidates: list[tuple[int, int, int, int, int, ls_types.UnifiedSymbolInformation]] = []
-
-        # collect container-kind candidates that span more than one line plus all variables;
-        # one-line entries of container kinds are excluded to avoid matching imports.
-        for symbol in document_symbols.iter_symbols():
-            kind = symbol["kind"]
-            s_range = symbol["location"]["range"]  # type: ignore[typeddict-item]
-            start = s_range["start"]
-            end = s_range["end"]
-            start_line = start["line"]
-            end_line = end["line"]
-            if kind in container_symbol_kinds and start_line != end_line:
-                priority = self._CONTAINER_KIND_PRIORITY
-            elif kind == ls_types.SymbolKind.Variable:
-                priority = self._VARIABLE_KIND_PRIORITY
-            else:
-                continue
-            candidates.append((start_line, start["character"], end_line, end["character"], priority, symbol))
-
-        # sort by start_line ascending, then priority so containers precede variables at ties;
-        # preserves the original two-pass iteration order that seeded ``max`` tie-breaking.
-        candidates.sort(key=lambda c: (c[0], c[4], c[1]))
-        self._candidates = candidates
-
-    def find_innermost_container(self, line: int, column: int | None, strict: bool) -> "ls_types.UnifiedSymbolInformation | None":
-        """
-        Return the innermost candidate whose range contains ``(line, column)``.
-
-        Matches the containment semantics previously expressed by the
-        ``is_position_in_range`` closure inside ``request_containing_symbol``:
-        in non-strict mode the range is inclusive on both ends; in strict mode
-        the start line is excluded.
-
-        :param line: 0-indexed target line.
-        :param column: 0-indexed target column; ``None`` uses line-only
-            containment.
-        :param strict: if ``True``, require the position to lie strictly inside
-            the candidate range (start line excluded).
-        :return: the matching symbol or ``None`` if no candidate matches.
-        """
-        best: ls_types.UnifiedSymbolInformation | None = None
-        best_start_line = -1
-
-        # candidates are sorted by start_line ascending so we can terminate once past the target.
-        for start_line, start_char, end_line, _end_char, _priority, symbol in self._candidates:
-            if start_line > line:
-                break
-
-            # containment check mirrors the original is_position_in_range helper
-            if strict:
-                if not (end_line >= line > start_line):
-                    continue
-                if column is not None and line == start_line and not (column > start_char):
-                    continue
-            else:
-                if not (end_line >= line >= start_line):
-                    continue
-                if column is not None and line == start_line and not (column >= start_char):
-                    continue
-
-            # innermost = greatest start_line; equality preserves first-encountered (sort order).
-            if start_line > best_start_line:
-                best = symbol
-                best_start_line = start_line
-
-        return best
-
-
-class LanguageServerDependencyProvider(ABC):
-    """
-    Prepares dependencies for a language server (if any), ultimately enabling the launch command to be constructed
-    and optionally providing environment variables that are necessary for the execution.
-    """
-
-    def __init__(self, custom_settings: SolidLSPSettings.CustomLSSettings, ls_resources_dir: str):
-        self._custom_settings = custom_settings
-        self._ls_resources_dir = ls_resources_dir
-
-    @abstractmethod
-    def create_launch_command(self) -> list[str]:
-        """
-        Creates the launch command for this language server, potentially downloading and installing dependencies
-        beforehand.
-
-        :return: the launch command as a list containing the executable and its arguments
-        """
-
-    def create_launch_command_env(self) -> dict[str, str]:
-        """
-        Provides environment variables to be set when executing the launch command.
-
-        This method is intended to be overridden by subclasses that need to set variables.
-
-        :return: a mapping for variable names to values
-        """
-        return {}
-
-
-class LanguageServerDependencyProviderSinglePath(LanguageServerDependencyProvider, ABC):
-    """
-    Special case of a dependency provider, where there is a single core dependency which provides
-    the basis for the launch command.
-
-    The core dependency's path can be overridden by the user in LS-specific settings (SerenaConfig)
-    via the key "ls_path". If the user provides the key, the specified path is used directly.
-    Otherwise, the provider implementation is called to get or install the core dependency.
-    """
-
-    @abstractmethod
-    def _get_or_install_core_dependency(self) -> str:
-        """
-        Gets the language server's core path, potentially installing dependencies beforehand.
-
-        :return: the core dependency's path (e.g. executable, jar, etc.)
-        """
-
-    def create_launch_command(self) -> list[str]:
-        path = self._custom_settings.get("ls_path", None)
-        if path is not None:
-            core_path = path
-        else:
-            core_path = self._get_or_install_core_dependency()
-        return self._create_launch_command(core_path)
-
-    @abstractmethod
-    def _create_launch_command(self, core_path: str) -> list[str]:
-        """
-        :param core_path: path to the core dependency
-        :return: the launch command as a list containing the executable and its arguments
-        """
-
-
 class SolidLanguageServer(ABC):
     """
-    The LanguageServer class provides a language agnostic interface to the Language Server Protocol.
-    It is used to communicate with Language Servers of different programming languages.
+    High-level abstraction for language server interaction, which wraps the underlying low-level LSP interface
     """
 
     CACHE_FOLDER_NAME = "cache"
@@ -489,8 +364,13 @@ class SolidLanguageServer(ABC):
     the LS-specific version should be incremented instead.
     """
     RAW_DOCUMENT_SYMBOL_CACHE_FILENAME = "raw_document_symbols.pkl"
-    RAW_DOCUMENT_SYMBOL_CACHE_FILENAME_LEGACY_FALLBACK = "document_symbols_cache_v23-06-25.pkl"
-    DOCUMENT_SYMBOL_CACHE_VERSION = 4
+    DOCUMENT_SYMBOL_CACHE_VERSION = 5
+    """
+    defines the version of the high-level document symbol format.
+    This should be incremented whenever there is a change in the way document symbols are stored.
+    For changes that affect the symbols of a particular language server implementation (subclass),
+    change :meth:`_document_symbols_cache_fingerprint` instead.
+    """
     DOCUMENT_SYMBOL_CACHE_FILENAME = "document_symbols.pkl"
 
     # Directories that should always be ignored regardless of language:
@@ -511,8 +391,20 @@ class SolidLanguageServer(ABC):
             ".nox",  # test runners
             ".idea",  # IDE internals
             ".serena",  # serena's own data
+            ".vscode",  # Doesn't contain symbols
         }
     )
+
+    _SYMBOL_CACHE_TYPES = [DocumentSymbols, SymbolBody, SymbolKind]
+    """
+    data types used in document symbol caches 
+    """
+    _LS_SPECIFIC_SETTINGS_TYPES = [SingleQuotedScalarString, DoubleQuotedScalarString]
+    """
+    types that may appear in LS-specific settings read from YAML files and which therefore
+    may appear in persisted cache keys.
+    """
+    _cache_loader = SafePickleLoader(allowed_classes=[*_SYMBOL_CACHE_TYPES, *_LS_SPECIFIC_SETTINGS_TYPES])
 
     # To be overridden and extended by subclasses
     def is_ignored_dirname(self, dirname: str) -> bool:
@@ -541,10 +433,6 @@ class SolidLanguageServer(ABC):
             return logging.ERROR
         else:
             return logging.INFO
-
-    @classmethod
-    def get_language_enum_instance(cls) -> Language:
-        return Language.from_ls_class(cls)
 
     @classmethod
     def supports_implementation_request(cls) -> bool:
@@ -579,7 +467,7 @@ class SolidLanguageServer(ABC):
         cls,
         config: LanguageServerConfig,
         repository_root_path: str,
-        timeout: float | None = None,
+        timeout: float | None = DEFAULT_LS_REQUEST_TIMEOUT,
         solidlsp_settings: SolidLSPSettings | None = None,
     ) -> "SolidLanguageServer":
         """
@@ -591,7 +479,7 @@ class SolidLanguageServer(ABC):
         :param repository_root_path: The root path of the repository.
         :param config: language server configuration.
         :param logger: The logger to use.
-        :param timeout: the timeout for requests to the language server. If None, no timeout will be used.
+        :param timeout: the timeout, in seconds, for requests to the language server; if None, use no timeout
         :param solidlsp_settings: additional settings
         :return LanguageServer: A language specific LanguageServer instance.
         """
@@ -602,11 +490,10 @@ class SolidLanguageServer(ABC):
         # Ensure repository_root_path is absolute to avoid issues with file URIs
         repository_root_path = os.path.abspath(repository_root_path)
 
-        ls_class = config.code_language.get_ls_class()
-        # For now, we assume that all language server implementations have the same signature of the constructor
-        # (which, unfortunately, differs from the signature of the base class).
-        # If this assumption is ever violated, we need branching logic here.
-        ls = ls_class(config, repository_root_path, solidlsp_settings)  # type: ignore
+        ls_class = config.ls_id.get_ls_class()
+        # All language server implementations are required to use the same signature of the constructor
+        # (which differs from the signature of the base class constructor).
+        ls = ls_class(config, repository_root_path, solidlsp_settings)
         ls.set_request_timeout(timeout)
         return ls
 
@@ -624,22 +511,31 @@ class SolidLanguageServer(ABC):
 
         Do not instantiate this class directly. Use `LanguageServer.create` method instead.
 
-        :param config: the global SolidLSP configuration.
+        :param config: the language server's configuration.
         :param repository_root_path: the root path of the repository.
-        :param process_launch_info: (DEPRECATED - implement _create_dependency_provider instead)
+        :param process_launch_info: (DEPRECATED: pass None and implement _create_dependency_provider instead)
             the command used to start the actual language server.
             The command must pass appropriate flags to the binary, so that it runs in the stdio mode,
             as opposed to HTTP, TCP modes supported by some language servers.
+        :param language_id: The language identifier which will be passed to the language server in the `textDocument/didOpen`
+            notification by default.
+            If the language server uses multiple language identifiers, it must override the method `get_language_id_for_file`
+            to provide the appropriate identifier for each type of file.
+        :param solidlsp_settings: the global SolidLSP settings
         :param cache_version_raw_document_symbols: the version, for caching, of the raw document symbols coming
             from this specific language server. This should be incremented by subclasses calling this constructor
             whenever the format of the raw document symbols changes (typically because the language server
             improves/fixes its output).
         """
+        self.config = config
         self._solidlsp_settings = solidlsp_settings
-        lang = self.get_language_enum_instance()
-        self._custom_settings = solidlsp_settings.get_ls_specific_settings(lang)
+        ls_id = config.ls_id
+        self._custom_settings = solidlsp_settings.get_ls_specific_settings(ls_id)
+        """
+        the (user-provided) language server-specific settings
+        """
         self._ls_resources_dir = self.ls_resources_dir(solidlsp_settings)
-        log.debug(f"Custom config (LS-specific settings) for {lang}: {self._custom_settings}")
+        log.debug(f"Custom config (LS-specific settings) for {ls_id}: {self._custom_settings}")
         self._encoding = config.encoding
         self.repository_root_path: str = repository_root_path
 
@@ -648,11 +544,26 @@ class SolidLanguageServer(ABC):
         )
 
         self.language_id = language_id
+        """
+        default language identifier to be passed to the language server in `textDocument/didOpen` notifications.
+        """
         self.open_file_buffers: dict[str, LSPFileBuffer] = {}
-        self.language = Language(language_id)
+        self.ls_id = ls_id
+        """
+        identifies the language server (not to be confused with the language_id passed to the language server)
+        """
+        # The source filename matcher is a @cache'd per-language singleton. A previous project may
+        # have extended it (e.g. Perl's file_filter adding .cgi); reset it here so every activation
+        # starts from the language's default extensions, then language-server subclasses re-apply
+        # their own settings during the rest of __init__.
+        self.ls_id.get_source_fn_matcher().reset()
+        self._published_diagnostics: dict[str, list[ls_types.Diagnostic]] = {}
+        self._published_diagnostics_generation_by_uri: dict[str, int] = {}
+        self._published_diagnostics_generation = 0
+        self._published_diagnostics_condition = threading.Condition()
 
         # initialise symbol caches
-        self.cache_dir = Path(self._solidlsp_settings.project_data_path) / self.CACHE_FOLDER_NAME / self.language_id
+        self.cache_dir = Path(self._solidlsp_settings.project_data_path) / self.CACHE_FOLDER_NAME / self.ls_id.get_key()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         # * raw document symbols cache
         self._ls_specific_raw_document_symbols_cache_version = cache_version_raw_document_symbols
@@ -673,38 +584,36 @@ class SolidLanguageServer(ABC):
                 log.debug(f"LSP: {source} -> {target}: {msg!s}")
 
         else:
-            logging_fn = None  # type: ignore
+            logging_fn = None
 
-        # create the LanguageServerHandler, which provides the functionality to start the language server and communicate with it,
-        # preparing the launch command beforehand
+        # create the low-level server interface, potentially installing dependencies and launching a subprocess
+        self._process_launch_info: ProcessLaunchInfo | None = process_launch_info
         self._dependency_provider: LanguageServerDependencyProvider | None = None
-        if process_launch_info is None:
-            self._dependency_provider = self._create_dependency_provider()
-            process_launch_info = self._create_process_launch_info()
-        log.debug(f"Creating language server instance with {language_id=} and process launch info: {process_launch_info}")
-        self.server = LanguageServerProcess(
-            process_launch_info,
-            language=self.language,
-            determine_log_level=self._determine_log_level,
-            logger=logging_fn,
-            start_independent_lsp_process=config.start_independent_lsp_process,
-        )
+        self.server = self._create_language_server_interface(logging_fn)
+        """
+        the low-level language server interface
+        """
+        self.server.on_any_notification(self._observe_server_notification)
 
-        # Set up the pathspec matcher for the ignored paths
-        # for all absolute paths in ignored_paths, convert them to relative paths
-        processed_patterns = []
-        for pattern in set(config.ignored_paths):
-            # Normalize separators (pathspec expects forward slashes)
-            pattern = pattern.replace(os.path.sep, "/")
-            processed_patterns.append(pattern)
-        log.debug(f"Processing {len(processed_patterns)} ignored paths from the config")
-
-        # Create a pathspec matcher from the processed patterns
-        self._ignore_spec = pathspec.PathSpec.from_lines(pathspec.patterns.GitWildMatchPattern, processed_patterns)
-
-        self._request_timeout: float | None = None
+        # create a pathspec matcher from the given patterns
+        self._ignore_spec = pathspec.PathSpec.from_lines(pathspec.patterns.GitWildMatchPattern, config.ignored_paths)
 
         self._has_waited_for_cross_file_references = False
+
+        self._abs_workspace_folders_indexed = self.config.get_absolute_workspace_folders(self.repository_root_path)
+        self._abs_workspace_folders_additional = self.config.get_absolute_additional_workspace_folders(self.repository_root_path)
+        """
+        additional workspace folders, which are passed to the language server in the initialization request
+        but which are not indexed by SolidLSP, i.e. not traversed for full symbol tree
+        """
+        self._abs_workspace_folders_all = self._abs_workspace_folders_indexed + self._abs_workspace_folders_additional
+
+    @property
+    def custom_settings(self) -> SolidLSPSettings.CustomLSSettings:
+        """
+        The (user-provided) language server-specific settings.
+        """
+        return self._custom_settings
 
     def _create_dependency_provider(self) -> LanguageServerDependencyProvider:
         """
@@ -717,11 +626,443 @@ class SolidLanguageServer(ABC):
             f"{self.__class__.__name__} must implement _create_dependency_provider() or pass process_launch_info to __init__()"
         )
 
+    def _get_dependency_provider(self) -> LanguageServerDependencyProvider:
+        if self._dependency_provider is None:
+            self._dependency_provider = self._create_dependency_provider()
+        return self._dependency_provider
+
+    def install_dependencies(self) -> None:
+        """
+        Installs the runtime dependencies whose installation is deferred until the language server is launched.
+
+        The remaining dependencies are installed upon instantiation of the language server.
+        Language servers created with a fixed launch command have no dependency provider and thus nothing to install here.
+        """
+        if self._dependency_provider is not None:
+            self._dependency_provider.install_dependencies()
+
     def _create_process_launch_info(self) -> ProcessLaunchInfo:
-        assert self._dependency_provider is not None
-        cmd = self._dependency_provider.create_launch_command()
-        env = self._dependency_provider.create_launch_command_env()
+        dependency_provider = self._get_dependency_provider()
+        cmd = dependency_provider.create_launch_command()
+        env = dependency_provider.create_launch_command_env()
         return ProcessLaunchInfo(cmd=cmd, cwd=self.repository_root_path, env=env)
+
+    def _get_process_launch_info(self) -> ProcessLaunchInfo:
+        if self._process_launch_info is None:
+            self._process_launch_info = self._create_process_launch_info()
+        return self._process_launch_info
+
+    def _create_language_server_interface(self, logging_fn: Callable[[str, str, StringDict | str], None] | None) -> LanguageServerInterface:
+        """
+        Creates the low-level language server interface for LSP communication.
+
+        The interface is created but not started.
+
+        The default implementation creates a StdioLanguageServer, but subclasses can override this method to create a different type
+        of interface if needed.
+
+        :param logging_fn: the trace logging function
+        :return: the interface
+        """
+        language_id = self.language_id
+        process_launch_info = self._get_process_launch_info()
+        log.debug(f"Creating language server instance with {language_id=} and {process_launch_info}")
+        return StdioLanguageServer(
+            process_launch_info,
+            ls_id=self.ls_id,
+            determine_log_level=self._determine_log_level,
+            logger=logging_fn,
+            start_independent_lsp_process=self.config.start_independent_lsp_process,
+        )
+
+    # --- diagnostics-related functions ---
+
+    def _observe_server_notification(self, method: str, params: Any) -> None:
+        """
+        Observe notifications sent by the language server.
+
+        This is used for generic cross-language bookkeeping that must work independently of
+        language-specific notification handlers.
+        """
+        if method == "textDocument/publishDiagnostics":
+            self._store_published_diagnostics(params)
+
+    def _store_published_diagnostics(self, params: Any) -> None:
+        """
+        Store diagnostics received through ``textDocument/publishDiagnostics``.
+        """
+        if not isinstance(params, dict):
+            return
+
+        uri = params.get("uri")
+        diagnostics = params.get("diagnostics")
+        if not isinstance(uri, str) or not isinstance(diagnostics, list):
+            return
+
+        normalized_diagnostics: list[ls_types.Diagnostic] = []
+        for diagnostic in diagnostics:
+            if not isinstance(diagnostic, dict):
+                continue
+            if "message" not in diagnostic or "range" not in diagnostic:
+                continue
+
+            normalized_diagnostic: ls_types.Diagnostic = {
+                "uri": uri,
+                "message": diagnostic["message"],
+                "range": diagnostic["range"],
+            }
+            severity = diagnostic.get("severity")
+            if isinstance(severity, int):
+                normalized_diagnostic["severity"] = ls_types.DiagnosticSeverity(severity)
+
+            code = diagnostic.get("code")
+            if isinstance(code, int | str):
+                normalized_diagnostic["code"] = code
+
+            if "source" in diagnostic:
+                normalized_diagnostic["source"] = diagnostic["source"]
+            normalized_diagnostics.append(ls_types.Diagnostic(**normalized_diagnostic))
+
+        # canonicalize the key so lookups using URIs produced by pathlib.Path.as_uri() match
+        # what servers publish (e.g. file:///c%3A/... or file:///c:/... vs. file:///C:/...)
+        key = self._canonicalize_published_diagnostics_uri(uri)
+
+        with self._published_diagnostics_condition:
+            self._published_diagnostics_generation += 1
+            self._published_diagnostics[key] = normalized_diagnostics
+            self._published_diagnostics_generation_by_uri[key] = self._published_diagnostics_generation
+            self._published_diagnostics_condition.notify_all()
+
+    @staticmethod
+    def _canonicalize_published_diagnostics_uri(uri: str) -> str:
+        """
+        Canonicalizes a ``file://`` URI so that diagnostics published by language servers
+        and lookups based on ``pathlib.Path.as_uri()`` agree on the same key.
+
+        On Windows, servers may publish under ``file:///c%3A/...`` or ``file:///c:/...`` while
+        ``pathlib.Path.as_uri()`` produces ``file:///C:/...``. The canonical form uses an
+        upper-case drive letter and a plain colon.
+        """
+        if os.name != "nt" or not uri.startswith("file:///"):
+            return uri
+
+        # extract the segment after "file:///" up to the next slash and look for a drive letter
+        prefix = "file:///"
+        rest = uri[len(prefix) :]
+        slash = rest.find("/")
+        head = rest if slash < 0 else rest[:slash]
+        tail = "" if slash < 0 else rest[slash:]
+
+        if (len(head) >= 2 and head[0].isalpha() and head[1] == ":") or (
+            len(head) >= 4 and head[0].isalpha() and head[1:4].lower() == "%3a"
+        ):
+            head = head[0].upper() + ":"
+        else:
+            return uri
+
+        return prefix + head + tail
+
+    def _get_published_diagnostics_generation(self, uri: str) -> int:
+        key = self._canonicalize_published_diagnostics_uri(uri)
+        with self._published_diagnostics_condition:
+            return self._published_diagnostics_generation_by_uri.get(key, -1)
+
+    def _wait_for_published_diagnostics(
+        self,
+        uri: str,
+        after_generation: int,
+        timeout: float,
+    ) -> list[ls_types.Diagnostic] | None:
+        key = self._canonicalize_published_diagnostics_uri(uri)
+        deadline = perf_counter() + timeout
+        with self._published_diagnostics_condition:
+            while True:
+                current_generation = self._published_diagnostics_generation_by_uri.get(key, -1)
+                if current_generation > after_generation:
+                    return list(self._published_diagnostics.get(key, []))
+
+                remaining_timeout = deadline - perf_counter()
+                if remaining_timeout <= 0:
+                    return None
+                self._published_diagnostics_condition.wait(timeout=remaining_timeout)
+
+    def _get_cached_published_diagnostics(self, uri: str) -> list[ls_types.Diagnostic] | None:
+        key = self._canonicalize_published_diagnostics_uri(uri)
+        with self._published_diagnostics_condition:
+            diagnostics = self._published_diagnostics.get(key)
+            if diagnostics is None:
+                return None
+            return list(diagnostics)
+
+    @staticmethod
+    def _diagnostic_matches_range(diagnostic: ls_types.Diagnostic, start_line: int, end_line: int) -> bool:
+        diagnostic_start_line = diagnostic["range"]["start"]["line"]
+        diagnostic_end_line = diagnostic["range"]["end"]["line"]
+
+        # normalize inverted ranges: some servers (e.g. Julia's JuliaSyntax.jl for unterminated
+        # expressions) emit diagnostics whose end position lies before the start position.
+        # treat such ranges as a single span covering both lines.
+        lo = min(diagnostic_start_line, diagnostic_end_line)
+        hi = max(diagnostic_start_line, diagnostic_end_line)
+
+        # when end_line < 0 the caller imposes no upper bound; only enforce the lower bound.
+        if end_line < 0:
+            return hi >= start_line
+        return lo <= end_line and hi >= start_line
+
+    @staticmethod
+    def _diagnostic_matches_min_severity(diagnostic: ls_types.Diagnostic, min_severity: int) -> bool:
+        severity = diagnostic.get("severity")
+        if severity is None:
+            return True
+        return int(severity) <= min_severity
+
+    @classmethod
+    def _filter_diagnostics(
+        cls,
+        diagnostics: list[ls_types.Diagnostic],
+        start_line: int,
+        end_line: int,
+        min_severity: int,
+    ) -> list[ls_types.Diagnostic]:
+        diagnostics = [d for d in diagnostics if cls._diagnostic_matches_range(d, start_line, end_line)]
+        diagnostics = [d for d in diagnostics if cls._diagnostic_matches_min_severity(d, min_severity)]
+        return diagnostics
+
+    def _validate_text_document_diagnostics_request(
+        self,
+        relative_file_path: str,
+        start_line: int,
+        end_line: int,
+        min_severity: int,
+    ) -> str:
+        if not self.server_started:
+            log.error("request_text_document_diagnostics called before Language Server started")
+            raise SolidLSPException("Language Server not started")
+        if start_line < 0:
+            raise ValueError(f"start_line must be non-negative, got {start_line}")
+        if end_line != -1 and end_line < start_line:
+            raise ValueError(f"end_line must be -1 or >= start_line, got {end_line} < {start_line}")
+        if min_severity not in {1, 2, 3, 4}:
+            raise ValueError(f"min_severity must be one of 1, 2, 3, 4, got {min_severity}")
+        return pathlib.Path(str(PurePath(self.repository_root_path, relative_file_path))).as_uri()
+
+    def get_published_diagnostics_generation(self, relative_file_path: str) -> int:
+        """
+        Get the generation number for the latest published diagnostics of a file.
+
+        :param relative_file_path: The relative path of the file.
+        :return: the generation number, or ``-1`` if none were published yet.
+        """
+        uri = pathlib.Path(str(PurePath(self.repository_root_path, relative_file_path))).as_uri()
+        return self._get_published_diagnostics_generation(uri)
+
+    def get_cached_published_text_document_diagnostics(
+        self,
+        relative_file_path: str,
+        start_line: int = 0,
+        end_line: int = -1,
+        min_severity: int = 4,
+    ) -> list[ls_types.Diagnostic] | None:
+        """
+        Get cached diagnostics received through ``textDocument/publishDiagnostics``.
+
+        :param relative_file_path: The relative path of the file to retrieve diagnostics for.
+        :param start_line: the first 0-based line to include in the result.
+        :param end_line: the last 0-based line to include in the result. ``-1`` means no upper bound.
+        :param min_severity: minimum LSP severity to include, where 1=Error, 2=Warning, 3=Information, 4=Hint.
+            Diagnostics with lower-or-equal numeric severity are returned.
+        :return: the cached diagnostics, or ``None`` if no diagnostics were published yet.
+        """
+        uri = self._validate_text_document_diagnostics_request(relative_file_path, start_line, end_line, min_severity)
+        diagnostics = self._get_cached_published_diagnostics(uri)
+        if diagnostics is None:
+            return None
+        return self._filter_diagnostics(diagnostics, start_line, end_line, min_severity)
+
+    def request_published_text_document_diagnostics(
+        self,
+        relative_file_path: str,
+        after_generation: int = -1,
+        timeout: float = 2.5,
+        start_line: int = 0,
+        end_line: int = -1,
+        min_severity: int = 4,
+        allow_cached: bool = True,
+    ) -> list[ls_types.Diagnostic] | None:
+        """
+        Wait for diagnostics received through ``textDocument/publishDiagnostics`` and return them.
+
+        :param relative_file_path: The relative path of the file to retrieve diagnostics for.
+        :param after_generation: only return diagnostics published after this generation. ``-1`` accepts the next publication.
+        :param timeout: the maximum time to wait for a newer publication.
+        :param start_line: the first 0-based line to include in the result.
+        :param end_line: the last 0-based line to include in the result. ``-1`` means no upper bound.
+        :param min_severity: minimum LSP severity to include, where 1=Error, 2=Warning, 3=Information, 4=Hint.
+            Diagnostics with lower-or-equal numeric severity are returned.
+        :param allow_cached: whether to fall back to the current cached diagnostics if no newer publication arrives in time.
+        :return: the published diagnostics, or ``None`` if no diagnostics are available.
+        """
+        uri = self._validate_text_document_diagnostics_request(relative_file_path, start_line, end_line, min_severity)
+        published_uri = self._get_published_diagnostics_uri(uri)
+        diagnostics: list[ls_types.Diagnostic] | None = None
+
+        # keeping the document open
+        with self.open_file(relative_file_path):
+            diagnostics = self._wait_for_relevant_published_diagnostics(
+                uri=published_uri,
+                after_generation=after_generation,
+                timeout=timeout,
+                allow_cached=allow_cached,
+            )
+
+        if diagnostics is None:
+            return None
+
+        return self._filter_diagnostics(diagnostics, start_line, end_line, min_severity)
+
+    def _get_published_diagnostics_uri(self, request_uri: str) -> str:
+        """
+        Gets the URI under which published diagnostics should be looked up.
+        """
+        return request_uri
+
+    def _supports_pull_diagnostics(self) -> bool:
+        """
+        Whether the language server handles ``textDocument/diagnostic`` (LSP 3.17 pull
+        diagnostics) gracefully. Subclasses should override and return ``False`` when the
+        underlying server does not implement pull diagnostics, especially when sending
+        the request would terminate the server (e.g. LanguageServer.jl raises an error
+        for unknown methods that crashes the process).
+        """
+        return True
+
+    def _get_published_diagnostics_wait_timeout(self, pull_diagnostics_failed: bool) -> float:
+        """
+        Gets the timeout for waiting on published diagnostics after a diagnostics request.
+        """
+        return 2.5
+
+    def _accept_published_diagnostics(self, diagnostics: list[ls_types.Diagnostic]) -> bool:
+        """
+        Determines whether a published diagnostics payload should satisfy the current wait.
+        """
+        return bool(diagnostics)
+
+    def _wait_for_relevant_published_diagnostics(
+        self,
+        uri: str,
+        after_generation: int,
+        timeout: float,
+        allow_cached: bool = True,
+    ) -> list[ls_types.Diagnostic] | None:
+        """
+        Waits for a published diagnostics payload that is relevant for the current request.
+        """
+        deadline = monotonic() + timeout
+        current_after_generation = after_generation
+
+        while True:
+            remaining_timeout = deadline - monotonic()
+            if remaining_timeout <= 0:
+                break
+
+            diagnostics = self._wait_for_published_diagnostics(
+                uri=uri,
+                after_generation=current_after_generation,
+                timeout=remaining_timeout,
+            )
+            if diagnostics is None:
+                break
+            if self._accept_published_diagnostics(diagnostics):
+                return diagnostics
+            current_after_generation = self._get_published_diagnostics_generation(uri)
+
+        if allow_cached:
+            diagnostics = self._get_cached_published_diagnostics(uri)
+            if diagnostics is not None and self._accept_published_diagnostics(diagnostics):
+                return diagnostics
+
+        return None
+
+    def request_text_document_diagnostics(
+        self,
+        relative_file_path: str,
+        start_line: int = 0,
+        end_line: int = -1,
+        min_severity: int = 4,
+    ) -> list[ls_types.Diagnostic]:
+        """
+        Raise a [textDocument/diagnostic](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_diagnostic) request to the Language Server
+        to find diagnostics for the given file. Wait for the response and return the result.
+
+        :param relative_file_path: The relative path of the file to retrieve diagnostics for
+        :param start_line: the first 0-based line to include in the result.
+        :param end_line: the last 0-based line to include in the result. `-1` means no upper bound.
+        :param min_severity: minimum LSP severity to include, where 1=Error, 2=Warning, 3=Information, 4=Hint.
+            Diagnostics with lower-or-equal numeric severity are returned.
+
+        :return: A list of diagnostics for the file
+        """
+        uri = self._validate_text_document_diagnostics_request(relative_file_path, start_line, end_line, min_severity)
+        published_uri = self._get_published_diagnostics_uri(uri)
+        diagnostics_before_request = self._get_published_diagnostics_generation(published_uri)
+        ret: list[ls_types.Diagnostic] | None = None
+        pull_diagnostics_failed = False
+
+        with self.open_file(relative_file_path):
+            response: Any = None
+            # only send pull diagnostics when the server actually supports it; some servers
+            # (e.g. Julia's LanguageServer.jl) hard-error and crash the process on unknown methods
+            if self._supports_pull_diagnostics():
+                try:
+                    response = self.server.send.text_document_diagnostic(
+                        {  # ty: ignore[invalid-argument-type]  # dict built from LSPConstants keys; shape matches the TypedDict
+                            LSPConstants.TEXT_DOCUMENT: {
+                                LSPConstants.URI: uri,
+                            }
+                        }
+                    )
+                except SolidLSPException as ex:
+                    # Termination must propagate so tools_base can restart the LS and retry.
+                    # Other pull-diagnostics failures (e.g. unsupported method without crash)
+                    # still fall back to published diagnostics.
+                    if ex.is_language_server_terminated():
+                        raise
+                    log.debug("Falling back to published diagnostics for %s due to pull-diagnostics error: %s", relative_file_path, ex)
+                    response = None
+                    pull_diagnostics_failed = True
+
+            if response is not None:
+                assert isinstance(response, dict), (
+                    f"Unexpected response from Language Server (expected list, got {type(response)}): {response}"
+                )
+                ret = []
+                for item in response["items"]:  # type: ignore
+                    new_item: ls_types.Diagnostic = {
+                        "uri": uri,
+                        "severity": item["severity"],
+                        "message": item["message"],
+                        "range": item["range"],
+                        "code": item.get("code"),  # type: ignore
+                    }
+                    if "source" in item:
+                        new_item["source"] = item["source"]
+                    ret.append(ls_types.Diagnostic(**new_item))
+
+            if not ret:
+                published_diagnostics = self._wait_for_relevant_published_diagnostics(
+                    uri=published_uri,
+                    after_generation=diagnostics_before_request,
+                    timeout=self._get_published_diagnostics_wait_timeout(pull_diagnostics_failed),
+                )
+                if published_diagnostics is not None:
+                    ret = published_diagnostics
+
+        if ret is None:
+            return []
+
+        return self._filter_diagnostics(ret, start_line, end_line, min_severity)
 
     def _get_wait_time_for_cross_file_referencing(self) -> float:
         """Meant to be overridden by subclasses for LS that don't have a reliable "finished initializing" signal.
@@ -730,6 +1071,149 @@ class SolidLanguageServer(ABC):
         if the LS is not fully initialized yet.
         """
         return 2
+
+    def notify_files_created(self, relative_file_paths: Sequence[str]) -> None:
+        """
+        Called when one or more files were newly created on disk (detected outside of Serena's own file
+        tools, e.g. by :class:`serena.ls_manager.LanguageServerFileChangeNotifier`), before those files are
+        opened via :meth:`open_file`. The default implementation does nothing: a `didChangeWatchedFiles`
+        notification followed by an open/close cycle is enough for most backends to fold a new file into
+        their index. Override this for a language server whose project system needs an explicit reload to
+        become aware of a file that did not exist when the project was first loaded.
+        """
+
+    # --- Cross-workspace / additional workspace folder support ---
+
+    @staticmethod
+    def _path_contains_dots(relative_file_path: str) -> bool:
+        """Check if a relative path traverses outside the workspace root via '..' components."""
+        return ".." in PurePath(relative_file_path).parts
+
+    @dataclass
+    class PathWorkspaceStatus:
+        """
+        Represents the status of a path with respect to the language server's workspace folders.
+        """
+
+        ls: "SolidLanguageServer"
+        resolve_abs_path: Path
+        is_in_workspace_folder: bool
+        workspace_root: str | None = None
+        """
+        the workspace root the path is within/relative to, if any
+        """
+
+        @classmethod
+        def from_abs_resolved_path(cls, path: Path, ls: "SolidLanguageServer") -> "SolidLanguageServer.PathWorkspaceStatus":
+            """
+            :param path: an absolute, resolved Path instance
+            :param ls: the language server instance
+            """
+            for workspace in ls._abs_workspace_folders_all:
+                if path.is_relative_to(workspace):
+                    return SolidLanguageServer.PathWorkspaceStatus(
+                        ls=ls, is_in_workspace_folder=True, workspace_root=workspace, resolve_abs_path=path
+                    )
+            return SolidLanguageServer.PathWorkspaceStatus(ls=ls, is_in_workspace_folder=False, resolve_abs_path=path)
+
+        @classmethod
+        def from_relative_path(cls, relative_path: str, ls: "SolidLanguageServer") -> "SolidLanguageServer.PathWorkspaceStatus":
+            """
+            :param relative_path: a relative path from the repository root
+            :param ls: the language server instance
+            """
+            return cls.from_abs_resolved_path(pathlib.Path(ls.repository_root_path, relative_path).resolve(), ls)
+
+        def check_within_workspace_or_raise(self):
+            if not self.is_in_workspace_folder:
+                raise ValueError(
+                    f"Path {self.resolve_abs_path} is outside of configured workspaces. "
+                    f"Configured workspaces: {self.ls._abs_workspace_folders_all}."
+                )
+
+    def _resolve_file_uri(self, relative_file_path: str) -> str:
+        """Construct a canonical file URI from a relative path.
+
+        For cross-workspace paths containing '..', the path is resolved to
+        produce a clean URI without '..' segments.
+        """
+        p = pathlib.Path(os.path.join(self.repository_root_path, relative_file_path))
+        if self._path_contains_dots(relative_file_path):
+            p = p.resolve()
+            self.PathWorkspaceStatus.from_abs_resolved_path(p, self).check_within_workspace_or_raise()
+        return p.as_uri()
+
+    def _activate_additional_workspaces(self) -> None:
+        """Open a representative file from each additional workspace folder to
+        trigger project loading in the language server.
+
+        Many language servers only load projects on-demand when files are opened.
+        This method finds a source file in each additional workspace folder via
+        :meth:`_find_representative_source_file` and opens it, keeping it open
+        for the lifetime of this language server instance.
+
+        Subclasses must override :meth:`_find_representative_source_file` to
+        enable this feature; the default implementation raises ``NotImplementedError``.
+        """
+        opened_count = 0
+        for additional_workspace in self._abs_workspace_folders_additional:
+            source_file = self._find_representative_source_file(additional_workspace)
+            if source_file is None:
+                log.warning("No source file found in additional workspace folder: %s", additional_workspace)
+                continue
+
+            rel_path = os.path.relpath(source_file, self.repository_root_path)
+            log.info("Opening %s to trigger project loading for %s", rel_path, os.path.basename(additional_workspace))
+
+            abs_path = pathlib.Path(source_file).resolve()
+            uri = abs_path.as_uri()
+            language_id = self._get_language_id_for_file(rel_path)
+
+            self._signal_expect_indexing()
+            fb = LSPFileBuffer(
+                abs_path=abs_path,
+                uri=uri,
+                encoding=self._encoding,
+                version=0,
+                language_id=language_id,
+                ref_count=1,
+                language_server=self,
+                open_in_ls=True,
+            )
+            self.open_file_buffers[uri] = fb
+            opened_count += 1
+
+        if opened_count > 0:
+            log.info("Waiting for %d additional workspace(s) to index...", opened_count)
+            self._wait_for_additional_workspace_indexing()
+
+    def _find_representative_source_file(self, directory: str) -> str | None:
+        """Find a source file suitable for triggering project loading in the given directory.
+
+        Must be overridden by subclasses that support ``additional_workspace_folders``.
+        Return ``None`` if no suitable file is found.
+
+        :param directory: Absolute path to the workspace folder.
+        :return: Absolute path to a source file, or None.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not yet support additional_workspace_folders. "
+            f"Override _find_representative_source_file() to enable this feature."
+        )
+
+    def _signal_expect_indexing(self) -> None:
+        """Signal that new files are about to be opened and async indexing should be awaited.
+
+        Override in subclasses that track indexing progress (e.g. via $/progress).
+        Default implementation is a no-op.
+        """
+
+    def _wait_for_additional_workspace_indexing(self) -> None:
+        """Wait for additional workspace indexing to complete.
+
+        Override in subclasses that track indexing progress.
+        Default implementation is a no-op.
+        """
 
     def set_request_timeout(self, timeout: float | None) -> None:
         """
@@ -756,115 +1240,181 @@ class SolidLanguageServer(ABC):
           are understood by this language server or are discovered as containing sources indirectly, e.g. via references
         """
         # By default, use the matcher of the language
-        return self.language.get_source_fn_matcher()
+        return self.ls_id.get_source_fn_matcher()
 
-    def is_ignored_path(self, relative_path: str, ignore_unsupported_files: bool = True) -> bool:
+    class ProjectEntry(ABC):
+        @abstractmethod
+        def get_abs_path(self) -> str:
+            pass
+
+        @abstractmethod
+        def is_file(self) -> bool:
+            pass
+
+        @abstractmethod
+        def is_dir(self) -> bool:
+            pass
+
+        @abstractmethod
+        def get_rel_path(self) -> str:
+            pass
+
+        @abstractmethod
+        def get_rel_path_obj(self) -> Path:
+            pass
+
+    class ProjectEntryFromRelPath(ProjectEntry):
+        def __init__(self, rel_path: str, repository_root: str):
+            self.rel_path = rel_path
+            self.repository_root = repository_root
+            self._abs_path: str | None = None
+            self._is_file: bool | None = None
+            self._rel_path_obj: Path | None = None
+
+        def get_abs_path(self) -> str:
+            if self._abs_path is None:
+                self._abs_path = os.path.join(self.repository_root, self.rel_path)
+            return self._abs_path
+
+        def get_rel_path_obj(self) -> Path:
+            if self._rel_path_obj is None:
+                self._rel_path_obj = Path(self.rel_path)
+            return self._rel_path_obj
+
+        def is_file(self) -> bool:
+            if self._is_file is None:
+                abs_path = self.get_abs_path()
+                exists = os.path.exists(abs_path)
+                if exists:
+                    self._is_file = os.path.isfile(abs_path)
+                else:
+                    # assume it is a file if it has a suffix/extension
+                    rel_path_obj = self.get_rel_path_obj()
+                    self._is_file = bool(rel_path_obj.suffix)
+            return self._is_file
+
+        def is_dir(self) -> bool:
+            return os.path.isdir(self.get_abs_path())
+
+        def get_rel_path(self) -> str:
+            return self.rel_path
+
+    class ProjectEntryFromDirEntry(ProjectEntry):
+        def __init__(self, dir_entry: os.DirEntry, rel_path: str):
+            self._dir_entry = dir_entry
+            self._rel_path = rel_path
+            self._rel_path_obj: Path | None = None
+
+        def get_abs_path(self) -> str:
+            return self._dir_entry.path
+
+        def is_file(self) -> bool:
+            return self._dir_entry.is_file()
+
+        def is_dir(self) -> bool:
+            return self._dir_entry.is_dir()
+
+        def get_rel_path(self) -> str:
+            return self._rel_path
+
+        def get_rel_path_obj(self) -> Path:
+            if self._rel_path_obj is None:
+                self._rel_path_obj = Path(self._rel_path)
+            return self._rel_path_obj
+
+    def is_ignored_path(
+        self,
+        relative_path: str,
+        ignore_unsupported_files: bool = True,
+        dir_entry: os.DirEntry | None = None,
+        check_path_for_ignored_dirnames: bool = True,
+    ) -> bool:
         """
         Determine if a path should be ignored based on file type
         and ignore patterns.
 
+        Missing paths are classified without raising, since language servers may report
+        locations of generated files that are not present on disk (e.g. compiled classes
+        under build output). A missing path is treated as a file if its name has a suffix
+        and as a directory otherwise; directory-only ignore patterns (e.g. ``build/``)
+        match only existing directories.
+
         :param relative_path: Relative path to check
         :param ignore_unsupported_files: whether files that are not supported source files should be ignored
+        :param dir_entry: optional os.DirEntry for the path, if available
+        :param check_path_for_ignored_dirnames: whether to check each directory component of the path against the always-ignored
+            directory names (expensive, so disable this if it is known that the containing directories are not subject to
+            the ignored directories rule)
 
         :return: True if the path should be ignored, False otherwise
         """
-        abs_path = os.path.join(self.repository_root_path, relative_path)
-        if not os.path.exists(abs_path):
-            raise FileNotFoundError(f"File {abs_path} not found, the ignore check cannot be performed")
+        if dir_entry is None:
+            project_entry = self.ProjectEntryFromRelPath(relative_path, self.repository_root_path)
+        else:
+            project_entry = self.ProjectEntryFromDirEntry(dir_entry, relative_path)
 
-        # Check file extension if it's a file
-        is_file = os.path.isfile(abs_path)
+        # determine whether the path is a file
+        is_file = project_entry.is_file()
+
+        # check each directory component against always-ignored dirnames
+        if check_path_for_ignored_dirnames:
+            rel_path_obj = project_entry.get_rel_path_obj()
+            dir_parts = rel_path_obj.parts
+            if project_entry.is_file():
+                dir_parts = dir_parts[:-1]
+            for part in dir_parts:
+                if not part:  # Skip empty parts (e.g., from leading '/')
+                    continue
+                if self.is_ignored_dirname(part):
+                    return True
+
+        # apply the unsupported-extension rule to files
         if is_file and ignore_unsupported_files:
             fn_matcher = self.get_source_fn_matcher()
-            if not fn_matcher.is_relevant_filename(abs_path):
+            if not fn_matcher.is_relevant_filename(project_entry.get_abs_path()):
                 return True
 
-        # Create normalized path for consistent handling
-        rel_path = Path(relative_path)
-
-        # Check each part of the path against always fulfilled ignore conditions
-        dir_parts = rel_path.parts
-        if is_file:
-            dir_parts = dir_parts[:-1]
-        for part in dir_parts:
-            if not part:  # Skip empty parts (e.g., from leading '/')
-                continue
-            if self.is_ignored_dirname(part):
-                return True
-
-        return match_path(relative_path, self.get_ignore_spec(), root_path=self.repository_root_path)
-
-    def _shutdown(self, timeout: float = 5.0) -> None:
-        """
-        Cleanly shut the language server down.
-
-        LSP-protocol shutdown is requested with a bounded thread timer because
-        ``self.server.shutdown`` can block indefinitely on an unresponsive server.
-        After that, process and pipe teardown is delegated to ``LanguageServerProcess.stop``,
-        which owns its own pipe-cleanup / terminate / kill sequencing. Manipulating
-        ``Popen`` directly from here used to leave reader threads running and pipes
-        open on Windows; delegating fixes that.
-
-        :param timeout: upper bound for the LSP-protocol shutdown request; process teardown
-            after that is governed by ``LanguageServerProcess``'s own escalation logic.
-        """
-        if not self.server.is_running():
-            log.debug("Server process not running, skipping shutdown.")
-            return
-
-        log.info(f"Initiating final robust shutdown with a {timeout}s timeout...")
-
-        # request LSP-protocol shutdown on a bounded timer so an unresponsive server cannot block us
-        try:
-            log.debug("Sending LSP shutdown request...")
-            shutdown_thread = threading.Thread(target=self.server.shutdown, daemon=True)
-            shutdown_thread.start()
-            shutdown_thread.join(timeout=min(2.0, timeout))
-
-            if shutdown_thread.is_alive():
-                log.debug("LSP shutdown request timed out, proceeding to terminate...")
-            else:
-                log.debug("LSP shutdown request completed.")
-        except Exception as e:
-            log.debug(f"Exception during LSP-protocol shutdown: {e}")
-            # fall through — LanguageServerProcess.stop() still tears the process down
-
-        # delegate process + pipe teardown to LanguageServerProcess.stop so we don't
-        # bypass its reader-thread cleanup and pipe-close ordering
-        try:
-            self.server.stop()
-        except Exception as e:
-            log.error(f"Error during LanguageServerProcess.stop(): {e}")
+        return match_path(relative_path, self.get_ignore_spec(), root_path=self.repository_root_path, is_dir=project_entry.is_dir())
 
     @contextmanager
-    def start_server(self) -> Iterator["SolidLanguageServer"]:
+    def start_server_context(self) -> Iterator["SolidLanguageServer"]:
         self.start()
-        yield self
-        self.stop()
-
-    def _start_server_process(self) -> None:
-        self._start_server()
-        self.server_started = True
+        try:
+            yield self
+        finally:
+            self.stop()
 
     @abstractmethod
     def _start_server(self) -> None:
-        pass
+        """
+        Starts the low-level language server interface (i.e. self.server).
+
+        This method must ultimately call `self.server.start()` and may perform additional setup before or after starting the server,
+        such as waiting for initialization to complete or activating additional workspaces.
+        """
 
     def _get_language_id_for_file(self, relative_file_path: str) -> str:
-        """Return the language ID for a file.
+        """
+        Determines the language identifier to pass to the language server for the given file,
+        particularly `textDocument/didOpen` requests.
 
-        Override in subclasses to return file-specific language IDs.
-        Default implementation returns self.language_id.
+        Override this method in subclasses to return file-specific language identifiers.
+        The default implementation returns the main identifier passed at construction (self.language_id).
         """
         return self.language_id
 
     @contextmanager
     def open_file(self, relative_file_path: str, open_in_ls: bool = True) -> Iterator[LSPFileBuffer]:
         """
-        Open a file in the Language Server. This is required before making any requests to the Language Server.
+        Opens a file.
+
+        Note: Opening a file in the language server is typically a precondition for further requests
+        pertaining to the respective file.
 
         :param relative_file_path: The relative path of the file to open.
         :param open_in_ls: whether to open the file in the language server, sending the didOpen notification.
+            If the file is already open but file contents has changed since the original notification,
+            an update notification is sent instead.
             Set this to False to read the local file buffer without notifying the LS; the file can
             be opened in the LS later by calling the `ensure_open_in_ls` method on the returned LSPFileBuffer.
         """
@@ -873,6 +1423,8 @@ class SolidLanguageServer(ABC):
             raise SolidLSPException("Language Server not started")
 
         absolute_file_path = Path(self.repository_root_path, relative_file_path)
+        if self._path_contains_dots(relative_file_path):
+            absolute_file_path = absolute_file_path.resolve()
         uri = absolute_file_path.as_uri()
 
         if uri in self.open_file_buffers:
@@ -883,12 +1435,6 @@ class SolidLanguageServer(ABC):
             fb.ref_count += 1
             if open_in_ls:
                 fb.ensure_open_in_ls()
-            # resync the language server with disk before yielding: an external
-            # mutation (e.g. git checkout during a project re-activation) could
-            # have made both the cached buffer and the LSP copy stale
-            fb.reload_from_disk()
-            yield fb
-            fb.ref_count -= 1
         else:
             version = 0
             language_id = self._get_language_id_for_file(relative_file_path)
@@ -903,12 +1449,14 @@ class SolidLanguageServer(ABC):
                 open_in_ls=open_in_ls,
             )
             self.open_file_buffers[uri] = fb
-            yield fb
-            fb.ref_count -= 1
 
-        if self.open_file_buffers[uri].ref_count == 0:
-            self.open_file_buffers[uri].close()
-            del self.open_file_buffers[uri]
+        try:
+            yield fb
+        finally:
+            fb.ref_count -= 1
+            if fb.ref_count == 0:
+                fb.close()
+                del self.open_file_buffers[uri]
 
     @contextmanager
     def _open_file_context(
@@ -924,7 +1472,7 @@ class SolidLanguageServer(ABC):
             be opened in the LS later by calling the `ensure_open_in_ls` method on the returned LSPFileBuffer.
         """
         if file_buffer is not None:
-            expected_uri = pathlib.Path(os.path.join(self.repository_root_path, relative_file_path)).as_uri()
+            expected_uri = self._resolve_file_uri(relative_file_path)
             assert file_buffer.uri == expected_uri, f"Inconsistency between provided {file_buffer.uri=} and {expected_uri=}"
             if open_in_ls:
                 file_buffer.ensure_open_in_ls()
@@ -947,8 +1495,7 @@ class SolidLanguageServer(ABC):
             log.error("insert_text_at_position called before Language Server started")
             raise SolidLSPException("Language Server not started")
 
-        absolute_file_path = str(PurePath(self.repository_root_path, relative_file_path))
-        uri = pathlib.Path(absolute_file_path).as_uri()
+        uri = self._resolve_file_uri(relative_file_path)
 
         # Ensure the file is open
         assert uri in self.open_file_buffers
@@ -959,8 +1506,8 @@ class SolidLanguageServer(ABC):
         new_contents, new_l, new_c = TextUtils.insert_text_at_position(file_buffer.contents, line, column, text_to_be_inserted)
         file_buffer.contents = new_contents
         self.server.notify.did_change_text_document(
-            {
-                LSPConstants.TEXT_DOCUMENT: {  # type: ignore
+            {  # ty: ignore[invalid-argument-type]  # dict built from LSPConstants keys; shape matches the TypedDict
+                LSPConstants.TEXT_DOCUMENT: {
                     LSPConstants.VERSION: file_buffer.version,
                     LSPConstants.URI: file_buffer.uri,
                 },
@@ -990,8 +1537,7 @@ class SolidLanguageServer(ABC):
             log.error("delete_text_between_positions called before Language Server started")
             raise SolidLSPException("Language Server not started")
 
-        absolute_file_path = str(PurePath(self.repository_root_path, relative_file_path))
-        uri = pathlib.Path(absolute_file_path).as_uri()
+        uri = self._resolve_file_uri(relative_file_path)
 
         # Ensure the file is open
         assert uri in self.open_file_buffers
@@ -1003,8 +1549,8 @@ class SolidLanguageServer(ABC):
         )
         file_buffer.contents = new_contents
         self.server.notify.did_change_text_document(
-            {
-                LSPConstants.TEXT_DOCUMENT: {  # type: ignore
+            {  # ty: ignore[invalid-argument-type]  # dict built from LSPConstants keys; shape matches the TypedDict
+                LSPConstants.TEXT_DOCUMENT: {
                     LSPConstants.VERSION: file_buffer.version,
                     LSPConstants.URI: file_buffer.uri,
                 },
@@ -1036,7 +1582,10 @@ class SolidLanguageServer(ABC):
         def execute(self) -> list[ls_types.Location]:
             self._ensure_server_started()
 
-            t0 = perf_counter() if log.isEnabledFor(logging.DEBUG) else None
+            t0 = perf_counter() if _debug_enabled else None
+            # arm indexing tracking before didOpen so that the subsequent wait can
+            # observe the indexing progress triggered by opening the file
+            self.language_server._pre_open_for_cross_file_references()
             with self.language_server.open_file(self.relative_file_path):
                 self.language_server._wait_for_cross_file_references_if_needed()
                 try:
@@ -1099,6 +1648,12 @@ class SolidLanguageServer(ABC):
                     self.request_name,
                     abs_path,
                 )
+                return None
+
+            # skip locations of generated files that are not present on disk
+            # (language servers may report e.g. compiled classes under build output)
+            if not os.path.exists(abs_path):
+                log.info("%s found symbol at non-existent path: %s", self.request_name, abs_path)
                 return None
 
             if self.skip_ignored_paths and self.language_server.is_ignored_path(rel_path_str):
@@ -1180,15 +1735,21 @@ class SolidLanguageServer(ABC):
         return cast(
             DefinitionParams,
             {
-                LSPConstants.TEXT_DOCUMENT: {
-                    LSPConstants.URI: pathlib.Path(str(PurePath(self.repository_root_path, relative_file_path))).as_uri()
-                },
+                LSPConstants.TEXT_DOCUMENT: {LSPConstants.URI: self._resolve_file_uri(relative_file_path)},
                 LSPConstants.POSITION: {
                     LSPConstants.LINE: line,
                     LSPConstants.CHARACTER: column,
                 },
             },
         )
+
+    def _pre_open_for_cross_file_references(self) -> None:
+        """Called just before open_file() for requests that may need cross-file indexing.
+
+        Override to pre-arm async indexing tracking before sending didOpen (e.g. clear
+        a threading.Event so a subsequent wait for indexing blocks correctly).
+        The base implementation is a no-op.
+        """
 
     def _wait_for_cross_file_references_if_needed(self) -> None:
         if not self._has_waited_for_cross_file_references:
@@ -1229,7 +1790,7 @@ class SolidLanguageServer(ABC):
     def _send_references_request(self, relative_file_path: str, line: int, column: int) -> list[lsp_types.Location] | None:
         return self.server.send.references(
             {
-                "textDocument": {"uri": PathUtils.path_to_uri(os.path.join(self.repository_root_path, relative_file_path))},
+                "textDocument": {"uri": self._resolve_file_uri(relative_file_path)},
                 "position": {"line": line, "character": column},
                 "context": {"includeDeclaration": False},
             }
@@ -1336,7 +1897,7 @@ class SolidLanguageServer(ABC):
         :return: A list of completions
         """
         with self.open_file(relative_file_path):
-            open_file_buffer = self.open_file_buffers[pathlib.Path(os.path.join(self.repository_root_path, relative_file_path)).as_uri()]
+            open_file_buffer = self.open_file_buffers[self._resolve_file_uri(relative_file_path)]
             completion_params: LSPTypes.CompletionParams = {
                 "position": {"line": line, "character": column},
                 "textDocument": {"uri": open_file_buffer.uri},
@@ -1348,15 +1909,15 @@ class SolidLanguageServer(ABC):
                 response = self.server.send.completion(completion_params)
                 if isinstance(response, list):
                     response = {"items": response, "isIncomplete": False}
-                if response is None or not response["isIncomplete"]:  # type: ignore
+                if response is None or not response["isIncomplete"]:
                     break
 
             # TODO: Understand how to appropriately handle `isIncomplete`
-            if response is None or (response["isIncomplete"] and not allow_incomplete):  # type: ignore
+            if response is None or (response["isIncomplete"] and not allow_incomplete):
                 return []
 
             if "items" in response:
-                response = response["items"]  # type: ignore
+                response = response["items"]
 
             response = cast(list[LSPTypes.CompletionItem], response)
 
@@ -1374,8 +1935,8 @@ class SolidLanguageServer(ABC):
 
                 if "label" in item:
                     completion_item["completionText"] = item["label"]
-                    completion_item["kind"] = item["kind"]  # type: ignore
-                elif "insertText" in item:  # type: ignore
+                    completion_item["kind"] = item["kind"]
+                elif "insertText" in item:
                     completion_item["completionText"] = item["insertText"]
                     completion_item["kind"] = item["kind"]
                 elif "textEdit" in item and "newText" in item["textEdit"]:
@@ -1407,24 +1968,15 @@ class SolidLanguageServer(ABC):
 
             return [json.loads(json_repr) for json_repr in set(json.dumps(item, sort_keys=True) for item in completions_list)]
 
-    def _request_document_symbols(
+    def _get_raw_document_symbols(
         self, relative_file_path: str, file_data: LSPFileBuffer | None
     ) -> list[SymbolInformation] | list[DocumentSymbol] | None:
         """
-        Sends a [documentSymbol](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_documentSymbol)
-        request to the language server to find symbols in the given file - or returns a cached result if available.
-        The returned symbols are considered "raw document symbols" (in contrast to processed symbols returned by `request_document_symbols`).
+        Gets the raw document symbols for the given file, either from the cache or by querying the language server.
 
-        NOTE: This method can be overridden in subclasses to post-process the raw results.
-              When doing so after the initial implementation, be sure to update the init parameter `cache_version_raw_document_symbols`
-              to a different version (add 1) to ensure that all caches are invalidated appropriately.
-              IMPORTANT: Since rebuilding the raw document symbol cache from the language server results
-              is potentially expensive, prefer overriding the `request_document_symbols` method
-              if the post-processing can also be done on the processed/high-level symbols.
-
-        :param relative_file_path: the relative path of the file that has the symbols.
+        :param relative_file_path: the relative path of the file for which to retrieve the raw document symbols.
         :param file_data: the file data buffer, if already opened. If None, the file will be opened in this method.
-        :return: the list of root symbols in the file.
+        :return: the list of root symbols in the file
         """
 
         def get_cached_raw_document_symbols(cache_key: str, fd: LSPFileBuffer) -> list[SymbolInformation] | list[DocumentSymbol] | None:
@@ -1444,7 +1996,7 @@ class SolidLanguageServer(ABC):
             log.debug("perf: raw_document_symbols_cache STALE path=%s", relative_file_path)
             return None
 
-        def get_raw_document_symbols(fd: LSPFileBuffer) -> list[SymbolInformation] | list[DocumentSymbol] | None:
+        with self._open_file_context(relative_file_path, file_buffer=file_data, open_in_ls=False) as fd:
             # check for cached result
             cache_key = relative_file_path
             response = get_cached_raw_document_symbols(cache_key, fd)
@@ -1452,19 +2004,41 @@ class SolidLanguageServer(ABC):
                 return response
 
             # no cached result, query language server
-            log.debug(f"Requesting document symbols for {relative_file_path} from the Language Server")
-            response = self.server.send.document_symbol(
-                {"textDocument": {"uri": pathlib.Path(os.path.join(self.repository_root_path, relative_file_path)).as_uri()}}
-            )
+            response = self._request_raw_document_symbols(relative_file_path, file_data=fd)
 
-            # update cache
-            self._raw_document_symbols_cache[cache_key] = (fd.content_hash, response)
-            self._raw_document_symbols_cache_is_modified = True
+            # Only cache non-empty results. An empty or None response can occur when the language server
+            # has not yet finished indexing or building the project (e.g. Lean 4 before `lake build`),
+            # and caching it would permanently serve stale data even after the project is ready.
+            if response:
+                self._raw_document_symbols_cache[cache_key] = (fd.content_hash, response)
+                self._raw_document_symbols_cache_is_modified = True
 
             return response
 
-        with self._open_file_context(relative_file_path, file_buffer=file_data) as fd:
-            return get_raw_document_symbols(fd)
+    def _request_raw_document_symbols(
+        self, relative_file_path: str, file_data: LSPFileBuffer | None
+    ) -> list[SymbolInformation] | list[DocumentSymbol] | None:
+        """
+        Sends a [documentSymbol](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_documentSymbol)
+        request to the language server to find symbols in the given file.
+        The returned symbols are considered "raw document symbols" (in contrast to processed symbols returned by `request_document_symbols`).
+
+        NOTE: This method can be overridden in subclasses to post-process the raw results.
+              When doing so after the initial implementation, be sure to update the init parameter `cache_version_raw_document_symbols`
+              to a different version (add 1) to ensure that all caches are invalidated appropriately.
+              IMPORTANT: Since rebuilding the raw document symbol cache from the language server results
+              is potentially expensive, prefer overriding the `_build_document_symbols_from_raw_symbols` method
+              if the post-processing can also be done on the processed/high-level symbols.
+              For symbol name normalization, override `_normalize_symbol_name` instead.
+
+        :param relative_file_path: the relative path of the file that has the symbols.
+        :param file_data: the file data buffer, if already opened. If None, the file will be opened in this method.
+        :return: the list of root symbols in the file.
+        """
+        with self._open_file_context(relative_file_path, file_buffer=file_data):
+            log.debug(f"Requesting document symbols for {relative_file_path} from the Language Server")
+            response = self.server.send.document_symbol({"textDocument": {"uri": self._resolve_file_uri(relative_file_path)}})
+            return response
 
     def _normalize_symbol_name(self, symbol: RawDocumentSymbol, relative_file_path: str) -> str:
         """
@@ -1474,6 +2048,12 @@ class SolidLanguageServer(ABC):
         NOTE: When changing the override of this method after the initial LS implementation,
               be sure to also override `_document_symbols_cache_fingerprint` in order to ensure that
               the caches are invalidated appropriately.
+        NOTE: The returned name must not contain '/', which separates the components of a name path
+              (see :class:`serena.symbol.NamePathMatcher`). A symbol whose name contains it cannot be
+              addressed by any tool taking an exact name path, not even via the name path that is
+              reported for the symbol itself. Language servers that identify symbols in such a way
+              (e.g. Erlang language servers, which may report functions as `name/arity`) must substitute another
+              character here.
 
         :param symbol: the symbol
         :param relative_file_path: the relative path of the file the symbol is located in
@@ -1485,11 +2065,6 @@ class SolidLanguageServer(ABC):
     def request_document_symbols(self, relative_file_path: str, file_buffer: LSPFileBuffer | None = None) -> DocumentSymbols:
         """
         Retrieves the collection of symbols in the given file.
-
-        NOTE: This method can be overridden in subclasses to post-process the results.
-              When doing so after the initial LS implementation, be sure to also override `_document_symbols_cache_fingerprint`
-              to ensure that the caches are invalidated appropriately.
-              DO NOT override this method to modify symbol names; override `_normalize_symbol_name` instead.
 
         :param relative_file_path: The relative path of the file that has the symbols
         :param file_buffer: an optional file buffer if the file is already opened.
@@ -1506,115 +2081,131 @@ class SolidLanguageServer(ABC):
             file_hash_and_result = self._document_symbols_cache.get(cache_key)
             if file_hash_and_result is None:
                 log.debug("No cache hit for document symbols in %s", relative_file_path)
-                log.debug("perf: document_symbols_cache MISS path=%s", relative_file_path)
             else:
                 file_hash, document_symbols = file_hash_and_result
                 if file_hash == file_data.content_hash:
-                    log.debug("Returning cached document symbols for %s", relative_file_path)
-                    log.debug("perf: document_symbols_cache HIT path=%s", relative_file_path)
+                    log.debug("Returning cached document symbols for %s (hash=%s)", relative_file_path, file_hash)
                     return document_symbols
 
-                log.debug("Cached document symbol content for %s has changed", relative_file_path)
-                log.debug("perf: document_symbols_cache STALE path=%s", relative_file_path)
+                log.debug("Cached document symbol content for %s has changed (old hash=%s)", relative_file_path, file_hash)
 
-            # no cached result: request the root symbols from the language server
-            root_symbols = self._request_document_symbols(relative_file_path, file_data)
+            # no cached result: get the raw root symbols from the language server
+            document_symbols = self._build_document_symbols_from_raw_symbols(relative_file_path, file_buffer=file_data)
 
-            if root_symbols is None:
-                log.warning(
-                    f"Received None response from the Language Server for document symbols in {relative_file_path}. "
-                    f"This means the language server can't understand this file (possibly due to syntax errors). It may also be due to a bug or misconfiguration of the LS. "
-                    f"Returning empty list",
-                )
-                return DocumentSymbols([])
-
-            assert isinstance(root_symbols, list), f"Unexpected response from Language Server: {root_symbols}"
-            log.debug("Received %d root symbols for %s from the language server", len(root_symbols), relative_file_path)
-
-            body_factory = SymbolBodyFactory(file_data)
-
-            def convert_to_unified_symbol(original_symbol_dict: RawDocumentSymbol) -> ls_types.UnifiedSymbolInformation:
-                """
-                Converts the given symbol dictionary to the unified representation, ensuring
-                that all required fields are present (except 'children' which is handled separately).
-
-                :param original_symbol_dict: the item to augment
-                :return: the augmented item (new object)
-                """
-                # noinspection PyInvalidCast
-                item = cast(ls_types.UnifiedSymbolInformation, dict(original_symbol_dict))
-                absolute_path = os.path.join(self.repository_root_path, relative_file_path)
-
-                # handle missing location and path entries
-                if "location" not in item:
-                    uri = pathlib.Path(absolute_path).as_uri()
-                    assert "range" in item
-                    tree_location = ls_types.Location(
-                        uri=uri,
-                        range=item["range"],
-                        absolutePath=absolute_path,
-                        relativePath=relative_file_path,
-                    )
-                    item["location"] = tree_location
-                location = item["location"]
-                if "absolutePath" not in location:
-                    location["absolutePath"] = absolute_path  # type: ignore
-                if "relativePath" not in location:
-                    location["relativePath"] = relative_file_path  # type: ignore
-
-                item["body"] = self.create_symbol_body(item, factory=body_factory)
-
-                # handle missing selectionRange
-                if "selectionRange" not in item:
-                    if "range" in item:
-                        item["selectionRange"] = item["range"]
-                    else:
-                        item["selectionRange"] = item["location"]["range"]
-
-                return item
-
-            def convert_symbols_with_common_parent(
-                symbols: list[DocumentSymbol] | list[SymbolInformation],
-                parent: ls_types.UnifiedSymbolInformation | None,
-            ) -> list[ls_types.UnifiedSymbolInformation]:
-                """
-                Converts the given symbols into UnifiedSymbolInformation with proper parent-child relationships,
-                adding overload indices for symbols with the same name under the same parent.
-                """
-                # apply name normalization and count occurrences of each symbol name
-                total_name_counts: dict[str, int] = defaultdict(lambda: 0)
-                for symbol in symbols:
-                    name = self._normalize_symbol_name(symbol, relative_file_path=relative_file_path)
-                    symbol["name"] = name
-                    total_name_counts[name] += 1
-
-                # convert symbols to the unified representation and
-                #  * add overload indices where necessary
-                #  * ensure that the "parent" field is set correctly
-                name_counts: dict[str, int] = defaultdict(lambda: 0)
-                unified_symbols = []
-                for symbol in symbols:
-                    usymbol = convert_to_unified_symbol(symbol)
-                    if total_name_counts[usymbol["name"]] > 1:
-                        usymbol["overload_idx"] = name_counts[usymbol["name"]]
-                    name_counts[usymbol["name"]] += 1
-                    usymbol["parent"] = parent
-                    if "children" in usymbol:
-                        usymbol["children"] = convert_symbols_with_common_parent(usymbol["children"], usymbol)  # type: ignore
-                    else:
-                        usymbol["children"] = []  # type: ignore
-                    unified_symbols.append(usymbol)
-                return unified_symbols
-
-            unified_root_symbols = convert_symbols_with_common_parent(root_symbols, None)
-            document_symbols = DocumentSymbols(unified_root_symbols)
-
-            # update cache
-            log.debug("Updating cached document symbols for %s", relative_file_path)
-            self._document_symbols_cache[cache_key] = (file_data.content_hash, document_symbols)
-            self._document_symbols_cache_is_modified = True
+            # update cache (only cache non-empty results to avoid permanently caching unindexed responses)
+            content_hash = file_data.content_hash
+            if document_symbols.root_symbols:
+                log.debug("Updating cached document symbols for %s (hash=%s)", relative_file_path, content_hash)
+                self._document_symbols_cache[cache_key] = (content_hash, document_symbols)
+                self._document_symbols_cache_is_modified = True
 
             return document_symbols
+
+    def _build_document_symbols_from_raw_symbols(self, relative_file_path: str, file_buffer: LSPFileBuffer) -> DocumentSymbols:
+        """
+        Requests the raw symbols from the language server and builds the collection of (high-level) symbols from them.
+
+        NOTE: This method can be overridden in subclasses to post-process the results.
+              When doing so after the initial LS implementation, be sure to also override `_document_symbols_cache_fingerprint`
+              to ensure that the caches are invalidated appropriately.
+              DO NOT override this method to modify symbol names; override `_normalize_symbol_name` instead.
+
+        :param relative_file_path: the relative path of the file
+        :param file_buffer: file buffer of the file
+        :return: the collection of symbols in the file.
+        """
+        root_symbols = self._get_raw_document_symbols(relative_file_path, file_data=file_buffer)
+
+        if root_symbols is None:
+            log.warning(
+                f"Received None response from the Language Server for document symbols in {relative_file_path}. "
+                f"This means the language server can't understand this file (possibly due to syntax errors). It may also be due to a bug or misconfiguration of the LS. "
+                f"Returning empty list",
+            )
+            return DocumentSymbols([])
+
+        assert isinstance(root_symbols, list), f"Unexpected response from Language Server: {root_symbols}"
+        log.debug("Received %d root symbols for %s from the language server", len(root_symbols), relative_file_path)
+
+        body_factory = SymbolBodyFactory(file_buffer)
+
+        def convert_to_unified_symbol(original_symbol_dict: RawDocumentSymbol) -> ls_types.UnifiedSymbolInformation:
+            """
+            Converts the given symbol dictionary to the unified representation, ensuring
+            that all required fields are present (except 'children' which is handled separately).
+
+            :param original_symbol_dict: the item to augment
+            :return: the augmented item (new object)
+            """
+            # noinspection PyInvalidCast
+            item = cast(ls_types.UnifiedSymbolInformation, dict(original_symbol_dict))
+            absolute_path = os.path.join(self.repository_root_path, relative_file_path)
+
+            # handle missing location and path entries
+            if "location" not in item:
+                uri = pathlib.Path(absolute_path).as_uri()
+                assert "range" in item
+                tree_location = ls_types.Location(
+                    uri=uri,
+                    range=item["range"],
+                    absolutePath=absolute_path,
+                    relativePath=relative_file_path,
+                )
+                item["location"] = tree_location
+            location = item["location"]
+            if "absolutePath" not in location:
+                location["absolutePath"] = absolute_path
+            if "relativePath" not in location:
+                location["relativePath"] = relative_file_path
+
+            item["body"] = self.create_symbol_body(item, factory=body_factory)
+
+            # handle missing selectionRange
+            if "selectionRange" not in item:
+                if "range" in item:
+                    item["selectionRange"] = item["range"]
+                else:
+                    item["selectionRange"] = item["location"]["range"]
+
+            return item
+
+        def convert_symbols_with_common_parent(
+            symbols: list[DocumentSymbol] | list[SymbolInformation],
+            parent: ls_types.UnifiedSymbolInformation | None,
+        ) -> list[ls_types.UnifiedSymbolInformation]:
+            """
+            Converts the given symbols into UnifiedSymbolInformation with proper parent-child relationships,
+            adding overload indices for symbols with the same name under the same parent.
+            """
+            # apply name normalization and count occurrences of each symbol name
+            total_name_counts: dict[str, int] = defaultdict(lambda: 0)
+            for symbol in symbols:
+                name = self._normalize_symbol_name(symbol, relative_file_path=relative_file_path)
+                symbol["name"] = name
+                total_name_counts[name] += 1
+
+            # convert symbols to the unified representation and
+            #  * add overload indices where necessary
+            #  * ensure that the "parent" field is set correctly
+            name_counts: dict[str, int] = defaultdict(lambda: 0)
+            unified_symbols = []
+            for symbol in symbols:
+                usymbol = convert_to_unified_symbol(symbol)
+                if total_name_counts[usymbol["name"]] > 1:
+                    usymbol["overload_idx"] = name_counts[usymbol["name"]]
+                name_counts[usymbol["name"]] += 1
+                usymbol["parent"] = parent
+                if "children" in usymbol:
+                    usymbol["children"] = convert_symbols_with_common_parent(usymbol["children"], usymbol)  # type: ignore
+                else:
+                    usymbol["children"] = []
+                unified_symbols.append(usymbol)
+            return unified_symbols
+
+        unified_root_symbols = convert_symbols_with_common_parent(root_symbols, None)
+        document_symbols = DocumentSymbols(unified_root_symbols)
+
+        return document_symbols
 
     def request_full_symbol_tree(self, within_relative_path: str | None = None) -> list[ls_types.UnifiedSymbolInformation]:
         """
@@ -1627,61 +2218,56 @@ class SolidLanguageServer(ABC):
         All symbols except the root packages will have a parent attribute.
         Will ignore directories starting with '.', language-specific defaults
         and user-configured directories (e.g. from .gitignore).
+        Ignore rules apply to unresolved paths. Discovered symbolic links are followed only in trusted projects.
 
         :param within_relative_path: pass a relative path to only consider symbols within this path.
             If a file is passed, only the symbols within this file will be considered.
             If a directory is passed, all files within this directory will be considered.
         :return: A list of root symbols representing the top-level packages/modules in the project.
         """
-        if within_relative_path is not None:
-            within_abs_path = os.path.join(self.repository_root_path, within_relative_path)
-            if not os.path.exists(within_abs_path):
-                raise FileNotFoundError(f"File or directory not found: {within_abs_path}")
-            if os.path.isfile(within_abs_path):
-                if self.is_ignored_path(within_relative_path):
-                    log.error("You passed a file explicitly, but it is ignored. This is probably an error. File: %s", within_relative_path)
-                    return []
-                else:
-                    root_nodes = self.request_document_symbols(within_relative_path).root_symbols
-                    return root_nodes
 
         # Helper function to recursively process directories
-        def process_directory(rel_dir_path: str) -> list[ls_types.UnifiedSymbolInformation]:
-            abs_dir_path = self.repository_root_path if rel_dir_path == "." else os.path.join(self.repository_root_path, rel_dir_path)
-            abs_dir_path = os.path.realpath(abs_dir_path)
-
-            if self.is_ignored_path(str(Path(abs_dir_path).relative_to(self.repository_root_path))):
+        def process_directory(abs_dir_path: str) -> list[ls_types.UnifiedSymbolInformation]:
+            rel_dir_path: str | None
+            try:
+                rel_dir_path = str(Path(abs_dir_path).relative_to(self.repository_root_path))
+            except ValueError:  # not relative to repository root
+                rel_dir_path = None
+            if rel_dir_path and self.is_ignored_path(rel_dir_path):
                 log.debug("Skipping directory: %s (because it should be ignored)", rel_dir_path)
                 return []
 
             result = []
             try:
-                contained_dir_or_file_names = os.listdir(abs_dir_path)
+                contained_dir_or_file_entries = os.scandir(abs_dir_path)
             except OSError:
                 return []
 
             # Create package symbol for directory
-            package_symbol = ls_types.UnifiedSymbolInformation(  # type: ignore
+            package_symbol = ls_types.UnifiedSymbolInformation(
                 name=os.path.basename(abs_dir_path),
                 kind=ls_types.SymbolKind.Package,
                 location=ls_types.Location(
                     uri=str(pathlib.Path(abs_dir_path).as_uri()),
                     range={"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
                     absolutePath=str(abs_dir_path),
-                    relativePath=str(Path(abs_dir_path).resolve().relative_to(self.repository_root_path)),
+                    relativePath=os.path.relpath(abs_dir_path, self.repository_root_path),
                 ),
                 children=[],
             )
             result.append(package_symbol)
 
-            for contained_dir_or_file_name in contained_dir_or_file_names:
-                contained_dir_or_file_abs_path = os.path.join(abs_dir_path, contained_dir_or_file_name)
+            for contained_dir_or_file_entry in contained_dir_or_file_entries:
+                # skip symbolic links during discovery in untrusted projects
+                if not self.config.is_project_trusted and contained_dir_or_file_entry.is_symlink():
+                    continue
+
+                contained_dir_or_file_name = contained_dir_or_file_entry.name
+                contained_dir_or_file_abs_path = contained_dir_or_file_entry.path
 
                 # obtain relative path
                 try:
-                    contained_dir_or_file_rel_path = str(
-                        Path(contained_dir_or_file_abs_path).resolve().relative_to(self.repository_root_path)
-                    )
+                    contained_dir_or_file_rel_path = os.path.relpath(contained_dir_or_file_abs_path, self.repository_root_path)
                 except ValueError as e:
                     # Typically happens when the path is not under the repository root (e.g., symlink pointing outside)
                     log.warning(
@@ -1692,24 +2278,30 @@ class SolidLanguageServer(ABC):
                     )
                     continue
 
-                if self.is_ignored_path(contained_dir_or_file_rel_path):
+                is_dir = contained_dir_or_file_entry.is_dir()
+                if self.is_ignored_path(
+                    contained_dir_or_file_rel_path, dir_entry=contained_dir_or_file_entry, check_path_for_ignored_dirnames=is_dir
+                ):
                     log.debug("Skipping item: %s (because it should be ignored)", contained_dir_or_file_rel_path)
                     continue
 
-                if os.path.isdir(contained_dir_or_file_abs_path):
-                    child_symbols = process_directory(contained_dir_or_file_rel_path)
+                if is_dir:
+                    child_symbols = process_directory(contained_dir_or_file_abs_path)
                     package_symbol["children"].extend(child_symbols)
                     for child in child_symbols:
                         child["parent"] = package_symbol
 
-                elif os.path.isfile(contained_dir_or_file_abs_path):
+                elif contained_dir_or_file_entry.is_file():
                     with self._open_file_context(contained_dir_or_file_rel_path, open_in_ls=False) as file_data:
                         document_symbols = self.request_document_symbols(contained_dir_or_file_rel_path, file_data)
-                        file_root_nodes = document_symbols.root_symbols
+
+                        # create shallow copies of the document root symbols to avoid modifying the cached symbols
+                        # when linking them to the file symbol #2126
+                        file_root_nodes = [r.copy() for r in document_symbols.root_symbols]
 
                         # Create file symbol, link with children
                         file_range = self._get_range_from_file_content(file_data.contents)
-                        file_symbol = ls_types.UnifiedSymbolInformation(  # type: ignore
+                        file_symbol = ls_types.UnifiedSymbolInformation(
                             name=os.path.splitext(contained_dir_or_file_name)[0],
                             kind=ls_types.SymbolKind.File,
                             range=file_range,
@@ -1718,7 +2310,7 @@ class SolidLanguageServer(ABC):
                                 uri=str(pathlib.Path(contained_dir_or_file_abs_path).as_uri()),
                                 range=file_range,
                                 absolutePath=str(contained_dir_or_file_abs_path),
-                                relativePath=str(Path(contained_dir_or_file_abs_path).resolve().relative_to(self.repository_root_path)),
+                                relativePath=contained_dir_or_file_rel_path,
                             ),
                             children=file_root_nodes,
                             parent=package_symbol,
@@ -1729,27 +2321,25 @@ class SolidLanguageServer(ABC):
                     # Link file symbol with package
                     package_symbol["children"].append(file_symbol)
 
-                    # TODO: Not sure if this is actually still needed given recent changes to relative path handling
-                    def fix_relative_path(nodes: list[ls_types.UnifiedSymbolInformation]) -> None:
-                        for node in nodes:
-                            if "location" in node and "relativePath" in node["location"]:
-                                path = Path(node["location"]["relativePath"])  # type: ignore
-                                if path.is_absolute():
-                                    try:
-                                        path = path.relative_to(self.repository_root_path)
-                                        node["location"]["relativePath"] = str(path)
-                                    except Exception:
-                                        pass
-                            if "children" in node:
-                                fix_relative_path(node["children"])
-
-                    fix_relative_path(file_root_nodes)
-
             return result
 
-        # Start from the root or the specified directory
-        start_rel_path = within_relative_path or "."
-        return process_directory(start_rel_path)
+        if within_relative_path:
+            within_abs_path = os.path.join(self.repository_root_path, within_relative_path)
+            if not os.path.exists(within_abs_path):
+                raise FileNotFoundError(f"File or directory not found: {within_abs_path}")
+            if self.is_ignored_path(within_relative_path):
+                raise ValueError(f"Explicitly requested symbols in '{within_relative_path}' while the path is ignored")
+            if os.path.isfile(within_abs_path):
+                root_nodes = self.request_document_symbols(within_relative_path).root_symbols
+                return root_nodes
+            else:
+                self.PathWorkspaceStatus.from_abs_resolved_path(Path(within_abs_path).resolve(), self).check_within_workspace_or_raise()
+                return process_directory(within_abs_path)
+        else:
+            full_result = []
+            for root in self.config.get_absolute_workspace_folders(self.repository_root_path):
+                full_result.extend(process_directory(root))
+            return full_result
 
     @staticmethod
     def _get_range_from_file_content(file_content: str) -> ls_types.Range:
@@ -1817,6 +2407,7 @@ class SolidLanguageServer(ABC):
     def request_overview(self, within_relative_path: str) -> dict[str, list[UnifiedSymbolInformation]]:
         """
         An overview of all symbols in the given file or directory.
+        Raises a ValueError if a path to an ignored file is passed.
 
         :param within_relative_path: the relative path to the file or directory to get the overview of.
         :return: A mapping of all relative paths analyzed to lists of top-level symbols in the corresponding file.
@@ -1826,6 +2417,8 @@ class SolidLanguageServer(ABC):
             raise FileNotFoundError(f"File or directory not found: {abs_path}")
 
         if abs_path.is_file():
+            if self.is_ignored_path(within_relative_path):
+                raise ValueError(f"The explicitly passed file {within_relative_path} is ignored, not returning overview.")
             symbols_overview = self.request_document_overview(within_relative_path)
             return {within_relative_path: symbols_overview}
         else:
@@ -1888,7 +2481,7 @@ class SolidLanguageServer(ABC):
         with self.open_file(relative_file_path):
             response = self.server.send.signature_help(
                 {
-                    "textDocument": {"uri": pathlib.Path(os.path.join(self.repository_root_path, relative_file_path)).as_uri()},
+                    "textDocument": {"uri": self._resolve_file_uri(relative_file_path)},
                     "position": {
                         "line": line,
                         "character": column,
@@ -1999,10 +2592,13 @@ class SolidLanguageServer(ABC):
                 if containing_symbol is None and include_file_symbols:
                     log.warning(f"Could not find containing symbol for {ref_path}:{ref_line}:{ref_col}. Returning file symbol instead")
                     fileRange = self._get_range_from_file_content(file_data.contents)
+                    ref_abs_path = os.path.join(self.repository_root_path, ref_path)
+                    if self._path_contains_dots(ref_path):
+                        ref_abs_path = str(pathlib.Path(ref_abs_path).resolve())
                     location = ls_types.Location(
-                        uri=str(pathlib.Path(os.path.join(self.repository_root_path, ref_path)).as_uri()),
+                        uri=self._resolve_file_uri(ref_path),
                         range=fileRange,
-                        absolutePath=str(os.path.join(self.repository_root_path, ref_path)),
+                        absolutePath=ref_abs_path,
                         relativePath=ref_path,
                     )
                     name = os.path.splitext(os.path.basename(ref_path))[0]
@@ -2042,11 +2638,18 @@ class SolidLanguageServer(ABC):
                 # This is neither really safe nor elegant, but if we don't do it,
                 # there is no way to distinguish between definitions and imports as import is not a symbol-type
                 # and we get the type referenced symbol resulting from imports...
+                # An import symbol is located at the reference itself, whereas a same-named symbol whose body
+                # merely contains the reference (e.g. a caller) is not an import.
+                selection_start = containing_symbol["selectionRange"]["start"]
+                selection_end = containing_symbol["selectionRange"]["end"]
                 if (
                     not include_imports
                     and incoming_symbol is not None
                     and containing_symbol["name"] == incoming_symbol["name"]
                     and containing_symbol["kind"] == incoming_symbol["kind"]
+                    and (selection_start["line"], selection_start["character"])
+                    <= (ref_line, ref_col)
+                    <= (selection_end["line"], selection_end["character"])
                 ):
                     log.debug(
                         f"Found import of referenced symbol {incoming_symbol['name']}"
@@ -2070,161 +2673,6 @@ class SolidLanguageServer(ABC):
 
         return result
 
-    def request_call_hierarchy_incoming(self, relative_file_path: str, line: int, column: int) -> list[lsp_types.CallHierarchyIncomingCall]:
-        """
-        Finds all callers of the symbol at the given position.
-
-        Uses the LSP callHierarchy/incomingCalls request (prepareCallHierarchy + incomingCalls).
-
-        :param relative_file_path: The relative path of the file containing the symbol
-        :param line: The 0-indexed line number of the symbol
-        :param column: The 0-indexed column number of the symbol
-        :return: List of incoming calls (callers) for the symbol
-        """
-        if not self.server_started:
-            raise SolidLSPException("Language Server not started")
-
-        uri = PathUtils.path_to_uri(os.path.join(self.repository_root_path, relative_file_path))
-        with self.open_file(relative_file_path):
-            items = self.server.send.prepare_call_hierarchy({"textDocument": {"uri": uri}, "position": {"line": line, "character": column}})
-            if not items:
-                return []
-            result: list[lsp_types.CallHierarchyIncomingCall] = []
-            for item in items:
-                incoming = self.server.send.incoming_calls({"item": item})
-                if incoming:
-                    result.extend(incoming)
-            return result
-
-    def request_call_hierarchy_outgoing(self, relative_file_path: str, line: int, column: int) -> list[lsp_types.CallHierarchyOutgoingCall]:
-        """
-        Finds all symbols called by the symbol at the given position.
-
-        Uses the LSP callHierarchy/outgoingCalls request (prepareCallHierarchy + outgoingCalls).
-
-        :param relative_file_path: The relative path of the file containing the symbol
-        :param line: The 0-indexed line number of the symbol
-        :param column: The 0-indexed column number of the symbol
-        :return: List of outgoing calls (callees) from the symbol
-        """
-        if not self.server_started:
-            raise SolidLSPException("Language Server not started")
-
-        uri = PathUtils.path_to_uri(os.path.join(self.repository_root_path, relative_file_path))
-        with self.open_file(relative_file_path):
-            items = self.server.send.prepare_call_hierarchy({"textDocument": {"uri": uri}, "position": {"line": line, "character": column}})
-            if not items:
-                return []
-            result: list[lsp_types.CallHierarchyOutgoingCall] = []
-            for item in items:
-                outgoing = self.server.send.outgoing_calls({"item": item})
-                if outgoing:
-                    result.extend(outgoing)
-            return result
-
-    def request_type_hierarchy_supertypes(self, relative_file_path: str, line: int, column: int) -> list[lsp_types.TypeHierarchyItem]:
-        """
-        Finds all supertypes (parents) of the type at the given position.
-
-        Uses the LSP typeHierarchy/supertypes request (prepareTypeHierarchy + supertypes).
-
-        :param relative_file_path: The relative path of the file containing the type
-        :param line: The 0-indexed line number of the type
-        :param column: The 0-indexed column number of the type
-        :return: List of supertype items
-        """
-        if not self.server_started:
-            raise SolidLSPException("Language Server not started")
-
-        uri = PathUtils.path_to_uri(os.path.join(self.repository_root_path, relative_file_path))
-        with self.open_file(relative_file_path):
-            items = self.server.send.prepare_type_hierarchy({"textDocument": {"uri": uri}, "position": {"line": line, "character": column}})
-            if not items:
-                return []
-            result: list[lsp_types.TypeHierarchyItem] = []
-            for item in items:
-                supertypes = self.server.send.type_hierarchy_supertypes({"item": item})
-                if supertypes:
-                    result.extend(supertypes)
-            return result
-
-    def request_type_hierarchy_subtypes(self, relative_file_path: str, line: int, column: int) -> list[lsp_types.TypeHierarchyItem]:
-        """
-        Finds all subtypes (children) of the type at the given position.
-
-        Uses the LSP typeHierarchy/subtypes request (prepareTypeHierarchy + subtypes).
-
-        :param relative_file_path: The relative path of the file containing the type
-        :param line: The 0-indexed line number of the type
-        :param column: The 0-indexed column number of the type
-        :return: List of subtype items
-        """
-        if not self.server_started:
-            raise SolidLSPException("Language Server not started")
-
-        uri = PathUtils.path_to_uri(os.path.join(self.repository_root_path, relative_file_path))
-        with self.open_file(relative_file_path):
-            items = self.server.send.prepare_type_hierarchy({"textDocument": {"uri": uri}, "position": {"line": line, "character": column}})
-            if not items:
-                return []
-            result: list[lsp_types.TypeHierarchyItem] = []
-            for item in items:
-                subtypes = self.server.send.type_hierarchy_subtypes({"item": item})
-                if subtypes:
-                    result.extend(subtypes)
-            return result
-
-    def _get_symbol_range_index(self, relative_file_path: str, file_data: LSPFileBuffer) -> SymbolRangeIndex:
-        """
-        ... return a cached :py:class:`SymbolRangeIndex` for the file, rebuilding on content change.
-
-        The cache is lazy-initialised on the first lookup to avoid adding a
-        new attribute to ``__init__`` (which is customised by every
-        language-server subclass). Staleness is detected via the same
-        ``content_hash`` comparison used by
-        :py:attr:`_document_symbols_cache`, so content mutations signalled via
-        ``didChange`` invalidate the entry on next access.
-
-        :param relative_file_path: path of the file whose symbols to index.
-        :param file_data: already-opened buffer for the file, used for the
-            content-hash lookup and to avoid re-reading the file from disk.
-        :return: the cached or newly built ``SymbolRangeIndex`` for the file.
-        """
-        # lazy-init the cache dict so this method is safe to add without touching __init__
-        cache: dict[str, tuple[str, SymbolRangeIndex]] = self.__dict__.setdefault("_symbol_range_index_cache", {})
-
-        # cache lookup: same hash → return cached index, else rebuild
-        entry = cache.get(relative_file_path)
-        if entry is not None:
-            cached_hash, cached_index = entry
-            if cached_hash == file_data.content_hash:
-                return cached_index
-
-        # cache miss: rebuild after normalising each symbol's location to the current workspace path
-        document_symbols = self.request_document_symbols(relative_file_path, file_buffer=file_data)
-        absolute_file_path = str(PurePath(self.repository_root_path, relative_file_path))
-        for symbol in document_symbols.iter_symbols():
-            if "location" not in symbol:
-                symbol_range = symbol["range"]
-                symbol["location"] = ls_types.Location(
-                    uri=f"file:/{absolute_file_path}",
-                    range=symbol_range,
-                    absolutePath=absolute_file_path,
-                    relativePath=relative_file_path,
-                )
-            else:
-                location = symbol["location"]
-                assert "range" in location
-                location["absolutePath"] = absolute_file_path
-                location["relativePath"] = relative_file_path
-                location["uri"] = Path(absolute_file_path).as_uri()
-
-        # container kinds preserved from the original request_containing_symbol (Python-focused).
-        container_symbol_kinds = {ls_types.SymbolKind.Method, ls_types.SymbolKind.Function, ls_types.SymbolKind.Class}
-        index = SymbolRangeIndex(document_symbols, container_symbol_kinds)
-        cache[relative_file_path] = (file_data.content_hash, index)
-        return index
-
     def request_containing_symbol(
         self,
         relative_file_path: str,
@@ -2236,8 +2684,9 @@ class SolidLanguageServer(ABC):
     ) -> ls_types.UnifiedSymbolInformation | None:
         """
         Finds the first symbol containing the position for the given file.
-        For Python, container symbols are considered to be those with kinds corresponding to
-        functions, methods, or classes (typically: Function (12), Method (6), Class (5)).
+        Container symbols are those with kinds corresponding to functions, methods, classes, structs
+        and interfaces, as well as variables and constants (which may be one-liners, e.g. members
+        of a Go ``const`` group).
 
         The method operates as follows:
           - Request the document symbols for the file.
@@ -2249,7 +2698,7 @@ class SolidLanguageServer(ABC):
             among those above the given line.
           - If no container candidates are found, return None.
 
-        :param relative_file_path: The relative path to the Python file.
+        :param relative_file_path: The relative path to the file.
         :param line: The 0-indexed line number.
         :param column: The 0-indexed column (also called character). If not passed, the lookup will be based
             only on the line.
@@ -2260,25 +2709,82 @@ class SolidLanguageServer(ABC):
         :param include_body: Whether to include the body of the symbol in the result.
         :return: The container symbol (if found) or None.
         """
-        # empty-line guard: the document-symbol shape is unreliable on blank lines, so we short-circuit early.
-        with self.open_file(relative_file_path) as file_data:
-            absolute_file_path = str(PurePath(self.repository_root_path, relative_file_path))
+        # checking if the line is empty, unfortunately ugly and duplicating code, but I don't want to refactor
+        with self.open_file(relative_file_path):
+            absolute_file_path = os.path.join(self.repository_root_path, relative_file_path)
+            if self._path_contains_dots(relative_file_path):
+                absolute_file_path = str(pathlib.Path(absolute_file_path).resolve())
             content = FileUtils.read_file(absolute_file_path, self._encoding)
             if content.split("\n")[line].strip() == "":
                 log.error(f"Passing empty lines to request_container_symbol is currently not supported, {relative_file_path=}, {line=}")
                 return None
 
-            # delegate the lookup to the cached per-file range index (O(candidates-up-to-line) per call)
-            index = self._get_symbol_range_index(relative_file_path, file_data)
-            containing_symbol = index.find_innermost_container(line, column, strict)
-            if containing_symbol is None:
-                return None
+        document_symbols = self.request_document_symbols(relative_file_path)
 
-            # symbol-body materialisation happens under the open-file context so the underlying
-            # buffer is still readable for SymbolBodyFactory.
+        # make jedi and pyright api compatible
+        # the former has no location, the later has no range
+        # we will just always add location of the desired format to all symbols
+        for symbol in document_symbols.iter_symbols():
+            if "location" not in symbol:
+                range = symbol["range"]
+                location = ls_types.Location(
+                    uri=f"file:/{absolute_file_path}",
+                    range=range,
+                    absolutePath=absolute_file_path,
+                    relativePath=relative_file_path,
+                )
+                symbol["location"] = location
+            else:
+                location = symbol["location"]
+                assert "range" in location
+                location["absolutePath"] = absolute_file_path
+                location["relativePath"] = relative_file_path
+                location["uri"] = Path(absolute_file_path).as_uri()
+
+        def is_position_in_range(line: int, range_d: ls_types.Range) -> bool:
+            start = range_d["start"]
+            end = range_d["end"]
+
+            column_condition = True
+            if strict:
+                line_condition = end["line"] >= line > start["line"]
+                if column is not None and line == start["line"]:
+                    column_condition = column > start["character"]
+            else:
+                line_condition = end["line"] >= line >= start["line"]
+                if column is not None and line == start["line"]:
+                    column_condition = column >= start["character"]
+            return line_condition and column_condition
+
+        def is_multiline_container(s):
+            return SymbolKind.is_container(s["kind"]) and s["location"]["range"]["start"]["line"] != s["location"]["range"]["end"]["line"]
+
+        def is_variable_or_constant(s):
+            return s["kind"] in {ls_types.SymbolKind.Variable, ls_types.SymbolKind.Constant}
+
+        # Only consider containers that are not one-liners (otherwise we may get imports)
+        # variables and constants are admitted even as one-liners (e.g. members of a Go const group)
+        candidate_containers = [s for s in document_symbols.iter_symbols() if is_multiline_container(s) or is_variable_or_constant(s)]
+
+        if not candidate_containers:
+            return None
+
+        # From the candidates, find those whose range contains the given position.
+        containing_symbols = []
+        for symbol in candidate_containers:
+            s_range = symbol["location"]["range"]
+            if not is_position_in_range(line, s_range):
+                continue
+            containing_symbols.append(symbol)
+
+        if containing_symbols:
+            # Return the one with the greatest starting position (i.e. the innermost container).
+            containing_symbol = max(containing_symbols, key=lambda s: s["location"]["range"]["start"]["line"])
             if include_body:
                 containing_symbol["body"] = self.create_symbol_body(containing_symbol, factory=body_factory)
             return containing_symbol
+        else:
+            return None
 
     def request_container_of_symbol(
         self, symbol: ls_types.UnifiedSymbolInformation, include_body: bool = False
@@ -2320,7 +2826,9 @@ class SolidLanguageServer(ABC):
         return definitions[0]
 
     def _get_document_symbols_with_locations(self, relative_file_path: str) -> list[ls_types.UnifiedSymbolInformation]:
-        absolute_file_path = str(PurePath(self.repository_root_path, relative_file_path))
+        abs_path = os.path.join(self.repository_root_path, relative_file_path)
+        if self._path_contains_dots(relative_file_path):
+            abs_path = str(pathlib.Path(abs_path).resolve())
         document_symbols = self.request_document_symbols(relative_file_path)
         symbols = list(document_symbols.iter_symbols())
 
@@ -2328,9 +2836,9 @@ class SolidLanguageServer(ABC):
         # symbol exposes a normalized location/range in the current workspace.
         for symbol in symbols:
             location = symbol["location"]
-            location["absolutePath"] = absolute_file_path
+            location["absolutePath"] = abs_path
             location["relativePath"] = relative_file_path
-            location["uri"] = Path(absolute_file_path).as_uri()
+            location["uri"] = self._resolve_file_uri(relative_file_path)
         return symbols
 
     @staticmethod
@@ -2576,13 +3084,14 @@ class SolidLanguageServer(ABC):
         Returns a fingerprint of any language server-specific aspects that result in changes
         to the high-level document symbol information.
 
-        Language servers must implement this method/change the return value
-          * whenever they change the `request_document_symbols` implementation to modify the returned content
-          * are reconfigured in a way that affects the returned contents (e.g. context-specific configuration
-            such as build flags or environment variables); configuration options can, in such cases, be
-            hashed together to produce a single fingerprint value.
+        Language servers must implement this method/change the return value if
+        the `_build_document_symbols_from_raw_symbols` implementation (or any of the methods called by it)
+        are changed to modify the returned content.
 
-        Whenever the value changes, the document symbols cache will be invalidated and re-populated.
+        Whenever the value changes, the high-level document symbols cache will be invalidated and re-populated.
+
+        Note: For aspects that change the values returned by the language server itself,
+        change `_raw_document_symbols_cache_fingerprint` instead.
 
         The value must be hashable and safe for inclusion in cache version tuples.
         E.g. use an integer, a string or a tuple of integers/strings.
@@ -2597,12 +3106,14 @@ class SolidLanguageServer(ABC):
         """
         Return the version for the document symbols cache.
 
-        Incorporates cache context fingerprint if provided by the language server.
+        Incorporates cache fingerprints if provided by the language server.
         """
-        fingerprint = self._document_symbols_cache_fingerprint()
-        if fingerprint is not None:
-            return (self.DOCUMENT_SYMBOL_CACHE_VERSION, fingerprint)
-        return self.DOCUMENT_SYMBOL_CACHE_VERSION
+        version: list[Hashable] = [self.DOCUMENT_SYMBOL_CACHE_VERSION]
+        high_level_fingerprint = self._document_symbols_cache_fingerprint()
+        if high_level_fingerprint is not None:
+            version.append(high_level_fingerprint)
+        version.append(self._raw_document_symbols_cache_version())
+        return tuple(version)
 
     def _save_raw_document_symbols_cache(self) -> None:
         cache_file = self.cache_dir / self.RAW_DOCUMENT_SYMBOL_CACHE_FILENAME
@@ -2622,47 +3133,42 @@ class SolidLanguageServer(ABC):
                 e,
             )
 
-    def _raw_document_symbols_cache_version(self) -> tuple[Hashable, ...]:
-        base_version: tuple[Hashable, ...] = (self.RAW_DOCUMENT_SYMBOLS_CACHE_VERSION, self._ls_specific_raw_document_symbols_cache_version)
-        fingerprint = self._document_symbols_cache_fingerprint()
+    def _raw_document_symbols_cache_fingerprint(self) -> Hashable | None:
+        """
+        Returns a fingerprint of any language server-specific aspects that result in changes
+        to the raw document symbol information produced by the language server.
+
+        Language servers must implement this method/change the return value whenever they
+        are reconfigured or otherwise affected in a way that affects the contents returned
+        by the language server for document symbol requests (raw request result).
+        For example, this could be context-specific configuration such as build flags or environment variables;
+        configuration options can, in such cases, be hashed together to produce a single fingerprint value.
+
+        Whenever the value changes, the raw document symbols cache (as well as the high-level cache that
+        builds on the raw results) will be invalidated and re-populated.
+
+        The value must be hashable and safe for inclusion in cache version tuples.
+        E.g. use an integer, a string or a tuple of integers/strings.
+
+        For example, if there is a single aspect being considered, use an integer to reflect the version
+        of this aspect (incrementing it whenever the implementation changes).
+        If multiple versioned aspects exist, use a tuple of versions, etc.
+        """
+        return None
+
+    def _raw_document_symbols_cache_version(self) -> Hashable:
+        base_version = (self.RAW_DOCUMENT_SYMBOLS_CACHE_VERSION, self._ls_specific_raw_document_symbols_cache_version)
+        fingerprint = self._raw_document_symbols_cache_fingerprint()
         if fingerprint is not None:
             return (*base_version, fingerprint)
         return base_version
 
     def _load_raw_document_symbols_cache(self) -> None:
         cache_file = self.cache_dir / self.RAW_DOCUMENT_SYMBOL_CACHE_FILENAME
-
-        if not cache_file.exists():
-            # check for legacy cache to load to migrate
-            legacy_cache_file = self.cache_dir / self.RAW_DOCUMENT_SYMBOL_CACHE_FILENAME_LEGACY_FALLBACK
-            if legacy_cache_file.exists():
-                try:
-                    legacy_cache: dict[
-                        str, tuple[str, tuple[list[ls_types.UnifiedSymbolInformation], list[ls_types.UnifiedSymbolInformation]]]
-                    ] = load_pickle(legacy_cache_file)
-                    log.info("Migrating legacy document symbols cache with %d entries", len(legacy_cache))
-                    num_symbols_migrated = 0
-                    migrated_cache = {}
-                    for cache_key, (file_hash, (all_symbols, root_symbols)) in legacy_cache.items():
-                        if cache_key.endswith("-True"):  # include_body=True
-                            new_cache_key = cache_key[:-5]
-                            migrated_cache[new_cache_key] = (file_hash, root_symbols)
-                            num_symbols_migrated += len(all_symbols)
-                    log.info("Migrated %d document symbols from legacy cache", num_symbols_migrated)
-                    self._raw_document_symbols_cache = migrated_cache  # type: ignore
-                    self._raw_document_symbols_cache_is_modified = True
-                    self._save_raw_document_symbols_cache()
-                    legacy_cache_file.unlink()
-                    return
-                except Exception as e:
-                    log.error("Error during cache migration: %s", e)
-                    return
-
-        # load existing cache (if any)
         if cache_file.exists():
             log.info("Loading document symbols cache from %s", cache_file)
             try:
-                saved_cache = load_cache(str(cache_file), self._raw_document_symbols_cache_version())
+                saved_cache = load_cache(str(cache_file), self._raw_document_symbols_cache_version(), loader=self._cache_loader)
                 if saved_cache is not None:
                     self._raw_document_symbols_cache = saved_cache
                     log.info(f"Loaded {len(self._raw_document_symbols_cache)} entries from raw document symbols cache.")
@@ -2697,7 +3203,7 @@ class SolidLanguageServer(ABC):
         if cache_file.exists():
             log.info("Loading document symbols cache from %s", cache_file)
             try:
-                saved_cache = load_cache(str(cache_file), self._document_symbols_cache_version())
+                saved_cache = load_cache(str(cache_file), self._document_symbols_cache_version(), loader=self._cache_loader)
                 if saved_cache is not None:
                     self._document_symbols_cache = saved_cache
                     log.info(f"Loaded {len(self._document_symbols_cache)} entries from document symbols cache.")
@@ -2758,9 +3264,7 @@ class SolidLanguageServer(ABC):
         :return: A WorkspaceEdit containing the changes needed to rename the symbol, or None if rename is not supported
         """
         params = RenameParams(
-            textDocument=ls_types.TextDocumentIdentifier(
-                uri=pathlib.Path(os.path.join(self.repository_root_path, relative_file_path)).as_uri()
-            ),
+            textDocument=ls_types.TextDocumentIdentifier(uri=self._resolve_file_uri(relative_file_path)),
             position=ls_types.Position(line=line, character=column),
             newName=new_name,
         )
@@ -2770,85 +3274,22 @@ class SolidLanguageServer(ABC):
 
     def apply_text_edits_to_file(self, relative_path: str, edits: list[ls_types.TextEdit]) -> None:
         """
-        Apply a list of text edits to a file in a single in-memory pass.
-
-        The previous implementation ran ``delete_text_between_positions`` and
-        ``insert_text_at_position`` per edit. Each call re-scanned the buffer via
-        ``get_index_from_line_col`` (O(N)), so E edits cost O(E*N). For large
-        files with many edits (common during refactors) this dominated runtime.
-
-        Now: precompute line-start offsets once (O(N)), sort edits ascending by
-        start position, verify they don't overlap, and rebuild the new buffer in
-        a single forward pass (O(N + total_new_text)). LSP is notified once with
-        all content changes in reverse order, which keeps each change's range
-        coordinates valid against the incrementally-updated document.
+        Apply a list of text edits to a file.
 
         :param relative_path: The relative path of the file to edit
-        :param edits: List of TextEdit dictionaries to apply; must not overlap
+        :param edits: List of TextEdit dictionaries to apply
         """
-        if not edits:
-            return
-
         with self.open_file(relative_path):
-            if not self.server_started:
-                log.error("apply_text_edits_to_file called before Language Server started")
-                raise SolidLSPException("Language Server not started")
+            # Sort edits by position (latest first) to avoid position shifts
+            sorted_edits = sorted(edits, key=lambda e: (e["range"]["start"]["line"], e["range"]["start"]["character"]), reverse=True)
 
-            absolute_file_path = str(PurePath(self.repository_root_path, relative_path))
-            uri = pathlib.Path(absolute_file_path).as_uri()
-            assert uri in self.open_file_buffers, f"File buffer missing for {relative_path}"
-            file_buffer = self.open_file_buffers[uri]
-            original_contents = file_buffer.contents
-
-            # sort ascending so we can walk the buffer forward in one pass
-            sorted_edits = sorted(
-                edits,
-                key=lambda e: (e["range"]["start"]["line"], e["range"]["start"]["character"]),
-            )
-
-            # precompute line-start offsets on the original buffer once (O(N))
-            line_starts = TextUtils.compute_line_starts(original_contents)
-
-            def _to_index(pos: ls_types.Position) -> int:
-                line = pos["line"]
-                if line < 0 or line >= len(line_starts):
-                    raise SolidLSPException(
-                        f"Text edit references line {line} which is outside {relative_path} (has {len(line_starts)} lines)"
-                    )
-                return line_starts[line] + pos["character"]
-
-            # rebuild the new contents in a single forward pass (O(N + total_new_text))
-            parts: list[str] = []
-            cursor_idx = 0
             for edit in sorted_edits:
-                start_idx = _to_index(edit["range"]["start"])
-                end_idx = _to_index(edit["range"]["end"])
-                if start_idx < cursor_idx:
-                    raise SolidLSPException(f"Overlapping text edits in {relative_path} at line {edit['range']['start']['line']}")
-                if end_idx < start_idx:
-                    raise SolidLSPException(f"Text edit end precedes its start in {relative_path}")
-                parts.append(original_contents[cursor_idx:start_idx])
-                parts.append(edit["newText"])
-                cursor_idx = end_idx
-            parts.append(original_contents[cursor_idx:])
-            new_contents = "".join(parts)
+                start_pos = ls_types.Position(line=edit["range"]["start"]["line"], character=edit["range"]["start"]["character"])
+                end_pos = ls_types.Position(line=edit["range"]["end"]["line"], character=edit["range"]["end"]["character"])
 
-            # commit buffer state and send a single LSP notification; changes must be
-            # listed in reverse order so each range stays valid against the doc as
-            # prior changes are applied by the server
-            file_buffer.version += 1
-            file_buffer.contents = new_contents
-            self.server.notify.did_change_text_document(
-                {
-                    LSPConstants.TEXT_DOCUMENT: {  # type: ignore
-                        LSPConstants.VERSION: file_buffer.version,
-                        LSPConstants.URI: file_buffer.uri,
-                    },
-                    LSPConstants.CONTENT_CHANGES: [
-                        {LSPConstants.RANGE: edit["range"], "text": edit["newText"]} for edit in reversed(sorted_edits)
-                    ],
-                }
-            )
+                # Delete the old text and insert the new text
+                self.delete_text_between_positions(relative_path, start_pos, end_pos)
+                self.insert_text_at_position(relative_path, start_pos["line"], start_pos["character"], edit["newText"])
 
     def start(self) -> "SolidLanguageServer":
         """
@@ -2856,8 +3297,19 @@ class SolidLanguageServer(ABC):
 
         :return: self for method chaining
         """
-        log.info(f"Starting language server with language {self.language_server.language} for {self.language_server.repository_root_path}")
-        self._start_server_process()
+        log.info(f"Starting language server {self.language_server.ls_id} for {self.language_server.repository_root_path}")
+        self.server_started = True
+        try:
+            self._start_server()
+        except Exception:
+            # `_start_server()` may raise after already spawning the underlying process (a
+            # capability assertion or an initialize() timeout firing post-spawn). Stop it here
+            # so a failed start never leaves an orphaned process behind, regardless of caller.
+            if self.is_running():
+                self.stop()
+            else:
+                self.server_started = False
+            raise
         return self
 
     def stop(self, shutdown_timeout: float = 2.0) -> None:
@@ -2868,16 +3320,18 @@ class SolidLanguageServer(ABC):
         :param shutdown_timeout: time, in seconds, to wait for the server to shutdown gracefully before killing it
         """
         try:
-            self._shutdown(timeout=shutdown_timeout)
+            self.server.stop(timeout=shutdown_timeout)
         except Exception as e:
             log.warning(f"Exception while shutting down language server: {e}")
+        finally:
+            self.server_started = False
 
     @property
     def language_server(self) -> Self:
         return self
 
     @property
-    def handler(self) -> LanguageServerProcess:
+    def handler(self) -> LanguageServerInterface:
         """Access the underlying language server handler.
 
         Useful for advanced operations like sending custom commands
@@ -2887,3 +3341,46 @@ class SolidLanguageServer(ABC):
 
     def is_running(self) -> bool:
         return self.server.is_running()
+
+    def _create_initialize_params_builder(self) -> InitializeParamsBuilder:
+        return DefaultInitializeParamsBuilder(self)
+
+    @abstractmethod
+    def _create_base_initialize_params(self) -> dict | InitializeParams:
+        """
+        Subclasses should override this method to provide server-specific InitializeParams settings,
+        which provide the basis for the InitializeParams object sent to the language server during initialization.
+
+        The returned dictionary is passed to the builder constructed by _create_initialize_params_builder()
+        in order to create the final InitializeParams object.
+
+        The default builder implementation already sets the following keys, so implementations of this method
+        should not set them:
+
+        - processId
+        - rootPath
+        - rootUri
+        - clientInfo
+        - workspaceFolders
+
+        :return: the base InitializeParams settings
+        """
+
+    def _create_initialize_params(self) -> InitializeParams:
+        """
+        Create the InitializeParams object to send to the language server during initialization.
+        """
+        params = self._create_initialize_params_builder().with_base_options(self._create_base_initialize_params()).build()
+        self._register_content_modified_retry_methods(params)
+        return params
+
+    def _register_content_modified_retry_methods(self, params: InitializeParams) -> None:
+        """
+        Reads back `general.staleRequestSupport.retryOnContentModified` from the InitializeParams
+        we are about to send and registers it with the underlying `LanguageServerInterface`, so
+        that `send_request` only retries `ContentModified` (-32801) responses for methods we have
+        actually told the server we will retry (see `LanguageServerInterface.send_request`).
+        """
+        general_capabilities = cast(dict, params.get("capabilities", {})).get("general", {})
+        retry_methods = general_capabilities.get("staleRequestSupport", {}).get("retryOnContentModified", [])
+        self.server.set_content_modified_retry_methods(retry_methods)

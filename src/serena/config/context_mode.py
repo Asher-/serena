@@ -1,6 +1,7 @@
 """
 Context and Mode configuration loader
 """
+# SPDX-License-Identifier: GPL-3.0-or-later
 
 import os
 from dataclasses import dataclass, field
@@ -11,7 +12,7 @@ import yaml
 from sensai.util import logging
 from sensai.util.string import ToStringMixin
 
-from serena.config.serena_config import SerenaPaths, ToolInclusionDefinition
+from serena.config.serena_config import ApiInclusionDefinition, SerenaPaths, ToolInclusionDefinition
 from serena.constants import (
     DEFAULT_CONTEXT,
     INTERNAL_MODE_YAMLS_DIR,
@@ -26,8 +27,12 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def looks_like_yaml_path(s: str) -> bool:
+    return os.sep in s or (os.altsep and os.altsep in s) or s.lower().endswith((".yml", ".yaml"))
+
+
 @dataclass(kw_only=True)
-class SerenaAgentMode(ToolInclusionDefinition, ToStringMixin):
+class SerenaAgentMode(ToolInclusionDefinition, ApiInclusionDefinition, ToStringMixin):
     """Represents a mode of operation for the agent, typically read off a YAML file.
     An agent can be in multiple modes simultaneously as long as they are not mutually exclusive.
     The modes can be adjusted after the agent is running, for example for switching from planning to editing.
@@ -53,7 +58,13 @@ class SerenaAgentMode(ToolInclusionDefinition, ToStringMixin):
         """Print an overview of the mode."""
         print(f"{self.name}:\n {self.description}")
         if self.excluded_tools:
-            print(" excluded tools:\n  " + ", ".join(sorted(self.excluded_tools)))
+            print(" excluded tools:\n    " + ", ".join(sorted(self.excluded_tools)))
+        if self.included_optional_tools:
+            print(" included optional tools:\n    " + ", ".join(sorted(self.included_optional_tools)))
+        if self.fixed_tools:
+            print(" fixed tools:\n    " + ", ".join(sorted(self.fixed_tools)))
+        if self.prompt:
+            print(" defines initial prompt")
 
     @classmethod
     def from_yaml(cls, yaml_path: str | Path) -> Self:
@@ -118,21 +129,26 @@ class SerenaAgentMode(ToolInclusionDefinition, ToStringMixin):
 
     @classmethod
     def load(cls, name_or_path: str | Path) -> Self:
-        # Check if it's a file path that exists
-        path = Path(name_or_path)
-        if path.exists() and path.is_file():
-            return cls.from_yaml(name_or_path)
+        # If it is a path or looks like a path, load from file
+        if isinstance(name_or_path, Path) or looks_like_yaml_path(str(name_or_path)):
+            path = Path(name_or_path)
+            if path.exists() and path.is_file():
+                return cls.from_yaml(name_or_path)
+            else:
+                raise FileNotFoundError(f"Mode file not found: {path.resolve()}")
 
-        # If it looks like a file path but doesn't exist, raise FileNotFoundError
-        name_or_path_str = str(name_or_path)
-        if os.sep in name_or_path_str or (os.altsep and os.altsep in name_or_path_str) or name_or_path_str.endswith((".yml", ".yaml")):
-            raise FileNotFoundError(f"Mode file not found: {path.resolve()}")
-
+        # load from name
         return cls.from_name(str(name_or_path))
+
+    def has_prompt(self) -> bool:
+        """
+        :return: whether this mode defines a prompt
+        """
+        return bool(self.prompt and self.prompt.strip())
 
 
 @dataclass(kw_only=True)
-class SerenaAgentContext(ToolInclusionDefinition, ToStringMixin):
+class SerenaAgentContext(ToolInclusionDefinition, ApiInclusionDefinition, ToStringMixin):
     """Represents a context where the agent is operating (an IDE, a chat, etc.), typically read off a YAML file.
     An agent can only be in a single context at a time.
     The contexts cannot be changed after the agent is running.
@@ -167,6 +183,11 @@ class SerenaAgentContext(ToolInclusionDefinition, ToStringMixin):
     If set to true and a project is provided at startup, the set of tools is limited to those required by the project's
     concrete configuration, and other tools are excluded completely, allowing the set of tools to be minimal.
     The `activate_project` tool will, therefore, be disabled in this case, as project switching is not allowed.
+    """
+
+    structured_tool_output: bool | None = None
+    """
+    whether to use structured output for tools (None = auto)
     """
 
     def _tostring_includes(self) -> list[str]:
@@ -227,15 +248,13 @@ class SerenaAgentContext(ToolInclusionDefinition, ToStringMixin):
 
     @classmethod
     def load(cls, name_or_path: str | Path) -> Self:
-        # Check if it's a file path that exists
-        path = Path(name_or_path)
-        if path.exists() and path.is_file():
-            return cls.from_yaml(name_or_path)
-
-        # If it looks like a file path but doesn't exist, raise FileNotFoundError
-        name_or_path_str = str(name_or_path)
-        if os.sep in name_or_path_str or (os.altsep and os.altsep in name_or_path_str) or name_or_path_str.endswith((".yml", ".yaml")):
-            raise FileNotFoundError(f"Context file not found: {path.resolve()}")
+        # If it is a path or looks like a path, load from file
+        if isinstance(name_or_path, Path) or looks_like_yaml_path(str(name_or_path)):
+            path = Path(name_or_path)
+            if path.exists() and path.is_file():
+                return cls.from_yaml(name_or_path)
+            else:
+                raise FileNotFoundError(f"Context file not found: {path.resolve()}")
 
         return cls.from_name(str(name_or_path))
 

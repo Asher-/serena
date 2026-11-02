@@ -12,6 +12,7 @@ import pytest
 from serena.project import Project
 from serena.util.text_utils import LineType
 from solidlsp import SolidLanguageServer
+from test.conftest import PYTHON_LANGUAGE_BACKENDS
 from test.solidlsp.conftest import PYTHON_BACKEND_LANGUAGES, format_symbol_for_assert, has_malformed_name, request_all_symbols
 
 
@@ -78,6 +79,26 @@ class TestPythonLanguageServerBasics:
         sel_start = create_user_symbol["selectionRange"]["start"]
         references = language_server.request_references(file_path, sel_start["line"], sel_start["character"])
         assert len(references) > 1, "Should get valid references for create_user (using selectionRange if present)"
+
+    @pytest.mark.parametrize("language_server", PYTHON_LANGUAGE_BACKENDS, indirect=True)
+    def test_request_text_document_diagnostics_with_filters(self, language_server: SolidLanguageServer) -> None:
+        file_path = os.path.join("test_repo", "diagnostics_sample.py")
+
+        diagnostics = language_server.request_text_document_diagnostics(file_path)
+        assert len(diagnostics) >= 2
+        diagnostic_messages = [diagnostic["message"] for diagnostic in diagnostics]
+        assert any("missing_user" in message for message in diagnostic_messages), diagnostic_messages
+        assert any("undefined_name" in message for message in diagnostic_messages), diagnostic_messages
+
+        factory_diagnostics = language_server.request_text_document_diagnostics(file_path, start_line=3, end_line=5, min_severity=1)
+        factory_messages = [diagnostic["message"] for diagnostic in factory_diagnostics]
+        assert factory_messages, "Expected diagnostics in broken_factory range"
+        assert all("missing_user" in message for message in factory_messages), factory_messages
+
+        consumer_diagnostics = language_server.request_text_document_diagnostics(file_path, start_line=7, end_line=10, min_severity=1)
+        consumer_messages = [diagnostic["message"] for diagnostic in consumer_diagnostics]
+        assert consumer_messages, "Expected diagnostics in broken_consumer range"
+        assert all("undefined_name" in message for message in consumer_messages), consumer_messages
 
 
 class TestProjectBasics:
@@ -193,28 +214,28 @@ class TestProjectBasics:
         """Test search_files_for_pattern with various patterns and glob filters."""
         # Test 1: Search for class definitions across all files
         class_pattern = r"class\s+\w+\s*(?:\([^{]*\)|:)"
-        matches = project.search_source_files_for_pattern(class_pattern)
+        matches = project.search_project_files_for_pattern(class_pattern)
         assert len(matches) > 0
         # Should find multiple classes like User, Item, BaseModel, etc.
         assert len(matches) >= 5
 
         # Test 2: Search for specific class with include glob
         user_class_pattern = r"class\s+User\s*(?:\([^{]*\)|:)"
-        matches = project.search_source_files_for_pattern(user_class_pattern, paths_include_glob="**/models.py")
+        matches = project.search_project_files_for_pattern(user_class_pattern, paths_include_glob="**/models.py")
         assert len(matches) == 1  # Should only find User class in models.py
         assert matches[0].source_file_path is not None
         assert "models.py" in matches[0].source_file_path
 
         # Test 3: Search for method definitions with exclude glob
         method_pattern = r"def\s+\w+\s*\([^)]*\):"
-        matches = project.search_source_files_for_pattern(method_pattern, paths_exclude_glob="**/models.py")
+        matches = project.search_project_files_for_pattern(method_pattern, paths_exclude_glob="**/models.py")
         assert len(matches) > 0
         # Should find methods in services.py but not in models.py
         assert all(match.source_file_path is not None and "models.py" not in match.source_file_path for match in matches)
 
         # Test 4: Search for specific method with both include and exclude globs
         create_user_pattern = r"def\s+create_user\s*\([^)]*\)(?:\s*->[^:]+)?:"
-        matches = project.search_source_files_for_pattern(
+        matches = project.search_project_files_for_pattern(
             create_user_pattern, paths_include_glob="**/*.py", paths_exclude_glob="**/models.py"
         )
         assert len(matches) == 1  # Should only find create_user in services.py
@@ -223,7 +244,7 @@ class TestProjectBasics:
 
         # Test 5: Search for a pattern that should appear in multiple files
         init_pattern = r"def\s+__init__\s*\([^)]*\):"
-        matches = project.search_source_files_for_pattern(init_pattern)
+        matches = project.search_project_files_for_pattern(init_pattern)
         assert len(matches) > 1  # Should find __init__ in multiple classes
         # Should find __init__ in both models.py and services.py
         assert any(match.source_file_path is not None and "models.py" in match.source_file_path for match in matches)
@@ -231,7 +252,7 @@ class TestProjectBasics:
 
         # Test 6: Search with a pattern that should have no matches
         no_match_pattern = r"def\s+this_method_does_not_exist\s*\([^)]*\):"
-        matches = project.search_source_files_for_pattern(no_match_pattern)
+        matches = project.search_project_files_for_pattern(no_match_pattern)
         assert len(matches) == 0
 
     @pytest.mark.parametrize("language_server", PYTHON_BACKEND_LANGUAGES, indirect=True)

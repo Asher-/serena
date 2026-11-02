@@ -10,6 +10,7 @@ Adding a new language involves:
 2. **Language Registration** - Adding the language to enums and configurations  
 3. **Test Repository** - Creating a minimal test project
 4. **Test Suite** - Writing comprehensive tests
+5. **Documentation** - Updating the user-facing language lists and the changelog
 
 ## Step 1: Language Server Implementation
 
@@ -33,50 +34,123 @@ To implement a new language server using the DependencyProvider pattern:
     ```
     The resource dir that is passed is the directory in which installed dependencies should be stored!
 
-**Base Classes:**
+**Base Classes** (choose the most specific one that fits):
 
-- **`LanguageServerDependencyProviderSinglePath`** - For language servers with a single core dependency (e.g., an executable or JAR file)
-  - Provides automatic support for the `ls_path` custom setting, allowing users to override the core dependency path (if they have it installed it themselves)
+- **`LanguageServerDependencyProviderUvx`** - For language servers distributed as a PyPI package, run on demand
+  via `uvx` / `uv x` (no installation step to implement)
+  - Simply instantiate it with the package name, pinned default version, entrypoint (console script) and optional `extra_args`;
+    the version can be overridden by the user via the configured `version_setting_key` custom setting
+  - Reference implementation: `PyrightServer`
+
+- **`LanguageServerDependencyProviderBaseCommand`** - For the common case where the
+  launch command is constructed from a *base command* (which the user can override via custom settings; handled generically)
+  - Implement `_create_default_base_command()` to return the default base command (executable + args), downloading/installing
+    dependencies beforehand if necessary
+  - Implement `_create_launch_command_from_base_command(base_command)` to add any further arguments, producing the
+    final launch command
+
+- **`LanguageServerDependencyProviderSinglePath`** - Alternative to inheriting from `...BaseCommand` directly for the case
+  of a single core dependency (e.g., an executable or JAR file); use when the single path is not used directly as a base command
+  otherwise inherit from `...BaseCommand` directly
   - Implement `_get_or_install_core_dependency()` to return the path to the core dependency, downloading/installing it automatically if necessary
   - Implement `_create_launch_command(core_path)` to build the full command from the core path
-  - Reference implementations: `TypeScriptLanguageServer`, `Intelephense`, `ClojureLSP`, `ClangdLanguageServer`, `PyrightServer`
+  - Reference implementations: `TypeScriptLanguageServer`, `Intelephense`, `ClojureLSP`, `ClangdLanguageServer`
 
-- **`LanguageServerDependencyProvider`** - The base class, which can be directly inherited from for complex cases with multiple dependencies or custom setup
-  - Implement `create_launch_command()` directly
+- **`LanguageServerDependencyProvider`** - The root base class, for complex cases with multiple dependencies or custom setup
+  - Implement `create_launch_command()` directly (note: no automatic support for user-level launch command overrides in this case)
   - Reference implementations: `EclipseJDTLS`, `CSharpLanguageServer`, `MatlabLanguageServer`
 
-**Implementation Pointers::**
-  - When returning the command, prefer the list-based representation for robustness
+**Implementation Pointers:**
   - Override `create_launch_command_env` if the launch command needs environment variables to be set (defaults to `{}` in the base implementation)
+  - When calling subprocesses, e.g. to install dependencies, do not use `subprocess.run` directly; instead, use the `subprocess_run` helper function from `solidlsp.util.subprocess_util`
+  - **Do not use `assert` for runtime validations:** Python strips `assert` statements when run with `-O` (`python -O`). Environment checks (e.g. `node` or `npm` presence in `PATH`), directory/file verifications (e.g. SDK paths), and LSP capability handshake validations must use explicit `raise` statements (e.g., `SolidLSPException`, `FileNotFoundError`, or `RuntimeError`) rather than `assert` to avoid leaving the server half-initialized or failing silently.
 
 You should look at at least one existing implementation of each base class to understand how they work.
 
-### 1.2 LSP Initialization
+#### Downloading Runtime Dependencies
 
-Override initialization methods if needed:
+Use `DownloadedDependency` (in `solidlsp.dependency_provider`), which bundles the URL, 
+archive type, allowed hosts and checksum verification behind a single `download_to()` call:
 
 ```python
-def _get_initialize_params(self) -> InitializeParams:
-    """Return language-specific initialization parameters."""
+dep = DownloadedDependency(
+    url=f"https://example.org/foo-{version}-{platform}.zip",
+    archive_type="zip",              # optional FileUtils.ArchiveType for extraction
+    allowed_hosts=FOO_ALLOWED_HOSTS, # optional list of allowed hosts 
+)
+dep.download_to(target_dir)
+```
+
+Checksums for downloads live in a URL-keyed database, `src/solidlsp/resources/downloaded_dependency_hashes.json`,
+managed by `DownloadedDependencyHashDatabase`. 
+
+Consequences for your implementation:
+
+  * Build each dependency in a factory classmethod (`_create_dep_*`) that takes an
+    optional version and falls back to the pinned `DEFAULT_*` constant. 
+  * Add an `update_dep_hashes()` classmethod that constructs every dependency
+    and updates the hashes:
+    ```python
+    @classmethod
+    def update_dep_hashes(cls) -> None:
+        deps = [cls._create_dep_foo(), cls_._create_dep_bar(), ...]
+        with DownloadedDependencyHashDatabase.get_instance().update_context() as db:
+            for dep in deps:
+                db.update(dep)
+    ```
+    Hook a call to this method into `scripts/update_downloaded_dependency_hashes.py`, run that script,
+    and commit the resulting JSON changes.
+  * After bumping any pinned version, re-run the script. Add a NOTE comment next to
+    the version constants saying so; a stale database means unverified downloads
+    locally and a CI failure.
+  * Pass `verified=False` only for dependencies whose hash cannot be pinned by design
+    (e.g. a user-supplied version override).
+
+Reference implementation: `EclipseJDTLS.DependencyProvider` 
+
+Note that several older language servers still define hashes locally in constants and 
+call `FileUtils.download_and_extract_archive_verified`directly. Do not apply this legacy approach.
+
+### 1.2 LSP Initialization
+
+Override `_create_base_initialize_params` to provide server-specific initialization
+parameters. The common keys — `processId`, `rootPath`, `rootUri`, `clientInfo` and
+`workspaceFolders` — are set centrally by the `InitializeParamsBuilder` (see
+`src/solidlsp/initialize_params.py`), so your override MUST NOT set them. Just return
+the server-specific settings (typically `capabilities` and `initializationOptions`):
+
+```python
+def _create_base_initialize_params(self) -> dict:
+    """Return language-specific initialization parameters (server-specific keys only)."""
     return {
-        "processId": os.getpid(),
-        "rootUri": PathUtils.path_to_uri(self.repository_root_path),
         "capabilities": {
             # Language-specific capabilities
-        }
+        },
+        # "initializationOptions": {...},  # if the server needs them
     }
 
 def _start_server(self):
     """Start the language server with custom handlers."""
     # Set up notification handlers
     self.server.on_notification("window/logMessage", self._handle_log_message)
-    
-    # Start server and initialize
+
+    # Start server and initialize. Do NOT call _create_base_initialize_params directly;
+    # _create_initialize_params() wraps it with the builder to add the common keys.
     self.server.start()
-    init_response = self.server.send.initialize(self._get_initialize_params())
-    
+    init_response = self.server.send.initialize(self._create_initialize_params())
+
     self.server.notify.initialized({})
 ```
+
+Notes:
+- The builder resolves `workspaceFolders` from the language server config (indexed
+  folders + `ls_additional_workspace_folders`); don't build the folder list yourself.
+- To send a folder list nested inside `initializationOptions` (some servers, e.g.
+  `EclipseJDTLS`/`KotlinLanguageServer`, need this), set it explicitly there — only the
+  *top-level* `workspaceFolders` is builder-managed.
+- To suppress the top-level `workspaceFolders` entirely, override
+  `_create_initialize_params_builder` and construct `DefaultInitializeParamsBuilder`
+  with `set_workspace_folders=False`.
 
 After `_start_server` returns, the language server should be fully operational.
 If the server requires that one waits for certain notifications or responses before being ready, implement that logic here.
@@ -84,12 +158,12 @@ For an example, see `EclipseJDTLS._start_server`.
 
 ## Step 2: Language Registration
 
-### 2.1 Add to Language Enum
+### 2.1 Add to LanguageServerId Enum
 
-In `src/solidlsp/ls_config.py`, add your language to the `Language` enum:
+In `src/solidlsp/ls_config.py`, add your language to the enum:
 
 ```python
-class Language(str, Enum):
+class LanguageServerId(str, Enum):
     # Existing languages...
     NEW_LANGUAGE = "new_language"
     
@@ -97,21 +171,16 @@ class Language(str, Enum):
         match self:
             # Existing cases...
             case self.NEW_LANGUAGE:
-                return FilenameMatcher("*.newlang", "*.nl")  # File extensions
-```
+                return FilenameMatcher(".newlang", ".nl")  # File extensions
 
-### 2.2 Update Language Server Factory
-
-In `src/solidlsp/ls.py`, add your language to the `create` method:
-
-```python
-@classmethod
-def create(cls, config: LanguageServerConfig, repository_root_path: str) -> "SolidLanguageServer":
-    match config.code_language:
-        # Existing cases...
-        case Language.NEW_LANGUAGE:
-            from solidlsp.language_servers.new_language_server import NewLanguageServer
-            return NewLanguageServer(config, repository_root_path)
+    ...
+        
+    def get_ls_class(self) -> type["SolidLanguageServer"]:
+        match self:
+            # Existing cases...
+            case self.NEW_LANGUAGE:
+                from solidlsp.language_servers.new_language_server import NewLanguageServer
+                return NewLanguageServer
 ```
 
 ## Step 3: Test Repository
@@ -185,17 +254,14 @@ You should at least test:
 3. Finding cross-file references
 
 Have a look at `test/solidlsp/php/test_php_basic.py` as an example for what should be tested.
-Don't forget to add a new language marker to `pytest.ini`.
-
-### 4.2 Integration Tests
-
-Consider adding new cases to the parametrized tests in `test_serena_agent.py` for the new language.
+Declare the new language marker under `[tool.pytest.ini_options].markers` in `pyproject.toml`.
 
 
-### 5 Documentation
+## Step 5: Documentation
 
 Update:
 
 - **README.md** - Add language to the list of languages
 - **docs/01-about/020_programming-languages.md** - Add language to the list and mention any special notes, compatibility or requirements (e.g. installations the user is required to do)
+- **src/serena/resources/project.template.yml** - Refresh the commented language-server list: run `uv run python scripts/print_language_list.py` and paste its output over the existing list, stripping the trailing spaces the script pads each line with
 - **CHANGELOG.md** - Document the new language support

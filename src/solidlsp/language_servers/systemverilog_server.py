@@ -1,18 +1,17 @@
 """
 SystemVerilog language server using verible-verilog-ls.
 """
+# SPDX-License-Identifier: MIT
 
 import logging
 import os
-import pathlib
 import shutil
-from typing import Any, cast
+from typing import Any
 
 from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.settings import SolidLSPSettings
-from solidlsp.util import supervise
+from solidlsp.util.subprocess_util import subprocess_run
 
 from .common import RuntimeDependency, RuntimeDependencyCollection
 
@@ -44,7 +43,7 @@ class SystemVerilogLanguageServer(SolidLanguageServer):
             if system_verible:
                 # Log version information
                 try:
-                    result = supervise.run(
+                    result = subprocess_run(
                         [system_verible, "--version"],
                         capture_output=True,
                         text=True,
@@ -150,13 +149,8 @@ class SystemVerilogLanguageServer(SolidLanguageServer):
         def _create_launch_command(self, core_path: str) -> list[str]:
             return [core_path]
 
-    @staticmethod
-    def _get_initialize_params(repository_absolute_path: str) -> InitializeParams:
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
+    def _create_base_initialize_params(self) -> dict:
         initialize_params = {
-            "processId": os.getpid(),
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
             "locale": "en",
             "capabilities": {
                 "textDocument": {
@@ -186,9 +180,8 @@ class SystemVerilogLanguageServer(SolidLanguageServer):
                     "didChangeConfiguration": {"dynamicRegistration": True},
                 },
             },
-            "workspaceFolders": [{"uri": root_uri, "name": os.path.basename(repository_absolute_path)}],
         }
-        return cast(InitializeParams, initialize_params)
+        return initialize_params
 
     def _start_server(self) -> None:
         def do_nothing(params: Any) -> None:
@@ -205,7 +198,7 @@ class SystemVerilogLanguageServer(SolidLanguageServer):
 
         log.info("Starting verible-verilog-ls process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request")
         init_response = self.server.send.initialize(initialize_params)

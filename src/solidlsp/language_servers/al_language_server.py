@@ -4,10 +4,10 @@ You can pass the following entries in ``ls_specific_settings["al"]``:
     - al_extension_version: Override the pinned AL VS Code extension version
       downloaded by Serena (default: the bundled Serena version).
 """
+# SPDX-License-Identifier: MIT
 
 import logging
 import os
-import pathlib
 import platform
 import re
 import stat
@@ -19,7 +19,7 @@ from overrides import override
 from solidlsp import ls_types
 from solidlsp.language_servers.common import quote_windows_path
 from solidlsp.ls import DocumentSymbols, LSPFileBuffer, RawDocumentSymbol, SolidLanguageServer
-from solidlsp.ls_config import Language, LanguageServerConfig
+from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.ls_types import SymbolKind, UnifiedSymbolInformation
 from solidlsp.ls_utils import FileUtils
 from solidlsp.lsp_protocol_handler.lsp_types import Definition, DefinitionParams, LocationLink
@@ -28,11 +28,31 @@ from solidlsp.settings import SolidLSPSettings
 
 log = logging.getLogger(__name__)
 
-AL_EXTENSION_VERSION = "18.0.2242655"
-AL_EXTENSION_URL = (
-    f"https://marketplace.visualstudio.com/_apis/public/gallery/publishers/ms-dynamics-smb/vsextensions/al/{AL_EXTENSION_VERSION}/vspackage"
-)
-AL_EXTENSION_SHA256 = "3971995e61a59dc4fcce4a65053072a67991ed624a16635c4f2911f12564b2b9"
+# Version pinning convention (see eclipse_jdtls.py for the full spec):
+#   INITIAL_* — frozen forever; legacy unversioned install dir is reserved for it.
+#   DEFAULT_* — bumped on upgrades; goes into a versioned subdir.
+INITIAL_AL_EXTENSION_VERSION = "18.0.2242655"
+INITIAL_AL_EXTENSION_SHA256 = "3971995e61a59dc4fcce4a65053072a67991ed624a16635c4f2911f12564b2b9"
+DEFAULT_AL_EXTENSION_VERSION = "18.0.2242655"
+DEFAULT_AL_EXTENSION_SHA256 = "3971995e61a59dc4fcce4a65053072a67991ed624a16635c4f2911f12564b2b9"
+
+# Base name of the language server executable within the extension; on Windows it is suffixed with ".exe"
+AL_HOST_EXECUTABLE_NAME = "Microsoft.Dynamics.Nav.EditorServices.Host"
+
+
+def _al_extension_sha(version: str) -> str | None:
+    if version == INITIAL_AL_EXTENSION_VERSION:
+        return INITIAL_AL_EXTENSION_SHA256
+    if version == DEFAULT_AL_EXTENSION_VERSION:
+        return DEFAULT_AL_EXTENSION_SHA256
+    return None
+
+
+def _al_extension_dirname(version: str) -> str:
+    # legacy unversioned dir reserved for INITIAL; every other version goes into a versioned subdir
+    return "al-extension" if version == INITIAL_AL_EXTENSION_VERSION else f"al-extension-{version}"
+
+
 AL_EXTENSION_ALLOWED_HOSTS = ("marketplace.visualstudio.com",)
 
 
@@ -131,20 +151,12 @@ class ALLanguageServer(SolidLanguageServer):
         return path.replace("\\", "/")
 
     @classmethod
-    def _download_al_extension(cls, url: str, target_dir: str) -> bool:
+    def _download_al_extension(cls, url: str, target_dir: str, expected_sha256: str | None) -> bool:
         """
         Download and extract the AL extension from VS Code marketplace.
 
         The VS Code marketplace packages extensions as .vsix files (which are ZIP archives).
         This method downloads the VSIX file and extracts it to get the language server binaries.
-
-        Args:
-            logger: Logger for tracking download progress
-            url: VS Code marketplace URL for the AL extension
-            target_dir: Directory where the extension will be extracted
-
-        Returns:
-            True if successful, False otherwise
 
         Note:
             The download includes progress tracking and proper user-agent headers
@@ -158,7 +170,7 @@ class ALLanguageServer(SolidLanguageServer):
                 url,
                 target_dir,
                 "zip",
-                expected_sha256=AL_EXTENSION_SHA256 if url == AL_EXTENSION_URL else None,
+                expected_sha256=expected_sha256,
                 allowed_hosts=AL_EXTENSION_ALLOWED_HOSTS,
             )
             log.info("AL extension extracted successfully")
@@ -179,10 +191,8 @@ class ALLanguageServer(SolidLanguageServer):
         3. Configures executable permissions on Unix systems
         4. Returns the properly formatted command string
 
-        The AL Language Server executable is located in different paths based on the platform:
-        - Windows: bin/win32/Microsoft.Dynamics.Nav.EditorServices.Host.exe
-        - Linux: bin/linux/Microsoft.Dynamics.Nav.EditorServices.Host
-        - macOS: bin/darwin/Microsoft.Dynamics.Nav.EditorServices.Host
+        The executable lives in the extension's `bin` directory, whose internal layout depends on
+        the extension version; see `_get_executable_path_candidates`.
         """
         system = platform.system()
 
@@ -200,11 +210,12 @@ class ALLanguageServer(SolidLanguageServer):
                 "3. Ensure internet connection for automatic download"
             )
 
-        # Build executable path based on platform
-        executable_path = cls._get_executable_path(extension_path, system)
+        # Build the executable path, tolerating the layouts of the different extension versions
+        candidates = cls._get_executable_path_candidates(extension_path, system)
+        executable_path = next((path for path in candidates if os.path.isfile(path)), None)
 
-        if not os.path.exists(executable_path):
-            raise RuntimeError(f"AL Language Server executable not found at: {executable_path}")
+        if executable_path is None:
+            raise RuntimeError("AL Language Server executable not found. Looked for:\n" + "\n".join(f"  - {path}" for path in candidates))
 
         # Prepare and return the executable command
         return cls._prepare_executable(executable_path, system)
@@ -231,8 +242,10 @@ class ALLanguageServer(SolidLanguageServer):
         elif env_path:
             log.warning(f"AL_EXTENSION_PATH set but directory not found: {env_path}")
 
-        # Check default download location
-        default_path = os.path.join(cls.ls_resources_dir(solidlsp_settings), "al-extension", "extension")
+        # Check the resolved-version download location (versioned for non-INITIAL, legacy "al-extension" for INITIAL)
+        al_settings = solidlsp_settings.get_ls_specific_settings(LanguageServerId.AL)
+        al_extension_version = al_settings.get("al_extension_version", DEFAULT_AL_EXTENSION_VERSION)
+        default_path = os.path.join(cls.ls_resources_dir(solidlsp_settings), _al_extension_dirname(al_extension_version), "extension")
         if os.path.exists(default_path):
             log.debug(f"Found AL extension in default location: {default_path}")
             return default_path
@@ -255,9 +268,9 @@ class ALLanguageServer(SolidLanguageServer):
             Path to installed extension or None if download failed
 
         """
-        al_extension_dir = os.path.join(cls.ls_resources_dir(solidlsp_settings), "al-extension")
-        al_settings = solidlsp_settings.get_ls_specific_settings(Language.AL)
-        al_extension_version = al_settings.get("al_extension_version", AL_EXTENSION_VERSION)
+        al_settings = solidlsp_settings.get_ls_specific_settings(LanguageServerId.AL)
+        al_extension_version = al_settings.get("al_extension_version", DEFAULT_AL_EXTENSION_VERSION)
+        al_extension_dir = os.path.join(cls.ls_resources_dir(solidlsp_settings), _al_extension_dirname(al_extension_version))
         al_extension_url = (
             "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/ms-dynamics-smb/"
             f"vsextensions/al/{al_extension_version}/vspackage"
@@ -265,7 +278,7 @@ class ALLanguageServer(SolidLanguageServer):
 
         log.info(f"Downloading AL extension from: {al_extension_url}")
 
-        if cls._download_al_extension(al_extension_url, al_extension_dir):
+        if cls._download_al_extension(al_extension_url, al_extension_dir, _al_extension_sha(al_extension_version)):
             extension_path = os.path.join(al_extension_dir, "extension")
             if os.path.exists(extension_path):
                 log.info("AL extension downloaded and installed successfully")
@@ -278,26 +291,36 @@ class ALLanguageServer(SolidLanguageServer):
         return None
 
     @classmethod
-    def _get_executable_path(cls, extension_path: str, system: str) -> str:
+    def _get_executable_path_candidates(cls, extension_path: str, system: str) -> list[str]:
         """
-        Build platform-specific executable path.
+        Build the candidate paths of the language server executable for the given platform.
+
+        The AL extension has shipped the executable in two layouts: in the builds up to at least
+        18.0.2242655 it lies in a platform-specific subdirectory of `bin` (`bin/win32/...exe` on
+        Windows), whereas in build 18.0.2732683 the platform subdirectories are gone and it lies
+        directly in `bin`. Both are queried because the build that Serena downloads and the build
+        that the user has installed in VS Code need not be the same.
 
         Args:
             extension_path: Path to AL extension directory
             system: Operating system name
 
         Returns:
-            Full path to executable
+            Candidate paths to the executable, the platform subdirectory layout first
 
         """
         if system == "Windows":
-            return os.path.join(extension_path, "bin", "win32", "Microsoft.Dynamics.Nav.EditorServices.Host.exe")
+            platform_dir, executable_name = "win32", AL_HOST_EXECUTABLE_NAME + ".exe"
         elif system == "Linux":
-            return os.path.join(extension_path, "bin", "linux", "Microsoft.Dynamics.Nav.EditorServices.Host")
+            platform_dir, executable_name = "linux", AL_HOST_EXECUTABLE_NAME
         elif system == "Darwin":
-            return os.path.join(extension_path, "bin", "darwin", "Microsoft.Dynamics.Nav.EditorServices.Host")
+            platform_dir, executable_name = "darwin", AL_HOST_EXECUTABLE_NAME
         else:
             raise RuntimeError(f"Unsupported platform: {system}")
+        return [
+            os.path.join(extension_path, "bin", platform_dir, executable_name),
+            os.path.join(extension_path, "bin", executable_name),
+        ]
 
     @classmethod
     def _prepare_executable(cls, executable_path: str, system: str) -> str:
@@ -437,20 +460,12 @@ class ALLanguageServer(SolidLanguageServer):
 
         return None
 
-    @staticmethod
-    def _get_initialize_params(repository_absolute_path: str) -> dict:
+    def _create_base_initialize_params(self) -> dict:
         """
         Returns the initialize params for the AL Language Server.
         """
-        # Ensure we have an absolute path for URI generation
-        repository_path = pathlib.Path(repository_absolute_path).resolve()
-        root_uri = repository_path.as_uri()
-
         # AL requires extensive capabilities based on VS Code trace
         initialize_params = {
-            "processId": os.getpid(),
-            "rootPath": str(repository_path),
-            "rootUri": root_uri,
             "capabilities": {
                 "workspace": {
                     "applyEdit": True,
@@ -501,7 +516,6 @@ class ALLanguageServer(SolidLanguageServer):
                 },
             },
             "trace": "verbose",
-            "workspaceFolders": [{"uri": root_uri, "name": repository_path.name}],
         }
 
         return initialize_params
@@ -545,12 +559,12 @@ class ALLanguageServer(SolidLanguageServer):
         self.server.start()
 
         # Send initialize request
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request from LSP client to AL LSP server and awaiting response")
 
         # Send initialize and wait for response
-        resp = self.server.send_request("initialize", initialize_params)
+        resp = self.server.send_request("initialize", dict(initialize_params))
         if resp is None:
             raise RuntimeError("AL Language Server initialization failed - no response")
 
@@ -991,25 +1005,19 @@ class ALLanguageServer(SolidLanguageServer):
 
     @override
     def request_document_symbols(self, relative_file_path: str, file_buffer: LSPFileBuffer | None = None) -> DocumentSymbols:
-        """
-        Override to normalize AL symbol names by stripping object type and ID metadata.
-
-        AL Language Server returns symbol names with full object format like
-        'Table 50000 "TEST Customer"', but symbol names should be pure without metadata.
-        This follows the same pattern as Java LS which strips type information from names.
-
-        Metadata (object type, ID) is available via the hover LSP method when using
-        include_info=True in find_symbol.
-        """
-        # Normalize path separators for cross-platform compatibility (backslash → forward slash)
         relative_file_path = self._normalize_path(relative_file_path)
-
-        # Get symbols from parent implementation
-        document_symbols = super().request_document_symbols(relative_file_path, file_buffer=file_buffer)
-
-        return document_symbols
+        return super().request_document_symbols(relative_file_path, file_buffer=file_buffer)
 
     def _normalize_symbol_name(self, symbol: RawDocumentSymbol, relative_file_path: str) -> str:
+        # Override to normalize AL symbol names by stripping object type and ID metadata.
+        # IMPORTANT: Update _document_symbols_cache_fingerprint if this normalization logic changes.
+        #
+        # AL Language Server returns symbol names with full object format like
+        # 'Table 50000 "TEST Customer"', but symbol names should be pure without metadata.
+        # This follows the same pattern as Java LS which strips type information from names.
+        #
+        # Metadata (object type, ID) is available via the hover LSP method when using
+        # include_info=True in find_symbol.
         original_name = symbol["name"]
         normalized_name = self._extract_al_display_name(original_name)
 
@@ -1027,7 +1035,7 @@ class ALLanguageServer(SolidLanguageServer):
         if original_name != normalized_name and self._AL_OBJECT_NAME_PATTERN.match(original_name):
             sel_range = symbol.get("selectionRange")
             if sel_range:
-                start = sel_range.get("start")  # type: ignore
+                start = sel_range.get("start")
                 if start and "line" in start and "character" in start:
                     line = start["line"]
                     char = start["character"]

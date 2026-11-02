@@ -1,17 +1,18 @@
+# SPDX-License-Identifier: MIT
+
 from __future__ import annotations
 
 import logging
 import os
+import pathlib
 import platform
-import shutil
 import subprocess
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, cast
 
 from solidlsp.ls_utils import FileUtils, PlatformUtils
-from solidlsp.util import supervise
-from solidlsp.util.subprocess_util import subprocess_kwargs
+from solidlsp.util import subprocess_util
 
 log = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ class RuntimeDependency:
     url: str | None = None
     sha256: str | None = None
     allowed_hosts: tuple[str, ...] | list[str] | None = None
-    archive_type: str | None = None
+    archive_type: FileUtils.ArchiveType | None = None
     binary_name: str | None = None
     command: str | list[str] | None = None
     package_name: str | None = None
@@ -102,26 +103,26 @@ class RuntimeDependencyCollection:
 
     @staticmethod
     def _run_command(command: str | list[str], cwd: str) -> None:
-        kwargs = subprocess_kwargs()
+        kwargs = subprocess_util.subprocess_kwargs()
+        if not PlatformUtils.get_platform_id().is_windows():
+            import pwd
 
-        is_windows = platform.system() == "Windows"
-        if not isinstance(command, str) and not is_windows:
-            # Since we are using the shell, we need to convert the command list to a single string
-            # on Linux/macOS
-            command = " ".join(command)
+            kwargs["user"] = pwd.getpwuid(os.getuid()).pw_name
 
+        command = subprocess_util.convert_shell_cmd(command)
         log.info("Running command %s in '%s'", f"'{command}'" if isinstance(command, str) else command, cwd)
 
-        completed_process = supervise.run(
+        completed_process = subprocess_util.subprocess_run(
             command,
             shell=True,
             check=False,
             cwd=cwd,
-            stdin=subprocess.DEVNULL,
+            capture_output=False,
+            text=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             **kwargs,
-        )  # type: ignore
+        )
         if completed_process.returncode != 0:
             log.warning("Command '%s' failed with return code %d", command, completed_process.returncode)
             log.warning("Command output:\n%s", completed_process.stdout)
@@ -150,81 +151,6 @@ class RuntimeDependencyCollection:
                 expected_sha256=dep.sha256,
                 allowed_hosts=dep.allowed_hosts,
             )
-
-
-@dataclass(kw_only=True)
-class RequiredCLI:
-    """Preflight check for an external CLI tool that a language server requires on PATH.
-
-    Provides fail-fast, construction-time behaviour: when the LSP's backing runtime CLI
-    is absent, raise a :class:`RuntimeError` with an actionable install message instead
-    of letting the server start and fail cryptically on later LSP requests.
-
-    The simple case — a pure :func:`shutil.which` lookup — is handled by
-    :meth:`resolve_or_raise`. Callers that already perform their own richer resolution
-    (e.g. probing well-known install locations or consulting a version manager) can
-    keep that logic and call :meth:`build_missing_error` after their own search has
-    been exhausted; the returned error carries the same rationale and install hints,
-    producing a uniform message across language servers.
-    """
-
-    name: str
-    """the binary name looked up via :func:`shutil.which` (e.g. ``"haxe"``, ``"lean"``)."""
-
-    rationale: str
-    """a free-form explanation of why the CLI is required. Rendered verbatim between
-    the ``"<name> is not installed or not in PATH."`` header and the install-hints
-    block. May contain embedded newlines."""
-
-    install_hints: Sequence[str]
-    """install-option lines, each rendered as a ``"  - <hint>"`` bullet under the
-    ``"Install options:"`` header. Example entry:
-    ``"Homebrew (macOS): brew install haxe"``."""
-
-    def resolve_or_raise(self) -> str:
-        """Resolve the CLI's absolute path via :func:`shutil.which`.
-
-        :return: absolute path to the CLI binary.
-        :raises RuntimeError: if the CLI is not on PATH; the message carries the
-            rationale and install hints.
-        """
-        # lookup on PATH
-        path = shutil.which(self.name)
-        if path is not None:
-            return path
-
-        # no resolver fallback; signal missing CLI with the uniform error
-        raise self.build_missing_error()
-
-    def build_missing_error(self, *, searched: Sequence[str] | None = None) -> RuntimeError:
-        """Build a uniformly-formatted :class:`RuntimeError` for a missing CLI.
-
-        Intended for callers that perform their own resolution (e.g. probing
-        well-known install locations) and need to signal failure after their search
-        has been exhausted. The caller issues the :keyword:`raise` itself so that
-        the traceback attributes the decision to its own call site.
-
-        :param searched: optional paths the caller already probed. When given, they
-            are rendered as a ``"Searched locations:"`` block between the rationale
-            and the install hints.
-        :return: a :class:`RuntimeError` ready to raise.
-        """
-        # header and rationale
-        lines: list[str] = [
-            f"{self.name} is not installed or not in PATH.",
-            self.rationale,
-        ]
-
-        # optional context: paths the caller already probed
-        if searched:
-            lines.append("Searched locations:")
-            lines.extend(f"  - {path}" for path in searched)
-
-        # actionable install hints
-        lines.append("Install options:")
-        lines.extend(f"  - {hint}" for hint in self.install_hints)
-
-        return RuntimeError("\n".join(lines))
 
 
 def build_npm_install_command(package_name: str, version: str, registry: str | None = None) -> list[str]:
@@ -257,3 +183,13 @@ def quote_windows_path(path: str) -> str:
             return path
         return f'"{path}"'
     return path
+
+
+UE_IGNORED_DIRNAMES = frozenset({"Binaries", "DerivedDataCache", "Intermediate", "Saved"})
+"""Unreal Engine build and cache directories. Matched per directory name, so per-plugin and
+per-module copies (e.g. ``Plugins/Foo/Intermediate``) are covered too."""
+
+
+def is_unreal_engine_project(repository_root_path: str) -> bool:
+    """:return: whether the repository root contains an Unreal Engine ``.uproject`` file."""
+    return any(pathlib.Path(repository_root_path).glob("*.uproject"))

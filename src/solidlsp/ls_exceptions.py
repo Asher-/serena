@@ -1,8 +1,9 @@
 """
 This module contains the exceptions raised by the framework.
 """
+# SPDX-License-Identifier: MIT
 
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerIdLike
 
 
 class SolidLSPException(Exception):
@@ -28,14 +29,14 @@ class SolidLSPException(Exception):
 
         return isinstance(self.cause, LanguageServerTerminatedException)
 
-    def get_affected_language(self) -> Language | None:
+    def get_affected_language(self) -> LanguageServerIdLike | None:
         """
         :return: the affected language for the case where the exception is caused by the language server having terminated
         """
         from .ls_process import LanguageServerTerminatedException
 
         if isinstance(self.cause, LanguageServerTerminatedException):
-            return self.cause.language
+            return self.cause.ls_id
         return None
 
     def __str__(self) -> str:
@@ -50,6 +51,15 @@ class SolidLSPException(Exception):
                 s += " "
             s += f"(caused by {self.cause})"
         return s
+
+
+class InvalidTextLocationError(SolidLSPException):
+    """
+    Raised when a symbol's LSP range refers to a text location that does not exist
+    in the file's current line buffer, other than the well-defined whole-line-through-EOF
+    convention (end line exactly one past EOF at column 0), which is corrected rather
+    than rejected.
+    """
 
 
 class MetalsStaleLockError(SolidLSPException):

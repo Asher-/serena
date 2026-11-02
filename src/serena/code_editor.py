@@ -1,51 +1,34 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 import json
 import logging
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Reversible
 from contextlib import contextmanager
-from typing import Generic, TypeVar, cast
+from types import TracebackType
+from typing import Any, Generic, Self, TypeVar, cast
 
-from serena.jetbrains.jetbrains_plugin_client import JetBrainsPluginClient
+from serena.jetbrains.jetbrains_plugin_client import JetBrainsPluginClient, ServerNotFoundError
 from serena.symbol import JetBrainsSymbol, LanguageServerSymbol, LanguageServerSymbolRetriever, PositionInFile, Symbol
-from serena.util.file_lifecycle import AtomicFileWriter, WritePrecondition
 from solidlsp import SolidLanguageServer, ls_types
 from solidlsp.ls import LSPFileBuffer
-from solidlsp.ls_utils import PathUtils, TextUtils
+from solidlsp.ls_utils import PathUtils, TextStepper, TextUtils
 
 from .project import Project
+from .util.file_proxy import FileProxy
+from .util.file_system import write_file_atomic
 
 log = logging.getLogger(__name__)
 TSymbol = TypeVar("TSymbol", bound=Symbol)
 
 
-class LandedEditError(Exception):
-    """
-    Raised by an edit whose new contents are in place on disk when a step after its write fails. The edit has been applied,
-    so a caller reports it as applied and never repeats it (pg://serena/edit/report).
-    """
-
-    def __init__(self, relative_path: str, cause: Exception) -> None:
-        """
-        :param relative_path: the relative path of the file whose new contents are in place on disk.
-        :param cause: the failure of the step after the write.
-        """
-        super().__init__(f"The edit of {relative_path} has been applied, but a step after its write failed: {cause!r}")
-        self.relative_path = relative_path
-        self.cause = cause
-
-
 class CodeEditor(Generic[TSymbol], ABC):
-    def __init__(self, project: Project, write_precondition: WritePrecondition | None = None) -> None:
-        """
-        :param project: the project whose files the editor edits.
-        :param write_precondition: the condition the save of the file it names evaluates immediately before replacing
-            that file (pg://serena/edit/version); ``None`` saves unconditionally.
-        """
+    def __init__(self, project: Project) -> None:
+        self.project = project
         self.project_root = project.project_root
         self.encoding = project.project_config.encoding
         self.newline = project.line_ending.newline_str
-        self._write_precondition = write_precondition
 
     class EditedFile(ABC):
         def __init__(self, relative_path: str) -> None:
@@ -65,15 +48,6 @@ class CodeEditor(Generic[TSymbol], ABC):
             :param contents: the new contents
             """
 
-        def discard_unsaved_contents(self) -> None:
-            """
-            Discards the in-memory contents the file has not saved, bringing it back in line with the file on disk.
-
-            Called when saving the file failed before the save replaced it, which leaves the file on disk as it was
-            before the edit. An edited file whose contents live only for the duration of the edit holds nothing to
-            discard; one backed by a longer-lived buffer must reload that buffer.
-            """
-
         @abstractmethod
         def delete_text_between_positions(self, start_pos: PositionInFile, end_pos: PositionInFile) -> None:
             pass
@@ -82,21 +56,6 @@ class CodeEditor(Generic[TSymbol], ABC):
         def insert_text_at_position(self, pos: PositionInFile, text: str) -> None:
             pass
 
-        def text_between_positions(self, start_pos: PositionInFile, end_pos: PositionInFile) -> str:
-            """
-            Returns the text of the file between ``start_pos`` (inclusive) and
-            ``end_pos`` (exclusive), computed against the current in-memory contents
-            of the edited file.
-
-            :param start_pos: the inclusive start position
-            :param end_pos: the exclusive end position
-            :return: the text between the two positions
-            """
-            contents = self.get_contents()
-            start_idx = TextUtils.get_index_from_line_col(contents, start_pos.line, start_pos.col)
-            end_idx = TextUtils.get_index_from_line_col(contents, end_pos.line, end_pos.col)
-            return contents[start_idx:end_idx]
-
     @contextmanager
     def _open_file_context(self, relative_path: str) -> Iterator["CodeEditor.EditedFile"]:
         """
@@ -104,64 +63,38 @@ class CodeEditor(Generic[TSymbol], ABC):
         """
         raise NotImplementedError("This method must be overridden for each subclass")
 
-    def read_file(self, relative_path: str) -> str:
+    def read_file(self, relative_path: str, lines: tuple[int, int] | None = None) -> str:
         """
         Reads the content of a file.
 
         :param relative_path: the relative path of the file to read
+        :param lines: tuple of (first_line, last_line) to read only a specific line range (0-based, inclusive)
         :return: the content of the file
         """
         with self._open_file_context(relative_path) as file:
-            return file.get_contents()
+            contents = file.get_contents()
+            if lines is None:
+                return contents
+            else:
+                first_line, last_line = lines
+                return TextUtils.get_text_in_lines_range(contents, first_line, last_line)
 
     @contextmanager
     def edited_file_context(self, relative_path: str) -> Iterator["CodeEditor.EditedFile"]:
         """
         Context manager for editing a file.
-
-        The edited file is saved when the context exits. A save that fails before it replaces the file leaves the file on
-        disk as it was, and the edited file's unsaved contents are discarded before the error propagates. A failure once
-        the save has replaced the file raises :class:`LandedEditError`, since the edit has then been applied
-        (pg://serena/edit/report).
         """
-        saved = False
-        try:
-            with self._open_file_context(relative_path) as edited_file:
-                yield edited_file
-
-                # save the file; on a failure before the replace, bring the edited file back in line with the unchanged file on disk
-                try:
-                    self._save_edited_file(edited_file)
-                except LandedEditError:
-                    raise
-                except Exception as save_error:
-                    try:
-                        edited_file.discard_unsaved_contents()
-                    except Exception as discard_error:
-                        save_error.add_note(f"Discarding the unsaved contents of {relative_path} failed as well: {discard_error!r}")
-                    raise
-                saved = True
-        except Exception as e:
-            # releasing the edited file once its save has landed, e.g. closing it in a terminated language server, fails an
-            # edit that has been applied
-            if saved:
-                raise LandedEditError(relative_path, e) from e
-            raise
+        if FileProxy.is_external_path(relative_path, self.project):
+            raise ValueError(f"Cannot edit external file: {relative_path}")
+        with self._open_file_context(relative_path) as edited_file:
+            yield edited_file
+            # save the file
+            self._save_edited_file(edited_file)
 
     def _save_edited_file(self, edited_file: "CodeEditor.EditedFile") -> None:
-        # write atomically: contents the encoding cannot represent, or a failed write, leave the file as it was
         abs_path = os.path.join(self.project_root, edited_file.relative_path)
         new_contents = edited_file.get_contents()
-        AtomicFileWriter().write_text(
-            abs_path, new_contents, self.encoding, self.newline, self._write_precondition_for(edited_file.relative_path)
-        )
-
-    def _write_precondition_for(self, relative_path: str) -> WritePrecondition | None:
-        # the editor's precondition guards the save of the one file it names, and no other file an edit saves
-        precondition = self._write_precondition
-        if precondition is not None and os.path.normpath(precondition.relative_path) == os.path.normpath(relative_path):
-            return precondition
-        return None
+        write_file_atomic(abs_path, new_contents, encoding=self.encoding, newline=self.newline)
 
     @abstractmethod
     def _find_unique_symbol(self, name_path: str, relative_file_path: str) -> TSymbol:
@@ -174,33 +107,6 @@ class CodeEditor(Generic[TSymbol], ABC):
         :return: the unique symbol
         """
 
-    def _get_statement_end_position(self, symbol: TSymbol, edited_file: "CodeEditor.EditedFile") -> PositionInFile:
-        """
-        Get the end position for statement-level edit operations on the given symbol.
-
-        Default implementation returns the LSP-reported body end position unchanged.
-        Subclasses targeting language servers that report narrower-than-statement extents
-        (e.g. Python variable symbols) should override to widen to the enclosing statement.
-
-        :param symbol: the symbol the caller is about to edit.
-        :param edited_file: the edited file context, providing access to current file text.
-        :return: the 0-based end position.
-        """
-        return symbol.get_body_end_position_or_raise()
-
-    def _get_statement_start_position(self, symbol: TSymbol, edited_file: "CodeEditor.EditedFile") -> PositionInFile:
-        """
-        Get the start position for statement-level edit operations on the given symbol.
-
-        Symmetric to :meth:`_get_statement_end_position`; default returns the LSP-reported
-        body start position unchanged.
-
-        :param symbol: the symbol the caller is about to edit.
-        :param edited_file: the edited file context, providing access to current file text.
-        :return: the 0-based start position.
-        """
-        return symbol.get_body_start_position_or_raise()
-
     def replace_body(self, name_path: str, relative_file_path: str, body: str) -> None:
         """
         Replaces the body of the symbol with the given name_path in the given file.
@@ -210,74 +116,16 @@ class CodeEditor(Generic[TSymbol], ABC):
         :param body: the new body
         """
         symbol = self._find_unique_symbol(name_path, relative_file_path)
+        start_pos = symbol.get_body_start_position_or_raise()
+        end_pos = symbol.get_body_end_position_or_raise()
 
         with self.edited_file_context(relative_file_path) as edited_file:
-            # widen the LSP-reported extent to the enclosing statement boundaries when the
-            # language server reports narrower extents (e.g. Python Variable symbols where
-            # the extent ends at the identifier rather than the full assignment)
-            start_pos = self._get_statement_start_position(symbol, edited_file)
-            end_pos = self._get_statement_end_position(symbol, edited_file)
-
-            # preserve the whitespace envelope of the original extent so that languages whose
-            # symbol extent includes a trailing newline (e.g. markdown headings, where the extent
-            # ends at line N+1 col 0) do not get that newline destroyed by body.strip(). For
-            # Python/Swift/C++ where extents are tight, leading/trailing are empty and the strip
-            # dominates, preserving the historical behaviour.
-            original = edited_file.text_between_positions(start_pos, end_pos)
-            leading = original[: len(original) - len(original.lstrip())]
-            trailing = original[len(original.rstrip()) :]
-            stripped_body = body.strip()
-
-            # elide a redundant leading declaration keyword: some language servers
-            # (e.g. gopls for Go ``var`` / ``type`` / ``const``) report a symbol extent
-            # that begins at the NAME, excluding the ``var ``/``type `` keyword that
-            # precedes it on the line. A replacement body that includes that keyword
-            # would duplicate it once re-inserted at the extent start (``var var X = ...``).
-            # Detect and drop the duplicate.
-            contents_lines = edited_file.get_contents().splitlines(keepends=True)
-            line_prefix = contents_lines[start_pos.line][: start_pos.col] if start_pos.line < len(contents_lines) else ""
-            stripped_body = self._strip_redundant_leading_prefix(line_prefix, stripped_body)
-
-            framed_body = leading + stripped_body + trailing
+            # make sure the replacement adds no additional newlines (before or after) - all newlines
+            # and whitespace before/after should remain the same, so we strip it entirely
+            body = body.strip()
 
             edited_file.delete_text_between_positions(start_pos, end_pos)
-            edited_file.insert_text_at_position(start_pos, framed_body)
-
-    @staticmethod
-    def _strip_redundant_leading_prefix(line_prefix: str, body: str) -> str:
-        """
-        Drop a leading declaration keyword from ``body`` when it merely duplicates the
-        text already present immediately before the symbol's extent.
-
-        Some language servers report the extent of a ``var`` / ``type`` / ``const``
-        declaration starting at the symbol NAME rather than the leading keyword (gopls
-        does this for Go). :meth:`replace_body` re-inserts the body at the extent start,
-        so a body that includes the keyword (``var X = ...``) lands right after the
-        ``var `` already on the line and produces the invalid ``var var X = ...``.
-
-        This helper removes that duplication: when ``body`` begins with the exact
-        non-whitespace text of ``line_prefix`` (the indentation + keyword preceding the
-        extent) followed by whitespace, the redundant leading token is stripped. The
-        check is conservative — a body that already omits the keyword, or an identifier
-        that merely shares the prefix's spelling without a following whitespace
-        boundary, is returned unchanged.
-
-        :param line_prefix: the text on the extent's first line that precedes the extent
-            start (indentation plus any declaration keyword).
-        :param body: the replacement body, already stripped of surrounding whitespace.
-        :return: ``body`` with a redundant leading declaration keyword removed, or
-            ``body`` unchanged when no exact duplication is present.
-        """
-        prefix_token = line_prefix.strip()
-        if not prefix_token or not body.startswith(prefix_token):
-            return body
-        remainder = body[len(prefix_token) :]
-        # only elide when the prefix is a standalone leading token in the body (followed
-        # by whitespace), so we never bite into an identifier that merely shares the
-        # prefix's spelling (e.g. ``various`` after a ``var`` prefix)
-        if not remainder[:1].isspace():
-            return body
-        return remainder.lstrip()
+            edited_file.insert_text_at_position(start_pos, body)
 
     @staticmethod
     def _count_leading_newlines(text: Iterable) -> int:
@@ -300,10 +148,23 @@ class CodeEditor(Generic[TSymbol], ABC):
         Inserts content after the symbol with the given name in the given file.
         """
         symbol = self._find_unique_symbol(name_path, relative_file_path)
+        # Note: for body to be available, the symbol dto that the symbol instance is built from
+        # must have been retrieved either with body or at least with location.
+        # since _find_unique_symbol passes include_location=True, it works here
+        if symbol.body == symbol.name:
+            raise ValueError(
+                f"Cannot insert after this symbol (not a function, class or method): {symbol}. Consider using insert_before_symbol instead."
+            )
 
         # make sure body always ends with at least one newline
         if not body.endswith("\n"):
             body += "\n"
+
+        pos = symbol.get_body_end_position_or_raise()
+
+        # start at the beginning of the next line
+        col = 0
+        line = pos.line + 1
 
         # make sure a suitable number of leading empty lines is used (at least 0/1 depending on the symbol type,
         # otherwise as many as the caller wanted to insert)
@@ -321,15 +182,6 @@ class CodeEditor(Generic[TSymbol], ABC):
         body = body.rstrip("\r\n") + "\n"
 
         with self.edited_file_context(relative_file_path) as edited_file:
-            # widen the LSP-reported extent to the enclosing statement end when the language server
-            # reports narrower extents (e.g. Python Variable symbols) — prevents insertion inside
-            # the RHS of multi-line assignments
-            pos = self._get_statement_end_position(symbol, edited_file)
-
-            # start at the beginning of the next line
-            col = 0
-            line = pos.line + 1
-
             edited_file.insert_text_at_position(PositionInFile(line, col), body)
 
     def insert_before_symbol(self, name_path: str, relative_file_path: str, body: str) -> None:
@@ -337,6 +189,11 @@ class CodeEditor(Generic[TSymbol], ABC):
         Inserts content before the symbol with the given name in the given file.
         """
         symbol = self._find_unique_symbol(name_path, relative_file_path)
+        symbol_start_pos = symbol.get_body_start_position_or_raise()
+
+        # insert position is the start of line where the symbol is defined
+        line = symbol_start_pos.line
+        col = 0
 
         original_trailing_empty_lines = self._count_trailing_newlines(body) - 1
 
@@ -353,37 +210,16 @@ class CodeEditor(Generic[TSymbol], ABC):
 
         # apply edit
         with self.edited_file_context(relative_file_path) as edited_file:
-            # widen the LSP-reported extent to the enclosing statement start when the language
-            # server reports narrower extents (e.g. Python Variable symbols where the start may
-            # fall on a continuation line of a multi-line assignment)
-            symbol_start_pos = self._get_statement_start_position(symbol, edited_file)
-
-            # insert position is the start of line where the symbol is defined
-            line = symbol_start_pos.line
-            col = 0
-
             edited_file.insert_text_at_position(PositionInFile(line=line, col=col), body)
 
     def insert_at_line(self, relative_path: str, line: int, content: str) -> None:
         """
         Inserts content at the given line in the given file.
 
-        The operation is line-oriented: when ``content`` does not already end with a
-        newline, the file's existing line terminator (``\\r\\n`` for CRLF files,
-        ``\\n`` otherwise) is appended automatically so the line at ``line`` cannot be
-        fused onto ``content``'s final line.
-
         :param relative_path: the relative path of the file in which to insert content
         :param line: the 0-based index of the line to insert content at
         :param content: the content to insert
         """
-        # normalise the body to line-oriented form so the line at ``line`` cannot be
-        # fused onto ``content``'s final line; preserve the file's dominant terminator
-        if content and not content.endswith("\n"):
-            pre_content = self.read_file(relative_path)
-            terminator = "\r\n" if "\r\n" in pre_content else "\n"
-            content = content + terminator
-
         with self.edited_file_context(relative_path) as edited_file:
             edited_file.insert_text_at_position(PositionInFile(line, 0), content)
 
@@ -395,71 +231,69 @@ class CodeEditor(Generic[TSymbol], ABC):
         :param start_line: the 0-based index of the first line to delete (inclusive)
         :param end_line: the 0-based index of the last line to delete (inclusive)
         """
-        start_col = 0
-        end_line_for_delete = end_line + 1
-        end_col = 0
         with self.edited_file_context(relative_path) as edited_file:
-            start_pos = PositionInFile(line=start_line, col=start_col)
-            end_pos = PositionInFile(line=end_line_for_delete, col=end_col)
-            edited_file.delete_text_between_positions(start_pos, end_pos)
+            self._delete_line_range(edited_file, start_line, end_line)
 
     def replace_lines(self, relative_path: str, start_line: int, end_line: int, content: str) -> None:
         """
-        Replaces a range of lines in the given file with the given content.
+        Replaces a range of lines in the given file, writing the file once.
 
-        The operation deletes lines ``[start_line, end_line]`` (inclusive, 0-based) and
-        inserts ``content`` at the position where those lines began. This is the file-level
-        counterpart to :py:meth:`replace_body` -- it does not consult the language server
-        and can therefore mutate regions outside any LSP symbol extent (e.g. free-floating
-        comment blocks, blank-line gaps between imports, or regions before the first
-        declaration in a file).
+        Deleting the range and inserting the replacement as two separate operations
+        would persist the deletion even if the insertion failed, leaving the file
+        without the lines the caller asked to replace.
 
-        The operation is line-oriented: when ``content`` does not already end with a
-        newline, the file's existing line terminator (``\\r\\n`` for CRLF files, ``\\n``
-        otherwise) is appended automatically so the line that previously followed
-        ``end_line`` cannot be fused onto ``content``'s final line.
-
-        :param relative_path: the relative path of the file to edit
+        :param relative_path: the relative path of the file in which to replace the lines
         :param start_line: the 0-based index of the first line to replace (inclusive)
         :param end_line: the 0-based index of the last line to replace (inclusive)
-        :param content: the text to insert in place of the deleted range. An empty
-            string deletes the range with no replacement.
+        :param content: the content to insert in place of the range
         """
-        # validate the range; start > end is a programmer error
-        if start_line < 0 or end_line < start_line:
-            raise ValueError(f"Invalid replace_lines range [{start_line}, {end_line}] for {relative_path!r}")
-
-        # normalise the body to line-oriented form so the line that previously
-        # followed ``end_line`` cannot be fused onto ``content``'s final line --
-        # the dominant terminator in the existing file is preserved
-        if content and not content.endswith("\n"):
-            pre_content = self.read_file(relative_path)
-            terminator = "\r\n" if "\r\n" in pre_content else "\n"
-            content = content + terminator
-
-        # perform the delete-then-insert pair inside a single edited_file_context so the
-        # file is saved exactly once; the delete spans [start_line, end_line+1) line-starts
-        # and the insert happens at the freed position (start_line, 0)
         with self.edited_file_context(relative_path) as edited_file:
-            delete_start = PositionInFile(line=start_line, col=0)
-            delete_end = PositionInFile(line=end_line + 1, col=0)
-            edited_file.delete_text_between_positions(delete_start, delete_end)
-            if content:
-                edited_file.insert_text_at_position(PositionInFile(line=start_line, col=0), content)
+            self._delete_line_range(edited_file, start_line, end_line)
+            edited_file.insert_text_at_position(PositionInFile(line=start_line, col=0), content)
+
+    def _delete_line_range(self, edited_file: "CodeEditor.EditedFile", start_line: int, end_line: int) -> None:
+        """
+        Deletes the given inclusive line range from an open edited file.
+
+        :param edited_file: the open file to delete from
+        :param start_line: the 0-based index of the first line to delete (inclusive)
+        :param end_line: the 0-based index of the last line to delete (inclusive)
+        """
+        start_pos = PositionInFile(line=start_line, col=0)
+        end_pos = PositionInFile(line=end_line + 1, col=0)
+        edited_file.delete_text_between_positions(start_pos, end_pos)
 
     def delete_symbol(self, name_path: str, relative_file_path: str) -> None:
         """
         Deletes the symbol with the given name in the given file.
         """
         symbol = self._find_unique_symbol(name_path, relative_file_path)
+        start_pos = symbol.get_body_start_position_or_raise()
+        end_pos = symbol.get_body_end_position_or_raise()
+
         with self.edited_file_context(relative_file_path) as edited_file:
-            # widen the LSP-reported extent to the enclosing statement so a declaration whose
-            # extent the language server reports name-only (e.g. gopls for Go var/const/type,
-            # which excludes the leading keyword) is deleted whole rather than leaving a
-            # dangling ``var ``/``const ``/``type `` keyword behind; mirrors replace_body
-            start_pos = self._get_statement_start_position(symbol, edited_file)
-            end_pos = self._get_statement_end_position(symbol, edited_file)
+            # do the actual deletion
             edited_file.delete_text_between_positions(start_pos, end_pos)
+
+            # empty line removal heuristic:
+            # After the deletion, go to the line where the deleted symbol started,
+            # check whether it and any subsequent lines are empty, and if so, delete them.
+            # The empty lines preceding the deleted symbol's body should normally suffice as a separator
+            # between the symbols before and after the deleted symbol.
+            start_pos.col = 0
+            stepper = TextStepper(edited_file.get_contents())
+            stepper.step_to(start_pos.line, start_pos.col)
+            apply_empty_line_deletion = False
+            while stepper.step_line():
+                line = stepper.get_last_line(with_end=False)
+                if line.strip() == "":
+                    end_pos.line = stepper.line
+                    end_pos.col = stepper.col
+                    apply_empty_line_deletion = True
+                else:
+                    break
+            if apply_empty_line_deletion:
+                edited_file.delete_text_between_positions(start_pos, end_pos)
 
     @abstractmethod
     def rename_symbol(self, name_path: str, relative_path: str, new_name: str) -> str:
@@ -467,8 +301,8 @@ class CodeEditor(Generic[TSymbol], ABC):
 
 
 class LanguageServerCodeEditor(CodeEditor[LanguageServerSymbol]):
-    def __init__(self, symbol_retriever: LanguageServerSymbolRetriever, write_precondition: WritePrecondition | None = None):
-        super().__init__(project=symbol_retriever.project, write_precondition=write_precondition)
+    def __init__(self, symbol_retriever: LanguageServerSymbolRetriever):
+        super().__init__(project=symbol_retriever.project)
         self._symbol_retriever = symbol_retriever
 
     def _get_language_server(self, relative_path: str) -> SolidLanguageServer:
@@ -485,11 +319,6 @@ class LanguageServerCodeEditor(CodeEditor[LanguageServerSymbol]):
 
         def set_contents(self, contents: str) -> None:
             self._file_buffer.contents = contents
-
-        def discard_unsaved_contents(self) -> None:
-            # the buffer outlives the edit and the language server holds its edited copy, so both are reloaded
-            # from the file on disk even though the file's modification time has not advanced
-            self._file_buffer.reload_from_disk(force=True)
 
         def delete_text_between_positions(self, start_pos: PositionInFile, end_pos: PositionInFile) -> None:
             self._lang_server.delete_text_between_positions(self.relative_path, start_pos.to_lsp_position(), end_pos.to_lsp_position())
@@ -513,25 +342,6 @@ class LanguageServerCodeEditor(CodeEditor[LanguageServerSymbol]):
 
     def _find_unique_symbol(self, name_path: str, relative_file_path: str) -> LanguageServerSymbol:
         return self._symbol_retriever.find_unique(name_path, within_relative_path=relative_file_path)
-
-    def _get_statement_end_position(self, symbol: LanguageServerSymbol, edited_file: "CodeEditor.EditedFile") -> PositionInFile:
-        # route through the per-language :class:`SymbolExtentStrategy` so Python variable
-        # extents (reported as name-only by pyright/jedi) get widened to the enclosing
-        # assignment statement's end. Other languages fall through to the identity strategy.
-        # imported lazily to avoid coupling the module graph at import time.
-        from serena.symbol_extent import get_symbol_extent_strategy
-
-        lsp_end = symbol.get_body_end_position_or_raise()
-        strategy = get_symbol_extent_strategy(edited_file.relative_path)
-        return strategy.get_statement_end_position(symbol, edited_file.get_contents(), lsp_end)
-
-    def _get_statement_start_position(self, symbol: LanguageServerSymbol, edited_file: "CodeEditor.EditedFile") -> PositionInFile:
-        # imported lazily to avoid coupling the module graph at import time.
-        from serena.symbol_extent import get_symbol_extent_strategy
-
-        lsp_start = symbol.get_body_start_position_or_raise()
-        strategy = get_symbol_extent_strategy(edited_file.relative_path)
-        return strategy.get_statement_start_position(symbol, edited_file.get_contents(), lsp_start)
 
     def _relative_path_from_uri(self, uri: str) -> str:
         return os.path.relpath(PathUtils.uri_to_path(uri), self.project_root)
@@ -634,17 +444,16 @@ class LanguageServerCodeEditor(CodeEditor[LanguageServerSymbol]):
 
 
 class JetBrainsCodeEditor(CodeEditor[JetBrainsSymbol]):
-    def __init__(self, project: Project, write_precondition: WritePrecondition | None = None) -> None:
+    def __init__(self, project: Project) -> None:
         self._project = project
-        super().__init__(project, write_precondition)
+        super().__init__(project)
 
     class EditedFile(CodeEditor.EditedFile):
         def __init__(self, relative_path: str, project: Project):
             super().__init__(relative_path)
             path = os.path.join(project.project_root, relative_path)
             log.info("Editing file: %s", path)
-            with open(path, encoding=project.project_config.encoding) as f:
-                self._content = f.read()
+            self._content = FileProxy.from_project_relative_path(project, relative_path).get_contents()
 
         def get_contents(self) -> str:
             return self._content
@@ -666,13 +475,11 @@ class JetBrainsCodeEditor(CodeEditor[JetBrainsSymbol]):
 
     def _save_edited_file(self, edited_file: "CodeEditor.EditedFile") -> None:
         super()._save_edited_file(edited_file)
-
-        # ask the IDE to refresh the file; the save has landed, so a refresh that fails fails an edit that has been applied
         try:
             with JetBrainsPluginClient.from_project(self._project) as client:
                 client.refresh_file(edited_file.relative_path)
-        except Exception as e:
-            raise LandedEditError(edited_file.relative_path, e) from e
+        except ServerNotFoundError:
+            log.debug("JetBrains plugin server not found; file refresh skipped for %s", edited_file.relative_path)
 
     def _find_unique_symbol(self, name_path: str, relative_file_path: str) -> JetBrainsSymbol:
         with JetBrainsPluginClient.from_project(self._project) as client:
@@ -715,3 +522,45 @@ class JetBrainsCodeEditor(CodeEditor[JetBrainsSymbol]):
                 rename_in_text_occurrences=rename_in_text_occurrences,
             )
             return "Success"
+
+
+class EditedFileContext:
+    """
+    Context manager for file editing.
+
+    Create the context, then use `set_updated_content` to set the new content, the original content
+    being provided in `original_content`.
+    When exiting the context without an exception, the updated content will be written back to the file.
+    """
+
+    def __init__(self, relative_path: str, code_editor: CodeEditor):
+        self._relative_path = relative_path
+        self._code_editor = code_editor
+        self._edited_file: CodeEditor.EditedFile | None = None
+        self._edited_file_context: Any = None
+
+    def __enter__(self) -> Self:
+        self._edited_file_context = self._code_editor.edited_file_context(self._relative_path)
+        self._edited_file = self._edited_file_context.__enter__()
+        return self
+
+    def get_original_content(self) -> str:
+        """
+        :return: the original content of the file before any modifications.
+        """
+        assert self._edited_file is not None
+        return self._edited_file.get_contents()
+
+    def set_updated_content(self, content: str) -> None:
+        """
+        Sets the updated content of the file, which will be written back to the file
+        when the context is exited without an exception.
+
+        :param content: the updated content of the file
+        """
+        assert self._edited_file is not None
+        self._edited_file.set_contents(content)
+
+    def __exit__(self, exc_type: type[BaseException] | None, exc_value: BaseException | None, traceback: TracebackType | None) -> None:
+        assert self._edited_file_context is not None
+        self._edited_file_context.__exit__(exc_type, exc_value, traceback)

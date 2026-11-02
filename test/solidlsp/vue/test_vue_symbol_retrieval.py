@@ -2,15 +2,16 @@ import os
 
 import pytest
 
+from serena.symbol import LanguageServerSymbol
 from solidlsp import SolidLanguageServer
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_types import SymbolKind
 
 pytestmark = pytest.mark.vue
 
 
 class TestVueSymbolRetrieval:
-    @pytest.mark.parametrize("language_server", [Language.VUE], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.VUE], indirect=True)
     def test_request_containing_symbol_script_setup_function(self, language_server: SolidLanguageServer) -> None:
         file_path = os.path.join("src", "components", "CalculatorInput.vue")
 
@@ -45,7 +46,7 @@ class TestVueSymbolRetrieval:
         if "body" in containing_symbol:
             assert "handleDigit" in containing_symbol["body"].get_text(), "Function body should contain function name"
 
-    @pytest.mark.parametrize("language_server", [Language.VUE], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.VUE], indirect=True)
     def test_request_containing_symbol_computed_property(self, language_server: SolidLanguageServer) -> None:
         file_path = os.path.join("src", "components", "CalculatorInput.vue")
 
@@ -80,8 +81,8 @@ class TestVueSymbolRetrieval:
             SymbolKind.Function,
         ], f"Expected property/variable/function kind for computed, got {containing_symbol.get('kind')}"
 
-    @pytest.mark.parametrize("language_server", [Language.VUE], indirect=True)
-    def test_request_containing_symbol_no_containing_symbol(self, language_server: SolidLanguageServer) -> None:
+    @pytest.mark.parametrize("language_server", [LanguageServerId.VUE], indirect=True)
+    def test_request_containing_symbol_import_in_script_tag(self, language_server: SolidLanguageServer) -> None:
         file_path = os.path.join("src", "components", "CalculatorInput.vue")
 
         # Position in the import statements at the top of the script setup
@@ -92,12 +93,12 @@ class TestVueSymbolRetrieval:
         # Request containing symbol for a position in the imports
         containing_symbol = language_server.request_containing_symbol(file_path, import_line, import_character)
 
-        # Should return None or empty dictionary for positions without containing symbol
-        assert containing_symbol is None or containing_symbol == {}, (
-            f"Expected None or empty dict for import position, got {containing_symbol}"
-        )
+        # Containing symbol is the script tag
+        assert containing_symbol is not None
+        s = LanguageServerSymbol(containing_symbol)
+        assert s.get_name_path().startswith("script")
 
-    @pytest.mark.parametrize("language_server", [Language.VUE], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.VUE], indirect=True)
     def test_request_referencing_symbols_store_function(self, language_server: SolidLanguageServer) -> None:
         store_file = os.path.join("src", "stores", "calculator.ts")
 
@@ -135,7 +136,7 @@ class TestVueSymbolRetrieval:
                 assert "name" in ref, "Reference should have name"
                 assert "location" in ref, "Reference should have location"
 
-    @pytest.mark.parametrize("language_server", [Language.VUE], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.VUE], indirect=True)
     def test_request_referencing_symbols_composable(self, language_server: SolidLanguageServer) -> None:
         composable_file = os.path.join("src", "composables", "useFormatter.ts")
 
@@ -174,7 +175,7 @@ class TestVueSymbolRetrieval:
             f"Found references in: {[ref['location']['uri'] for ref in vue_refs if 'location' in ref and 'uri' in ref['location']]}"
         )
 
-    @pytest.mark.parametrize("language_server", [Language.VUE], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.VUE], indirect=True)
     def test_vue_component_cross_references(self, language_server: SolidLanguageServer) -> None:
         input_file = os.path.join("src", "components", "CalculatorInput.vue")
         button_file = os.path.join("src", "components", "CalculatorButton.vue")
@@ -199,7 +200,7 @@ class TestVueSymbolRetrieval:
         assert "Props" in symbol_names, "CalculatorButton.vue should have Props interface"
         assert "handleClick" in symbol_names, "CalculatorButton.vue should have handleClick function"
 
-    @pytest.mark.parametrize("language_server", [Language.VUE], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.VUE], indirect=True)
     def test_request_defining_symbol_import_resolution(self, language_server: SolidLanguageServer) -> None:
         file_path = os.path.join("src", "components", "CalculatorInput.vue")
 
@@ -229,7 +230,7 @@ class TestVueSymbolRetrieval:
                 f"Should point to calculator.ts, got {defining_symbol['location']['uri']}"
             )
 
-    @pytest.mark.parametrize("language_server", [Language.VUE], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.VUE], indirect=True)
     def test_request_defining_symbol_component_import(self, language_server: SolidLanguageServer) -> None:
         file_path = os.path.join("src", "components", "CalculatorInput.vue")
 

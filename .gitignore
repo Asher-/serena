@@ -79,6 +79,10 @@ downloads/
 eggs/
 .eggs/
 lib/
+!test/resources/repos/dart/test_repo/lib/
+!test/resources/repos/dart/test_repo/lib/diagnostics_sample.dart
+!test/resources/repos/svelte/test_repo/src/lib/
+!test/resources/repos/svelte/test_repo/src/lib/**
 lib64/
 parts/
 sdist/
@@ -288,6 +292,9 @@ cabal.project.local*
 # Lean 4
 .lake/
 
+# Nix
+/result
+
 zz-misc/
 vue-implementation/
 
@@ -309,3 +316,5 @@ news/news.json
 # Cursor-vs-RA evaluation scratch — findings.md backup snapshots and one-off test files
 docs/cursor-vs-ra/runs/*/findings.md.*
 docs/cursor-vs-ra/runs/*/findings.test-newfile.md
+test/resources/repos/vbnet/test_repo/obj/
+test/resources/repos/vbnet/test_repo/bin/

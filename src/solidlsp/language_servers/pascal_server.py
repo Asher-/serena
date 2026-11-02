@@ -42,6 +42,7 @@ Example configuration in ~/.serena/serena_config.yml:
             fpcdir: "D:/laz32/fpcsrc"
             lazarusdir: "D:/laz32/lazarus"
 """
+# SPDX-License-Identifier: MIT
 
 from __future__ import annotations
 
@@ -49,10 +50,10 @@ import hashlib
 import json
 import logging
 import os
-import pathlib
 import platform
 import shutil
 import tarfile
+import tempfile
 import threading
 import time
 import urllib.error
@@ -62,14 +63,40 @@ import zipfile
 
 from solidlsp.language_servers.common import RuntimeDependency, RuntimeDependencyCollection, quote_windows_path
 from solidlsp.ls import SolidLanguageServer
-from solidlsp.ls_config import Language, LanguageServerConfig
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
+from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
 
 log = logging.getLogger(__name__)
 
-PASLS_VERSION = "v0.2.0"
+# Version pinning convention (see eclipse_jdtls.py for the full spec):
+#   INITIAL_* — frozen forever; legacy unversioned install dir is reserved for it.
+#   DEFAULT_* — bumped on upgrades; goes into a versioned subdir.
+INITIAL_PASLS_VERSION = "v0.2.0"
+INITIAL_PASLS_SHA256_BY_PLATFORM = {
+    "linux-x64": "517259395b0a385a5e848cf48b967645a984be3dd456118bc08771283a822a5b",
+    "linux-arm64": "cb4986941cfdcf9cb74ece6bbb53a443390a908e880108a37f4ccf82b2d6c502",
+    "osx-x64": "0abfcd98f63f77dba74094339a40d4407b69317c1c77b13a26b9b7dbdfd885f1",
+    "osx-arm64": "d4c2411e406af96ceae12b11e77fdb0c684ca15a68bfd8b4f9c6fe1fbdf515a7",
+    "win-x64": "1493c31552e6f90a59800b2d44669e01fc4551d3647f3cea5dd105a9f6bc73e5",
+}
+DEFAULT_PASLS_VERSION = "v0.2.0"
+DEFAULT_PASLS_SHA256_BY_PLATFORM = {
+    "linux-x64": "517259395b0a385a5e848cf48b967645a984be3dd456118bc08771283a822a5b",
+    "linux-arm64": "cb4986941cfdcf9cb74ece6bbb53a443390a908e880108a37f4ccf82b2d6c502",
+    "osx-x64": "0abfcd98f63f77dba74094339a40d4407b69317c1c77b13a26b9b7dbdfd885f1",
+    "osx-arm64": "d4c2411e406af96ceae12b11e77fdb0c684ca15a68bfd8b4f9c6fe1fbdf515a7",
+    "win-x64": "1493c31552e6f90a59800b2d44669e01fc4551d3647f3cea5dd105a9f6bc73e5",
+}
+PASLS_VERSION = DEFAULT_PASLS_VERSION
+
+
+def _pasls_sha(version: str, platform_key: str) -> str | None:
+    if version == INITIAL_PASLS_VERSION:
+        return INITIAL_PASLS_SHA256_BY_PLATFORM.get(platform_key)
+    if version == DEFAULT_PASLS_VERSION:
+        return DEFAULT_PASLS_SHA256_BY_PLATFORM.get(platform_key)
+    return None
 
 
 class PascalLanguageServer(SolidLanguageServer):
@@ -105,9 +132,9 @@ class PascalLanguageServer(SolidLanguageServer):
         proc_env: dict[str, str] = {}
 
         # Read from ls_specific_settings["pascal"]
-        from solidlsp.ls_config import Language
+        from solidlsp.ls_config import LanguageServerId
 
-        pascal_settings = solidlsp_settings.get_ls_specific_settings(Language.PASCAL)
+        pascal_settings = solidlsp_settings.get_ls_specific_settings(LanguageServerId.PASCAL)
 
         # pp: Path to FPC compiler driver (must be fpc.exe, NOT ppc386.exe/ppcx64.exe)
         # CodeTools queries fpc.exe for configuration via "fpc -iV", "fpc -iTO", etc.
@@ -508,7 +535,7 @@ class PascalLanguageServer(SolidLanguageServer):
         """Atomic update: download -> verify checksum -> extract -> replace."""
         temp_dir = pasls_dir + ".tmp"
         backup_dir = pasls_dir + ".backup"
-        temp_archive_dir = os.path.join(os.path.expanduser("~"), "solidlsp_tmp")
+        temp_archive_dir = tempfile.mkdtemp(prefix="solidlsp_")
 
         try:
             dep = deps.get_single_dep_for_current_platform()
@@ -521,8 +548,6 @@ class PascalLanguageServer(SolidLanguageServer):
             # 1. Clean up any existing temp directory
             if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir)
-            os.makedirs(temp_archive_dir, exist_ok=True)
-
             # 2. Download archive
             log.info(f"Downloading pasls archive: {archive_filename}")
             if not cls._download_archive(dep.url, archive_path):
@@ -578,11 +603,7 @@ class PascalLanguageServer(SolidLanguageServer):
                         shutil.copytree(backup_meta, target_meta)
 
             # 9. Clean up downloaded archive and temp directory
-            try:
-                os.remove(archive_path)
-                os.rmdir(temp_archive_dir)
-            except OSError:
-                pass
+            shutil.rmtree(temp_archive_dir, ignore_errors=True)
 
             log.info("pasls installation completed successfully")
             return True
@@ -598,12 +619,13 @@ class PascalLanguageServer(SolidLanguageServer):
                 except Exception as rollback_error:
                     log.error(f"Rollback failed: {rollback_error}")
 
-            # Clean up temp directory
+            # Clean up temp directories
             if os.path.exists(temp_dir):
                 try:
                     shutil.rmtree(temp_dir)
                 except Exception:
                     pass
+            shutil.rmtree(temp_archive_dir, ignore_errors=True)
 
             return False
 
@@ -617,7 +639,7 @@ class PascalLanguageServer(SolidLanguageServer):
             str: The command to start the pasls server
 
         """
-        pascal_settings = solidlsp_settings.get_ls_specific_settings(Language.PASCAL)
+        pascal_settings = solidlsp_settings.get_ls_specific_settings(LanguageServerId.PASCAL)
         pasls_version = pascal_settings.get("pasls_version", PASLS_VERSION)
         cls.PASLS_VERSION = pasls_version
         cls.PASLS_RELEASES_URL = f"https://github.com/zen010101/pascal-language-server/releases/download/{pasls_version}"
@@ -629,7 +651,12 @@ class PascalLanguageServer(SolidLanguageServer):
             log.info(f"Found pasls in PATH: {pasls_in_path}")
             return quote_windows_path(pasls_in_path)
 
-        pasls_dir = cls.ls_resources_dir(solidlsp_settings)
+        # legacy unversioned dir reserved for INITIAL; every other version goes into a versioned subdir
+        pasls_dir = (
+            cls.ls_resources_dir(solidlsp_settings)
+            if pasls_version == INITIAL_PASLS_VERSION
+            else os.path.join(cls.ls_resources_dir(solidlsp_settings), f"pasls-{pasls_version}")
+        )
         os.makedirs(pasls_dir, exist_ok=True)
 
         # Clean up old files from previous sessions
@@ -647,7 +674,7 @@ class PascalLanguageServer(SolidLanguageServer):
                     platform_id="linux-x64",
                     archive_type="gztar",
                     binary_name="pasls",
-                    sha256="517259395b0a385a5e848cf48b967645a984be3dd456118bc08771283a822a5b",
+                    sha256=_pasls_sha(pasls_version, "linux-x64"),
                 ),
                 RuntimeDependency(
                     id="PascalLanguageServer",
@@ -656,7 +683,7 @@ class PascalLanguageServer(SolidLanguageServer):
                     platform_id="linux-arm64",
                     archive_type="gztar",
                     binary_name="pasls",
-                    sha256="cb4986941cfdcf9cb74ece6bbb53a443390a908e880108a37f4ccf82b2d6c502",
+                    sha256=_pasls_sha(pasls_version, "linux-arm64"),
                 ),
                 RuntimeDependency(
                     id="PascalLanguageServer",
@@ -665,7 +692,7 @@ class PascalLanguageServer(SolidLanguageServer):
                     platform_id="osx-x64",
                     archive_type="zip",
                     binary_name="pasls",
-                    sha256="0abfcd98f63f77dba74094339a40d4407b69317c1c77b13a26b9b7dbdfd885f1",
+                    sha256=_pasls_sha(pasls_version, "osx-x64"),
                 ),
                 RuntimeDependency(
                     id="PascalLanguageServer",
@@ -674,7 +701,7 @@ class PascalLanguageServer(SolidLanguageServer):
                     platform_id="osx-arm64",
                     archive_type="zip",
                     binary_name="pasls",
-                    sha256="d4c2411e406af96ceae12b11e77fdb0c684ca15a68bfd8b4f9c6fe1fbdf515a7",
+                    sha256=_pasls_sha(pasls_version, "osx-arm64"),
                 ),
                 RuntimeDependency(
                     id="PascalLanguageServer",
@@ -683,7 +710,7 @@ class PascalLanguageServer(SolidLanguageServer):
                     platform_id="win-x64",
                     archive_type="zip",
                     binary_name="pasls.exe",
-                    sha256="1493c31552e6f90a59800b2d44669e01fc4551d3647f3cea5dd105a9f6bc73e5",
+                    sha256=_pasls_sha(pasls_version, "win-x64"),
                 ),
             ]
         )
@@ -749,8 +776,7 @@ class PascalLanguageServer(SolidLanguageServer):
         log.info(f"Using pasls at: {pasls_executable_path}")
         return quote_windows_path(pasls_executable_path)
 
-    @staticmethod
-    def _get_initialize_params(repository_absolute_path: str) -> InitializeParams:
+    def _create_base_initialize_params(self) -> dict:
         """
         Returns the initialize params for the Pascal Language Server.
 
@@ -760,8 +786,6 @@ class PascalLanguageServer(SolidLanguageServer):
 
         We only pass target OS/CPU in initializationOptions if explicitly set.
         """
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
-
         # Build initializationOptions from environment variables
         # pasls reads these to configure CodeTools:
         # - PP: Path to FPC compiler executable
@@ -776,6 +800,14 @@ class PascalLanguageServer(SolidLanguageServer):
             value = os.environ.get(var, "")
             if value:
                 initialization_options[var] = value
+
+        initialization_options.update(
+            {
+                "checkSyntax": True,
+                "publishDiagnostics": True,
+                "showSyntaxErrors": True,
+            }
+        )
 
         initialize_params = {
             "locale": "en",
@@ -831,6 +863,7 @@ class PascalLanguageServer(SolidLanguageServer):
                     },
                     "formatting": {"dynamicRegistration": True},
                     "rangeFormatting": {"dynamicRegistration": True},
+                    "publishDiagnostics": {"relatedInformation": True},
                 },
                 "workspace": {
                     "workspaceFolders": True,
@@ -844,18 +877,9 @@ class PascalLanguageServer(SolidLanguageServer):
                 },
             },
             "initializationOptions": initialization_options,
-            "processId": os.getpid(),
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
         }
 
-        return initialize_params  # type: ignore
+        return initialize_params
 
     def _start_server(self) -> None:
         """
@@ -889,7 +913,7 @@ class PascalLanguageServer(SolidLanguageServer):
 
         log.info("Starting Pascal server process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request from LSP client to LSP server and awaiting response")
         init_response = self.server.send.initialize(initialize_params)

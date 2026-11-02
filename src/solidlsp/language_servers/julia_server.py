@@ -1,6 +1,7 @@
+# SPDX-License-Identifier: MIT
+
 import logging
 import os
-import pathlib
 import platform
 import shutil
 import subprocess
@@ -10,10 +11,10 @@ from overrides import override
 
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
+from solidlsp.lsp_protocol_handler.lsp_types import DiagnosticTag
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
-from solidlsp.util import supervise
+from solidlsp.util.subprocess_util import subprocess_run
 
 log = logging.getLogger(__name__)
 
@@ -79,10 +80,14 @@ class JuliaLanguageServer(SolidLanguageServer):
                 f"Checked locations: {common_locations}"
             )
 
-        # Check if LanguageServer.jl is installed
+        # Check if LanguageServer.jl is installed.
+        # stdin=DEVNULL: when Serena runs over the stdio MCP transport, the JSON-RPC
+        # channel *is* the process stdin/stdout. Without this, the Julia child inherits
+        # Serena's stdin (the MCP pipe) and clobbers it, killing the server right after
+        # initialize ("tools fetch failed"). See https://github.com/oraios/serena/issues/1577
         check_cmd = [julia_path, "-e", "using LanguageServer"]
         try:
-            result = supervise.run(check_cmd, check=False, capture_output=True, text=True, timeout=10)
+            result = subprocess_run(check_cmd, check=False, capture_output=True, text=True, timeout=10)
             if result.returncode != 0:
                 # LanguageServer.jl not found, install it
                 JuliaLanguageServer._install_language_server(julia_path)
@@ -100,7 +105,7 @@ class JuliaLanguageServer(SolidLanguageServer):
         install_cmd = [julia_path, "-e", 'using Pkg; Pkg.add("LanguageServer")']
 
         try:
-            result = supervise.run(install_cmd, check=False, capture_output=True, text=True, timeout=300)  # 5 minutes for installation
+            result = subprocess_run(install_cmd, check=False, capture_output=True, text=True, timeout=300)  # 5 minutes for installation
 
             if result.returncode == 0:
                 log.info("LanguageServer.jl installed successfully!")
@@ -116,31 +121,47 @@ class JuliaLanguageServer(SolidLanguageServer):
         """Define language-specific directories to ignore for Julia projects."""
         return super().is_ignored_dirname(dirname) or dirname in [".julia", "build", "dist"]
 
-    def _get_initialize_params(self, repository_absolute_path: str) -> InitializeParams:
+    @override
+    def _supports_pull_diagnostics(self) -> bool:
+        # LanguageServer.jl raises an unhandled error on textDocument/diagnostic which crashes
+        # the server process. Force the published-diagnostics path instead.
+        return False
+
+    @override
+    def _get_published_diagnostics_wait_timeout(self, pull_diagnostics_failed: bool) -> float:
+        # LanguageServer.jl needs significant warm-up after init before it emits the first
+        # publishDiagnostics: workspace/configuration round-trip + initial linter pass typically
+        # land 13-15s after the file is opened in a cold LS. Module-scoped fixtures usually have
+        # the cache pre-populated and return immediately, so this ceiling only kicks in for cold
+        # runs (standalone test invocations, CI cold start).
+        return 30.0
+
+    def _create_base_initialize_params(self) -> dict:
         """
         Returns the initialize params for the Julia Language Server.
         """
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
-        initialize_params: InitializeParams = {  # type: ignore
-            "processId": os.getpid(),
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
+        initialize_params: dict = {
             "capabilities": {
-                "workspace": {"workspaceFolders": True},
+                # workspace.configuration MUST be true: LanguageServer.jl pulls all julia.lint.*
+                # settings via workspace/configuration after initialize. Without it, the server
+                # skips that codepath and runlinter stays disabled, so no diagnostics ever arrive.
+                "workspace": {"workspaceFolders": True, "configuration": True},
                 "textDocument": {
+                    "publishDiagnostics": {
+                        "relatedInformation": True,
+                        "versionSupport": False,
+                        "tagSupport": {"valueSet": [DiagnosticTag.Unnecessary, DiagnosticTag.Deprecated]},
+                        "codeDescriptionSupport": True,
+                        "dataSupport": True,
+                    },
+                    "synchronization": {"dynamicRegistration": True, "didSave": True},
                     "definition": {"dynamicRegistration": True},
                     "references": {"dynamicRegistration": True},
                     "documentSymbol": {"dynamicRegistration": True},
                 },
             },
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
         }
-        return initialize_params  # type: ignore
+        return initialize_params
 
     def _start_server(self) -> None:
         """Start the LanguageServer.jl server process."""
@@ -151,6 +172,19 @@ class JuliaLanguageServer(SolidLanguageServer):
         def window_log_message(msg: dict) -> None:
             log.info(f"LSP: window/logMessage: {msg}")
 
+        def workspace_configuration(params: dict) -> list[Any]:
+            """
+            Respond to LanguageServer.jl's workspace/configuration pull request.
+
+            The server requests a flat list of julia.* settings (in particular julia.lint.run,
+            position 11 in the response). Returning ``None`` for each entry causes the server to
+            apply its built-in defaults — including ``runlinter = true`` — which is what we want
+            for diagnostics to be produced.
+            """
+            items = params.get("items", []) if isinstance(params, dict) else []
+            return [None for _ in items]
+
+        self.server.on_request("workspace/configuration", workspace_configuration)
         self.server.on_notification("window/logMessage", window_log_message)
         self.server.on_notification("$/progress", do_nothing)
         self.server.on_notification("textDocument/publishDiagnostics", do_nothing)
@@ -158,7 +192,7 @@ class JuliaLanguageServer(SolidLanguageServer):
         log.info("Starting LanguageServer.jl server process")
         self.server.start()
 
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
         log.info("Sending initialize request to Julia Language Server")
 
         init_response = self.server.send.initialize(initialize_params)
@@ -167,4 +201,10 @@ class JuliaLanguageServer(SolidLanguageServer):
         assert "documentSymbolProvider" in init_response["capabilities"]
 
         self.server.notify.initialized({})
+
+        # nudge the server to pull config: LanguageServer.jl only invokes request_julia_config
+        # from its workspace/didChangeConfiguration handler, so without this notification the
+        # server never asks us for julia.lint.run and runlinter stays disabled (no diagnostics).
+        self.server.notify.workspace_did_change_configuration({"settings": {}})
+
         log.info("Julia Language Server is initialized and ready.")

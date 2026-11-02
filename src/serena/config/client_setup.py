@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 from abc import ABC, abstractmethod
 
 import click
@@ -53,7 +55,7 @@ class ClientSetupHandlerClaudeCode(ClientSetupHandler):
         super().__init__("claude-code")
 
     def is_applicable(self) -> bool:
-        result = execute_shell_command("claude --version")
+        result = execute_shell_command("claude --version", capture_stderr=True)
         return result.return_code == 0 and "Claude" in result.stdout
 
     def get_mcp_server_options(self) -> list[str]:
@@ -78,7 +80,7 @@ class ClientSetupHandlerCodex(ClientSetupHandler):
         super().__init__("codex")
 
     def is_applicable(self) -> bool:
-        result = execute_shell_command("codex --version")
+        result = execute_shell_command("codex --version", capture_stderr=True)
         return result.return_code == 0 and "codex-cli" in result.stdout
 
     def get_mcp_server_options(self) -> list[str]:
@@ -88,4 +90,59 @@ class ClientSetupHandlerCodex(ClientSetupHandler):
         return self._run_shell_command(f"codex mcp add serena -- {self.get_mcp_server_command()}")
 
 
-client_setup_handlers = [ClientSetupHandlerClaudeCode(), ClientSetupHandlerCodex()]
+class ClientSetupHandlerCodeBuddy(ClientSetupHandler):
+    def __init__(self) -> None:
+        super().__init__("codebuddy")
+
+    def is_applicable(self) -> bool:
+        result = execute_shell_command("codebuddy --version", capture_stderr=True)
+        return result.return_code == 0
+
+    def get_mcp_server_options(self) -> list[str]:
+        return ["--context=codebuddy", "--project-from-cwd"]
+
+    def apply(self) -> bool:
+        cmd = f"codebuddy mcp add --scope user serena -- {self.get_mcp_server_command()}"
+        is_success = self._run_shell_command(cmd)
+        if is_success:
+            click.echo("\nIMPORTANT: We additionally recommend to set up hooks for CodeBuddy to ensure the best experience.")
+            click.echo("   Please read the instructions here:")
+            click.echo("   https://oraios.github.io/serena/02-usage/030_clients.html#codebuddy")
+        return is_success
+
+
+class ClientSetupHandlerGrok(ClientSetupHandler):
+    """
+    Setup for xAI Grok Build.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("grok")
+
+    def is_applicable(self) -> bool:
+        version_result = execute_shell_command("grok --version", capture_stderr=True)
+        if version_result.return_code != 0 or not version_result.stdout.lower().startswith("grok "):
+            return False
+
+        mcp_result = execute_shell_command("grok mcp add --help", capture_stderr=True)
+        return mcp_result.return_code == 0 and "Add or update an MCP server" in mcp_result.stdout
+
+    def get_mcp_server_options(self) -> list[str]:
+        return ["--context=grok", "--project-from-cwd"]
+
+    def apply(self) -> bool:
+        cmd = f"grok mcp add --scope user serena -- {self.get_mcp_server_command()}"
+        is_success = self._run_shell_command(cmd)
+        if is_success:
+            click.echo("\nIMPORTANT: We additionally recommend to set up hooks for Grok to ensure the best experience.")
+            click.echo("   Please read the instructions here:")
+            click.echo("   https://oraios.github.io/serena/02-usage/030_clients.html#grok")
+        return is_success
+
+
+client_setup_handlers = [
+    ClientSetupHandlerClaudeCode(),
+    ClientSetupHandlerCodeBuddy(),
+    ClientSetupHandlerCodex(),
+    ClientSetupHandlerGrok(),
+]
