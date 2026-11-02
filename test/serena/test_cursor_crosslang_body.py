@@ -25,11 +25,11 @@ from serena.agent import SerenaAgent
 from serena.config.serena_config import ProjectConfig, RegisteredProject, SerenaConfig
 from serena.project import Project
 from serena.tools.cursor_tools import CursorConfigureTool, CursorStartTool
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 from test.conftest import get_repo_path, language_tests_enabled
 
 
-def _build_agent(language: Language, project_name: str) -> SerenaAgent:
+def _build_agent(language: LanguageServerId, project_name: str) -> SerenaAgent:
     """Construct a SerenaAgent pointing at ``language``'s ``test_repo``."""
     config = SerenaConfig(gui_log_window=False, web_dashboard=False)
     repo_path = get_repo_path(language)
@@ -81,9 +81,9 @@ def _assert_body_spans_full_literal(view: str, identifier: str, close_char: str)
 @pytest.fixture(scope="module")
 def typescript_serena_agent() -> Iterator[SerenaAgent]:
     """SerenaAgent configured for the TypeScript test repo."""
-    if not language_tests_enabled(Language.TYPESCRIPT):
+    if not language_tests_enabled(LanguageServerId.TYPESCRIPT):
         pytest.skip("TypeScript tests not enabled")
-    agent = _build_agent(Language.TYPESCRIPT, "test_repo_typescript_body_probe")
+    agent = _build_agent(LanguageServerId.TYPESCRIPT, "test_repo_typescript_body_probe")
     try:
         yield agent
     finally:
@@ -130,9 +130,9 @@ def test_typescript_multiline_array_literal_body(typescript_serena_agent: Serena
 @pytest.fixture(scope="module")
 def go_serena_agent() -> Iterator[SerenaAgent]:
     """SerenaAgent configured for the Go test repo."""
-    if not language_tests_enabled(Language.GO):
+    if not language_tests_enabled(LanguageServerId.GO):
         pytest.skip("Go tests not enabled")
-    agent = _build_agent(Language.GO, "test_repo_go_body_probe")
+    agent = _build_agent(LanguageServerId.GO, "test_repo_go_body_probe")
     try:
         yield agent
     finally:
@@ -215,9 +215,9 @@ def test_go_method_body_window_renders(go_serena_agent: SerenaAgent) -> None:
 @pytest.fixture(scope="module")
 def swift_serena_agent() -> Iterator[SerenaAgent]:
     """SerenaAgent configured for the Swift test repo."""
-    if not language_tests_enabled(Language.SWIFT):
+    if not language_tests_enabled(LanguageServerId.SWIFT):
         pytest.skip("Swift tests not enabled")
-    agent = _build_agent(Language.SWIFT, "test_repo_swift_body_probe")
+    agent = _build_agent(LanguageServerId.SWIFT, "test_repo_swift_body_probe")
     try:
         yield agent
     finally:

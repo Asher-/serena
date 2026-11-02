@@ -3,7 +3,7 @@ import os
 import pytest
 
 from solidlsp import SolidLanguageServer
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_types import SymbolKind
 from solidlsp.ls_utils import SymbolUtils
 from test.conftest import is_ci
@@ -16,7 +16,7 @@ from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name,
 @pytest.mark.skipif(is_ci, reason="Kotlin LSP JVM restart is unstable on CI runners")
 @pytest.mark.kotlin
 class TestKotlinLanguageServer:
-    @pytest.mark.parametrize("language_server", [Language.KOTLIN], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.KOTLIN], indirect=True)
     def test_find_symbol(self, language_server: SolidLanguageServer) -> None:
         symbols = language_server.request_full_symbol_tree()
         assert SymbolUtils.symbol_tree_contains_name(symbols, "Main"), "Main class not found in symbol tree"
@@ -28,7 +28,7 @@ class TestKotlinLanguageServer:
     # Permanent state error: reproduces across KLS 261.x and 262.x on macOS-arm64. Not timing
     # (verified with 60s post-indexing sleep and 20 immediate retries). Skip until upstream fix.
     @pytest.mark.skipif(not is_ci, reason="Kotlin LSP -32803 Unknown stableId / RAW_FIR->STATUS bugs (permanent)")
-    @pytest.mark.parametrize("language_server", [Language.KOTLIN], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.KOTLIN], indirect=True)
     def test_find_referencing_symbols(self, language_server: SolidLanguageServer) -> None:
         # Use correct Kotlin file paths
         file_path = os.path.join("src", "main", "kotlin", "test_repo", "Utils.kt")
@@ -56,14 +56,14 @@ class TestKotlinLanguageServer:
             "Main should reference Model (tried all positions in selectionRange)"
         )
 
-    @pytest.mark.parametrize("language_server", [Language.KOTLIN], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.KOTLIN], indirect=True)
     def test_overview_methods(self, language_server: SolidLanguageServer) -> None:
         symbols = language_server.request_full_symbol_tree()
         assert SymbolUtils.symbol_tree_contains_name(symbols, "Main"), "Main missing from overview"
         assert SymbolUtils.symbol_tree_contains_name(symbols, "Utils"), "Utils missing from overview"
         assert SymbolUtils.symbol_tree_contains_name(symbols, "Model"), "Model missing from overview"
 
-    @pytest.mark.parametrize("language_server", [Language.KOTLIN], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.KOTLIN], indirect=True)
     def test_bare_symbol_names(self, language_server) -> None:
         all_symbols = request_all_symbols(language_server)
         malformed_symbols = []

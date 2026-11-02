@@ -22,7 +22,7 @@ from secrets import token_hex
 
 import pytest
 
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_process import LanguageServerProcess, ProcessLaunchInfo
 from solidlsp.ls_survival import HOLDINGS, LanguageServerStates
 from solidlsp.util import supervise
@@ -68,12 +68,12 @@ SERVER = textwrap.dedent(
 FIRST_INSTANCE = textwrap.dedent(
     """
     import json, logging, sys, threading, time
-    from solidlsp.ls_config import Language
+    from solidlsp.ls_config import LanguageServerId
     from solidlsp.ls_process import LanguageServerProcess, ProcessLaunchInfo
     command, directory, servers, big = json.loads(sys.argv[1]), sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
     started = []
     for _ in range(servers):
-        process = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=directory), Language.PYTHON, lambda _: logging.INFO)
+        process = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=directory), LanguageServerId.PYTHON, lambda _: logging.INFO)
         process.start()
         started.append(process)
         if "silent" in command:
@@ -138,7 +138,7 @@ def _first_instance(
 
 
 def _client(command: list[str], scratch: Path) -> LanguageServerProcess:
-    return LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(scratch)), Language.PYTHON, lambda _: logging.INFO)
+    return LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(scratch)), LanguageServerId.PYTHON, lambda _: logging.INFO)
 
 
 def _state_files(root: Path) -> list[Path]:

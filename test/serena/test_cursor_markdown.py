@@ -15,7 +15,7 @@ from serena.agent import SerenaAgent
 from serena.config.serena_config import ProjectConfig, RegisteredProject, SerenaConfig
 from serena.project import Project
 from serena.tools.cursor_tools import CursorConfigureTool, CursorOverviewTool, CursorStartTool
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 from test.conftest import get_repo_path
 
 pytestmark = pytest.mark.markdown
@@ -28,17 +28,17 @@ pytestmark = pytest.mark.markdown
 
 @pytest.fixture(scope="module")
 def markdown_serena_agent() -> Iterator[SerenaAgent]:
-    """SerenaAgent configured for the Markdown test repo with Language.MARKDOWN active."""
+    """SerenaAgent configured for the Markdown test repo with LanguageServerId.MARKDOWN active."""
     # build a minimal SerenaConfig so the agent does not try to launch the dashboard or GUI
     config = SerenaConfig(gui_log_window=False, web_dashboard=False)
-    repo_path = get_repo_path(Language.MARKDOWN)
+    repo_path = get_repo_path(LanguageServerId.MARKDOWN)
 
     # construct the project explicitly so we control the language list
     project = Project(
         project_root=str(repo_path),
         project_config=ProjectConfig(
             project_name="test_repo_markdown",
-            languages=[Language.MARKDOWN],
+            languages=[LanguageServerId.MARKDOWN],
             ignored_paths=[],
             excluded_tools=[],
             read_only=False,

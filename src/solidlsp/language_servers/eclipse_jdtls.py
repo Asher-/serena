@@ -30,7 +30,7 @@ from solidlsp.ls_types import UnifiedSymbolInformation
 from solidlsp.ls_utils import PlatformUtils
 from solidlsp.lsp_protocol_handler.lsp_types import DocumentSymbol, SymbolInformation
 from solidlsp.settings import SolidLSPSettings
-from solidlsp.util.subprocess_util import subprocess_run
+from solidlsp.util import supervise
 
 log = logging.getLogger(__name__)
 
@@ -654,7 +654,7 @@ class EclipseJDTLS(SolidLanguageServer):
             """
             try:
                 # both -XshowSettings:properties and -version write to stderr by convention
-                result = subprocess_run(
+                result = supervise.run(
                     [java_exe, "-XshowSettings:properties", "-version"],
                     capture_output=True,
                     text=True,
@@ -1424,7 +1424,7 @@ class EclipseJDTLS(SolidLanguageServer):
 
         self.server.notify.workspace_did_change_configuration({"settings": initialize_params["initializationOptions"]["settings"]})  # type: ignore
 
-        if not self._service_ready_event.is_set():
+        if not self._service_ready_event.is_set() and not self.server.adopted:
             log.info("Waiting for service to be ready ...")
             self._service_ready_event.wait()
         log.info("Service is ready")

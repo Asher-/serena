@@ -38,7 +38,7 @@ from serena.tools.cursor_tools import (
 )
 from serena.tools.file_tools import CreateTextFileTool
 from serena.tools.tools_base import SUCCESS_RESULT, Tool, ToolMarkerCanEdit
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 from test.conftest import language_tests_enabled
 from test.serena.test_streamable_http_cc_session_key import _make_mcp_ctx
 
@@ -100,7 +100,7 @@ def _project_at(root: Path, serena_config: SerenaConfig) -> Project:
         project_root=str(root.resolve()),
         project_config=ProjectConfig(
             project_name=root.name,
-            languages=[Language.PYTHON],
+            languages=[LanguageServerId.PYTHON],
             ignored_paths=[],
             excluded_tools=[],
             read_only=False,
@@ -165,7 +165,7 @@ def _no_pipe_session() -> Iterator[None]:
 @pytest.fixture
 def session(work_dir: Path) -> Iterator[_Session]:
     """A session of a real agent that holds no project yet, with two registered projects to activate."""
-    if not language_tests_enabled(Language.PYTHON):
+    if not language_tests_enabled(LanguageServerId.PYTHON):
         pytest.skip("Python tests not enabled")
 
     config = SerenaConfig(gui_log_window=False, web_dashboard=False)

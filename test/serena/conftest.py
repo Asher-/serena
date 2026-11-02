@@ -11,7 +11,7 @@ import pytest
 from serena.agent import SerenaAgent
 from serena.config.serena_config import ProjectConfig, RegisteredProject, SerenaConfig, SerenaPaths
 from serena.project import Project
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 from test.conftest import get_repo_path, language_tests_enabled
 
 
@@ -65,16 +65,16 @@ def work_dir(request: pytest.FixtureRequest) -> Iterator[Path]:
 @pytest.fixture(scope="module")
 def python_serena_agent() -> Iterator[SerenaAgent]:
     """SerenaAgent configured for the Python test repo."""
-    if not language_tests_enabled(Language.PYTHON):
+    if not language_tests_enabled(LanguageServerId.PYTHON):
         pytest.skip("Python tests not enabled")
 
     config = SerenaConfig(gui_log_window=False, web_dashboard=False)
-    repo_path = get_repo_path(Language.PYTHON)
+    repo_path = get_repo_path(LanguageServerId.PYTHON)
     project = Project(
         project_root=str(repo_path),
         project_config=ProjectConfig(
             project_name="test_repo_python",
-            languages=[Language.PYTHON],
+            languages=[LanguageServerId.PYTHON],
             ignored_paths=[],
             excluded_tools=[],
             read_only=False,

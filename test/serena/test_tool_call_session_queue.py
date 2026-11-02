@@ -29,7 +29,7 @@ from serena.task_executor import TaskExecutor
 from serena.tools.cursor_tools import CursorFindTool
 from serena.tools.file_tools import StatTool
 from serena.tools.tools_base import Tool, ToolMarkerDoesNotRequireActiveProject
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 
 TTool = TypeVar("TTool", bound=Tool)
 
@@ -185,14 +185,14 @@ class _LanguageAddingProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
 
         :return: a fixed marker, once the addition has returned
         """
-        self.agent.add_language(Language.TYPESCRIPT)
+        self.agent.add_language(LanguageServerId.TYPESCRIPT)
         return "added"
 
 
 class _LanguageRemovingProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
     """A tool whose call removes a language from the active project of its session and reports whether the removal ran."""
 
-    def __init__(self, agent: SerenaAgent, removals: list[Language]) -> None:
+    def __init__(self, agent: SerenaAgent, removals: list[LanguageServerId]) -> None:
         """
         :param agent: the agent
         :param removals: the languages the active project has removed, in removal order
@@ -206,8 +206,8 @@ class _LanguageRemovingProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
 
         :return: ``removed`` if the removal ran before ``remove_language`` returned, ``pending`` otherwise
         """
-        self.agent.remove_language(Language.PYTHON)
-        return "removed" if self._removals == [Language.PYTHON] else "pending"
+        self.agent.remove_language(LanguageServerId.PYTHON)
+        return "removed" if self._removals == [LanguageServerId.PYTHON] else "pending"
 
 
 class _GatedLanguageServer:
@@ -298,7 +298,7 @@ def _project(root: Path, agent: SerenaAgent) -> Project:
     """
     return Project(
         project_root=str(root),
-        project_config=ProjectConfig(project_name=root.name, languages=[Language.PYTHON]),
+        project_config=ProjectConfig(project_name=root.name, languages=[LanguageServerId.PYTHON]),
         serena_config=agent.serena_config,
     )
 
@@ -668,7 +668,7 @@ def test_a_language_addition_within_a_session_call_completes_while_the_daemon_wi
     """
     agent.serena_config.tool_timeout = 10.0
     project = _bind_project(agent, "session-a", tmp_path)
-    additions: list[Language] = []
+    additions: list[LanguageServerId] = []
     monkeypatch.setattr(project, "add_language", additions.append)
     adding = _activated(_LanguageAddingProbeTool(agent), monkeypatch)
     agent.issue_task(gate.hold, name="DaemonWideHold")
@@ -677,7 +677,7 @@ def test_a_language_addition_within_a_session_call_completes_while_the_daemon_wi
     result = adding.apply_ex(mcp_ctx=_ForwardedMcpContext.for_session("session-a"))
 
     assert result == "added", result
-    assert additions == [Language.TYPESCRIPT]
+    assert additions == [LanguageServerId.TYPESCRIPT]
     assert not gate.release.is_set()
 
 
@@ -691,7 +691,7 @@ def test_a_language_removal_within_a_session_call_has_completed_when_the_request
     """
     agent.serena_config.tool_timeout = 10.0
     project = _bind_project(agent, "session-a", tmp_path)
-    removals: list[Language] = []
+    removals: list[LanguageServerId] = []
     monkeypatch.setattr(project, "remove_language", removals.append)
     removing = _activated(_LanguageRemovingProbeTool(agent, removals), monkeypatch)
 
@@ -762,13 +762,13 @@ def test_a_language_addition_outside_any_session_runs_as_the_running_task_of_the
     agent._active_project = project
     running_during_addition: list[list[str]] = []
 
-    def add_language(language: Language) -> None:
+    def add_language(language: LanguageServerId) -> None:
         running = [task.name.split(":", 1)[1] for task in agent._task_executor.get_current_tasks() if task.is_running]
         running_during_addition.append(running)
 
     monkeypatch.setattr(project, "add_language", add_language)
 
-    agent.add_language(Language.TYPESCRIPT)
+    agent.add_language(LanguageServerId.TYPESCRIPT)
 
     assert running_during_addition == [["AddLanguage:typescript"]], running_during_addition
 

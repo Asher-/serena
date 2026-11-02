@@ -8,7 +8,7 @@ the full cursor lifecycle: start, navigate, configure, trail, and close.
 import pytest
 
 from serena.cursor import CursorManager, EdgeType
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 from test.conftest import project_with_ls_context
 
 pytestmark = pytest.mark.python
@@ -17,7 +17,7 @@ pytestmark = pytest.mark.python
 @pytest.fixture(scope="module")
 def cursor_manager():
     """Create a CursorManager backed by the real Python test repo with a live LSP server."""
-    with project_with_ls_context(Language.PYTHON) as project:
+    with project_with_ls_context(LanguageServerId.PYTHON) as project:
         yield CursorManager(project)
 
 

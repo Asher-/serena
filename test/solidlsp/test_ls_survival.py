@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_process import LanguageServerProcess, ProcessLaunchInfo
 from solidlsp.ls_survival import LanguageServerStates
@@ -74,9 +74,9 @@ SERVER = textwrap.dedent(
 FIRST_INSTANCE = textwrap.dedent(
     """
     import json, logging, sys, time
-    from solidlsp.ls_config import Language
+    from solidlsp.ls_config import LanguageServerId
     from solidlsp.ls_process import LanguageServerProcess, ProcessLaunchInfo
-    process = LanguageServerProcess(ProcessLaunchInfo(cmd=json.loads(sys.argv[1]), cwd=sys.argv[2]), Language.PYTHON, lambda _: logging.INFO)
+    process = LanguageServerProcess(ProcessLaunchInfo(cmd=json.loads(sys.argv[1]), cwd=sys.argv[2]), LanguageServerId.PYTHON, lambda _: logging.INFO)
     process.start()
     process.send_request("initialize", {"processId": None})
     process.send_notification("initialized", {})
@@ -116,7 +116,7 @@ def test_the_next_instance_adopts_the_server_with_no_second_initialize_or_did_op
     assert symbol == "open"
 
     # the next instance, knowing nothing but the command and the directory
-    process = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), Language.PYTHON, lambda _: logging.INFO)
+    process = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), LanguageServerId.PYTHON, lambda _: logging.INFO)
     process.start()
     assert process.process is not None and process.process.pid == pid
     assert process.send_request("initialize", {"processId": None}) == {"capabilities": {"documentSymbolProvider": True}}
@@ -141,7 +141,7 @@ def test_a_document_changed_while_no_instance_ran_is_brought_up_to_date(tmp_path
     command = [sys.executable, str(server), str(journal)]
     _start_and_kill_the_first_instance(tmp_path, command)
 
-    process = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), Language.PYTHON, lambda _: logging.INFO)
+    process = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), LanguageServerId.PYTHON, lambda _: logging.INFO)
     process.start()
     process.send_notification(
         "textDocument/didOpen", {"textDocument": {"uri": "file:///a", "version": 1, "languageId": "python", "text": "b"}}
@@ -161,7 +161,7 @@ def test_a_change_after_an_adoption_counts_on_from_the_version_the_server_holds(
     _start_and_kill_the_first_instance(tmp_path, command)
 
     # a client whose buffer of a document restarts its count on being opened again
-    process = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), Language.PYTHON, lambda _: logging.INFO)
+    process = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), LanguageServerId.PYTHON, lambda _: logging.INFO)
     process.start()
     process.send_notification(
         "textDocument/didOpen", {"textDocument": {"uri": "file:///a", "version": 0, "languageId": "python", "text": "b"}}
@@ -188,13 +188,13 @@ def _quiet() -> bool:
 @pytest.mark.skipif(shutil.which("rust-analyzer") is None, reason="no rust-analyzer on PATH")
 def test_a_server_adopted_after_it_went_quiet_starts_without_the_signal_it_gave_the_ended_instance(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
-    shutil.copytree(get_repo_path(Language.RUST), repo)
+    shutil.copytree(get_repo_path(LanguageServerId.RUST), repo)
     first_instance = textwrap.dedent(
         """
         import sys, time
         from test.conftest import _create_ls
-        from solidlsp.ls_config import Language
-        ls = _create_ls(Language.RUST, repo_path=sys.argv[1])
+        from solidlsp.ls_config import LanguageServerId
+        ls = _create_ls(LanguageServerId.RUST, repo_path=sys.argv[1])
         ls.start()
         print("STARTED", ls.server.process.pid, flush=True)
         time.sleep(300)
@@ -219,7 +219,7 @@ def test_a_server_adopted_after_it_went_quiet_starts_without_the_signal_it_gave_
     os.killpg(first.pid, signal.SIGKILL)
     first.wait()
 
-    ls = _create_ls(Language.RUST, repo_path=str(repo))
+    ls = _create_ls(LanguageServerId.RUST, repo_path=str(repo))
     starting = threading.Thread(target=ls.start, daemon=True)
     starting.start()
     starting.join(60)
@@ -248,7 +248,7 @@ def test_a_live_pid_sent_in_initialize_params_reaches_the_server_as_a_null_proce
     server.write_text(SERVER)
     journal = tmp_path / "journal"
     command = [sys.executable, str(server), str(journal)]
-    process = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), Language.PYTHON, lambda _: logging.INFO)
+    process = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), LanguageServerId.PYTHON, lambda _: logging.INFO)
     process.start()
 
     try:
@@ -263,7 +263,7 @@ def test_an_error_the_server_answers_with_is_raised_to_the_caller(tmp_path: Path
     server = tmp_path / "server.py"
     server.write_text(SERVER)
     command = [sys.executable, str(server), str(tmp_path / "journal")]
-    process = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), Language.PYTHON, lambda _: logging.INFO)
+    process = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), LanguageServerId.PYTHON, lambda _: logging.INFO)
     process.start()
 
     try:
@@ -277,7 +277,7 @@ def test_a_second_stop_finds_nothing_held_and_leaves_no_state(tmp_path: Path) ->
     server = tmp_path / "server.py"
     server.write_text(SERVER)
     command = [sys.executable, str(server), str(tmp_path / "journal")]
-    process = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), Language.PYTHON, lambda _: logging.INFO)
+    process = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), LanguageServerId.PYTHON, lambda _: logging.INFO)
     process.start()
     process.stop()
 

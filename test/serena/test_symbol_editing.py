@@ -23,7 +23,7 @@ from overrides import overrides
 from syrupy import SnapshotAssertion
 
 from serena.code_editor import CodeEditor, LanguageServerCodeEditor
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 from src.serena.symbol import LanguageServerSymbolRetriever
 from test.conftest import get_repo_path, project_with_ls_context
 
@@ -178,7 +178,7 @@ class CodeDiff:
 
 
 class EditingTest(ABC):
-    def __init__(self, language: Language, rel_path: str):
+    def __init__(self, language: LanguageServerId, rel_path: str):
         """
         :param language: the language
         :param rel_path: the relative path of the edited file
@@ -244,7 +244,7 @@ TYPESCRIPT_TEST_FILE = "index.ts"
 
 
 class DeleteSymbolTest(EditingTest):
-    def __init__(self, language: Language, rel_path: str, deleted_symbol: str):
+    def __init__(self, language: LanguageServerId, rel_path: str, deleted_symbol: str):
         super().__init__(language, rel_path)
         self.deleted_symbol = deleted_symbol
         self.rel_path = rel_path
@@ -258,7 +258,7 @@ class DeleteSymbolTest(EditingTest):
     [
         pytest.param(
             DeleteSymbolTest(
-                Language.PYTHON,
+                LanguageServerId.PYTHON,
                 PYTHON_TEST_REL_FILE_PATH,
                 "VariableContainer",
             ),
@@ -266,7 +266,7 @@ class DeleteSymbolTest(EditingTest):
         ),
         pytest.param(
             DeleteSymbolTest(
-                Language.TYPESCRIPT,
+                LanguageServerId.TYPESCRIPT,
                 TYPESCRIPT_TEST_FILE,
                 "DemoClass",
             ),
@@ -286,7 +286,7 @@ def test_delete_go_top_level_type_removes_leading_keyword() -> None:
     keyword) must remove the whole declaration rather than leave a dangling ``type``
     keyword on an otherwise-empty line (invalid Go).
     """
-    test = DeleteSymbolTest(Language.GO, "main.go", "DemoStruct")
+    test = DeleteSymbolTest(LanguageServerId.GO, "main.go", "DemoStruct")
     with test._setup() as symbol_retriever:
         content_before = test._read_file("main.go")
         assert "type DemoStruct" in content_before  # precondition: the fixture declares it
@@ -329,7 +329,7 @@ NEW_TYPESCRIPT_FUNCTION_AFTER = """function newFunctionAfterClass(): void {
 
 class InsertInRelToSymbolTest(EditingTest):
     def __init__(
-        self, language: Language, rel_path: str, symbol_name: str, new_content: str, mode: Literal["before", "after"] | None = None
+        self, language: LanguageServerId, rel_path: str, symbol_name: str, new_content: str, mode: Literal["before", "after"] | None = None
     ):
         super().__init__(language, rel_path)
         self.symbol_name = symbol_name
@@ -353,7 +353,7 @@ class InsertInRelToSymbolTest(EditingTest):
     [
         pytest.param(
             InsertInRelToSymbolTest(
-                Language.PYTHON,
+                LanguageServerId.PYTHON,
                 PYTHON_TEST_REL_FILE_PATH,
                 "typed_module_var",
                 NEW_PYTHON_VARIABLE,
@@ -362,7 +362,7 @@ class InsertInRelToSymbolTest(EditingTest):
         ),
         pytest.param(
             InsertInRelToSymbolTest(
-                Language.PYTHON,
+                LanguageServerId.PYTHON,
                 PYTHON_TEST_REL_FILE_PATH,
                 "use_module_variables",
                 NEW_PYTHON_FUNCTION,
@@ -371,7 +371,7 @@ class InsertInRelToSymbolTest(EditingTest):
         ),
         pytest.param(
             InsertInRelToSymbolTest(
-                Language.TYPESCRIPT,
+                LanguageServerId.TYPESCRIPT,
                 TYPESCRIPT_TEST_FILE,
                 "DemoClass",
                 NEW_TYPESCRIPT_FUNCTION_AFTER,
@@ -380,7 +380,7 @@ class InsertInRelToSymbolTest(EditingTest):
         ),
         pytest.param(
             InsertInRelToSymbolTest(
-                Language.TYPESCRIPT,
+                LanguageServerId.TYPESCRIPT,
                 TYPESCRIPT_TEST_FILE,
                 "helperFunction",
                 NEW_TYPESCRIPT_FUNCTION,
@@ -397,7 +397,7 @@ def test_insert_in_rel_to_symbol(test_case: InsertInRelToSymbolTest, mode: Liter
 @pytest.mark.python
 def test_insert_python_class_before(snapshot: SnapshotAssertion):
     InsertInRelToSymbolTest(
-        Language.PYTHON,
+        LanguageServerId.PYTHON,
         PYTHON_TEST_REL_FILE_PATH,
         "VariableDataclass",
         NEW_PYTHON_CLASS_WITH_TRAILING_NEWLINES,
@@ -408,7 +408,7 @@ def test_insert_python_class_before(snapshot: SnapshotAssertion):
 @pytest.mark.python
 def test_insert_python_class_after(snapshot: SnapshotAssertion):
     InsertInRelToSymbolTest(
-        Language.PYTHON,
+        LanguageServerId.PYTHON,
         PYTHON_TEST_REL_FILE_PATH,
         "VariableDataclass",
         NEW_PYTHON_CLASS_WITH_LEADING_NEWLINES,
@@ -430,7 +430,7 @@ TYPESCRIPT_REPLACED_BODY = """function printValue() {
 
 
 class ReplaceBodyTest(EditingTest):
-    def __init__(self, language: Language, rel_path: str, symbol_name: str, new_body: str):
+    def __init__(self, language: LanguageServerId, rel_path: str, symbol_name: str, new_body: str):
         super().__init__(language, rel_path)
         self.symbol_name = symbol_name
         self.new_body = new_body
@@ -444,7 +444,7 @@ class ReplaceBodyTest(EditingTest):
     [
         pytest.param(
             ReplaceBodyTest(
-                Language.PYTHON,
+                LanguageServerId.PYTHON,
                 PYTHON_TEST_REL_FILE_PATH,
                 "VariableContainer/modify_instance_var",
                 PYTHON_REPLACED_BODY,
@@ -453,7 +453,7 @@ class ReplaceBodyTest(EditingTest):
         ),
         pytest.param(
             ReplaceBodyTest(
-                Language.TYPESCRIPT,
+                LanguageServerId.TYPESCRIPT,
                 TYPESCRIPT_TEST_FILE,
                 "DemoClass/printValue",
                 TYPESCRIPT_REPLACED_BODY,
@@ -473,7 +473,7 @@ NIX_ATTR_REPLACEMENT = """c = 3;"""
 class NixAttrReplacementTest(EditingTest):
     """Test for replacing individual attributes in Nix that should NOT result in double semicolons."""
 
-    def __init__(self, language: Language, rel_path: str, symbol_name: str, new_body: str):
+    def __init__(self, language: LanguageServerId, rel_path: str, symbol_name: str, new_body: str):
         super().__init__(language, rel_path)
         self.symbol_name = symbol_name
         self.new_body = new_body
@@ -499,7 +499,7 @@ def test_nix_symbol_replacement_no_double_semicolon(snapshot: SnapshotAssertion)
     logic should prevent double semicolons.
     """
     test_case = NixAttrReplacementTest(
-        Language.NIX,
+        LanguageServerId.NIX,
         "default.nix",
         "testUser",  # Simple attrset with multiple key-value pairs
         NIX_ATTR_REPLACEMENT,
@@ -508,7 +508,7 @@ def test_nix_symbol_replacement_no_double_semicolon(snapshot: SnapshotAssertion)
 
 
 class RenameSymbolTest(EditingTest):
-    def __init__(self, language: Language, rel_path: str, symbol_name: str, new_name: str):
+    def __init__(self, language: LanguageServerId, rel_path: str, symbol_name: str, new_name: str):
         super().__init__(language, rel_path)
         self.symbol_name = symbol_name
         self.new_name = new_name
@@ -526,7 +526,7 @@ class RenameSymbolTest(EditingTest):
 @pytest.mark.python
 def test_rename_symbol(snapshot: SnapshotAssertion):
     test_case = RenameSymbolTest(
-        Language.PYTHON,
+        LanguageServerId.PYTHON,
         PYTHON_TEST_REL_FILE_PATH,
         "typed_module_var",
         "renamed_typed_module_var",
@@ -550,7 +550,7 @@ NEW_VUE_HANDLER = """const handleDoubleClick = () => {
     [
         pytest.param(
             DeleteSymbolTest(
-                Language.VUE,
+                LanguageServerId.VUE,
                 VUE_TEST_FILE,
                 "handleMouseEnter",
             ),
@@ -568,7 +568,7 @@ def test_delete_symbol_vue(test_case: DeleteSymbolTest, snapshot: SnapshotAssert
     [
         pytest.param(
             InsertInRelToSymbolTest(
-                Language.VUE,
+                LanguageServerId.VUE,
                 VUE_TEST_FILE,
                 "handleClick",
                 NEW_VUE_HANDLER,
@@ -599,7 +599,7 @@ VUE_REPLACED_HANDLECLICK_BODY = """const handleClick = () => {
     [
         pytest.param(
             ReplaceBodyTest(
-                Language.VUE,
+                LanguageServerId.VUE,
                 VUE_TEST_FILE,
                 "handleClick",
                 VUE_REPLACED_HANDLECLICK_BODY,
@@ -620,7 +620,7 @@ VUE_REPLACED_PRESSCOUNT_BODY = """const pressCount = ref(100)"""
     [
         pytest.param(
             ReplaceBodyTest(
-                Language.VUE,
+                LanguageServerId.VUE,
                 VUE_TEST_FILE,
                 "pressCount",
                 VUE_REPLACED_PRESSCOUNT_BODY,
@@ -659,7 +659,7 @@ VUE_STORE_REPLACED_CLEAR_BODY = """function clear() {
     [
         pytest.param(
             ReplaceBodyTest(
-                Language.VUE,
+                LanguageServerId.VUE,
                 VUE_STORE_FILE,
                 "clear",
                 VUE_STORE_REPLACED_CLEAR_BODY,

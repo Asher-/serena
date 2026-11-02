@@ -19,7 +19,7 @@ from serena.config.serena_config import (
 )
 from serena.constants import PROJECT_TEMPLATE_FILE, SERENA_MANAGED_DIR_NAME
 from serena.project import MemoriesManager, Project
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 from test.conftest import create_default_serena_config
 
 
@@ -63,7 +63,7 @@ class TestProjectConfigAutogenerate:
 
         # Verify the configuration
         assert config.project_name == self.project_path.name
-        assert config.languages == [Language.PYTHON]
+        assert config.languages == [LanguageServerId.PYTHON]
 
     def test_autogenerate_with_js_files(self):
         """Test successful autogeneration with JavaScript source files."""
@@ -73,7 +73,7 @@ class TestProjectConfigAutogenerate:
         # Run autogenerate - should pick Python as dominant
         config = ProjectConfig.autogenerate(self.project_path, self.serena_config, save_to_disk=False)
 
-        assert config.languages == [Language.TYPESCRIPT]
+        assert config.languages == [LanguageServerId.TYPESCRIPT]
 
     def test_autogenerate_with_multiple_languages(self):
         """Test autogeneration picks dominant language when multiple are present."""
@@ -85,7 +85,7 @@ class TestProjectConfigAutogenerate:
         # Run autogenerate - should pick Python as dominant
         config = ProjectConfig.autogenerate(self.project_path, self.serena_config, save_to_disk=False)
 
-        assert config.languages == [Language.PYTHON]
+        assert config.languages == [LanguageServerId.PYTHON]
 
     def test_autogenerate_saves_to_disk(self):
         """Test that autogenerate can save the configuration to disk."""
@@ -101,7 +101,7 @@ class TestProjectConfigAutogenerate:
         assert config_path.exists()
 
         # Verify the content
-        assert config.languages == [Language.GO]
+        assert config.languages == [LanguageServerId.GO]
 
     def test_autogenerate_nonexistent_path(self):
         """Test that autogenerate raises FileNotFoundError for non-existent path."""
@@ -138,7 +138,7 @@ class TestProjectConfigAutogenerate:
         config = ProjectConfig.autogenerate(self.project_path, self.serena_config, project_name=custom_name, save_to_disk=False)
 
         assert config.project_name == custom_name
-        assert config.languages == [Language.TYPESCRIPT]
+        assert config.languages == [LanguageServerId.TYPESCRIPT]
 
 
 class TestProjectConfig:
@@ -190,14 +190,14 @@ class TestProjectConfigLanguageBackend:
     def test_language_backend_defaults_to_none(self):
         config = ProjectConfig(
             project_name="test",
-            languages=[Language.PYTHON],
+            languages=[LanguageServerId.PYTHON],
         )
         assert config.language_backend is None
 
     def test_language_backend_can_be_set(self):
         config = ProjectConfig(
             project_name="test",
-            languages=[Language.PYTHON],
+            languages=[LanguageServerId.PYTHON],
             language_backend=LanguageBackend.JETBRAINS,
         )
         assert config.language_backend == LanguageBackend.JETBRAINS
@@ -205,7 +205,7 @@ class TestProjectConfigLanguageBackend:
     def test_language_backend_roundtrips_through_yaml(self):
         config = ProjectConfig(
             project_name="test",
-            languages=[Language.PYTHON],
+            languages=[LanguageServerId.PYTHON],
             language_backend=LanguageBackend.JETBRAINS,
         )
         d = config._to_yaml_dict()
@@ -214,7 +214,7 @@ class TestProjectConfigLanguageBackend:
     def test_language_backend_none_roundtrips_through_yaml(self):
         config = ProjectConfig(
             project_name="test",
-            languages=[Language.PYTHON],
+            languages=[LanguageServerId.PYTHON],
         )
         d = config._to_yaml_dict()
         assert d["language_backend"] is None
@@ -256,7 +256,7 @@ def _make_config_with_project(
         project_root=str(Path(__file__).parent.parent / "resources" / "repos" / "python" / "test_repo"),
         project_config=ProjectConfig(
             project_name=project_name,
-            languages=[Language.PYTHON],
+            languages=[LanguageServerId.PYTHON],
             language_backend=language_backend,
         ),
         serena_config=config,
@@ -312,7 +312,7 @@ class TestEffectiveLanguageBackend:
             project_root=str(Path(__file__).parent.parent / "resources" / "repos" / "java" / "test_repo"),
             project_config=ProjectConfig(
                 project_name="jb_proj",
-                languages=[Language.JAVA],
+                languages=[LanguageServerId.JAVA],
                 language_backend=LanguageBackend.JETBRAINS,
             ),
             serena_config=config,
@@ -335,7 +335,7 @@ class TestEffectiveLanguageBackend:
             project_root=str(Path(__file__).parent.parent / "resources" / "repos" / "python" / "test_repo"),
             project_config=ProjectConfig(
                 project_name="lsp_proj2",
-                languages=[Language.PYTHON],
+                languages=[LanguageServerId.PYTHON],
                 language_backend=LanguageBackend.LSP,
             ),
             serena_config=config,
@@ -358,7 +358,7 @@ class TestEffectiveLanguageBackend:
             project_root=str(Path(__file__).parent.parent / "resources" / "repos" / "python" / "test_repo"),
             project_config=ProjectConfig(
                 project_name="proj2",
-                languages=[Language.PYTHON],
+                languages=[LanguageServerId.PYTHON],
                 language_backend=None,
             ),
             serena_config=config,
@@ -480,7 +480,7 @@ class TestProjectSerenaDataFolder:
     def _make_project(self, serena_config: "SerenaConfig | None" = None) -> Project:
         project_config = ProjectConfig(
             project_name="myproject",
-            languages=[Language.PYTHON],
+            languages=[LanguageServerId.PYTHON],
         )
         project = Project(
             project_root=str(self.project_path),
@@ -813,25 +813,25 @@ class TestRegisteredProjectReloadIfChanged:
 
     def test_returns_false_when_yml_unchanged(self):
         """freshly-loaded config already reflects disk; a no-op reload reports False and preserves state."""
-        assert self.registered.project_config.languages == [Language.PYTHON]
+        assert self.registered.project_config.languages == [LanguageServerId.PYTHON]
         assert self.registered.reload_if_changed(self.serena_config) is False
-        assert self.registered.project_config.languages == [Language.PYTHON]
+        assert self.registered.project_config.languages == [LanguageServerId.PYTHON]
 
     def test_picks_up_added_language(self):
         """Editing project.yml to append a language is reflected on the next reload_if_changed call."""
         cfg = ProjectConfig.load(self.project_path, serena_config=self.serena_config)
-        cfg.languages.append(Language.TYPESCRIPT)
+        cfg.languages.append(LanguageServerId.TYPESCRIPT)
         cfg.save(str(self.yml_path), save_project_local_yml=False)
         assert self.registered.reload_if_changed(self.serena_config) is True
-        assert self.registered.project_config.languages == [Language.PYTHON, Language.TYPESCRIPT]
+        assert self.registered.project_config.languages == [LanguageServerId.PYTHON, LanguageServerId.TYPESCRIPT]
 
     def test_picks_up_removed_language(self):
         """Editing project.yml to drop and replace a language is reflected on the next reload_if_changed call."""
         cfg = ProjectConfig.load(self.project_path, serena_config=self.serena_config)
-        cfg.languages = [Language.TYPESCRIPT]
+        cfg.languages = [LanguageServerId.TYPESCRIPT]
         cfg.save(str(self.yml_path), save_project_local_yml=False)
         assert self.registered.reload_if_changed(self.serena_config) is True
-        assert self.registered.project_config.languages == [Language.TYPESCRIPT]
+        assert self.registered.project_config.languages == [LanguageServerId.TYPESCRIPT]
 
     def test_drops_cached_project_instance_on_change(self):
         """On a detected change, the next get_project_instance must build a fresh Project, not return the memoized one."""
@@ -839,12 +839,12 @@ class TestRegisteredProjectReloadIfChanged:
         project_first = self.registered.get_project_instance(serena_config=self.serena_config)
         # edit project.yml to change languages through the proper round-trip
         cfg = ProjectConfig.load(self.project_path, serena_config=self.serena_config)
-        cfg.languages.append(Language.TYPESCRIPT)
+        cfg.languages.append(LanguageServerId.TYPESCRIPT)
         cfg.save(str(self.yml_path), save_project_local_yml=False)
         assert self.registered.reload_if_changed(self.serena_config) is True
         project_second = self.registered.get_project_instance(serena_config=self.serena_config)
         assert project_second is not project_first
-        assert project_second.project_config.languages == [Language.PYTHON, Language.TYPESCRIPT]
+        assert project_second.project_config.languages == [LanguageServerId.PYTHON, LanguageServerId.TYPESCRIPT]
 
     def test_keeps_cached_instance_when_unchanged(self):
         """When the on-disk config is unchanged, the memoized Project instance is preserved."""
@@ -857,13 +857,13 @@ class TestRegisteredProjectReloadIfChanged:
         """If project.yml has been removed, reload_if_changed reports False and preserves the cached config defensively."""
         self.yml_path.unlink()
         assert self.registered.reload_if_changed(self.serena_config) is False
-        assert self.registered.project_config.languages == [Language.PYTHON]
+        assert self.registered.project_config.languages == [LanguageServerId.PYTHON]
 
     def test_keeps_cache_when_yml_malformed(self):
         """If project.yml is malformed, reload_if_changed reports False and preserves the cached config defensively."""
         self.yml_path.write_text("this: is: not: valid: yaml: :\n", encoding="utf-8")
         assert self.registered.reload_if_changed(self.serena_config) is False
-        assert self.registered.project_config.languages == [Language.PYTHON]
+        assert self.registered.project_config.languages == [LanguageServerId.PYTHON]
 
 
 class TestGetRegisteredProjectWithRelocatedRoot:

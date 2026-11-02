@@ -11,7 +11,7 @@ import pytest
 
 from solidlsp.language_servers.ruby_lsp import RubyLsp
 from solidlsp.language_servers.solargraph import Solargraph
-from solidlsp.ls_config import Language, LanguageServerConfig
+from solidlsp.ls_config import LanguageServerId, LanguageServerConfig
 from solidlsp.settings import SolidLSPSettings
 from solidlsp.util import supervise
 from test.solidlsp.util.supervised_stand_in import StandIns, assert_started_through_brain_supervise
@@ -33,7 +33,7 @@ def test_ruby_lsp_setup_fails_where_ruby_is_not_installed(stand_ins: StandIns, p
     settings = SolidLSPSettings(solidlsp_dir=str(tmp_path / "solidlsp"))
 
     with pytest.raises(RuntimeError) as caught:
-        RubyLsp._setup_runtime_dependencies(LanguageServerConfig(code_language=Language.RUBY), str(project), settings)
+        RubyLsp._setup_runtime_dependencies(LanguageServerConfig(code_language=LanguageServerId.RUBY), str(project), settings)
     assert "Ruby is not installed or not found in PATH" in str(caught.value)
 
 
@@ -43,7 +43,7 @@ def test_ruby_lsp_setup_fails_with_what_a_failing_gem_install_wrote(stand_ins: S
     settings = SolidLSPSettings(solidlsp_dir=str(tmp_path / "solidlsp"))
 
     with pytest.raises(RuntimeError) as caught:
-        RubyLsp._setup_runtime_dependencies(LanguageServerConfig(code_language=Language.RUBY), str(project), settings)
+        RubyLsp._setup_runtime_dependencies(LanguageServerConfig(code_language=LanguageServerId.RUBY), str(project), settings)
     assert "Failed to install ruby-lsp: ERROR:  Could not find a valid gem 'ruby-lsp' (= 0.17.0)" in str(caught.value)
     assert_started_through_brain_supervise(ruby, gem)
 
@@ -53,14 +53,14 @@ def test_solargraph_setup_fails_where_ruby_fails(stand_ins: StandIns, project: P
     ruby = stand_ins.answering("ruby", exit_code=1)
 
     with pytest.raises(RuntimeError) as caught:
-        Solargraph._setup_runtime_dependencies(LanguageServerConfig(code_language=Language.RUBY), str(project))
+        Solargraph._setup_runtime_dependencies(LanguageServerConfig(code_language=LanguageServerId.RUBY), str(project))
     assert "Error checking Ruby installation: Unknown error." in str(caught.value)
     assert_started_through_brain_supervise(ruby)
 
 
 def test_solargraph_setup_fails_where_ruby_is_not_installed(stand_ins: StandIns, project: Path) -> None:
     with pytest.raises(RuntimeError) as caught:
-        Solargraph._setup_runtime_dependencies(LanguageServerConfig(code_language=Language.RUBY), str(project))
+        Solargraph._setup_runtime_dependencies(LanguageServerConfig(code_language=LanguageServerId.RUBY), str(project))
     assert "Ruby is not installed or not found in PATH" in str(caught.value)
 
 
@@ -78,6 +78,6 @@ def test_solargraph_setup_fails_with_what_a_failing_gem_install_wrote(stand_ins:
     )
 
     with pytest.raises(RuntimeError) as caught:
-        Solargraph._setup_runtime_dependencies(LanguageServerConfig(code_language=Language.RUBY), str(project))
+        Solargraph._setup_runtime_dependencies(LanguageServerConfig(code_language=LanguageServerId.RUBY), str(project))
     assert "Failed to check or install Solargraph: ERROR:  Could not find a valid gem solargraph" in str(caught.value)
     assert_started_through_brain_supervise(ruby, gem)

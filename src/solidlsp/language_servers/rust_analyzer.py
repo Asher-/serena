@@ -14,6 +14,7 @@ import threading
 from overrides import override
 
 from solidlsp import ls_types
+from solidlsp.language_servers.common import RequiredCLI
 from solidlsp.ls import (
     LanguageServerDependencyProvider,
     LanguageServerDependencyProviderSinglePath,
@@ -22,7 +23,7 @@ from solidlsp.ls import (
 )
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.settings import SolidLSPSettings
-from solidlsp.util.subprocess_util import subprocess_run
+from solidlsp.util import supervise
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +58,7 @@ class RustAnalyzer(SolidLanguageServer):
         def _get_rustup_version() -> str | None:
             """Get installed rustup version or None if not found."""
             try:
-                result = subprocess_run(["rustup", "--version"], capture_output=True, text=True, check=False)
+                result = supervise.run(["rustup", "--version"], capture_output=True, text=True, check=False)
                 if result.returncode == 0:
                     return result.stdout.strip()
             except FileNotFoundError:
@@ -68,7 +69,7 @@ class RustAnalyzer(SolidLanguageServer):
         def _get_rust_analyzer_via_rustup() -> str | None:
             """Get rust-analyzer path via rustup. Returns None if not found."""
             try:
-                result = subprocess_run(["rustup", "which", "rust-analyzer"], capture_output=True, text=True, check=False)
+                result = supervise.run(["rustup", "which", "rust-analyzer"], capture_output=True, text=True, check=False)
                 if result.returncode == 0:
                     return result.stdout.strip()
             except FileNotFoundError:
@@ -83,7 +84,7 @@ class RustAnalyzer(SolidLanguageServer):
             that fails because the component is not installed.
             """
             try:
-                result = subprocess_run([path, "--version"], capture_output=True, text=True, check=False, timeout=10)
+                result = supervise.run([path, "--version"], capture_output=True, text=True, check=False, timeout=10)
                 return result.returncode == 0
             except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
                 return False
@@ -109,7 +110,7 @@ class RustAnalyzer(SolidLanguageServer):
             # If rustup is available but rust-analyzer not installed, auto-install it BEFORE
             # checking PATH. This ensures we get the correct version matching the toolchain.
             if RustAnalyzer.DependencyProvider._get_rustup_version():
-                result = subprocess_run(["rustup", "component", "add", "rust-analyzer"], check=False, capture_output=True, text=True)
+                result = supervise.run(["rustup", "component", "add", "rust-analyzer"], check=False, capture_output=True, text=True)
                 if result.returncode == 0:
                     # Verify installation worked
                     rustup_path = RustAnalyzer.DependencyProvider._get_rust_analyzer_via_rustup()
@@ -159,33 +160,33 @@ class RustAnalyzer(SolidLanguageServer):
                 if path and os.path.isfile(path) and os.access(path, os.X_OK):
                     return path
 
-            # Provide helpful error message with all searched locations
-            searched = [p for p in common_paths if p]
-            install_instructions = [
-                "  - Rustup: rustup component add rust-analyzer",
-                "  - Cargo: cargo install rust-analyzer",
+            # Build platform-specific install hints and raise via the shared helper.
+            install_hints = [
+                "Rustup: rustup component add rust-analyzer",
+                "Cargo: cargo install rust-analyzer",
             ]
             if is_windows:
-                install_instructions.extend(
+                install_hints.extend(
                     [
-                        "  - Scoop: scoop install rust-analyzer",
-                        "  - Chocolatey: choco install rust-analyzer",
-                        "  - Standalone: Download from https://github.com/rust-lang/rust-analyzer/releases",
+                        "Scoop: scoop install rust-analyzer",
+                        "Chocolatey: choco install rust-analyzer",
+                        "Standalone: Download from https://github.com/rust-lang/rust-analyzer/releases",
                     ]
                 )
             else:
-                install_instructions.extend(
+                install_hints.extend(
                     [
-                        "  - Homebrew (macOS): brew install rust-analyzer",
-                        "  - System package manager (Linux): apt/dnf/pacman install rust-analyzer",
+                        "Homebrew (macOS): brew install rust-analyzer",
+                        "System package manager (Linux): apt/dnf/pacman install rust-analyzer",
                     ]
                 )
 
-            raise RuntimeError(
-                "rust-analyzer is not installed or not in PATH.\n"
-                "Searched locations:\n" + "\n".join(f"  - {p}" for p in searched) + "\n"
-                "Please install rust-analyzer via:\n" + "\n".join(install_instructions)
-            )
+            searched = [p for p in common_paths if p]
+            raise RequiredCLI(
+                name="rust-analyzer",
+                rationale="rust-analyzer is the Rust language server used by serena.",
+                install_hints=install_hints,
+            ).build_missing_error(searched=searched)
 
         def _get_or_install_core_dependency(self) -> str:
             return self._ensure_rust_analyzer_installed()
@@ -775,12 +776,13 @@ class RustAnalyzer(SolidLanguageServer):
             log.warning("rust-analyzer: server did not advertise a completionProvider capability")
         self.server.notify.initialized({})
 
-        # Wait for rust-analyzer to finish initial indexing (it emits experimental/serverStatus with
-        # quiescent=true when ready). Use a timeout so a server that crashes or never signals
-        # readiness cannot hang startup indefinitely (previously this waited with no timeout).
-        _SERVER_READY_TIMEOUT = 120.0
-        log.info("Waiting for rust-analyzer to signal readiness (quiescent)...")
-        if self.server_ready.wait(timeout=_SERVER_READY_TIMEOUT):
-            log.info("rust-analyzer ready")
-        else:
-            log.warning("rust-analyzer did not signal readiness within %.0fs; proceeding anyway", _SERVER_READY_TIMEOUT)
+        if not self.server.adopted:
+            # Wait for rust-analyzer to finish initial indexing (it emits experimental/serverStatus with
+            # quiescent=true when ready). Use a timeout so a server that crashes or never signals
+            # readiness cannot hang startup indefinitely (previously this waited with no timeout).
+            _SERVER_READY_TIMEOUT = 120.0
+            log.info("Waiting for rust-analyzer to signal readiness (quiescent)...")
+            if self.server_ready.wait(timeout=_SERVER_READY_TIMEOUT):
+                log.info("rust-analyzer ready")
+            else:
+                log.warning("rust-analyzer did not signal readiness within %.0fs; proceeding anyway", _SERVER_READY_TIMEOUT)

@@ -19,7 +19,7 @@ from serena.project import Project
 from serena.tools.cursor_tools import CursorGrepTool
 from serena.tools.file_tools import SearchForPatternTool
 from serena.util.file_system import find_all_non_ignored_files, scan_directory
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 from solidlsp.structural.registry import StructuralBackendRegistry
 
 _SOURCE_FILE = os.path.join("pkg", "module.py")
@@ -49,7 +49,7 @@ def _project(root: Path) -> Project:
         log_level=logging.ERROR,
         language_backend=LanguageBackend.LSP,
     )
-    project_config = ProjectConfig(project_name="walk_link_test", languages=[Language.PYTHON], language_backend=LanguageBackend.LSP)
+    project_config = ProjectConfig(project_name="walk_link_test", languages=[LanguageServerId.PYTHON], language_backend=LanguageBackend.LSP)
     return Project(project_root=str(root), project_config=project_config, serena_config=serena_config)
 
 

@@ -16,7 +16,7 @@ from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.lsp_protocol_handler.lsp_types import DidChangeConfigurationParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
-from solidlsp.util.subprocess_util import subprocess_run
+from solidlsp.util import supervise
 
 log = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ class PerlLanguageServer(SolidLanguageServer):
     def _get_perl_version() -> str | None:
         """Get the installed Perl version or None if not found."""
         try:
-            result = subprocess_run(["perl", "-v"], capture_output=True, text=True, check=False)
+            result = supervise.run(["perl", "-v"], capture_output=True, text=True, check=False)
             if result.returncode == 0:
                 return result.stdout.strip()
         except FileNotFoundError:
@@ -56,7 +56,7 @@ class PerlLanguageServer(SolidLanguageServer):
     def _get_perl_language_server_version() -> str | None:
         """Get the installed Perl::LanguageServer version or None if not found."""
         try:
-            result = subprocess_run(
+            result = supervise.run(
                 ["perl", "-MPerl::LanguageServer", "-e", "print $Perl::LanguageServer::VERSION"],
                 capture_output=True,
                 text=True,

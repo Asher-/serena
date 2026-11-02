@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from solidlsp.language_servers.fsharp_language_server import FSharpLanguageServer
-from solidlsp.ls_config import Language, LanguageServerConfig
+from solidlsp.ls_config import LanguageServerId, LanguageServerConfig
 from solidlsp.ls_utils import DotnetVersion, PlatformUtils
 from solidlsp.settings import SolidLSPSettings
 from solidlsp.structural.backends import csharp as csharp_backend
@@ -61,7 +61,7 @@ def test_fsautocomplete_is_installed_by_dotnet_tool_install_and_launched_from_wh
     )
     settings = SolidLSPSettings(solidlsp_dir=str(tmp_path / "solidlsp"))
 
-    command = FSharpLanguageServer._setup_runtime_dependencies(LanguageServerConfig(code_language=Language.FSHARP), settings)
+    command = FSharpLanguageServer._setup_runtime_dependencies(LanguageServerConfig(code_language=LanguageServerId.FSHARP), settings)
 
     assert Path(command.split()[0]).read_text() == "installed by dotnet tool install\n"
     assert_started_through_brain_supervise(dotnet)

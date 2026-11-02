@@ -16,7 +16,7 @@ from serena.code_editor import LanguageServerCodeEditor
 from serena.symbol import LanguageServerSymbolRetriever
 from serena.util.file_lifecycle import AtomicFileWriter, WritePrecondition
 from solidlsp.ls import LSPFileBuffer
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 from test.conftest import get_repo_path, project_with_ls_context
 from test.serena.test_cursor_container_edit import _make_manager_via_subclass
 
@@ -41,13 +41,13 @@ class TestLanguageServerEditFailedSave:
     @pytest.mark.python
     def test_unencodable_body_leaves_file_directory_and_buffer_as_they_were(self, work_dir: Path) -> None:
         # a copy of the Python test repository, and the edited file's state before the edit
-        repo_path = work_dir / get_repo_path(Language.PYTHON).name
-        shutil.copytree(get_repo_path(Language.PYTHON), repo_path)
+        repo_path = work_dir / get_repo_path(LanguageServerId.PYTHON).name
+        shutil.copytree(get_repo_path(LanguageServerId.PYTHON), repo_path)
         edited_path = repo_path / PYTHON_EDITED_FILE
         bytes_before = edited_path.read_bytes()
         listing_before = sorted(os.listdir(edited_path.parent))
 
-        with project_with_ls_context(Language.PYTHON, str(repo_path)) as project:
+        with project_with_ls_context(LanguageServerId.PYTHON, str(repo_path)) as project:
             # a project whose encoding cannot represent the new body
             project.project_config.encoding = "ascii"
             retriever = LanguageServerSymbolRetriever(project)

@@ -35,7 +35,7 @@ class LanguageUnavailableError(Exception):
     def __init__(
         self,
         message: str,
-        language: "Language | None" = None,
+        language: "LanguageServerIdLike | None" = None,
         cause: Exception | None = None,
         unavailable_languages: "dict[LanguageServerIdLike, Exception] | None" = None,
     ) -> None:

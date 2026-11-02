@@ -28,7 +28,7 @@ from serena.tools.cursor_tools import (
     CursorReplaceBodyTool,
     CursorStartTool,
 )
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 from test.conftest import project_with_ls_context
 
 pytestmark = pytest.mark.python
@@ -42,7 +42,7 @@ pytestmark = pytest.mark.python
 @pytest.fixture(scope="module")
 def python_project():
     """A Project with an active Python language server for cursor tests."""
-    with project_with_ls_context(Language.PYTHON) as project:
+    with project_with_ls_context(LanguageServerId.PYTHON) as project:
         yield project
 
 

@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from solidlsp.language_servers.fsharp_language_server import FSharpLanguageServer
-from solidlsp.ls_config import Language, LanguageServerConfig
+from solidlsp.ls_config import LanguageServerId, LanguageServerConfig
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_utils import PlatformUtils
 from solidlsp.settings import SolidLSPSettings
@@ -65,7 +65,7 @@ def test_fsautocomplete_setup_fails_with_what_a_failing_dotnet_tool_install_wrot
     settings = SolidLSPSettings(solidlsp_dir=str(tmp_path / "solidlsp"))
 
     with pytest.raises(RuntimeError) as caught:
-        FSharpLanguageServer._setup_runtime_dependencies(LanguageServerConfig(code_language=Language.FSHARP), settings)
+        FSharpLanguageServer._setup_runtime_dependencies(LanguageServerConfig(code_language=LanguageServerId.FSHARP), settings)
     assert "Failed to install FsAutoComplete: error NU1101: Unable to find package fsautocomplete" in str(caught.value)
     assert_started_through_brain_supervise(dotnet)
 

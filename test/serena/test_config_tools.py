@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 
 from serena.tools.config_tools import GetLanguageServerStatusTool
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 
 
 class _DummyAgent:
@@ -24,22 +24,22 @@ class _DummyAgent:
 
     def __init__(
         self,
-        active_lsp_languages: list[Language] | None = None,
-        unavailable_lsp_languages: dict[Language, Exception] | None = None,
+        active_lsp_languages: list[LanguageServerId] | None = None,
+        unavailable_lsp_languages: dict[LanguageServerId, Exception] | None = None,
     ) -> None:
         self._active_lsp_languages = list(active_lsp_languages or [])
         self._unavailable_lsp_languages = dict(unavailable_lsp_languages or {})
 
-    def get_active_lsp_languages(self) -> list[Language]:
+    def get_active_lsp_languages(self) -> list[LanguageServerId]:
         return list(self._active_lsp_languages)
 
-    def get_unavailable_lsp_languages(self) -> dict[Language, Exception]:
+    def get_unavailable_lsp_languages(self) -> dict[LanguageServerId, Exception]:
         return dict(self._unavailable_lsp_languages)
 
 
 def _make_tool(
-    active_lsp_languages: list[Language] | None = None,
-    unavailable_lsp_languages: dict[Language, Exception] | None = None,
+    active_lsp_languages: list[LanguageServerId] | None = None,
+    unavailable_lsp_languages: dict[LanguageServerId, Exception] | None = None,
 ) -> GetLanguageServerStatusTool:
     agent = _DummyAgent(
         active_lsp_languages=active_lsp_languages,
@@ -64,15 +64,15 @@ def test_get_language_server_status_reports_active_and_unavailable() -> None:
     # way the dashboard's /get_language_server_status endpoint does
     boom = RuntimeError("Metals crashed on startup")
     tool = _make_tool(
-        active_lsp_languages=[Language.PYTHON],
-        unavailable_lsp_languages={Language.SCALA: boom},
+        active_lsp_languages=[LanguageServerId.PYTHON],
+        unavailable_lsp_languages={LanguageServerId.SCALA: boom},
     )
 
     payload = json.loads(tool.apply())
 
     assert payload == {
-        "active": [Language.PYTHON.value],
-        "unavailable": {Language.SCALA.value: "Metals crashed on startup"},
+        "active": [LanguageServerId.PYTHON.value],
+        "unavailable": {LanguageServerId.SCALA.value: "Metals crashed on startup"},
     }
 
 
@@ -80,25 +80,25 @@ def test_get_language_server_status_sorts_active_languages() -> None:
     # agents should be able to rely on a stable ordering of ``active`` so diffs between snapshots
     # are meaningful; this mirrors the dashboard's sort-by-value contract
     tool = _make_tool(
-        active_lsp_languages=[Language.TYPESCRIPT, Language.MARKDOWN, Language.PYTHON],
+        active_lsp_languages=[LanguageServerId.TYPESCRIPT, LanguageServerId.MARKDOWN, LanguageServerId.PYTHON],
         unavailable_lsp_languages={},
     )
 
     payload = json.loads(tool.apply())
 
-    assert payload["active"] == sorted([Language.TYPESCRIPT.value, Language.MARKDOWN.value, Language.PYTHON.value])
+    assert payload["active"] == sorted([LanguageServerId.TYPESCRIPT.value, LanguageServerId.MARKDOWN.value, LanguageServerId.PYTHON.value])
 
 
 def test_get_language_server_status_serializes_language_keys_as_values() -> None:
     # unavailable is a dict keyed by Language enum in-process; the serialized form must key by the
     # enum's .value string (not its repr) so the dashboard JS and MCP clients see the same shape
     tool = _make_tool(
-        active_lsp_languages=[Language.PYTHON],
-        unavailable_lsp_languages={Language.SCALA: RuntimeError("boom"), Language.GO: ValueError("nope")},
+        active_lsp_languages=[LanguageServerId.PYTHON],
+        unavailable_lsp_languages={LanguageServerId.SCALA: RuntimeError("boom"), LanguageServerId.GO: ValueError("nope")},
     )
 
     payload = json.loads(tool.apply())
 
-    assert set(payload["unavailable"].keys()) == {Language.SCALA.value, Language.GO.value}
-    assert payload["unavailable"][Language.SCALA.value] == "boom"
-    assert payload["unavailable"][Language.GO.value] == "nope"
+    assert set(payload["unavailable"].keys()) == {LanguageServerId.SCALA.value, LanguageServerId.GO.value}
+    assert payload["unavailable"][LanguageServerId.SCALA.value] == "boom"
+    assert payload["unavailable"][LanguageServerId.GO.value] == "nope"

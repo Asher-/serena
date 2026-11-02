@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from solidlsp import SolidLanguageServer
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 from solidlsp.structural.backends.markdown import MarkdownStructuralLanguage
 
 
@@ -60,7 +60,7 @@ def _flatten_structural_headings(source: str) -> list[tuple[str, int]]:
 class TestMarkdownM4StructuralParity:
     """Asserts the LSP surface and the M4 backend agree on every heading."""
 
-    @pytest.mark.parametrize("language_server", [Language.MARKDOWN], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.MARKDOWN], indirect=True)
     @pytest.mark.parametrize("relative_path", ["README.md", "guide.md", "api.md"])
     def test_lsp_matches_structural_backend(self, language_server: SolidLanguageServer, relative_path: str) -> None:
         """Headings from the LSP match those from :class:`MarkdownStructuralLanguage` one-to-one."""
@@ -85,7 +85,7 @@ class TestMarkdownM4StructuralParity:
 class TestMarkdownM4HierarchyShape:
     """Validates the hierarchy the M4 server reports for nested headings."""
 
-    @pytest.mark.parametrize("language_server", [Language.MARKDOWN], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.MARKDOWN], indirect=True)
     def test_readme_hierarchy(self, language_server: SolidLanguageServer) -> None:
         """README.md's h1 contains its h2 siblings as children, and each h2 contains its h3 descendants."""
         _all, roots = language_server.request_document_symbols("README.md").get_all_symbols_and_roots()

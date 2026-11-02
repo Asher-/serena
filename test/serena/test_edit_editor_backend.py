@@ -23,7 +23,7 @@ from serena.jetbrains.jetbrains_plugin_client import JetBrainsPluginClient
 from serena.tools.cursor_tools import CursorReplaceRangeTool, CursorReplaceRangeVerifiedTool
 from serena.tools.tools_base import SUCCESS_RESULT
 from serena.util.file_lifecycle import content_version
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 from test.conftest import get_repo_path, project_with_ls_context
 from test.serena.test_cursor_container_edit import _make_manager_via_subclass
 
@@ -253,13 +253,13 @@ class TestLanguageServerEditorSave:
 
     def test_change_after_version_check_is_kept_and_reported_stale(self, work_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # a copy of the Python test repository, and the version the caller read the edited file at
-        repo_path = work_dir / get_repo_path(Language.PYTHON).name
-        shutil.copytree(get_repo_path(Language.PYTHON), repo_path)
+        repo_path = work_dir / get_repo_path(LanguageServerId.PYTHON).name
+        shutil.copytree(get_repo_path(LanguageServerId.PYTHON), repo_path)
         edited_path = repo_path / PYTHON_EDITED_FILE
         expect_version = content_version(edited_path.read_bytes())
         listing_before = sorted(os.listdir(edited_path.parent))
 
-        with project_with_ls_context(Language.PYTHON, str(repo_path)) as project:
+        with project_with_ls_context(LanguageServerId.PYTHON, str(repo_path)) as project:
             # a tool whose agent runs the language server backend, and another writer changing the file after the version check
             agent = _BackendAgent(CursorManager(project=project), project, LanguageBackend.LSP, using_language_server=True)
             tool = _bind_replace_range(agent)

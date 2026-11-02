@@ -15,7 +15,7 @@ import pytest
 
 from serena.ls_manager import LanguageServerFactory, LanguageServerManager, LanguageUnavailableError
 from solidlsp import SolidLanguageServer
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 
 _GATE_TIMEOUT = 10.0
 """the seconds a test waits on a gate before failing; a bound on a hang, never the ordering under test"""
@@ -41,7 +41,7 @@ class _GatedLanguageServerFactory(LanguageServerFactory):
         """Makes the ``start`` of every server started from now on wait on :attr:`start_gate`."""
         self._hold_starts = True
 
-    def create_language_server(self, language: Language) -> SolidLanguageServer:  # type: ignore[override]
+    def create_language_server(self, language: LanguageServerId) -> SolidLanguageServer:  # type: ignore[override]
         server = MagicMock(spec=SolidLanguageServer)
         server.language = language
         server.is_running.return_value = True
@@ -63,8 +63,8 @@ def _python_manager(factory: _GatedLanguageServerFactory) -> LanguageServerManag
     :param factory: the factory double the manager creates its servers with
     :return: a manager holding one running Python server, ``factory.created[0]``
     """
-    manager = LanguageServerManager.from_languages([Language.PYTHON], factory)
-    assert factory.created and manager.get_active_languages() == [Language.PYTHON]
+    manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON], factory)
+    assert factory.created and manager.get_active_languages() == [LanguageServerId.PYTHON]
     return manager
 
 
@@ -123,7 +123,7 @@ class TestRestartStopsReplacedServer:
         manager = _python_manager(factory)
         replaced = factory.created[0]
 
-        replacement = manager.restart_language_server(Language.PYTHON)
+        replacement = manager.restart_language_server(LanguageServerId.PYTHON)
 
         # the replaced server was stopped and the manager holds the replacement
         replaced.stop.assert_called_once()
@@ -150,7 +150,7 @@ class TestRestartStopsReplacedServer:
         factory.start_failure = OSError(24, "Too many open files")
 
         with pytest.raises(LanguageUnavailableError):
-            manager.restart_language_server(Language.PYTHON)
+            manager.restart_language_server(LanguageServerId.PYTHON)
 
         # the replacement that failed to start was stopped
         assert len(factory.created) == 2

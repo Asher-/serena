@@ -40,7 +40,7 @@ import pytest
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 from test.conftest import get_repo_path, language_tests_enabled
 
 
@@ -114,10 +114,10 @@ def serena_http_server(tmp_path: Path) -> Iterator[dict[str, Any]]:
     Serena is shipped, so the test exercises the production code path rather
     than an in-process shortcut.
     """
-    if not language_tests_enabled(Language.SWIFT):
+    if not language_tests_enabled(LanguageServerId.SWIFT):
         pytest.skip("Swift tests not enabled (xcrun toolchain unavailable)")
 
-    repo_path = get_repo_path(Language.SWIFT)
+    repo_path = get_repo_path(LanguageServerId.SWIFT)
     port = _find_free_port()
     log_file = tmp_path / "serena-mcp.log"
 

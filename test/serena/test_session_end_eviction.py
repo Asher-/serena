@@ -31,7 +31,7 @@ from serena.ls_manager import LanguageServerManager
 from serena.project import Project
 from serena.tools import Tool
 from serena.tools.tools_base import SESSION_ID_ARGUMENT
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 
 _GATE_TIMEOUT = 10.0
 """the seconds a test waits on a bridge process's exit before failing; a bound on a hang, never the ordering under test"""
@@ -87,7 +87,7 @@ def make_go_project(agent: SerenaAgent, work_dir: Path) -> Callable[[str], Proje
         root = work_dir / name
         root.mkdir()
         (root / _GO_FILE).write_text("package main\n\nfunc Hello() {}\n", encoding="utf-8")
-        project_config = ProjectConfig(project_name=name, languages=[Language.GO], language_backend=LanguageBackend.LSP)
+        project_config = ProjectConfig(project_name=name, languages=[LanguageServerId.GO], language_backend=LanguageBackend.LSP)
         project = Project(project_root=str(root), project_config=project_config, serena_config=agent.serena_config)
         manager = MagicMock(spec=LanguageServerManager)
         manager.stopped = threading.Event()

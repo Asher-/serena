@@ -22,7 +22,7 @@ from serena.agent import _SESSION_KEY_VAR, SerenaAgent
 from serena.config.serena_config import LanguageBackend, ProjectConfig, SerenaConfig
 from serena.ls_manager import LanguageServerManager
 from serena.project import Project
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 
 _GATE_TIMEOUT = 10.0
 """the seconds a test waits on a gate before failing; a bound on a hang, never the ordering under test"""
@@ -50,7 +50,7 @@ def _held_project(agent: SerenaAgent, root: Path) -> _HeldProject:
         language server
     """
     root.mkdir()
-    project_config = ProjectConfig(project_name=root.name, languages=[Language.PYTHON], language_backend=LanguageBackend.LSP)
+    project_config = ProjectConfig(project_name=root.name, languages=[LanguageServerId.PYTHON], language_backend=LanguageBackend.LSP)
     project = Project(project_root=str(root), project_config=project_config, serena_config=agent.serena_config)
     manager = MagicMock(spec=LanguageServerManager)
     manager.stopped = threading.Event()

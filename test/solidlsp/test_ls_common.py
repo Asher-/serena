@@ -3,13 +3,13 @@ import os
 import pytest
 
 from solidlsp import SolidLanguageServer
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 
 
 class TestLanguageServerCommonFunctionality:
     """Test common functionality of SolidLanguageServer base implementation (not language-specific behaviour)."""
 
-    @pytest.mark.parametrize("language_server", [Language.PYTHON], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.PYTHON], indirect=True)
     def test_open_file_cache_invalidate(self, language_server: SolidLanguageServer) -> None:
         """
         Tests that the file buffer cache is invalidated when the file is changed on disk.
@@ -42,7 +42,7 @@ class TestLanguageServerCommonFunctionality:
         finally:
             os.remove(file_path)
 
-    @pytest.mark.parametrize("language_server", [Language.PYTHON], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.PYTHON], indirect=True)
     def test_reload_from_disk_bumps_version_and_refreshes_buffer(self, language_server: SolidLanguageServer) -> None:
         """
         Regression test for bug #3 — external mutations (e.g. git checkout during

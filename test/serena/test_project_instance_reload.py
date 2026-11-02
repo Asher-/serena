@@ -32,7 +32,7 @@ from serena.constants import SERENA_MANAGED_DIR_NAME
 from serena.ls_manager import LanguageServerFactory, LanguageServerManager
 from serena.project import Project
 from serena.tools.tools_base import Tool
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 from test.serena.test_session_project_binding import _HANG_GUARD_SECONDS, _Gate
 from test.serena.test_streamable_http_cc_session_key import _make_mcp_ctx
 
@@ -74,7 +74,7 @@ class _ManagerFactory:
         self._log_length = 0
         self._managers: list[_StandInManager] = []
 
-    def build(self, languages: list[Language], factory: LanguageServerFactory) -> LanguageServerManager:
+    def build(self, languages: list[LanguageServerId], factory: LanguageServerFactory) -> LanguageServerManager:
         """Builds a stand-in manager for the project ``factory`` serves, in place of :meth:`LanguageServerManager.from_languages`."""
         with self._condition:
             running = [m for m in self._managers if m.project_root == factory.project_root and not m.stopped.is_set()]

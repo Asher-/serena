@@ -17,7 +17,7 @@ from serena.tools import (
     ReplaceSymbolBodyTool,
     SafeDeleteSymbol,
 )
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_types import SymbolKind
 from test.conftest import get_repo_path, is_ci, language_tests_enabled
 from test.solidlsp import clojure as clj
@@ -44,21 +44,21 @@ def serena_config():
     # Create test projects for all supported languages
     test_projects = []
     for language in [
-        Language.PYTHON,
-        Language.GO,
-        Language.JAVA,
-        Language.KOTLIN,
-        Language.RUST,
-        Language.TYPESCRIPT,
-        Language.PHP,
-        Language.CSHARP,
-        Language.CLOJURE,
-        Language.FSHARP,
-        Language.POWERSHELL,
-        Language.CPP_CCLS,
-        Language.HAXE,
-        Language.LEAN4,
-        Language.MSL,
+        LanguageServerId.PYTHON,
+        LanguageServerId.GO,
+        LanguageServerId.JAVA,
+        LanguageServerId.KOTLIN,
+        LanguageServerId.RUST,
+        LanguageServerId.TYPESCRIPT,
+        LanguageServerId.PHP,
+        LanguageServerId.CSHARP,
+        LanguageServerId.CLOJURE,
+        LanguageServerId.FSHARP,
+        LanguageServerId.POWERSHELL,
+        LanguageServerId.CPP_CCLS,
+        LanguageServerId.HAXE,
+        LanguageServerId.LEAN4,
+        LanguageServerId.MSL,
     ]:
         repo_path = get_repo_path(language)
         if repo_path.exists():
@@ -109,7 +109,7 @@ def project_file_modification_context(serena_agent: SerenaAgent, relative_path: 
 
 @pytest.fixture
 def serena_agent(request: pytest.FixtureRequest, serena_config) -> Iterator[SerenaAgent]:
-    language = Language(request.param)
+    language = LanguageServerId(request.param)
     if not language_tests_enabled(language):
         pytest.skip(f"Tests for language {language} are not enabled.")
 
@@ -127,7 +127,7 @@ def serena_agent(request: pytest.FixtureRequest, serena_config) -> Iterator[Sere
 
 
 class TestSerenaAgent:
-    @pytest.mark.parametrize("project", [None, str(get_repo_path(Language.PYTHON)), "non_existent_path"])
+    @pytest.mark.parametrize("project", [None, str(get_repo_path(LanguageServerId.PYTHON)), "non_existent_path"])
     def test_agent_instantiation(self, project: str | None):
         """
         Tests agent instantiation for cases where
@@ -150,7 +150,7 @@ class TestSerenaAgent:
             for s in symbols
         ), f"Expected to find {symbol_name} ({expected_kind}) in {expected_file}"
         # testing retrieval of symbol info
-        if serena_agent.get_active_lsp_languages() == [Language.KOTLIN]:
+        if serena_agent.get_active_lsp_languages() == [LanguageServerId.KOTLIN]:
             # kotlin LS doesn't seem to provide hover info right now, at least for the struct we test this on
             return
         for s in symbols:
@@ -163,11 +163,11 @@ class TestSerenaAgent:
                 f"[{serena_agent.get_active_lsp_languages()[0]}] Expected symbol info to contain symbol name {symbol_name}. Info: {s['info']}"
             )
             # special additional test for Java, since Eclipse returns hover in a complex format and we want to make sure to get it right
-            if s["kind"] == SymbolKind.Class.name and serena_agent.get_active_lsp_languages() == [Language.JAVA]:
+            if s["kind"] == SymbolKind.Class.name and serena_agent.get_active_lsp_languages() == [LanguageServerId.JAVA]:
                 assert "A simple model class" in symbol_info, f"Java class docstring not found in symbol info: {s}"
 
     @pytest.mark.php
-    @pytest.mark.parametrize("serena_agent", [Language.PHP], indirect=True)
+    @pytest.mark.parametrize("serena_agent", [LanguageServerId.PHP], indirect=True)
     def test_find_symbol_within_php_file(self, serena_agent: SerenaAgent) -> None:
         """Verify find_symbol with a PHP file path routes to the PHP language server.
 
@@ -193,25 +193,25 @@ class TestSerenaAgent:
     @pytest.mark.parametrize(
         "serena_agent,symbol_name,expected_kind,expected_file",
         [
-            pytest.param(Language.PYTHON, "User", "Class", "models.py", marks=pytest.mark.python),
-            pytest.param(Language.GO, "Helper", "Function", "main.go", marks=pytest.mark.go),
-            pytest.param(Language.JAVA, "Model", "Class", "Model.java", marks=pytest.mark.java),
+            pytest.param(LanguageServerId.PYTHON, "User", "Class", "models.py", marks=pytest.mark.python),
+            pytest.param(LanguageServerId.GO, "Helper", "Function", "main.go", marks=pytest.mark.go),
+            pytest.param(LanguageServerId.JAVA, "Model", "Class", "Model.java", marks=pytest.mark.java),
             pytest.param(
-                Language.KOTLIN,
+                LanguageServerId.KOTLIN,
                 "Model",
                 "Struct",
                 "Model.kt",
                 marks=[pytest.mark.kotlin, *_KOTLIN_SKIP_MARKS],
             ),
-            pytest.param(Language.TYPESCRIPT, "DemoClass", "Class", "index.ts", marks=pytest.mark.typescript),
-            pytest.param(Language.PHP, "helperFunction", "Function", "helper.php", marks=pytest.mark.php),
-            pytest.param(Language.CLOJURE, "greet", "Function", clj.CORE_PATH, marks=pytest.mark.clojure),
-            pytest.param(Language.CSHARP, "Calculator", "Class", "Program.cs", marks=pytest.mark.csharp),
-            pytest.param(Language.POWERSHELL, "Greet-User", "Function", "main.ps1", marks=pytest.mark.powershell),
-            pytest.param(Language.CPP_CCLS, "add", "Function", "b.cpp", marks=pytest.mark.cpp),
-            pytest.param(Language.HAXE, "Main", "Class", "Main.hx", marks=pytest.mark.haxe),
-            pytest.param(Language.LEAN4, "add", "Method", "Helper.lean", marks=pytest.mark.lean4),
-            pytest.param(Language.MSL, "greet", "Function", "main.mrc", marks=pytest.mark.msl),
+            pytest.param(LanguageServerId.TYPESCRIPT, "DemoClass", "Class", "index.ts", marks=pytest.mark.typescript),
+            pytest.param(LanguageServerId.PHP, "helperFunction", "Function", "helper.php", marks=pytest.mark.php),
+            pytest.param(LanguageServerId.CLOJURE, "greet", "Function", clj.CORE_PATH, marks=pytest.mark.clojure),
+            pytest.param(LanguageServerId.CSHARP, "Calculator", "Class", "Program.cs", marks=pytest.mark.csharp),
+            pytest.param(LanguageServerId.POWERSHELL, "Greet-User", "Function", "main.ps1", marks=pytest.mark.powershell),
+            pytest.param(LanguageServerId.CPP_CCLS, "add", "Function", "b.cpp", marks=pytest.mark.cpp),
+            pytest.param(LanguageServerId.HAXE, "Main", "Class", "Main.hx", marks=pytest.mark.haxe),
+            pytest.param(LanguageServerId.LEAN4, "add", "Method", "Helper.lean", marks=pytest.mark.lean4),
+            pytest.param(LanguageServerId.MSL, "greet", "Function", "main.mrc", marks=pytest.mark.msl),
         ],
         indirect=["serena_agent"],
     )
@@ -221,7 +221,7 @@ class TestSerenaAgent:
     @pytest.mark.parametrize(
         "serena_agent,symbol_name,expected_kind,expected_file",
         [
-            pytest.param(Language.FSHARP, "Calculator", "Module", "Calculator.fs", marks=pytest.mark.fsharp),
+            pytest.param(LanguageServerId.FSHARP, "Calculator", "Module", "Calculator.fs", marks=pytest.mark.fsharp),
         ],
         indirect=["serena_agent"],
     )
@@ -232,7 +232,7 @@ class TestSerenaAgent:
     @pytest.mark.parametrize(
         "serena_agent,symbol_name,expected_kind,expected_file",
         [
-            pytest.param(Language.RUST, "add", "Function", "lib.rs", marks=pytest.mark.rust),
+            pytest.param(LanguageServerId.RUST, "add", "Function", "lib.rs", marks=pytest.mark.rust),
         ],
         indirect=["serena_agent"],
     )
@@ -279,48 +279,48 @@ class TestSerenaAgent:
         "serena_agent,symbol_name,def_file,ref_file",
         [
             pytest.param(
-                Language.PYTHON,
+                LanguageServerId.PYTHON,
                 "User",
                 os.path.join("test_repo", "models.py"),
                 os.path.join("test_repo", "services.py"),
                 marks=pytest.mark.python,
             ),
-            pytest.param(Language.GO, "Helper", "main.go", "main.go", marks=pytest.mark.go),
+            pytest.param(LanguageServerId.GO, "Helper", "main.go", "main.go", marks=pytest.mark.go),
             pytest.param(
-                Language.JAVA,
+                LanguageServerId.JAVA,
                 "Model",
                 os.path.join("src", "main", "java", "test_repo", "Model.java"),
                 os.path.join("src", "main", "java", "test_repo", "Main.java"),
                 marks=pytest.mark.java,
             ),
             pytest.param(
-                Language.KOTLIN,
+                LanguageServerId.KOTLIN,
                 "Model",
                 os.path.join("src", "main", "kotlin", "test_repo", "Model.kt"),
                 os.path.join("src", "main", "kotlin", "test_repo", "Main.kt"),
                 marks=[pytest.mark.kotlin, *_KOTLIN_SKIP_MARKS],
             ),
-            pytest.param(Language.RUST, "add", os.path.join("src", "lib.rs"), os.path.join("src", "main.rs"), marks=pytest.mark.rust),
-            pytest.param(Language.PHP, "helperFunction", "helper.php", "index.php", marks=pytest.mark.php),
+            pytest.param(LanguageServerId.RUST, "add", os.path.join("src", "lib.rs"), os.path.join("src", "main.rs"), marks=pytest.mark.rust),
+            pytest.param(LanguageServerId.PHP, "helperFunction", "helper.php", "index.php", marks=pytest.mark.php),
             pytest.param(
-                Language.CLOJURE,
+                LanguageServerId.CLOJURE,
                 "multiply",
                 clj.CORE_PATH,
                 clj.UTILS_PATH,
                 marks=pytest.mark.clojure,
             ),
-            pytest.param(Language.CSHARP, "Calculator", "Program.cs", "Program.cs", marks=pytest.mark.csharp),
-            pytest.param(Language.POWERSHELL, "Greet-User", "main.ps1", "main.ps1", marks=pytest.mark.powershell),
-            pytest.param(Language.CPP_CCLS, "add", "b.cpp", "a.cpp", marks=pytest.mark.cpp),
+            pytest.param(LanguageServerId.CSHARP, "Calculator", "Program.cs", "Program.cs", marks=pytest.mark.csharp),
+            pytest.param(LanguageServerId.POWERSHELL, "Greet-User", "main.ps1", "main.ps1", marks=pytest.mark.powershell),
+            pytest.param(LanguageServerId.CPP_CCLS, "add", "b.cpp", "a.cpp", marks=pytest.mark.cpp),
             pytest.param(
-                Language.HAXE,
+                LanguageServerId.HAXE,
                 "addNumbers",
                 os.path.join("src", "utils", "Helper.hx"),
                 os.path.join("src", "Main.hx"),
                 marks=pytest.mark.haxe,
             ),
-            pytest.param(Language.LEAN4, "add", "Helper.lean", "Main.lean", marks=pytest.mark.lean4),
-            pytest.param(Language.MSL, "format.coins", "utils.mrc", "main.mrc", marks=pytest.mark.msl),
+            pytest.param(LanguageServerId.LEAN4, "add", "Helper.lean", "Main.lean", marks=pytest.mark.lean4),
+            pytest.param(LanguageServerId.MSL, "format.coins", "utils.mrc", "main.mrc", marks=pytest.mark.msl),
         ],
         indirect=["serena_agent"],
     )
@@ -330,7 +330,7 @@ class TestSerenaAgent:
     @pytest.mark.parametrize(
         "serena_agent,symbol_name,def_file,ref_file",
         [
-            pytest.param(Language.TYPESCRIPT, "helperFunction", "index.ts", "use_helper.ts", marks=pytest.mark.typescript),
+            pytest.param(LanguageServerId.TYPESCRIPT, "helperFunction", "index.ts", "use_helper.ts", marks=pytest.mark.typescript),
         ],
         indirect=["serena_agent"],
     )
@@ -341,7 +341,7 @@ class TestSerenaAgent:
     @pytest.mark.parametrize(
         "serena_agent,symbol_name,def_file,ref_file",
         [
-            pytest.param(Language.FSHARP, "add", "Calculator.fs", "Program.fs", marks=pytest.mark.fsharp),
+            pytest.param(LanguageServerId.FSHARP, "add", "Calculator.fs", "Program.fs", marks=pytest.mark.fsharp),
         ],
         indirect=["serena_agent"],
     )
@@ -353,7 +353,7 @@ class TestSerenaAgent:
         "serena_agent,name_path,substring_matching,expected_symbol_name,expected_kind,expected_file",
         [
             pytest.param(
-                Language.PYTHON,
+                LanguageServerId.PYTHON,
                 "OuterClass/NestedClass",
                 False,
                 "NestedClass",
@@ -363,7 +363,7 @@ class TestSerenaAgent:
                 marks=pytest.mark.python,
             ),
             pytest.param(
-                Language.PYTHON,
+                LanguageServerId.PYTHON,
                 "OuterClass/NestedClass/find_me",
                 False,
                 "find_me",
@@ -373,7 +373,7 @@ class TestSerenaAgent:
                 marks=pytest.mark.python,
             ),
             pytest.param(
-                Language.PYTHON,
+                LanguageServerId.PYTHON,
                 "OuterClass/NestedCl",  # Substring for NestedClass
                 True,
                 "NestedClass",
@@ -383,7 +383,7 @@ class TestSerenaAgent:
                 marks=pytest.mark.python,
             ),
             pytest.param(
-                Language.PYTHON,
+                LanguageServerId.PYTHON,
                 "OuterClass/NestedClass/find_m",  # Substring for find_me
                 True,
                 "find_me",
@@ -393,7 +393,7 @@ class TestSerenaAgent:
                 marks=pytest.mark.python,
             ),
             pytest.param(
-                Language.PYTHON,
+                LanguageServerId.PYTHON,
                 "/OuterClass",  # Absolute path
                 False,
                 "OuterClass",
@@ -403,7 +403,7 @@ class TestSerenaAgent:
                 marks=pytest.mark.python,
             ),
             pytest.param(
-                Language.PYTHON,
+                LanguageServerId.PYTHON,
                 "/OuterClass/NestedClass/find_m",  # Absolute path with substring
                 True,
                 "find_me",
@@ -451,13 +451,13 @@ class TestSerenaAgent:
         "serena_agent,name_path",
         [
             pytest.param(
-                Language.PYTHON,
+                LanguageServerId.PYTHON,
                 "/NestedClass",  # Absolute path, NestedClass is not top-level
                 id="absolute_path_non_top_level_no_match",
                 marks=pytest.mark.python,
             ),
             pytest.param(
-                Language.PYTHON,
+                LanguageServerId.PYTHON,
                 "/NoSuchParent/NestedClass",  # Absolute path with non-existent parent
                 id="absolute_path_non_existent_parent_no_match",
                 marks=pytest.mark.python,
@@ -487,7 +487,7 @@ class TestSerenaAgent:
         "serena_agent,name_path,num_expected",
         [
             pytest.param(
-                Language.JAVA,
+                LanguageServerId.JAVA,
                 "Model/getName",
                 2,
                 id="overloaded_java_method",
@@ -520,7 +520,7 @@ class TestSerenaAgent:
         "serena_agent,name_path,relative_path",
         [
             pytest.param(
-                Language.JAVA,
+                LanguageServerId.JAVA,
                 "Model/getName",
                 os.path.join("src", "main", "java", "test_repo", "Model.java"),
                 id="overloaded_java_method",
@@ -548,7 +548,7 @@ class TestSerenaAgent:
         "serena_agent,name_path,relative_path",
         [
             pytest.param(
-                Language.TYPESCRIPT,
+                LanguageServerId.TYPESCRIPT,
                 "helperFunction",
                 "index.ts",
                 marks=pytest.mark.typescript,
@@ -573,25 +573,25 @@ class TestSerenaAgent:
         "serena_agent,name_path,relative_path",
         [
             pytest.param(
-                Language.PYTHON,
+                LanguageServerId.PYTHON,
                 "Timer",
                 os.path.join("test_repo", "utils.py"),
                 marks=pytest.mark.python,
             ),
             pytest.param(
-                Language.JAVA,
+                LanguageServerId.JAVA,
                 "ModelUser",
                 os.path.join("src", "main", "java", "test_repo", "ModelUser.java"),
                 marks=pytest.mark.java,
             ),
             pytest.param(
-                Language.KOTLIN,
+                LanguageServerId.KOTLIN,
                 "ModelUser",
                 os.path.join("src", "main", "kotlin", "test_repo", "ModelUser.kt"),
                 marks=[pytest.mark.kotlin] + ([pytest.mark.skip(reason="Kotlin LSP JVM crashes on restart in CI")] if is_ci else []),
             ),
             pytest.param(
-                Language.TYPESCRIPT,
+                LanguageServerId.TYPESCRIPT,
                 "unusedStandaloneFunction",
                 "index.ts",
                 marks=pytest.mark.typescript,

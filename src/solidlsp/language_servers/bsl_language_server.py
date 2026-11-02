@@ -28,7 +28,7 @@ from solidlsp.ls import (
 )
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.settings import SolidLSPSettings
-from solidlsp.util.subprocess_util import subprocess_run
+from solidlsp.util import supervise
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ def _get_java_major_version(java_exe: str) -> int | None:
     :param java_exe: path to the ``java`` executable.
     """
     try:
-        result = subprocess_run(
+        result = supervise.run(
             [java_exe, "-version"],
             capture_output=True,
             text=True,

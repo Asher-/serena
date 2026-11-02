@@ -83,6 +83,8 @@ class OmniSharp(SolidLanguageServer):
             log.error("No *.sln file found in repository")
             raise SolidLSPException("No SLN file found in repository")
 
+        # no --hostPID: OmniSharp ends when the process it names ends, and the language server outlives serena
+        # (bug://serena/language_server/initialize/process_id/client/watch)
         cmd = " ".join(
             [
                 omnisharp_executable_path,
@@ -92,8 +94,6 @@ class OmniSharp(SolidLanguageServer):
                 "-z",
                 "-s",
                 f'"{slnfilename}"',
-                "--hostPID",
-                str(os.getpid()),
                 "DotNet:enablePackageRestore=false",
                 "--loglevel",
                 "trace",
@@ -405,10 +405,11 @@ class OmniSharp(SolidLanguageServer):
         if "referencesProvider" in init_response["capabilities"] and init_response["capabilities"]["referencesProvider"]:
             self.references_available.set()
 
-        missing_capabilities = [
-            name
-            for event, name in ((self.definition_available, "definition"), (self.references_available, "references"))
-            if not event.is_set()
-        ]
-        if missing_capabilities:
-            log.warning("OmniSharp did not advertise capabilities during initialization: %s", ", ".join(missing_capabilities))
+        if not self.server.adopted:
+            missing_capabilities = [
+                name
+                for event, name in ((self.definition_available, "definition"), (self.references_available, "references"))
+                if not event.is_set()
+            ]
+            if missing_capabilities:
+                log.warning("OmniSharp did not advertise capabilities during initialization: %s", ", ".join(missing_capabilities))

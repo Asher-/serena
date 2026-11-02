@@ -17,7 +17,7 @@ from serena.constants import SERENA_MANAGED_DIR_NAME
 from serena.project import Project
 from serena.util.file_system import GitignoreParser
 from solidlsp.ls import SolidLanguageServer
-from solidlsp.ls_config import Language, LanguageServerConfig
+from solidlsp.ls_config import LanguageServerId, LanguageServerConfig
 from solidlsp.settings import SolidLSPSettings
 
 from .solidlsp.clojure import is_clojure_cli_available
@@ -55,29 +55,29 @@ def resources_dir() -> Path:
 
 
 class LanguageParamRequest:
-    param: Language
+    param: LanguageServerId
 
 
-_LANGUAGE_REPO_ALIASES: dict[Language, Language] = {
-    Language.CPP_CCLS: Language.CPP,
-    Language.PHP_PHPACTOR: Language.PHP,
-    Language.PYTHON_JEDI: Language.PYTHON,
-    Language.RUBY_SOLARGRAPH: Language.RUBY,
-    Language.PYTHON_TY: Language.PYTHON,
+_LANGUAGE_REPO_ALIASES: dict[LanguageServerId, LanguageServerId] = {
+    LanguageServerId.CPP_CCLS: LanguageServerId.CPP,
+    LanguageServerId.PHP_PHPACTOR: LanguageServerId.PHP,
+    LanguageServerId.PYTHON_JEDI: LanguageServerId.PYTHON,
+    LanguageServerId.RUBY_SOLARGRAPH: LanguageServerId.RUBY,
+    LanguageServerId.PYTHON_TY: LanguageServerId.PYTHON,
 }
 
 
-def get_repo_path(language: Language) -> Path:
+def get_repo_path(language: LanguageServerId) -> Path:
     repo_language = _LANGUAGE_REPO_ALIASES.get(language, language)
     return Path(__file__).parent / "resources" / "repos" / repo_language / "test_repo"
 
 
 def _create_ls(
-    language: Language,
+    language: LanguageServerId,
     repo_path: str | None = None,
     ignored_paths: list[str] | None = None,
     trace_lsp_communication: bool = False,
-    ls_specific_settings: dict[Language, dict[str, Any]] | None = None,
+    ls_specific_settings: dict[LanguageServerId, dict[str, Any]] | None = None,
     solidlsp_dir: Path | None = None,
 ) -> SolidLanguageServer:
     ignored_paths = ignored_paths or []
@@ -106,11 +106,11 @@ def _create_ls(
 
 @contextmanager
 def start_ls_context(
-    language: Language,
+    language: LanguageServerId,
     repo_path: str | None = None,
     ignored_paths: list[str] | None = None,
     trace_lsp_communication: bool = False,
-    ls_specific_settings: dict[Language, dict[str, Any]] | None = None,
+    ls_specific_settings: dict[LanguageServerId, dict[str, Any]] | None = None,
     solidlsp_dir: Path | None = None,
 ) -> Iterator[SolidLanguageServer]:
     ls = _create_ls(language, repo_path, ignored_paths, trace_lsp_communication, ls_specific_settings, solidlsp_dir)
@@ -134,7 +134,7 @@ def start_ls_context(
 
 
 @contextmanager
-def start_default_ls_context(language: Language) -> Iterator[SolidLanguageServer]:
+def start_default_ls_context(language: LanguageServerId) -> Iterator[SolidLanguageServer]:
     with start_ls_context(language) as ls:
         yield ls
 
@@ -143,7 +143,7 @@ def create_default_serena_config():
     return SerenaConfig(gui_log_window=False, web_dashboard=False)
 
 
-def _create_default_project(language: Language, repo_root_override: str | None = None) -> Project:
+def _create_default_project(language: LanguageServerId, repo_root_override: str | None = None) -> Project:
     repo_path = str(get_repo_path(language)) if repo_root_override is None else repo_root_override
     return Project.load(repo_path, serena_config=create_default_serena_config())
 
@@ -156,7 +156,7 @@ def repo_path(request: LanguageParamRequest) -> Path:
 
     Example:
     ```
-    @pytest.mark.parametrize("repo_path", [Language.PYTHON], indirect=True)
+    @pytest.mark.parametrize("repo_path", [LanguageServerId.PYTHON], indirect=True)
     def test_python_repo(repo_path):
         assert (repo_path / "src").exists()
     ```
@@ -178,7 +178,7 @@ def language_server(request: LanguageParamRequest):
 
     Example:
     ```
-    @pytest.mark.parametrize("language_server", [Language.PYTHON], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.PYTHON], indirect=True)
     def test_python_server(language_server: SyncLanguageServer) -> None:
         # Use the Python language server
         pass
@@ -186,7 +186,7 @@ def language_server(request: LanguageParamRequest):
 
     You can also test multiple languages in a single test:
     ```
-    @pytest.mark.parametrize("language_server", [Language.PYTHON, Language.TYPESCRIPT], indirect=True)
+    @pytest.mark.parametrize("language_server", [LanguageServerId.PYTHON, LanguageServerId.TYPESCRIPT], indirect=True)
     def test_multiple_languages(language_server: SyncLanguageServer) -> None:
         # This test will run once for each language
         pass
@@ -202,7 +202,7 @@ def language_server(request: LanguageParamRequest):
 
 
 @contextmanager
-def project_context(language: Language, repo_root_override: str | None = None) -> Iterator[Project]:
+def project_context(language: LanguageServerId, repo_root_override: str | None = None) -> Iterator[Project]:
     """Context manager that creates a Project for the specified language and ensures proper cleanup."""
     project = _create_default_project(language, repo_root_override)
     try:
@@ -219,7 +219,7 @@ def project(request: LanguageParamRequest, repo_root_override: str | None = None
 
     Example:
     ```
-    @pytest.mark.parametrize("project", [Language.PYTHON], indirect=True)
+    @pytest.mark.parametrize("project", [LanguageServerId.PYTHON], indirect=True)
     def test_python_project(project: Project) -> None:
         # Use the Python project to test something
         pass
@@ -227,7 +227,7 @@ def project(request: LanguageParamRequest, repo_root_override: str | None = None
 
     You can also test multiple languages in a single test:
     ```
-    @pytest.mark.parametrize("project", [Language.PYTHON, Language.TYPESCRIPT], indirect=True)
+    @pytest.mark.parametrize("project", [LanguageServerId.PYTHON, LanguageServerId.TYPESCRIPT], indirect=True)
     def test_multiple_languages(project: SyncLanguageServer) -> None:
         # This test will run once for each language
         pass
@@ -242,7 +242,7 @@ def project(request: LanguageParamRequest, repo_root_override: str | None = None
 
 
 @contextmanager
-def project_with_ls_context(language: Language, repo_root_override: str | None = None) -> Iterator[Project]:
+def project_with_ls_context(language: LanguageServerId, repo_root_override: str | None = None) -> Iterator[Project]:
     """Context manager that creates a Project with an active language server for the specified language."""
     with project_context(language, repo_root_override) as project:
         project.create_language_server_manager()
@@ -266,34 +266,34 @@ Flag indicating whether the tests are running in the GitHub CI environment.
 is_windows = platform.system() == "Windows"
 
 
-_LANGUAGE_PYTEST_MARKERS: dict[Language, list[MarkDecorator | Mark]] = {
-    Language.CLOJURE: [
+_LANGUAGE_PYTEST_MARKERS: dict[LanguageServerId, list[MarkDecorator | Mark]] = {
+    LanguageServerId.CLOJURE: [
         pytest.mark.clojure,
         pytest.mark.skipif(not is_clojure_cli_available(), reason="clojure CLI is not installed"),
     ],
-    Language.CPP: [pytest.mark.cpp],
-    Language.CPP_CCLS: [pytest.mark.cpp],
-    Language.CSHARP: [pytest.mark.csharp],
-    Language.FSHARP: [pytest.mark.fsharp],
-    Language.GO: [pytest.mark.go],
-    Language.HAXE: [pytest.mark.haxe, pytest.mark.skipif(_sh.which("haxe") is None, reason="haxe compiler is not installed")],
-    Language.JAVA: [pytest.mark.java],
-    Language.KOTLIN: [pytest.mark.kotlin, pytest.mark.skipif(is_ci, reason="Kotlin LSP JVM crashes on restart in CI")],
-    Language.LEAN4: [pytest.mark.lean4, pytest.mark.skipif(_sh.which("lean") is None, reason="Lean is not installed")],
-    Language.MSL: [pytest.mark.msl],
-    Language.NIX: [pytest.mark.nix, pytest.mark.skipif(_sh.which("nix") is None, reason="nix CLI is not installed")],
-    Language.PHP: [pytest.mark.php],
-    Language.PHP_PHPACTOR: [pytest.mark.php],
-    Language.POWERSHELL: [pytest.mark.powershell, pytest.mark.skipif(_sh.which("pwsh") is None, reason="pwsh is not installed")],
-    Language.PYTHON: [pytest.mark.python],
-    Language.PYTHON_JEDI: [pytest.mark.python],
-    Language.PYTHON_TY: [pytest.mark.python],
-    Language.RUST: [pytest.mark.rust, pytest.mark.skipif(_sh.which("rust-analyzer") is None, reason="rust-analyzer is not installed")],
-    Language.TYPESCRIPT: [pytest.mark.typescript],
+    LanguageServerId.CPP: [pytest.mark.cpp],
+    LanguageServerId.CPP_CCLS: [pytest.mark.cpp],
+    LanguageServerId.CSHARP: [pytest.mark.csharp],
+    LanguageServerId.FSHARP: [pytest.mark.fsharp],
+    LanguageServerId.GO: [pytest.mark.go],
+    LanguageServerId.HAXE: [pytest.mark.haxe, pytest.mark.skipif(_sh.which("haxe") is None, reason="haxe compiler is not installed")],
+    LanguageServerId.JAVA: [pytest.mark.java],
+    LanguageServerId.KOTLIN: [pytest.mark.kotlin, pytest.mark.skipif(is_ci, reason="Kotlin LSP JVM crashes on restart in CI")],
+    LanguageServerId.LEAN4: [pytest.mark.lean4, pytest.mark.skipif(_sh.which("lean") is None, reason="Lean is not installed")],
+    LanguageServerId.MSL: [pytest.mark.msl],
+    LanguageServerId.NIX: [pytest.mark.nix, pytest.mark.skipif(_sh.which("nix") is None, reason="nix CLI is not installed")],
+    LanguageServerId.PHP: [pytest.mark.php],
+    LanguageServerId.PHP_PHPACTOR: [pytest.mark.php],
+    LanguageServerId.POWERSHELL: [pytest.mark.powershell, pytest.mark.skipif(_sh.which("pwsh") is None, reason="pwsh is not installed")],
+    LanguageServerId.PYTHON: [pytest.mark.python],
+    LanguageServerId.PYTHON_JEDI: [pytest.mark.python],
+    LanguageServerId.PYTHON_TY: [pytest.mark.python],
+    LanguageServerId.RUST: [pytest.mark.rust, pytest.mark.skipif(_sh.which("rust-analyzer") is None, reason="rust-analyzer is not installed")],
+    LanguageServerId.TYPESCRIPT: [pytest.mark.typescript],
 }
 
 
-def get_pytest_markers(language: Language) -> list[MarkDecorator | Mark]:
+def get_pytest_markers(language: LanguageServerId) -> list[MarkDecorator | Mark]:
     """Pytest markers for a language.
 
     The returned list contains the primary language marker and any
@@ -302,62 +302,62 @@ def get_pytest_markers(language: Language) -> list[MarkDecorator | Mark]:
     return _LANGUAGE_PYTEST_MARKERS[language]
 
 
-def _determine_disabled_languages() -> list[Language]:
+def _determine_disabled_languages() -> list[LanguageServerId]:
     """
     Determine which language tests should be disabled (based on the environment)
 
     :return: the list of disabled languages
     """
-    result: list[Language] = []
+    result: list[LanguageServerId] = []
 
     java_tests_enabled = True
     if not java_tests_enabled:
-        result.append(Language.JAVA)
+        result.append(LanguageServerId.JAVA)
 
     clojure_tests_enabled = is_clojure_cli_available()
     if not clojure_tests_enabled:
-        result.append(Language.CLOJURE)
+        result.append(LanguageServerId.CLOJURE)
 
     # Disable CPP_CCLS tests if ccls is not available
     ccls_tests_enabled = _sh.which("ccls") is not None
     if not ccls_tests_enabled:
-        result.append(Language.CPP_CCLS)
+        result.append(LanguageServerId.CPP_CCLS)
 
     # Disable CPP (clangd) tests if clangd is not available
     clangd_tests_enabled = _sh.which("clangd") is not None
     if not clangd_tests_enabled:
-        result.append(Language.CPP)
+        result.append(LanguageServerId.CPP)
 
     # Disable PHP_PHPACTOR tests if php is not available
     php_tests_enabled = _sh.which("php") is not None
     if not php_tests_enabled:
-        result.append(Language.PHP_PHPACTOR)
+        result.append(LanguageServerId.PHP_PHPACTOR)
 
     # Disable PowerShell tests if pwsh is not available
     if _sh.which("pwsh") is None:
-        result.append(Language.POWERSHELL)
+        result.append(LanguageServerId.POWERSHELL)
 
     # Disable Lean4 tests if lean is not available
     if _sh.which("lean") is None:
-        result.append(Language.LEAN4)
+        result.append(LanguageServerId.LEAN4)
 
     # Disable Nix tests if nix is not available
     if _sh.which("nix") is None:
-        result.append(Language.NIX)
+        result.append(LanguageServerId.NIX)
 
     # Disable Rust tests if rust-analyzer is not available
     if _sh.which("rust-analyzer") is None:
-        result.append(Language.RUST)
+        result.append(LanguageServerId.RUST)
 
     # Disable Haxe tests if haxe compiler is not available (haxe-language-server
     # requires the haxe toolchain to resolve references/symbols; without it the
     # server starts but responds -32601 to textDocument/references).
     if _sh.which("haxe") is None:
-        result.append(Language.HAXE)
+        result.append(LanguageServerId.HAXE)
 
     al_tests_enabled = True
     if not al_tests_enabled:
-        result.append(Language.AL)
+        result.append(LanguageServerId.AL)
 
     return result
 
@@ -365,7 +365,7 @@ def _determine_disabled_languages() -> list[Language]:
 _disabled_languages = _determine_disabled_languages()
 
 
-def language_tests_enabled(language: Language) -> bool:
+def language_tests_enabled(language: LanguageServerId) -> bool:
     """
     Check if tests for the given language are enabled in the current environment.
 

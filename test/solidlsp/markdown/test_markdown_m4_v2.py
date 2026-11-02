@@ -13,7 +13,7 @@ import pytest
 
 from solidlsp import SolidLanguageServer
 from solidlsp.language_servers.markdown_lsp_server import _slug
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 
 pytestmark = [pytest.mark.markdown]
 
@@ -53,7 +53,7 @@ class TestSlugNormalization:
 # ===========================================================================
 
 
-@pytest.mark.parametrize("language_server", [Language.MARKDOWN], indirect=True)
+@pytest.mark.parametrize("language_server", [LanguageServerId.MARKDOWN], indirect=True)
 class TestMarkdownM4References:
     """``request_references`` returns inline-link locations targeting a heading."""
 
@@ -88,7 +88,7 @@ class TestMarkdownM4References:
         assert results == [], f"expected empty references for body cursor; got {results}"
 
 
-@pytest.mark.parametrize("language_server", [Language.MARKDOWN], indirect=True)
+@pytest.mark.parametrize("language_server", [LanguageServerId.MARKDOWN], indirect=True)
 class TestMarkdownM4Definition:
     """``request_definition`` resolves an inline link's fragment to the target heading."""
 

@@ -16,7 +16,7 @@ from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.ls_utils import FileUtils, PlatformId, PlatformUtils
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
-from solidlsp.util.subprocess_util import subprocess_run
+from solidlsp.util import supervise
 
 from ..common import RuntimeDependency
 
@@ -88,7 +88,7 @@ class ElixirTools(SolidLanguageServer):
         """Get the installed Elixir version or None if not found."""
         try:
             command = ["cmd.exe", "/d", "/c", "elixir", "--version"] if os.name == "nt" else ["elixir", "--version"]
-            result = subprocess_run(command, capture_output=True, text=True, check=False)
+            result = supervise.run(command, capture_output=True, text=True, check=False)
             if result.returncode == 0:
                 return result.stdout.strip()
         except FileNotFoundError:

@@ -29,7 +29,7 @@ from serena.tools.cursor_tools import (
     CursorReplaceBodyTool,
 )
 from serena.tools.tools_base import SUCCESS_RESULT
-from solidlsp.ls_config import Language
+from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_process import LanguageServerTerminatedException
 from test.conftest import get_repo_path, project_with_ls_context
@@ -53,7 +53,7 @@ def _terminated_failure() -> SolidLSPException:
     :return: the exception a language-server request raises when the server has terminated, which the tool layer's retry
         answers by restarting the server and running the whole tool again.
     """
-    return SolidLSPException(TERMINATED_MESSAGE, cause=LanguageServerTerminatedException(TERMINATED_MESSAGE, Language.PYTHON))
+    return SolidLSPException(TERMINATED_MESSAGE, cause=LanguageServerTerminatedException(TERMINATED_MESSAGE, LanguageServerId.PYTHON))
 
 
 def _ambiguous_failure() -> ValueError:
@@ -226,9 +226,9 @@ def _symbol_edit_fixture(work_dir: Path) -> Iterator[_SymbolEditFixture]:
     :param work_dir: the directory the Python test repository is copied into.
     :return: a context yielding the fixture over the copy, whose language server stops when the context exits.
     """
-    repo_path = work_dir / get_repo_path(Language.PYTHON).name
-    shutil.copytree(get_repo_path(Language.PYTHON), repo_path)
-    with project_with_ls_context(Language.PYTHON, str(repo_path)) as project:
+    repo_path = work_dir / get_repo_path(LanguageServerId.PYTHON).name
+    shutil.copytree(get_repo_path(LanguageServerId.PYTHON), repo_path)
+    with project_with_ls_context(LanguageServerId.PYTHON, str(repo_path)) as project:
         yield _SymbolEditFixture(project=project, manager=CursorManager(project=project), edited_path=repo_path / PYTHON_EDITED_FILE)
 
 

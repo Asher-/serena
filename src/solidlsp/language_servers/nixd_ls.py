@@ -21,12 +21,35 @@ from overrides import override
 
 from solidlsp import ls_types
 from solidlsp.dependency_provider import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath
+from solidlsp.language_servers.common import RequiredCLI
 from solidlsp.ls import DocumentSymbols, LSPFileBuffer, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.settings import SolidLSPSettings
-from solidlsp.util.subprocess_util import subprocess_run
+from solidlsp.util import supervise
 
 log = logging.getLogger(__name__)
+
+
+_NIX_CLI_REQUIREMENT = RequiredCLI(
+    name="nix",
+    rationale=(
+        "nixd is a Nix expression evaluator that depends on a working nix\ninstallation at runtime to resolve imports and <nixpkgs>."
+    ),
+    install_hints=[
+        "Official installer: https://nixos.org/download.html",
+        "Determinate Systems (alternative): https://install.determinate.systems/",
+    ],
+)
+
+_NIXD_CLI_REQUIREMENT = RequiredCLI(
+    name="nixd",
+    rationale=("nixd is the Nix language server used by serena; without its binary\non PATH there is no process to launch."),
+    install_hints=[
+        "Nix flake: nix profile install github:nix-community/nixd",
+        "nixpkgs: nix-env -iA nixpkgs.nixd",
+        "Homebrew (macOS): brew install nixd",
+    ],
+)
 
 
 class NixLanguageServer(SolidLanguageServer):
@@ -80,7 +103,7 @@ class NixLanguageServer(SolidLanguageServer):
 
             log.info("Installing nixd using nix... This may take a few minutes.")
             try:
-                result = subprocess_run(
+                result = supervise.run(
                     ["nix", "profile", "install", "github:nix-community/nixd"],
                     capture_output=True,
                     text=True,
@@ -94,7 +117,7 @@ class NixLanguageServer(SolidLanguageServer):
                         log.info("Successfully installed nixd at: %s", nixd_path)
                         return nixd_path
                 else:
-                    result = subprocess_run(
+                    result = supervise.run(
                         ["nix-env", "-iA", "nixpkgs.nixd"],
                         capture_output=True,
                         text=True,
@@ -137,7 +160,7 @@ class NixLanguageServer(SolidLanguageServer):
                 )
 
             try:
-                result = subprocess_run([nixd_path, "--version"], capture_output=True, text=True, check=False, timeout=5)
+                result = supervise.run([nixd_path, "--version"], capture_output=True, text=True, check=False, timeout=5)
                 if result.returncode != 0:
                     raise RuntimeError(f"nixd failed to run: {result.stderr}")
             except Exception as exc:
