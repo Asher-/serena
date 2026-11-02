@@ -405,5 +405,6 @@ class OmniSharp(SolidLanguageServer):
         if "referencesProvider" in init_response["capabilities"] and init_response["capabilities"]["referencesProvider"]:
             self.references_available.set()
 
-        self.definition_available.wait()
-        self.references_available.wait()
+        if not self.server.adopted:
+            self.definition_available.wait()
+            self.references_available.wait()

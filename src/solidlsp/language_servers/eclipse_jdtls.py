@@ -899,7 +899,8 @@ class EclipseJDTLS(SolidLanguageServer):
 
         self.server.notify.workspace_did_change_configuration({"settings": initialize_params["initializationOptions"]["settings"]})  # type: ignore
 
-        self._intellicode_enable_command_available.wait()
+        if not self.server.adopted:
+            self._intellicode_enable_command_available.wait()
 
         java_intellisense_members_path = self.runtime_dependency_paths.intellisense_members_path
         assert os.path.exists(java_intellisense_members_path)
@@ -911,7 +912,7 @@ class EclipseJDTLS(SolidLanguageServer):
         )
         assert intellicode_enable_result
 
-        if not self._service_ready_event.is_set():
+        if not self._service_ready_event.is_set() and not self.server.adopted:
             log.info("Waiting for service to be ready ...")
             self._service_ready_event.wait()
         log.info("Service is ready")

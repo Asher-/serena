@@ -739,4 +739,5 @@ class RustAnalyzer(SolidLanguageServer):
         }
         self.server.notify.initialized({})
 
-        self.server_ready.wait()
+        if not self.server.adopted:
+            self.server_ready.wait()

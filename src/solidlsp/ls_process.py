@@ -479,6 +479,14 @@ class LanguageServerProcess:
                     if request is not None:
                         request.on_error(err)
 
+    @property
+    def adopted(self) -> bool:
+        """
+        :return: whether this client attached to a server an ended instance started, so that what a start waits to hear
+            from a new server has been said, to that instance, and will not be said again.
+        """
+        return self._adopted
+
     def send_notification(self, method: str, params: dict | None = None) -> None:
         """
         Send notification pertaining to the given method to the server with the given parameters

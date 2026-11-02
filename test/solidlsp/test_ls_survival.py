@@ -8,10 +8,14 @@ what it received can be read from its journal.
 import json
 import logging
 import os
+import re
+import shutil
 import signal
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -21,6 +25,7 @@ from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_process import LanguageServerProcess, ProcessLaunchInfo
 from solidlsp.ls_survival import LanguageServerStates
 from solidlsp.util import supervise
+from test.conftest import _create_ls, get_repo_path
 
 pytestmark = pytest.mark.skipif(not os.environ.get(supervise.PROGRAM_ENV), reason="BRAIN_SUPERVISE names no program")
 
@@ -168,6 +173,74 @@ def test_a_change_after_an_adoption_counts_on_from_the_version_the_server_holds(
 
     assert Path(f"{journal}.versions").read_text().split() == ["2", "3"]
     process.stop()
+
+
+def _quiet() -> bool:
+    """:return: whether the one kept server's first instance has consumed everything the server has written."""
+    states = list(LanguageServerStates.kind_directory().rglob("*.json"))
+    if not states:
+        return False
+    state = json.loads(states[0].read_text())
+    stdout = json.loads(Path(state["record"]).read_text())["stdout"]
+    return state["stdout_offset"] == Path(stdout).stat().st_size
+
+
+@pytest.mark.skipif(shutil.which("rust-analyzer") is None, reason="no rust-analyzer on PATH")
+def test_a_server_adopted_after_it_went_quiet_starts_without_the_signal_it_gave_the_ended_instance(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    shutil.copytree(get_repo_path(Language.RUST), repo)
+    first_instance = textwrap.dedent(
+        """
+        import sys, time
+        from test.conftest import _create_ls
+        from solidlsp.ls_config import Language
+        ls = _create_ls(Language.RUST, repo_path=sys.argv[1])
+        ls.start()
+        print("STARTED", ls.server.process.pid, flush=True)
+        time.sleep(300)
+        """
+    )
+    first = subprocess.Popen(
+        [sys.executable, "-c", first_instance, str(repo)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        start_new_session=True,
+    )
+    assert first.stdout is not None
+    pid = next(int(line.split()[1]) for line in first.stdout if line.startswith("STARTED"))
+
+    # the kill comes once the instance has consumed all the server said, the ready signal among it
+    deadline, quiet_since = time.monotonic() + 120, None
+    while quiet_since is None or time.monotonic() < quiet_since + 3:
+        assert time.monotonic() < deadline, "the server never went quiet"
+        quiet_since = (quiet_since or time.monotonic()) if _quiet() else None
+        time.sleep(0.1)
+    os.killpg(first.pid, signal.SIGKILL)
+    first.wait()
+
+    ls = _create_ls(Language.RUST, repo_path=str(repo))
+    starting = threading.Thread(target=ls.start, daemon=True)
+    starting.start()
+    starting.join(60)
+    try:
+        assert not starting.is_alive(), "the start of the adopted server still waits on a signal it will not get"
+        assert ls.server.adopted and ls.server.process is not None and ls.server.process.pid == pid
+    finally:
+        for record in supervise.records():
+            record.stop()
+
+
+def test_no_language_server_waits_with_no_limit_on_what_an_adopted_server_will_not_say_again() -> None:
+    offenders = []
+    for path in (Path(__file__).parents[2] / "src" / "solidlsp" / "language_servers").glob("*.py"):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines):
+            guarded = any("self.server.adopted" in above for above in lines[max(0, index - 2) : index])
+            set_just_above = any(".set()" in above for above in lines[max(0, index - 3) : index])
+            if re.fullmatch(r"\s*self\.\w+\.wait\(\)", line) and not (guarded or set_just_above):
+                offenders.append(f"{path.name}:{index + 1}")
+    assert offenders == []
 
 
 def test_a_live_pid_sent_in_initialize_params_reaches_the_server_as_a_null_process_id(tmp_path: Path) -> None:
