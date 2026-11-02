@@ -272,7 +272,10 @@ class LanguageServerId(Enum):
     JULIA_FATOU = "julia_fatou"
     """Fatou language server for Julia (instead of LanguageServer.jl, which is the default)."""
     MARKDOWN = "markdown"
-    """Marksman language server for Markdown (experimental).
+    """Serena's in-house Markdown language server (experimental).
+    Backed by :class:`MarkdownStructuralLanguage` (markdown-it-py), so the LSP
+    symbol surface and the structural-edit surface share one parse tree.
+    v1 provides hierarchical ``textDocument/documentSymbol`` only.
     Must be explicitly specified as the main language, not auto-detected.
     This is an edge case primarily useful when working on documentation-heavy projects.
     """
@@ -280,6 +283,20 @@ class LanguageServerId(Enum):
     """texlab language server for LaTeX/BibTeX (experimental).
     Must be explicitly specified as the main language, not auto-detected.
     Provides sectioning-hierarchy document symbols plus label/citation definitions and references.
+    """
+    MARKSMAN = "marksman"
+    """Marksman language server for Markdown (experimental).
+    Preserved alternative implementation, retained for parity with older Serena
+    projects that relied on Marksman's richer feature set (references,
+    definitions, completion). Must be explicitly specified as the main
+    language, not auto-detected.
+    """
+    JSON = "json"
+    """Serena's in-house JSON structural backend (experimental).
+    Backed by :class:`JsonStructuralLanguage` (a hand-rolled round-trip CST),
+    so every parse / serialize cycle is byte-exact. There is no language
+    server yet — the backend provides structural editing only. Must be
+    explicitly specified as the main language, not auto-detected.
     """
     YAML = "yaml"
     """YAML language server (experimental).
@@ -396,6 +413,12 @@ class LanguageServerId(Enum):
             self.PHP_DEVSENSE,
             self.JULIA_FATOU,
             self.ANSIBLE,  # overlaps with YAML (same extension)
+            self.MARKDOWN,
+            self.MARKSMAN,
+            self.JSON,
+            self.YAML,
+            self.TOML,
+            self.GROOVY,
             self.CPP_CCLS,
         }
 
@@ -607,10 +630,12 @@ class LanguageServerId(Enum):
                 return FilenameMatcher(".fs", ".fsx", ".fsi")
             case self.REGO:
                 return FilenameMatcher(".rego")
-            case self.MARKDOWN:
+            case self.MARKDOWN | self.MARKSMAN:
                 return FilenameMatcher(".md", ".markdown")
             case self.LATEX:
                 return FilenameMatcher(".tex", ".bib", ".sty", ".cls")
+            case self.JSON:
+                return FilenameMatcher(".json")
             case self.SCALA:
                 return FilenameMatcher(".scala", ".sbt")
             case self.JULIA | self.JULIA_FATOU:
@@ -918,6 +943,10 @@ class LanguageServerId(Enum):
 
                 return RegalLanguageServer
             case self.MARKDOWN:
+                from solidlsp.language_servers.serena_markdown_language_server import SerenaMarkdownLanguageServer
+
+                return SerenaMarkdownLanguageServer
+            case self.MARKSMAN:
                 from solidlsp.language_servers.marksman import Marksman
 
                 return Marksman
@@ -1045,6 +1074,8 @@ class LanguageServerId(Enum):
                 from solidlsp.language_servers.graphql_language_server import GraphQLLanguageServer
 
                 return GraphQLLanguageServer
+            case self.JSON:
+                raise NotImplementedError("LanguageServerId.JSON has no language server; use the JSON structural backend instead.")
             case _:
                 raise ValueError(f"Unhandled language: {self}")
 

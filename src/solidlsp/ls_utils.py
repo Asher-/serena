@@ -27,7 +27,7 @@ import requests
 
 from solidlsp.ls_exceptions import InvalidTextLocationError, SolidLSPException
 from solidlsp.ls_types import UnifiedSymbolInformation
-from solidlsp.util.subprocess_util import subprocess_run
+from solidlsp.util import supervise
 
 log = logging.getLogger(__name__)
 
@@ -286,6 +286,27 @@ class TextUtils:
         :return: the 0-based line number corresponding to the index in the text
         """
         return cls.get_line_col_from_index(text, index)[0]
+
+    @staticmethod
+    def compute_line_starts(text: str) -> list[int]:
+        """
+        Precompute byte offsets at which each line of ``text`` begins.
+
+        Callers that need to convert many (line, col) positions against the same
+        buffer can resolve each position in O(1) via ``line_starts[line] + col``
+        instead of re-scanning the whole text with ``get_index_from_line_col``
+        every time (which is O(len(text)) per call and quadratic when batched).
+
+        :param text: the source text to index.
+        :return: a list where index ``i`` holds the offset of the first character
+            of line ``i``; length equals the number of lines (a final entry for
+            the trailing empty line is included when ``text`` ends with a newline).
+        """
+        line_starts = [0]
+        for i, c in enumerate(text):
+            if c == "\n":
+                line_starts.append(i + 1)
+        return line_starts
 
     @staticmethod
     def get_index_from_line_col(text: str, line: int, col: int) -> int:
@@ -850,7 +871,7 @@ class PlatformUtils:
         Returns the dotnet version for the current system
         """
         try:
-            result = subprocess_run(["dotnet", "--list-runtimes"], capture_output=True, check=True)
+            result = supervise.run(["dotnet", "--list-runtimes"], capture_output=True, check=True)
             available_version_cmd_output = []
             for line in result.stdout.split("\n"):
                 if line.startswith("Microsoft.NETCore.App"):
@@ -879,7 +900,7 @@ class PlatformUtils:
             )
         except (FileNotFoundError, subprocess.CalledProcessError):
             try:
-                result = subprocess_run(["mono", "--version"], capture_output=True, check=True)
+                result = supervise.run(["mono", "--version"], capture_output=True, check=True)
                 return DotnetVersion.VMONO
             except (FileNotFoundError, subprocess.CalledProcessError):
                 raise SolidLSPException("dotnet or mono not found on the system")
