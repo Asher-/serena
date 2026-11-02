@@ -156,6 +156,17 @@ class LspSymbolCollectionRenderer(Renderer[LspSymbolCollection]):
                 # https://peps.python.org/pep-0728/
                 # If we ever upgrade to 3.15, we can remove the type: ignore[typeddict-unknown-key]
                 s_dict["info"] = symbol_info
+
+        # widen the body text to the enclosing statement, so that a consumer does not receive the narrow identifier-only
+        # range a language server reports for a variable-like symbol, matching cursor_configure's body formatting
+        if p.include_body:
+            from serena.symbol_extent import compute_widened_body_text
+
+            project = self._agent.get_active_project_or_raise()
+            for s, s_dict in zip(symbols, symbol_dicts, strict=True):
+                widened = compute_widened_body_text(s, project)
+                if widened is not None:
+                    s_dict["body"] = widened
         return symbol_dicts
 
     def _group(self, symbol_dicts: list[LanguageServerSymbol.OutputDict]) -> Any:

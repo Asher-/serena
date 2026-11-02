@@ -399,7 +399,7 @@ def tools() -> Iterator[_Tools]:
 
 
 def _serve(journal: CallJournal, tools: _Tools) -> TestClient:
-    server = _JournaledFastMCP(journal, name="test", host="127.0.0.1")
+    server = _JournaledFastMCP(journal, name="test")
     server.add_tool(tools.held, name="held")
     server.add_tool(tools.fails, name="fails")
     server.add_tool(tools.call_id, name="call_id")
