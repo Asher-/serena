@@ -14,10 +14,10 @@ log = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from serena.agent import SerenaAgent
     from serena.code_editor import CodeEditor
-    from serena.util.file_lifecycle import WritePrecondition
     from serena.project import Project
     from serena.repl.facade import ApiScope, Facade
     from serena.tools import Tool
+    from serena.util.file_lifecycle import WritePrecondition
 
 
 class LanguageBackend(ABC):

@@ -9,7 +9,8 @@ File and file system-related tools, specifically for
 
 from typing import TYPE_CHECKING, Literal, cast
 
-from serena.tools import EditingToolWithDiagnostics, Tool, ToolMarkerOptional
+from serena.tools import EditingToolWithDiagnostics, Tool, ToolMarkerCanEdit, ToolMarkerOptional
+from serena.util.file_lifecycle import FilesystemLifecycle
 
 if TYPE_CHECKING:
     from serena.repl.api.edit_api import EditApi
@@ -42,7 +43,7 @@ class FsApiMixin:
         return FsApi(tool.agent)
 
 
-class ReadFileTool(Tool, FsApiMixin):
+class ReadFileTool(Tool, ToolMarkerOptional, FsApiMixin):
     """
     Reads a file within the project directory.
     """
@@ -62,64 +63,98 @@ class ReadFileTool(Tool, FsApiMixin):
         return self._api().read_file(relative_path, start_line, end_line, max_answer_chars).represent()
 
 
-class CreateTextFileTool(EditingToolWithDiagnostics, FsApiMixin):
+class CreateTextFileTool(Tool, ToolMarkerCanEdit, FsApiMixin):
     """
-    Creates/overwrites a file in the project directory.
+    Creates or (with explicit intent) overwrites a text file at a project-relative path, writing the
+    exact content given. Path-addressed rather than symbol-anchored, so it can bootstrap a brand-new
+    file and write empty / zero-byte content -- neither of which a cursor or symbol edit can do, since
+    an empty file has no symbol to anchor to. The write is atomic (temp + ``os.replace``): a crash or
+    error never leaves a half-written file.
     """
 
-    def apply(self, relative_path: str, content: str) -> str:
+    def apply(self, relative_path: str, content: str = "", overwrite: bool = False, expect_version: str = "") -> str:
         """
-        Write a new file or overwrite an existing file with the given content.
+        Create, or with explicit intent overwrite, a UTF-8 text file with the given content.
 
-        :param relative_path: the relative path to the file to create
-        :param content: the (appropriately encoded) content to write to the file
-        :return: a message indicating success or failure
+        Creating a new file needs nothing beyond the path and content. Overwriting an existing file
+        requires ``overwrite=True`` -- without it the call is refused and the original bytes are left
+        intact (no silent clobber). For a safe overwrite, pass ``expect_version`` (the ``version`` a
+        prior ``stat`` reported): if the file changed under you the write is refused with a typed stale
+        state carrying the current content; omit ``expect_version`` to overwrite unconditionally.
+        Parent directories are created as needed; ``content`` may be empty (a genuine zero-byte file).
+
+        :param relative_path: path of the file to write, relative to the project root
+        :param content: UTF-8 text to write; defaults to "" (writes a zero-byte file)
+        :param overwrite: set True to replace an existing file; without it, an existing path is refused
+        :param expect_version: the file's expected content version (from ``stat``) for a safe
+            compare-and-swap overwrite; empty overwrites unconditionally
+        :return: a confirmation, a refusal (already exists), or a typed stale state
         """
-        with self.diagnostics_context(relative_path) as diagnostics_context:
-            return diagnostics_context.format_result(self._api().create_text_file(relative_path, content))
+        # mutate through the lifecycle service (read-root == write-root)
+        return self._api().lifecycle().create(relative_path, content, overwrite=overwrite, expect_version=expect_version).render()
 
 
 class ListDirTool(Tool, FsApiMixin):
     """
-    Lists files and directories in the given directory (optionally with recursion).
+    Lists the entries of a project directory as a typed listing (name, kind, size) -- the reflex
+    replacement for raw ``ls``. Gitignored and hidden (dot-prefixed) entries are skipped by default so
+    the listing matches what the project treats as source; the opt-outs surface them explicitly.
+    Symlinks are reported with their target and never followed.
     """
 
-    def apply(self, relative_path: str, recursive: bool, skip_ignored_files: bool = False, max_answer_chars: int = -1) -> str:
+    def apply(
+        self,
+        relative_path: str = ".",
+        recursive: bool = False,
+        max_entries: int = 1000,
+        include_ignored: bool = False,
+        include_hidden: bool = False,
+    ) -> str:
         """
-        Lists files and directories in the given directory (optionally with recursion).
+        List a directory's entries, relative to the project root.
 
-        :param relative_path: the relative path to the directory to list; pass "." to scan the project root
-        :param recursive: whether to scan subdirectories recursively
-        :param skip_ignored_files: whether to skip files and directories that are ignored
-        :param max_answer_chars: if the output is longer than this number of characters,
-            no content will be returned. -1 means the default value from the config will be used.
-            Don't adjust unless there is really no other way to get the content required for the task.
-        :return: a JSON object with the names of directories and files within the given directory
+        :param relative_path: the directory to list, relative to the project root (default: the root)
+        :param recursive: whether to descend into sub-directories (symlinked directories are never followed)
+        :param max_entries: maximum entries to return; the listing declares when it was truncated
+        :param include_ignored: set True to include gitignored entries (skipped by default)
+        :param include_hidden: set True to include hidden dot-prefixed entries (skipped by default)
+        :return: a typed listing, or a typed not-found / not-a-directory state (never an exception)
         """
-        try:
-            return self._api().list_dir(relative_path, recursive, skip_ignored_files, max_answer_chars).represent()
-        except FileNotFoundError as e:
-            return self._to_json({"error": str(e), "project_root": self.get_project_root()})
+        return self._api().lifecycle().list_dir(
+            relative_path,
+            recursive=recursive,
+            max_entries=max_entries,
+            include_ignored=include_ignored,
+            include_hidden=include_hidden,
+        ).render()
 
 
 class FindFileTool(Tool, FsApiMixin):
     """
-    Finds files in the given relative paths
+    Finds files whose PATH matches a glob or substring -- the reflex replacement for raw ``find``. This
+    matches paths, not contents; to search file contents use ``search_for_pattern``. Gitignored and
+    hidden files are skipped and symlinked directories are not traversed.
     """
 
-    def apply(self, file_mask: str, relative_path: str, skip_ignored_files: bool = False) -> str:
+    def apply(
+        self, pattern: str, relative_path: str = ".", max_results: int = 1000, include_ignored: bool = False
+    ) -> str:
         """
-        Finds files matching the given file mask within the given relative path
+        Find files by path pattern under a directory.
 
-        :param file_mask: the filename or file mask (using the wildcards * or ?) to search for
-        :param relative_path: the relative path to the directory to search in; pass "." to scan the project root
-        :param skip_ignored_files: whether to skip ignored files/directories
-        :return: a JSON object with the list of matching files
+        :param pattern: a glob (e.g. ``"*.py"``, matched against the relative path and base name) or,
+            when it has no glob metacharacters, a path substring
+        :param relative_path: the directory to search under, relative to the project root (default: root)
+        :param max_results: maximum matches to return; the result declares when it was truncated
+        :param include_ignored: set True to include gitignored files (skipped by default)
+        :return: a typed list of matching project-relative paths
         """
-        return self._to_json({"files": self._api().find_file(file_mask, relative_path, skip_ignored_files=skip_ignored_files)})
+        return self._api().lifecycle().find_file(
+            pattern, relative_path=relative_path, max_results=max_results, include_ignored=include_ignored
+        ).render()
 
 
-class ReplaceContentTool(EditingToolWithDiagnostics, EditApiMixin):
+class ReplaceContentTool(EditingToolWithDiagnostics, ToolMarkerOptional, EditApiMixin):
     """
     Replaces content in a file (optionally using regular expressions).
     """
@@ -160,7 +195,7 @@ class ReplaceContentTool(EditingToolWithDiagnostics, EditApiMixin):
             )
 
 
-class ReplaceInFilesTool(EditingToolWithDiagnostics, EditApiMixin):
+class ReplaceInFilesTool(EditingToolWithDiagnostics, ToolMarkerOptional, EditApiMixin):
     """
     Replaces occurrences of a pattern across multiple files, with dry-run preview and per-occurrence selection.
     """
@@ -313,6 +348,14 @@ class InsertAtLineTool(EditingToolWithDiagnostics, ToolMarkerOptional, EditApiMi
 
 
 class SearchForPatternTool(Tool, FsApiMixin):
+    """
+    Performs a symbol-aware regex search of the project. Hits are grouped by
+    their enclosing symbol (when one exists in the LSP geography) so each group
+    is a ``cursor_start`` target via its ``name_path`` and ``relative_path``;
+    hits without an enclosing symbol are listed under their file with a hint
+    pointing at ``cursor_overview``.
+    """
+
     def apply(
         self,
         substring_pattern: str,
@@ -322,41 +365,132 @@ class SearchForPatternTool(Tool, FsApiMixin):
         paths_exclude_glob: str = "",
         relative_path: str = "",
         restrict_search_to_code_files: bool = False,
-        skip_ignored_files: bool = True,
-        multiline: bool = True,
         max_answer_chars: int = -1,
     ) -> str:
         """
-        Searches for a regex pattern across project files, returning whole matched lines (plus optional context).
-        Prefer symbolic operations if you know which symbols you are looking for!
+        Offers a flexible regex search across the project, grouping hits under
+        the symbol that encloses each match so the result reads as a navigable
+        cursor view rather than a flat data dump. Symbolic operations like
+        ``cursor_find`` should still be preferred when you already know which
+        symbols you are looking for.
 
-        :param substring_pattern: regular expression to search for.
-        :param context_lines_before: number of context lines to include before each match.
-        :param context_lines_after: number of context lines to include after each match.
-        :param paths_include_glob: optional glob (relative to project root, e.g. ``"src/**/*.ts"``) restricting which files are searched.
-        :param paths_exclude_glob: optional glob to exclude files; takes precedence over `paths_include_glob`.
-        :param relative_path: restricts the search to this file or subdirectory of the project root
-        :param restrict_search_to_code_files: whether to search only (non-ignored) files containing analyzable code symbols
-            (useful when looking for class/method definitions); otherwise also search non-code files.
-        :param skip_ignored_files: whether to skip ignored sub-paths (default: True)
-        :param multiline: whether to apply multi-line matching (default: True), enabling the flags re.DOTALL and re.MULTILINE
-        :param max_answer_chars: if the output exceeds this many characters, a progressively shortened summary is returned instead.
-            ``-1`` uses the configured default.
-        :return: A mapping from file paths to matched consecutive lines (0-based line numbers).
+        Pattern Matching Logic:
+            For each match, the returned result will contain the full lines where
+            the substring pattern is found, optionally with context lines. The
+            pattern is compiled with ``re.DOTALL``, so ``.`` matches newlines —
+            never put ``.*`` at the very beginning or end of the pattern, and
+            prefer non-greedy quantifiers where possible.
+
+        File Selection Logic:
+            ``restrict_search_to_code_files=True`` confines the search to files
+            an analyser can address symbolically (the only files for which
+            grouping by enclosing symbol is meaningful). Otherwise all
+            non-ignored files are searched and matches in non-analysable files
+            appear under file-level blocks. ``relative_path`` and the include /
+            exclude globs further restrict the search; globs are matched against
+            paths relative to the project root.
+
+        Output:
+            A header line is followed by per-symbol blocks of the form
+            ``@ <name_path> (<Kind>) [<relative_path>]`` with indented hits, and
+            file-level blocks ``@ <relative_path>`` for hits outside any
+            analysed symbol. Each ``(name_path, relative_path)`` pair is a
+            valid argument for ``cursor_start``; no cursors are opened by this
+            tool. When the result is too long, it shortens progressively to a
+            symbol/file list, then per-file counts, then the header alone.
+
+        :param substring_pattern: regular expression for a substring pattern to search for
+        :param context_lines_before: number of lines of context to include before each match
+        :param context_lines_after: number of lines of context to include after each match
+        :param paths_include_glob: optional glob pattern specifying files to include in the search.
+            Matches against relative file paths from the project root (e.g., ``"*.py"``,
+            ``"src/**/*.ts"``). Supports standard glob patterns and brace expansion.
+            If empty, all non-ignored files are included.
+        :param paths_exclude_glob: optional glob pattern specifying files to exclude from the
+            search. Takes precedence over ``paths_include_glob``. If empty, no files are
+            excluded.
+        :param relative_path: only sub-paths of this path (relative to the project root) are
+            searched. Pointing at a single file restricts the search to that file. Must exist.
+        :param restrict_search_to_code_files: whether to restrict the search to files that an
+            analyser can address symbolically. Set to ``True`` if you are only interested in
+            symbol-resident matches; ``False`` (the default) lets matches in HTML, YAML, etc.
+            appear under file-level blocks.
+        :param max_answer_chars: maximum characters for the returned output; ``-1`` uses the
+            configured default. Tighten the query rather than raising this.
+        :return: a plain-text cursor-style listing — never JSON.
         """
-        return (
-            self._api()
-            .search_for_pattern(
-                substring_pattern,
-                context_lines_before=context_lines_before,
-                context_lines_after=context_lines_after,
-                paths_include_glob=paths_include_glob,
-                paths_exclude_glob=paths_exclude_glob,
-                relative_path=relative_path,
-                restrict_search_to_code_files=restrict_search_to_code_files,
-                skip_ignored_files=skip_ignored_files,
-                multiline=multiline,
-                max_answer_chars=max_answer_chars,
-            )
-            .represent()
+        hits = self._api().search_by_enclosing_symbol(
+            substring_pattern,
+            relative_path=relative_path,
+            context_lines_before=context_lines_before,
+            context_lines_after=context_lines_after,
+            paths_include_glob=paths_include_glob,
+            paths_exclude_glob=paths_exclude_glob,
+            code_files_only=restrict_search_to_code_files,
         )
+        return self._limit_length(
+            hits.render_full(),
+            max_answer_chars,
+            shortened_result_factories=[hits.render_symbol_list, hits.render_per_file_counts, hits.render_summary],
+        )
+
+
+class StatTool(Tool):
+    """
+    Reports a path's metadata -- kind, size, permissions, and, for a regular file, its encoding,
+    line-ending style, trailing-newline state, and content version -- the reflex replacement for raw
+    ``stat``. The content version is the token ``create`` / ``delete_file`` / ``rename_file`` accept as
+    ``expect_version`` for a safe compare-and-swap write. Symlinks are described without following.
+    """
+
+    def apply(self, relative_path: str) -> str:
+        """
+        Describe a file, directory, or symlink.
+
+        :param relative_path: the path to describe, relative to the project root
+        :return: a typed metadata line, or a typed not-found state (never an exception)
+        """
+        service = FilesystemLifecycle(self.get_project_root(), is_ignored=self.project.is_ignored_path)
+        return service.stat(relative_path).render()
+
+
+class DeleteFileTool(Tool, ToolMarkerCanEdit):
+    """
+    Deletes a file -- the reflex replacement for raw ``rm``. Deleting a missing path is a no-op success
+    (idempotent). For a safe delete, pass ``expect_version`` (from ``stat``): if the content changed
+    under you the delete is refused; omit it to delete unconditionally.
+    """
+
+    def apply(self, relative_path: str, expect_version: str = "") -> str:
+        """
+        Delete a file at a project-relative path.
+
+        :param relative_path: the file to delete, relative to the project root
+        :param expect_version: the file's expected content version (from ``stat``) for a safe
+            compare-and-swap delete; empty deletes unconditionally
+        :return: a confirmation, an idempotent no-op notice, or a typed stale state
+        """
+        service = FilesystemLifecycle(self.get_project_root(), is_ignored=self.project.is_ignored_path)
+        return service.delete(relative_path, expect_version=expect_version).render()
+
+
+class RenameFileTool(Tool, ToolMarkerCanEdit):
+    """
+    Renames or moves a file -- one verb for both -- the reflex replacement for raw ``mv``. Missing
+    destination parent directories are created. For a safe move, pass ``expect_version`` (from ``stat``
+    of the source); omit it to move unconditionally. This is a plain move; reference-aware companion
+    edits are not performed.
+    """
+
+    def apply(self, source: str, destination: str, expect_version: str = "") -> str:
+        """
+        Rename or move a file within the project.
+
+        :param source: the existing path, relative to the project root
+        :param destination: the target path, relative to the project root (parents are created)
+        :param expect_version: the source's expected content version (from ``stat``) for a safe
+            compare-and-swap move; empty moves unconditionally
+        :return: a confirmation, a refusal, or a typed stale state
+        """
+        service = FilesystemLifecycle(self.get_project_root(), is_ignored=self.project.is_ignored_path)
+        return service.rename(source, destination, expect_version=expect_version).render()

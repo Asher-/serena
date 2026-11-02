@@ -442,6 +442,8 @@ class TopLevelCommands(AutoRegisteringGroup):
         tool_timeout: float | None,
     ) -> None:
 
+        from serena.mcp import SerenaMCPFactory, SessionEndRoute, uvicorn_ignore_logging_config_context
+
         # initialize logging, using INFO level initially (will later be adjusted by SerenaAgent according to the config)
         #   * memory log handler (for use by GUI/Dashboard)
         #   * stream handler for stderr (for direct console output, which will also be captured by clients like Claude Desktop)

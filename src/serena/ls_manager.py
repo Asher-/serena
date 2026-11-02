@@ -21,9 +21,29 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-class LanguageServerManagerInitialisationError(Exception):
-    def __init__(self, message: str):
+class LanguageUnavailableError(Exception):
+    """
+    raised when a language server is requested for a language that is not currently running.
+
+    :ivar language: the language whose server is unavailable (``None`` if the caller could not identify
+        a specific language, e.g. when the manager has no running servers at all)
+    :ivar cause: the original exception captured during the failed startup (if any)
+    :ivar unavailable_languages: all languages whose servers are currently unavailable on the manager,
+        mapped to the respective startup exception
+    """
+
+    def __init__(
+        self,
+        message: str,
+        language: "Language | None" = None,
+        cause: Exception | None = None,
+        unavailable_languages: "dict[LanguageServerIdLike, Exception] | None" = None,
+    ) -> None:
         super().__init__(message)
+        self.message = message
+        self.language = language
+        self.cause = cause
+        self.unavailable_languages = unavailable_languages or {}
 
 
 class LanguageServerFactory:
@@ -81,8 +101,9 @@ class LanguageServerManager:
     def __init__(
         self,
         language_servers: dict[LanguageServerIdLike, SolidLanguageServer],
-        language_server_factory: LanguageServerFactory,
-        project: "Project",
+        language_server_factory: LanguageServerFactory | None = None,
+        project: "Project | None" = None,
+        unavailable_languages: dict[LanguageServerIdLike, Exception] | None = None,
     ) -> None:
         """
         :param language_servers: a mapping from language to language server; the servers are assumed to be already started.
@@ -90,15 +111,36 @@ class LanguageServerManager:
             All servers are assumed to serve the same project root.
         :param language_server_factory: factory for language server creation; if None, dynamic (re)creation of language servers
             is not supported
+        :param unavailable_languages: a mapping from language to the exception captured during a failed startup attempt;
+            these languages are known to the manager but not currently served. Callers that request them receive a
+            typed :class:`LanguageUnavailableError` so the failure surface is loud rather than silent.
         """
         self._language_servers = language_servers
         self._language_server_factory = language_server_factory
-        self._file_change_notifier = LanguageServerFileChangeNotifier(project, self)
+        self._file_change_notifier = LanguageServerFileChangeNotifier(project, self) if project is not None else None
+        self._unavailable_languages: dict[LanguageServerIdLike, Exception] = dict(unavailable_languages or {})
+        self._restart_locks: dict[LanguageServerIdLike, threading.RLock] = {}
+        self._restart_locks_guard = threading.Lock()
 
     @property
     def _default_language_server(self) -> SolidLanguageServer:
+        """
+        :return: the first running language server in iteration order
+        :raises LanguageUnavailableError: if the manager has no running servers at all (every requested
+            language is in ``_unavailable_languages`` or none were requested)
+        """
         if len(self._language_servers) == 0:
-            raise ValueError("No language servers available in the manager")
+            unavailable = dict(self._unavailable_languages)
+            if unavailable:
+                summary = ", ".join(f"{lang.value}: {exc}" for lang, exc in unavailable.items())
+                raise LanguageUnavailableError(
+                    f"No language server is running. All requested languages failed to start ({summary}).",
+                    unavailable_languages=unavailable,
+                )
+            raise LanguageUnavailableError(
+                "No language servers available in the manager.",
+                unavailable_languages=unavailable,
+            )
         return next(iter(self._language_servers.values()))
 
     @staticmethod
@@ -107,12 +149,17 @@ class LanguageServerManager:
     ) -> "LanguageServerManager":
         """
         Creates a manager with language servers for the given languages using the given factory.
-        The language servers are started in parallel threads.
+        The language servers are started in parallel threads. Languages that fail to start are
+        tracked on the returned manager as unavailable rather than preventing construction; callers
+        that attempt to use them receive a typed :class:`LanguageUnavailableError` at the point of
+        use. This policy keeps partial-success working — a failing Scala server no longer tears
+        down a functioning Python server — while making the failure loud at the point of use rather
+        than silently degrading.
 
         :param languages: the languages for which to spawn language servers
         :param factory: the factory for language server creation
         :param project: the project for which the language servers are created
-        :return: the instance
+                :return: the instance, potentially with a subset of the requested languages served
         """
 
         class StartLSThread(threading.Thread):
@@ -140,37 +187,57 @@ class LanguageServerManager:
             thread.start()
             threads.append(thread)
 
-        # collect language servers and exceptions
+        # collect successfully-started servers and per-language startup exceptions
         language_servers: dict[LanguageServerIdLike, SolidLanguageServer] = {}
-        exceptions: dict[LanguageServerIdLike, Exception] = {}
+        unavailable: dict[LanguageServerIdLike, Exception] = {}
         for thread in threads:
             thread.join()
             if thread.exception is not None:
-                exceptions[thread.ls_id] = thread.exception
+                unavailable[thread.ls_id] = thread.exception
+                # if a server was partially created before start() failed, stop it so we don't leak the process
+                if thread.ls_id_server is not None:
+                    try:
+                        thread.ls_id_server.stop()
+                    except Exception as cleanup_error:
+                        log.debug(
+                            f"Ignoring cleanup error while stopping partially-started {thread.ls_id.value} server: {cleanup_error}"
+                        )
             elif thread.language_server is not None:
                 language_servers[thread.ls_id] = thread.language_server
 
-        # If any server failed to start up, raise an exception and stop all started language servers.
-        # A server whose own thread raised has already stopped its own process, since
-        # SolidLanguageServer.start() cleans up after itself on failure; only the servers that
-        # started successfully (and are therefore absent from `exceptions`) still need stopping.
-        # We intentionally fail fast here. The user's intention is to work with all the specified languages,
-        # so if any of them is not available, it is better to make symbolic tool calls fail, bringing the issue to the
-        # user's attention instead of silently continuing with a subset of the language servers and potentially
-        # causing suboptimal agent behaviour.
-        if exceptions:
-            for ls in language_servers.values():
-                ls.stop()
-            failure_messages = "\n".join([f"{ls_id.get_key()}: {e}" for ls_id, e in exceptions.items()])
-            raise LanguageServerManagerInitialisationError(f"Failed to start {len(exceptions)} language server(s):\n{failure_messages}")
+        # surface a summary of what started and what did not; the manager is returned even when all languages fail so the
+        # agent-facing APIs have a stable object and the escalation contract (typed error at the point of use) holds
+        if unavailable:
+            failure_summary = "; ".join(f"{lang.get_key()}: {e}" for lang, e in unavailable.items())
+            log.warning(
+                f"Language server manager constructed with degraded coverage "
+                f"(running: {[lang.get_key() for lang in language_servers]}, "
+                f"unavailable: {[lang.get_key() for lang in unavailable]}). Failures: {failure_summary}"
+            )
+        else:
+            log.info(f"Language server manager started for languages: {[lang.get_key() for lang in language_servers]}")
 
-        return LanguageServerManager(language_servers, factory, project)
+        return LanguageServerManager(language_servers, factory, project, unavailable)
+
+    def _restart_lock(self, ls_id: LanguageServerIdLike) -> threading.RLock:
+        """
+        :param ls_id: the language server id
+        :return: the lock that serializes the replacement of the given language's server
+        """
+        with self._restart_locks_guard:
+            return self._restart_locks.setdefault(ls_id, threading.RLock())
 
     def _ensure_functional_ls(self, ls: SolidLanguageServer) -> SolidLanguageServer:
-        if not ls.is_running():
+        if ls.is_running():
+            return ls
+
+        # replace the server under its language's restart lock, unless a caller that held the lock first already did
+        with self._restart_lock(ls.ls_id):
+            current = self._language_servers.get(ls.ls_id)
+            if current is not None and current is not ls and current.is_running():
+                return current
             log.warning(f"Language server for language {ls.ls_id} is not running; restarting ...")
-            ls = self.restart_language_server(ls.ls_id)
-        return ls
+            return self.restart_language_server(ls.ls_id)
 
     def _get_suitable_language_server(self, relative_path: str) -> SolidLanguageServer | None:
         """:param relative_path: relative path to a file"""
@@ -194,21 +261,49 @@ class LanguageServerManager:
         if self._language_server_factory is None:
             raise ValueError(f"No language server factory available to create language server for {ls_id}")
         language_server = self._language_server_factory.create_language_server(ls_id)
-        language_server.start()
+        try:
+            language_server.start()
+        except Exception:
+            # stop a server whose start failed, so a partly started process is not left running
+            language_server.stop()
+            raise
         self._language_servers[ls_id] = language_server
         return language_server
 
     def restart_language_server(self, ls_id: LanguageServerIdLike) -> SolidLanguageServer:
         """
-        Forces recreation and restart of the language server for the given language.
-        It is assumed that the language server for the given language is no longer running.
+        Forces recreation and restart of the language server for the given language. Works for
+        languages that are currently running (their LS is assumed to be no longer functional) as
+        well as for languages that were recorded as unavailable after a failed startup. The server
+        the restart replaces is stopped once its replacement is in place.
 
         :param ls_id: the language server identifier
         :return: the newly created language server
+        :raises LanguageUnavailableError: if creation/startup fails; the language remains recorded
+            as unavailable with the new failure cause
+        :raises ValueError: if the language was never requested for this manager
         """
-        if ls_id not in self._language_servers:
-            raise ValueError(f"No language server for language {ls_id.get_key()} present; cannot restart")
-        return self._create_and_start_language_server(ls_id)
+        with self._restart_lock(ls_id):
+            if ls_id not in self._language_servers and ls_id not in self._unavailable_languages:
+                raise ValueError(f"No language server for language {ls_id.get_key()} is known to this manager; cannot restart")
+            replaced = self._language_servers.get(ls_id)
+            try:
+                ls = self._create_and_start_language_server(ls_id)
+            except Exception as e:
+                self._unavailable_languages[ls_id] = e
+                raise LanguageUnavailableError(
+                    f"Failed to (re)start language server for {ls_id.get_key()}: {e}",
+                    language=ls_id,
+                    cause=e,
+                    unavailable_languages=dict(self._unavailable_languages),
+                ) from e
+            # successful startup clears any prior unavailability for the language
+            self._unavailable_languages.pop(ls_id, None)
+
+            # stop the replaced server now that its replacement holds the slot
+            if replaced is not None:
+                replaced.stop()
+            return ls
 
     def add_language_server(self, ls_id: LanguageServerIdLike) -> SolidLanguageServer:
         """
@@ -239,6 +334,21 @@ class LanguageServerManager:
         :return: list of languages
         """
         return list(self._language_servers.keys())
+
+    def get_unavailable_languages(self) -> dict[LanguageServerIdLike, Exception]:
+        """
+        :return: a copy of the languages whose servers are currently not running, mapped to the
+            exception captured when their startup (or last restart attempt) failed
+        """
+        return dict(self._unavailable_languages)
+
+    def is_language_available(self, language: LanguageServerIdLike) -> bool:
+        """
+        :param language: the language
+        :return: ``True`` if the manager has a running server for this language; ``False`` if the
+            language was requested but failed to start or was never requested at all
+        """
+        return language in self._language_servers
 
     @staticmethod
     def _stop_language_server(ls: SolidLanguageServer, save_cache: bool = False, timeout: float = 2.0) -> None:
@@ -282,6 +392,8 @@ class LanguageServerManager:
         :return: the number of individual file change events detected (0 if nothing changed).
         """
         log.info("Polling file system for changes to source files ...")
+        if self._file_change_notifier is None:
+            return 0
         num_changes = self._file_change_notifier.poll_and_notify()
         log.info(f"File system polling complete; {num_changes} change events sent to language servers.")
         return num_changes

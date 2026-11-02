@@ -42,7 +42,7 @@ class RestartLanguageServerTool(Tool, ToolMarkerOptional, LspApiMixin):
         return self._api().restart_language_server()
 
 
-class GetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead, LspApiMixin):
+class GetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional, LspApiMixin):
     """
     Gets an overview of the top-level symbols defined in a given file.
     """
@@ -70,7 +70,7 @@ class GetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead, LspApiMixin):
         return self._api().get_symbols_overview(relative_path, depth=depth, max_answer_chars=max_answer_chars).represent()
 
 
-class FindSymbolTool(Tool, ToolMarkerSymbolicRead, LspApiMixin):
+class FindSymbolTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional, LspApiMixin):
     """
     Performs a global (or local) search using the language server backend.
     """
@@ -120,7 +120,9 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead, LspApiMixin):
             If a file is passed, the search will be restricted to that file.
             If you have some knowledge about the codebase, you should use this parameter, as it will significantly
             speed up the search as well as reduce the number of results.
-        :param include_body: If True, include the symbol's source code. Use judiciously.
+        :param include_body: whether to include the symbol's source code. Use judiciously.
+            For languages with narrow LSP-reported extents (notably Python variables/constants/fields/properties),
+            the body is widened to the enclosing statement, matching the ``cursor_configure`` body formatting.
         :param include_info: whether to include additional info (hover-like, typically including docstring and signature),
             about the symbol (ignored if include_body is True). Info is never included for child symbols.
             Note: Depending on the language, this can be slow (e.g., C/C++).
@@ -155,7 +157,7 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead, LspApiMixin):
         return {"name_path": "name_path_pattern"}
 
 
-class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead, LspApiMixin):
+class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional, LspApiMixin):
     """
     Finds symbols that reference the given symbol
     """
@@ -349,7 +351,7 @@ class GetDiagnosticsForSymbolTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOption
         )
 
 
-class ReplaceSymbolBodyTool(EditingToolWithDiagnostics, EditApiMixin):
+class ReplaceSymbolBodyTool(EditingToolWithDiagnostics, ToolMarkerSymbolicEdit, ToolMarkerOptional, EditApiMixin):
     """
     Replaces the full definition of a symbol using the language server backend.
     """
@@ -377,7 +379,7 @@ class ReplaceSymbolBodyTool(EditingToolWithDiagnostics, EditApiMixin):
             return diagnostics_context.format_result(result)
 
 
-class InsertAfterSymbolTool(EditingToolWithDiagnostics, EditApiMixin):
+class InsertAfterSymbolTool(EditingToolWithDiagnostics, ToolMarkerSymbolicEdit, ToolMarkerOptional, EditApiMixin):
     """
     Inserts content after the end of the definition of a given symbol.
     """
@@ -402,7 +404,7 @@ class InsertAfterSymbolTool(EditingToolWithDiagnostics, EditApiMixin):
             return diagnostics_context.format_result(result)
 
 
-class InsertBeforeSymbolTool(EditingToolWithDiagnostics, EditApiMixin):
+class InsertBeforeSymbolTool(EditingToolWithDiagnostics, ToolMarkerSymbolicEdit, ToolMarkerOptional, EditApiMixin):
     """
     Inserts content before the beginning of the definition of a given symbol.
     """
@@ -427,7 +429,7 @@ class InsertBeforeSymbolTool(EditingToolWithDiagnostics, EditApiMixin):
             return diagnostics_context.format_result(result)
 
 
-class RenameSymbolTool(Tool, ToolMarkerSymbolicEdit, LspApiMixin):
+class RenameSymbolTool(Tool, ToolMarkerSymbolicEdit, ToolMarkerOptional, LspApiMixin):
     """
     Renames a symbol throughout the codebase using language server refactoring capabilities.
     For JB, we use a separate tool.

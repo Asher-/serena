@@ -5,7 +5,7 @@ Tools supporting the execution of (external) commands
 
 from typing import TYPE_CHECKING, cast
 
-from serena.tools import Tool, ToolMarkerCanEdit
+from serena.tools import Tool, ToolMarkerCanEdit, ToolMarkerOptional
 
 if TYPE_CHECKING:
     from serena.repl.api.shell_api import ShellApi
@@ -24,7 +24,7 @@ class ShellApiMixin:
         return ShellApi(tool.agent)
 
 
-class ExecuteShellCommandTool(Tool, ToolMarkerCanEdit, ShellApiMixin):
+class ExecuteShellCommandTool(Tool, ToolMarkerOptional, ToolMarkerCanEdit, ShellApiMixin):
     """
     Executes a shell command.
     """

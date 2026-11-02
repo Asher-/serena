@@ -4,6 +4,7 @@ The Serena Model Context Protocol (MCP) Server
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import dataclasses
+import hashlib
 import os
 import re
 import shutil
@@ -726,6 +727,9 @@ class RegisteredProject(ToStringMixin):
         self.project_root = Path(project_root).resolve()
         self.project_config = project_config
         self._project_instance = project_instance
+        # the instance a change to the project configuration dropped (see reload_if_changed), handed to the instance
+        # get_project_instance builds in its place
+        self._replaced_project_instance: Optional["Project"] = None
 
     def _tostring_exclude_private(self) -> bool:
         return True
@@ -774,23 +778,63 @@ class RegisteredProject(ToStringMixin):
         try:
             return self.project_root.samefile(Path(path).resolve())
         except OSError:
-            # typically raised if the path does not exist (e.g., a removed git worktree)
+            # a registered root that no longer exists on disk (e.g. the project directory was moved
+            # or deleted after registration) cannot match any path; report no-match rather than
+            # letting the FileNotFoundError abort resolution of unrelated registered projects
             return False
 
     def get_project_instance(self, serena_config: "SerenaConfig") -> "Project":
         """
         Returns the project instance for this registered project, loading it if necessary.
+        An instance loaded after :meth:`reload_if_changed` dropped one is handed the dropped instance as the one it replaces.
         """
         if self._project_instance is None:
             from ..project import Project
+
+            serena_config.place_data_folder_outside_project(self.project_root)
 
             with LogTime(f"Loading project instance for {self}", logger=log):
                 self._project_instance = Project(
                     project_root=str(self.project_root),
                     project_config=self.project_config,
                     serena_config=serena_config,
+                    replaced_project=self._replaced_project_instance,
                 )
+            self._replaced_project_instance = None
         return self._project_instance
+
+    def reload_if_changed(self, serena_config: "SerenaConfig") -> bool:
+        """
+        Reloads the project configuration from disk (``project.yml``, including the ``project.local.yml`` override)
+        and, if it differs from the cached configuration, replaces the cached configuration and drops any
+        memoized project instance so that the next :meth:`get_project_instance` call builds a fresh
+        :class:`Project` reflecting the on-disk state, handing it the dropped instance as the one it replaces.
+
+        :param serena_config: the global Serena configuration (used to resolve the project.yml path)
+        :return: True if the on-disk configuration differed from the cached one and the cache was updated;
+            False if the configuration was unchanged or could not be loaded (e.g., the project.yml file no
+            longer exists or is malformed). In the latter case the cached configuration is preserved.
+        """
+        try:
+            new_config = ProjectConfig.load(self.project_root, serena_config=serena_config)
+        except Exception as e:
+            log.warning(
+                "Could not reload project configuration for %s from disk: %s. Keeping cached configuration.",
+                self.project_root,
+                e,
+            )
+            return False
+        if new_config == self.project_config:
+            return False
+        log.info(
+            "Detected on-disk change to project configuration for %s; dropping cached project instance.",
+            self.project_root,
+        )
+        self.project_config = new_config
+        if self._project_instance is not None:
+            self._replaced_project_instance = self._project_instance
+        self._project_instance = None
+        return True
 
 
 @dataclass(kw_only=True)
@@ -1021,6 +1065,7 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
         # read projects
         if "projects" not in loaded_commented_yaml:
             raise SerenaConfigError("`projects` key not found in Serena configuration. Please update your `serena_config.yml` file.")
+        instance._project_roots_on_file = cls._project_roots_of(loaded_commented_yaml)
         instance.projects = []
         for path in loaded_commented_yaml["projects"] or []:
             path = Path(path).resolve()
@@ -1264,6 +1309,8 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
                     f"Project with path {project_root} was already added with name '{already_registered_project.project_name}'."
                 )
 
+        self.place_data_folder_outside_project(project_root)
+
         autogen = ProjectConfigAutoGenerationMode.ASYNCHRONOUS if asynchronous_autogen else ProjectConfigAutoGenerationMode.SYNCHRONOUS
         project_config = ProjectConfig.load(project_root, serena_config=self, autogen=autogen)
 
@@ -1366,9 +1413,6 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
         for field_name in self._iter_config_file_mapped_fields_without_type_conversion():
             commented_yaml[field_name] = getattr(self, field_name)
 
-        # convert project objects into list of paths
-        commented_yaml["projects"] = sorted({str(project.project_root) for project in self.projects})
-
         # convert language backend to string
         commented_yaml["language_backend"] = self.language_backend.get_key()
 
@@ -1386,7 +1430,23 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
         template_yaml = load_yaml(SERENA_CONFIG_TEMPLATE_FILE, comment_normalisation=YamlCommentNormalisation.LEADING)
         transfer_yaml_comments(template_yaml, commented_yaml, YamlCommentNormalisation.LEADING, force_update_all=True)
 
-        save_yaml(self.config_file_path, commented_yaml)
+        # the project roots the file holds now, with this instance's own registrations and removals applied, read and
+        # replaced under one lock so that no other process's save falls between the two
+        with FileLock(self.config_file_path + ".lock"):
+            on_file = self._project_roots_of(load_yaml(self.config_file_path)) if os.path.exists(self.config_file_path) else set()
+            own = {str(project.project_root) for project in self.projects}
+            roots = (on_file | (own - self._project_roots_on_file)) - (self._project_roots_on_file - own)
+            commented_yaml["projects"] = sorted(roots)
+            save_yaml(self.config_file_path, commented_yaml)
+            self._project_roots_on_file = own
+
+    @staticmethod
+    def _project_roots_of(loaded_yaml: CommentedMap) -> set[str]:
+        """
+        :param loaded_yaml: the loaded contents of a configuration file.
+        :return: the resolved project roots it lists.
+        """
+        return {str(Path(root).resolve()) for root in loaded_yaml.get("projects") or []}
 
     @staticmethod
     def _resolve_serena_folder_location(template: str, placeholders: dict[str, str]) -> str:
@@ -1433,21 +1493,69 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
         """
         Resolves the location of the project's .serena data folder using fallback logic:
 
-        1. If the folder exists at the configured path (``project_serena_folder_location``), use it.
-        2. Otherwise, if it exists at the default location inside the project root, use that.
-        3. If neither exists, return the configured path (for creation).
+        1. If the folder at the configured path (``project_serena_folder_location``) holds a project.yml, use it.
+        2. Otherwise, if the folder at the default location inside the project root holds one, use that.
+        3. Otherwise, if a folder exists in the serena home directory (:meth:`get_home_project_serena_folder`), use that.
+        4. Otherwise, use the folder that exists at the configured path, then the one at the default location.
+        5. If none exists, return the configured path (for creation).
 
         :param project_root: the absolute path to the project root directory
         :return: the resolved absolute path to the .serena data folder
         :raises SerenaConfigError: if the configured template contains an unknown placeholder
         """
         configured_path = self.get_configured_project_serena_folder(project_root)
+        default_path = os.path.join(str(project_root), SERENA_MANAGED_DIR_NAME)
+        for folder in (configured_path, default_path):
+            if self._holds_project_yml(folder):
+                return folder
+        home_path = self.get_home_project_serena_folder(project_root)
+        if os.path.isdir(home_path):
+            return home_path
         if os.path.isdir(configured_path):
             return configured_path
-        default_path = os.path.join(str(project_root), SERENA_MANAGED_DIR_NAME)
         if configured_path != default_path and os.path.isdir(default_path):
             return default_path
         return configured_path
+
+    @classmethod
+    def _holds_project_yml(cls, folder: str) -> bool:
+        """
+        :param folder: the path of a project's data folder
+        :return: whether the folder holds a project.yml
+        """
+        return os.path.isfile(os.path.join(folder, ProjectConfig.SERENA_PROJECT_FILE))
+
+    def place_data_folder_outside_project(self, project_root: str | Path) -> None:
+        """
+        Creates the data folder of a project outside its directory when the directory holds no project.yml, so that
+        activating the directory writes nothing inside it. A configured location outside the project directory is
+        created where it is configured, so that it is resolved ahead of a data folder inside the project that holds no
+        project.yml; for any other location, the folder is created in the serena home directory.
+
+        :param project_root: the absolute path to the project root directory
+        """
+        configured_path = self.get_configured_project_serena_folder(project_root)
+        default_path = os.path.join(str(project_root), SERENA_MANAGED_DIR_NAME)
+        if self._holds_project_yml(configured_path) or self._holds_project_yml(default_path):
+            return
+        if not Path(configured_path).resolve().is_relative_to(Path(project_root).resolve()):
+            os.makedirs(configured_path, exist_ok=True)
+            return
+        os.makedirs(self.get_home_project_serena_folder(project_root), exist_ok=True)
+
+    @staticmethod
+    def get_home_project_serena_folder(project_root: str | Path) -> str:
+        """
+        Returns the location in the serena home directory of the data folder of a project whose directory holds
+        none of its own. The folder is named after the project directory and a digest of its absolute path, so that
+        two directories of the same name never share one.
+
+        :param project_root: the absolute path to the project root directory
+        :return: the absolute path of the project's data folder in the serena home directory
+        """
+        resolved_root = str(Path(project_root).resolve())
+        digest = hashlib.sha256(resolved_root.encode("utf-8")).hexdigest()[:16]
+        return os.path.join(SerenaPaths().serena_user_home_dir, "projects", f"{Path(resolved_root).name}-{digest}")
 
     def get_project_yml_location(self, project_root: str | Path) -> str:
         """

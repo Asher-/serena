@@ -3,12 +3,14 @@
 The implementation of operations on the project's files.
 """
 
+import os
 from collections import defaultdict
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from serena.tools import CreateTextFileTool, FindFileTool, ListDirTool, ReadFileTool, SearchForPatternTool
+from serena.util.file_lifecycle import AtomicFileWriter, FilesystemLifecycle
 from serena.util.text_utils import MatchedConsecutiveLines
 from solidlsp.ls_utils import TextUtils
 
@@ -164,6 +166,107 @@ class PatternMatchesRenderer(Renderer[PatternMatches]):
         )
 
 
+class EnclosingSymbolHits:
+    """
+    The matches of a search, grouped by the symbol that encloses each, or by the file for a match outside any symbol.
+    Each ``(name_path, relative_path)`` of a group is a valid argument for ``cursor_start``.
+    """
+
+    Group = tuple[str, str | None, str | None]
+    """the file, the name path and the kind of a group; the latter two are None for a match outside any symbol"""
+
+    def __init__(self, skipped_links: list[str]) -> None:
+        """
+        :param skipped_links: the symbolic links to directories the search did not enter
+        """
+        self._skipped_links = skipped_links
+        self._grouped: dict[EnclosingSymbolHits.Group, list[str]] = {}
+        self._group_order: list[EnclosingSymbolHits.Group] = []
+        self._file_order: list[str] = []
+
+    def add(self, rel: str, name_path: str | None, kind: str | None, hit: str) -> None:
+        """
+        :param rel: the file of the match
+        :param name_path: the name path of the enclosing symbol, if any
+        :param kind: the kind of the enclosing symbol, if any
+        :param hit: the display string of the match
+        """
+        if rel not in self._file_order:
+            self._file_order.append(rel)
+        key = (rel, name_path, kind)
+        if key not in self._grouped:
+            self._grouped[key] = []
+            self._group_order.append(key)
+        self._grouped[key].append(hit)
+
+    def render_summary(self) -> str:
+        """
+        :return: the header, counting the matches, the symbol-resident groups and the touched files
+        """
+        n_matches = sum(len(v) for v in self._grouped.values())
+        n_symbols = sum(1 for k in self._grouped if k[1] is not None)
+        header = f"Found {n_matches} matches across {n_symbols} symbols in {len(self._file_order)} files."
+        if self._skipped_links:
+            header += f" Symbolic links to directories not entered: {', '.join(self._skipped_links)}."
+        return header
+
+    @staticmethod
+    def _render_hit(hit: str) -> list[str]:
+        # indent every line of the hit so multi-line context blocks stay readable
+        return [f"    {sub}" for sub in hit.splitlines()] or ["    "]
+
+    def render_full(self) -> str:
+        """
+        :return: the groups clustered by file in discovery order, symbol blocks first, then file-level blocks
+        """
+        lines = [self.render_summary(), ""]
+        for rel in self._file_order:
+            sym_groups = [k for k in self._group_order if k[0] == rel and k[1] is not None]
+            file_groups = [k for k in self._group_order if k[0] == rel and k[1] is None]
+            for key in sym_groups:
+                _, name_path, kind = key
+                lines.append(f"@ {name_path} ({kind}) [{rel}]")
+                lines.append("  hits:")
+                for hit in self._grouped[key]:
+                    lines.extend(self._render_hit(hit))
+                lines.append("")
+            for key in file_groups:
+                lines.append(f"@ {rel} [{rel}]")
+                lines.append("  hits:")
+                for hit in self._grouped[key]:
+                    lines.extend(self._render_hit(hit))
+                lines.append("  (use cursor_overview to navigate)")
+                lines.append("")
+        return "\n".join(lines).rstrip() + "\n"
+
+    def render_symbol_list(self) -> str:
+        """
+        :return: the symbol and file identifiers only, with no hit bodies
+        """
+        lines = [self.render_summary(), ""]
+        for rel in self._file_order:
+            for key in [k for k in self._group_order if k[0] == rel]:
+                _, name_path, kind = key
+                count = len(self._grouped[key])
+                if name_path is not None:
+                    lines.append(f"@ {name_path} ({kind}) [{rel}] - {count} matches")
+                else:
+                    lines.append(f"@ {rel} [{rel}] - {count} matches (use cursor_overview to navigate)")
+        return "\n".join(lines)
+
+    def render_per_file_counts(self) -> str:
+        """
+        :return: one line per file
+        """
+        lines = [self.render_summary(), ""]
+        per_file: dict[str, int] = {}
+        for (rel, _, _), hits in self._grouped.items():
+            per_file[rel] = per_file.get(rel, 0) + len(hits)
+        for rel in self._file_order:
+            lines.append(f"{rel}: {per_file[rel]} matches")
+        return "\n".join(lines)
+
+
 class FsApi(FacadeApi):
     def __init__(self, agent: "SerenaAgent") -> None:
         super().__init__(
@@ -218,7 +321,7 @@ class FsApi(FacadeApi):
 
         # write the file
         abs_path.parent.mkdir(parents=True, exist_ok=True)
-        abs_path.write_text(content, encoding=project.project_config.encoding, newline=project.line_ending.newline_str)
+        AtomicFileWriter().write_text(str(abs_path), content, project.project_config.encoding, project.line_ending.newline_str, None)
         answer = f"File created: {relative_path}."
         if will_overwrite_existing:
             answer += " Overwrote existing file."
@@ -312,3 +415,77 @@ class FsApi(FacadeApi):
             skip_ignored_files=skip_ignored_files,
         )
         return PatternMatches(matches, PatternMatchesRenderer(self._agent, max_answer_chars))
+
+    def lifecycle(self) -> FilesystemLifecycle:
+        """
+        :return: the lifecycle service of the active project, whose results are typed states (not found, stale, path escape)
+            and whose writes are atomic
+        """
+        project = self._get_project()
+        return FilesystemLifecycle(project.project_root, is_ignored=project.is_ignored_path)
+
+    def search_by_enclosing_symbol(
+        self,
+        substring_pattern: str,
+        relative_path: str = "",
+        context_lines_before: int = 0,
+        context_lines_after: int = 0,
+        paths_include_glob: str = "",
+        paths_exclude_glob: str = "",
+        code_files_only: bool = False,
+    ) -> EnclosingSymbolHits:
+        """
+        Searches the project for a pattern, grouping the matches by the symbol that encloses each.
+
+        :param substring_pattern: the regular expression to search for
+        :param relative_path: the path to search under, relative to the project root; it must exist
+        :param context_lines_before: the number of lines of context before each match
+        :param context_lines_after: the number of lines of context after each match
+        :param paths_include_glob: a glob of the files to include; empty includes all
+        :param paths_exclude_glob: a glob of the files to exclude, which takes precedence over the include glob; empty excludes none
+        :param code_files_only: whether to search only files an analyser can address symbolically
+        :return: the grouped matches
+        """
+        from serena.symbol import LanguageServerSymbol, LanguageServerSymbolRetriever
+
+        # locate and validate the search root
+        project = self._get_project()
+        if not os.path.exists(os.path.join(project.project_root, relative_path)):
+            raise FileNotFoundError(f"Relative path {relative_path} does not exist.")
+
+        # run the regex pass, collecting the links not entered
+        skipped_links: list[str] = []
+        matches = project.search_source_files_for_pattern(
+            pattern=substring_pattern,
+            relative_path=relative_path,
+            context_lines_before=context_lines_before,
+            context_lines_after=context_lines_after,
+            paths_include_glob=paths_include_glob.strip(),
+            paths_exclude_glob=paths_exclude_glob.strip(),
+            code_files_only=code_files_only,
+            skipped_links=skipped_links,
+        )
+
+        # opt into the LSP retriever only when the project's backend supports it
+        retriever = LanguageServerSymbolRetriever(project) if self._agent.get_language_backend().is_lsp() else None
+
+        # for each hit, ask the LSP for the enclosing symbol
+        hits = EnclosingSymbolHits(skipped_links)
+        for match in matches:
+            assert match.source_file_path is not None
+            rel = match.source_file_path
+            line = match.matched_lines[0].line_number
+            name_path: str | None = None
+            kind: str | None = None
+            if retriever is not None and retriever.can_analyze_file(rel):
+                try:
+                    ls = retriever.get_language_server(rel)
+                    sym_dict = ls.request_containing_symbol(rel, line, 0, strict=False)
+                    if sym_dict is not None:
+                        sym = LanguageServerSymbol(sym_dict)
+                        name_path = sym.get_name_path()
+                        kind = sym.symbol_kind_name
+                except Exception:
+                    pass
+            hits.add(rel, name_path, kind, match.to_display_string())
+        return hits

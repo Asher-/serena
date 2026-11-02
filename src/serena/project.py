@@ -67,13 +67,17 @@ class Project(ToStringMixin):
         project_config: ProjectConfig,
         serena_config: SerenaConfig,
         is_newly_created: bool = False,
+        replaced_project: Optional["Project"] = None,
     ):
         """
         :param project_root: path to the project's root folder; it is assumed to be fully resolved
         :param project_config: the project's configuration
         :param serena_config: the global Serena configuration
         :param is_newly_created: whether the project was newly created
-        """
+        :param replaced_project: the instance of the same root that this instance replaces after a change to the project
+            configuration, if any; this instance creates no language server manager until that one has stopped its
+            language servers
+                """
         assert serena_config is not None
         self.project_root = project_root
         self.project_config = project_config
@@ -94,6 +98,21 @@ class Project(ToStringMixin):
 
         self.language_server_manager: LanguageServerManager | None = None
         self._language_server_manager_init_error: Exception | None = None
+        # readiness signal for the language server manager: set inside
+        # :meth:`create_language_server_manager`'s ``finally`` once construction has been
+        # attempted at least once (success or failure). Read-path callers
+        # (:meth:`get_language_server_manager_or_raise`) block on this rather than racing
+        # the in-flight construction and observing a transient ``None`` slot. The signal
+        # lives on Project (not SerenaAgent) so multi-session daemons share one event
+        # per project across all activating sessions.
+        self._lsm_ready_event = threading.Event()
+        # the instance of the same root this instance replaces, dropped once its language servers have stopped; until
+        # then this instance creates no language server manager, so that two instances of one root never both run
+        # language servers over its tree (pg://serena/session/project/instance/uniqueness)
+        self._replaced_project = replaced_project
+        # set once this instance's language servers have been stopped for want of any holder (see
+        # mark_language_servers_stopped), cleared when it creates a language server manager
+        self._language_servers_stopped = threading.Event()
         self.is_newly_created = is_newly_created
         self._agent: Optional["SerenaAgent"] = None
 
@@ -489,19 +508,25 @@ class Project(ToStringMixin):
         def _tostring_includes(self) -> list[str]:
             return ["rel_path"]
 
-    def gather_source_files(self, relative_path: str = "") -> list[ProjectFile]:
+    def gather_source_files(self, relative_path: str = "", skipped_links: list[str] | None = None) -> list[ProjectFile]:
         """
         Retrieves all (non-ignored) project source files, optionally limited to the given path.
         The limitation to source files depends on the language backend and its identification of
         source files.
 
         :param relative_path: if provided, restrict search to this path
+        :param skipped_links: a list to which the relative path of every non-ignored symbolic link to a directory is
+            appended; such a link is never entered, so a link to an ancestor cannot make the walk repeat the tree
         :return: list of project files
         """
-        return self.gather_project_files(relative_path=relative_path, code_files_only=True)
+        return self.gather_project_files(relative_path=relative_path, code_files_only=True, skipped_links=skipped_links)
 
     def gather_project_files(
-        self, relative_path: str = "", code_files_only: bool = False, skip_ignored_files: bool = True
+        self,
+        relative_path: str = "",
+        code_files_only: bool = False,
+        skip_ignored_files: bool = True,
+        skipped_links: list[str] | None = None,
     ) -> list[ProjectFile]:
         """
         Retrieves all (non-ignored) project files, optionally limited to the given path
@@ -512,6 +537,8 @@ class Project(ToStringMixin):
         :param relative_path: if provided, restrict search to this path
         :param code_files_only: whether to ignore files that are not source files.
             The identification of source files depends on the language backend.
+        :param skipped_links: a list to which the relative path of every non-ignored symbolic link to a directory is
+            appended; such a link is never entered, so a link to an ancestor cannot make the walk repeat the tree
         :return: list of project files
         """
         start_path = os.path.join(self.project_root, relative_path)
@@ -561,9 +588,18 @@ class Project(ToStringMixin):
                     else:
                         return False
 
+            def is_skipped_dir(d: os.DirEntry) -> bool:
+                if is_ignored_dir(d):
+                    return True
+                if d.is_symlink():
+                    if skipped_links is not None:
+                        skipped_links.append(os.path.relpath(d.path, start=self.project_root))
+                    return True
+                return False
+
             # collect non-ignored files
             result = []
-            for root, dirs, files in walk_dir_entries(start_path, followlinks=follow_links, is_ignored_dir=is_ignored_dir):
+            for root, dirs, files in walk_dir_entries(start_path, followlinks=False, is_ignored_dir=is_skipped_dir):
                 for file in files:
                     if not follow_links and file.is_symlink():
                         continue
@@ -587,13 +623,17 @@ class Project(ToStringMixin):
 
             return result
 
-    def create_file_collection(self, relative_path: str, *, code_files_only: bool, skip_ignored_files: bool) -> FileCollection:
+    def create_file_collection(
+        self, relative_path: str, *, code_files_only: bool, skip_ignored_files: bool, skipped_links: list[str] | None = None
+    ) -> FileCollection:
         """
         Creates the file collection for the given relative path.
 
         :param relative_path: the relative path to create the file collection for, relative to the project root
         :param code_files_only: whether to include only (non-ignored) code files
         :param skip_ignored_files: whether to skip ignored files; has no effect if `code_files_only` is True
+        :param skipped_links: a list to which the relative path of every symbolic link to a directory the walk did not enter
+            is appended
         :return:
         """
         if FileProxy.is_external_path(relative_path, self):
@@ -601,7 +641,7 @@ class Project(ToStringMixin):
             file_collection = FileCollection([FileProxy.from_project_relative_path(self, relative_path)])
         else:
             project_files = self.gather_project_files(
-                relative_path=relative_path, code_files_only=code_files_only, skip_ignored_files=skip_ignored_files
+                relative_path=relative_path, code_files_only=code_files_only, skip_ignored_files=skip_ignored_files, skipped_links=skipped_links
             )
             file_collection = FileCollection.from_project_files(project_files, self)
 
@@ -618,6 +658,7 @@ class Project(ToStringMixin):
         multiline: bool = True,
         code_files_only: bool = True,
         skip_ignored_files: bool = True,
+        skipped_links: list[str] | None = None,
     ) -> list[MatchedConsecutiveLines]:
         """
         Search for a pattern across all (non-ignored) source files
@@ -631,9 +672,13 @@ class Project(ToStringMixin):
         :param multiline: whether to compile the regex with the DOTALL flag (`.` matches newlines).
         :param code_files_only: whether to include only (non-ignored) code files
         :param skip_ignored_files: whether to skip ignored files; has no effect if `code_files_only` is True
+        :param skipped_links: a list to which the relative path of every symbolic link to a directory the search did not
+            enter is appended
         :return: list of matches
         """
-        file_collection = self.create_file_collection(relative_path, code_files_only=code_files_only, skip_ignored_files=skip_ignored_files)
+        file_collection = self.create_file_collection(
+            relative_path, code_files_only=code_files_only, skip_ignored_files=skip_ignored_files, skipped_links=skipped_links
+        )
         return search_files(
             file_collection,
             pattern,
@@ -666,62 +711,167 @@ class Project(ToStringMixin):
             source_file_path=relative_file_path,
         )
 
-    def create_language_server_manager(self) -> LanguageServerManager:
+    def create_language_server_manager(self, force_recreate: bool = False) -> LanguageServerManager:
         """
-        Creates the language server manager for the project, starting one language server per configured programming language.
+        Returns the project's language server manager, creating it lazily on first call.
 
-        :return: the language server manager, which is also stored in the project instance
+        By default this is idempotent: if a manager has already been built for this project,
+        that manager is returned without disruption. Multiple MCP sessions in the same daemon
+        may concurrently activate the same project, and a destructive stop+recreate cycle in
+        one session would otherwise surface to other sessions as "language server manager
+        could not be constructed" during the brief window in which
+        ``self.language_server_manager`` is ``None``.
+
+        The destructive recreate semantic is preserved for explicit reset paths
+        (:meth:`SerenaAgent.reset_language_server_manager`, :meth:`SerenaAgent.add_language`,
+        :meth:`SerenaAgent.remove_language`, :class:`RestartLanguageServerTool`) via
+        ``force_recreate=True``. Even on the forced path, the new manager is built first and
+        the previous one is torn down only after the swap, so concurrent readers always
+        observe a healthy manager (either the previous one or the new one), never ``None``.
+
+        On every exit from the construction body — success or failure — this method sets
+        :attr:`_lsm_ready_event` so read-path callers blocked in
+        :meth:`get_language_server_manager_or_raise` wake up and re-check the manager slot.
+
+        :param force_recreate: when True, replace any existing manager with a freshly built
+            one. Default False (idempotent get-or-create).
+        :return: the language server manager, also stored in ``self.language_server_manager``.
         """
-        try:
-            # ensure that the project configuration, particularly the list of languages is complete,
-            # despite asynchronous first-time project configuration generation (which may not have completed yet)
-            self.project_config.await_asynchronous_completion()
+        # an instance replacing another of the same root starts no language servers while that one still runs its own; the
+        # wait comes before the lock, so it never blocks a release of this instance
+        self.wait_for_replaced_project()
+        # serialise concurrent calls on this Project so two activations cannot race through
+        # the create path and leak managers
+        with self.language_server_manager_lock():
+            # idempotent get-or-create: a non-None manager satisfies the same contract as
+            # :meth:`get_language_server_manager_or_raise` (the read path), so return early
+            if self.language_server_manager is not None and not force_recreate:
+                return self.language_server_manager
 
-            # determine timeout to use for LS calls
-            tool_timeout = self.serena_config.tool_timeout
-            if tool_timeout is None or tool_timeout < 0:
-                ls_timeout = None
-            else:
-                if tool_timeout < 10:
-                    raise ValueError(f"Tool timeout must be at least 10 seconds, but is {tool_timeout} seconds")
-                ls_timeout = tool_timeout - 5  # the LS timeout is for a single call, it should be smaller than the tool timeout
+            try:
+                # ensure that the project configuration, particularly the list of languages is complete,
+                # despite asynchronous first-time project configuration generation (which may not have completed yet)
+                self.project_config.await_asynchronous_completion()
 
-            # if there is an existing instance, stop its language servers first
-            if self.language_server_manager is not None:
-                log.info("Stopping existing language server manager ...")
-                self.language_server_manager.stop_all()
-                self.language_server_manager = None
-
-            log.info(f"Creating language server manager for {self.project_root}")
-            self._language_server_manager_init_error = None
-            is_trusted = self.is_trusted()
-            ls_specific_settings = dict(self.serena_config.ls_specific_settings)
-            if self.project_config.ls_specific_settings:
-                if is_trusted:
-                    ls_specific_settings = merge_ls_specific_settings(
-                        self.serena_config.ls_specific_settings, self.project_config.ls_specific_settings
-                    )
+                # determine timeout to use for LS calls
+                tool_timeout = self.serena_config.tool_timeout
+                if tool_timeout is None or tool_timeout < 0:
+                    ls_timeout = None
                 else:
-                    log.warning(
-                        f"Project path {self.project_root} is not trusted, ignoring LS-specific settings from project configuration. "
-                        "To trust the project, modify the trusted path patterns in the global configuration."
-                    )
-            factory = LanguageServerFactory(
-                project_root=self.project_root,
-                project_config=self.project_config,
-                project_data_path=self._serena_data_folder,
-                encoding=self.project_config.encoding,
-                ignored_patterns=self._ignored_patterns,
-                ls_timeout=ls_timeout,
-                ls_specific_settings=ls_specific_settings,
-                trace_lsp_communication=self.serena_config.trace_lsp_communication,
-                is_project_trusted=is_trusted,
-            )
-            self.language_server_manager = LanguageServerManager.from_languages(self.project_config.language_servers, factory, self)
-            return self.language_server_manager
-        except Exception as e:
-            self._language_server_manager_init_error = e
-            raise
+                    if tool_timeout < 10:
+                        raise ValueError(f"Tool timeout must be at least 10 seconds, but is {tool_timeout} seconds")
+                    ls_timeout = tool_timeout - 5  # the LS timeout is for a single call, it should be smaller than the tool timeout
+
+                # build the new manager BEFORE touching the existing one so concurrent readers
+                # continue to observe the previous (healthy) manager throughout the construction
+                # window; this is what eliminates the cross-session "could not be constructed"
+                # race that motivated this method's redesign
+                log.info(f"Creating language server manager for {self.project_root}")
+                self._language_server_manager_init_error = None
+                is_trusted = self.is_trusted()
+                ls_specific_settings = dict(self.serena_config.ls_specific_settings)
+                if self.project_config.ls_specific_settings:
+                    if is_trusted:
+                        ls_specific_settings = merge_ls_specific_settings(
+                            self.serena_config.ls_specific_settings, self.project_config.ls_specific_settings
+                        )
+                    else:
+                        log.warning(
+                            f"Project path {self.project_root} is not trusted, ignoring LS-specific settings from project configuration. "
+                            "To trust the project, modify the trusted path patterns in the global configuration."
+                        )
+                factory = LanguageServerFactory(
+                    project_root=self.project_root,
+                    project_config=self.project_config,
+                    project_data_path=self._serena_data_folder,
+                    encoding=self.project_config.encoding,
+                    ignored_patterns=self._ignored_patterns,
+                    ls_timeout=ls_timeout,
+                    ls_specific_settings=ls_specific_settings,
+                    trace_lsp_communication=self.serena_config.trace_lsp_communication,
+                    is_project_trusted=is_trusted,
+                )
+                new_manager = LanguageServerManager.from_languages(self.project_config.language_servers, factory, self)
+
+                # atomic swap then post-swap teardown of the previous manager (if any), so the
+                # ``self.language_server_manager`` slot transitions directly from old to new
+                # without ever being ``None``
+                previous_manager = self.language_server_manager
+                self.language_server_manager = new_manager
+                self._language_servers_stopped.clear()
+                if previous_manager is not None:
+                    log.info("Stopping previous language server manager (post-swap) ...")
+                    try:
+                        previous_manager.stop_all()
+                    except Exception as stop_exc:
+                        log.warning(f"Error stopping previous language server manager: {stop_exc}", exc_info=stop_exc)
+
+                return new_manager
+            except Exception as e:
+                self._language_server_manager_init_error = e
+                raise
+            finally:
+                # wake any read-path waiters whether construction succeeded or failed; the
+                # event is idempotent so re-entry under ``force_recreate=True`` is safe (the
+                # atomic swap above guarantees readers always observe a non-None manager
+                # during the recreate window)
+                self._lsm_ready_event.set()
+
+    def language_server_manager_lock(self) -> threading.RLock:
+        """
+        :return: the lock that serialises the creation of this project's language server manager with its release;
+            it is created lazily because Project's existing initialiser does not own a dedicated slot for it
+        """
+        return self.__dict__.setdefault("_lsm_lock", threading.RLock())
+
+    def detach_language_server_manager(self) -> LanguageServerManager | None:
+        """
+        Removes this project's language server manager without stopping it, so that the caller can stop it, and
+        re-arms the readiness signal first, so that a reader arriving after the removal waits for a new manager
+        rather than failing on the absent one.
+
+        :return: the removed manager, or None if the project had none
+        """
+        self._lsm_ready_event.clear()
+        manager = self.language_server_manager
+        self.language_server_manager = None
+        return manager
+
+    def wait_for_replaced_project(self) -> None:
+        """
+        Waits until the language servers of the instance this instance replaces (see :attr:`replaced_project`) have
+        stopped, if it replaces one, and then forgets that instance. An instance replaced before it started language servers
+        of its own still waits for the one it replaces, so the wait follows that chain until it reaches an instance whose
+        servers have stopped and which waits for none. Called before :meth:`language_server_manager_lock` is taken, so the
+        wait never blocks a release of this instance's language servers.
+        """
+        replaced_project = self._replaced_project
+        if replaced_project is not None:
+            log.info(f"Waiting for the language servers of the replaced instance of {self.project_root} to stop ...")
+
+            # the replaced instances, back to the last one that started language servers; each stops its own, and one
+            # still waiting for the instance it replaces never started any
+            while replaced_project is not None:
+                replaced_project._language_servers_stopped.wait()
+                replaced_project = replaced_project._replaced_project
+
+            self._replaced_project = None
+
+    def mark_language_servers_stopped(self) -> None:
+        """
+        Records that this instance's language servers have been stopped because nothing holds it any longer, which lets
+        an instance replacing it start its own (see :attr:`replaced_project`).
+        """
+        self._language_servers_stopped.set()
+
+    @property
+    def replaced_project(self) -> Optional["Project"]:
+        """
+        :return: the instance of the same root that this instance replaces after a change to the project configuration,
+            until that instance's language servers have stopped and this instance has waited for them to;
+            None otherwise
+        """
+        return self._replaced_project
 
     def get_language_server_manager_status(self) -> str:
         """
@@ -737,8 +887,29 @@ class Project(ToStringMixin):
             return "ready"
 
     def get_language_server_manager_or_raise(self) -> LanguageServerManager:
+        # block on the in-flight construction signalled by :meth:`create_language_server_manager`.
+        # The ready event is set in that method's ``finally`` so we wake regardless of success
+        # or failure; the post-wait check below then either returns the now-ready manager or
+        # raises with the captured init error. Bounding the wait by ``tool_timeout`` ensures a
+        # genuinely stuck construction surfaces as the caller's normal tool timeout rather than
+        # an indefinite block; a ``None`` / negative ``tool_timeout`` means "wait indefinitely",
+        # matching the same convention used inside :meth:`create_language_server_manager`.
         if self.language_server_manager is None:
-            msg = TextBuilder("The language server manager is not initialized, indicating a problem during project initialisation.")
+            tool_timeout = self.serena_config.tool_timeout
+            wait_timeout = None if (tool_timeout is None or tool_timeout < 0) else tool_timeout
+            self._lsm_ready_event.wait(timeout=wait_timeout)
+
+        # this error path fires only when the entire manager could not be constructed, which is distinct from
+        # the (now expected) case where the manager came up with partial coverage. Per-language startup failures
+        # no longer surface here: the manager is still constructed with the healthy languages, and calls into
+        # the manager for an unavailable language raise a :class:`LanguageUnavailableError` at the call site.
+        # Reaching this branch means construction itself raised, typically a project-wide configuration problem.
+        if self.language_server_manager is None:
+            msg = TextBuilder(
+                "The language server manager could not be constructed at all, indicating a project-wide "
+                "initialisation problem (as opposed to a single language failing to start, which is handled "
+                "by the manager itself)."
+            )
             if self._language_server_manager_init_error is not None:
                 msg.with_text(str(self._language_server_manager_init_error))
             if self._agent is not None:
