@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-import fnmatch
 import hashlib
 import json
 import logging
@@ -393,59 +392,6 @@ def expand_braces(pattern: str) -> list[str]:
     return patterns
 
 
-def glob_match(pattern: str, path: str) -> bool:
-    """
-    Match a file path against a glob pattern.
-
-    Supports standard glob patterns:
-    - * matches any number of characters except /
-    - ** matches any number of directories (zero or more)
-    - ? matches a single character except /
-    - [seq] matches any character in seq
-
-    Supports brace expansion:
-    - {a,b,c} expands to multiple patterns (including nesting)
-
-    Unsupported patterns:
-    - Bash extended glob features are unavailable in Python's fnmatch
-    - Extended globs like !(), ?(), +(), *(), @() are not supported
-
-    :param pattern: Glob pattern (e.g., 'src/**/*.py', '**agent.py')
-    :param path: File path to match against
-    :return: True if path matches pattern
-    """
-    pattern = pattern.replace("\\", "/")  # Normalize backslashes to forward slashes
-    path = path.replace("\\", "/")  # Normalize path backslashes to forward slashes
-
-    # Handle ** patterns that should match zero or more directories
-    if "**" in pattern:
-        # Method 1: Standard fnmatch (matches one or more directories)
-        regex1 = fnmatch.translate(pattern)
-        if re.match(regex1, path):
-            return True
-
-        # Method 2: Handle zero-directory case by removing /** entirely
-        # Convert "src/**/test.py" to "src/test.py"
-        if "/**/" in pattern:
-            zero_dir_pattern = pattern.replace("/**/", "/")
-            regex2 = fnmatch.translate(zero_dir_pattern)
-            if re.match(regex2, path):
-                return True
-
-        # Method 3: Handle leading ** case by removing **/
-        # Convert "**/test.py" to "test.py"
-        if pattern.startswith("**/"):
-            zero_dir_pattern = pattern[3:]  # Remove "**/"
-            regex3 = fnmatch.translate(zero_dir_pattern)
-            if re.match(regex3, path):
-                return True
-
-        return False
-    else:
-        # Simple pattern without **, use fnmatch directly
-        return fnmatch.fnmatch(path, pattern)
-
-
 class _ReadFileProxy(FileProxy):
     """A file named by its path relative to a root, read by a given reader."""
 
@@ -462,27 +408,6 @@ class _ReadFileProxy(FileProxy):
 
     def is_glob_supported(self) -> bool:
         return True
-
-
-def _filter_glob(file_collection: FileCollection, paths_include_glob: str | None, paths_exclude_glob: str | None) -> FileCollection:
-    """
-    :return: the files of the collection whose relative paths the include glob matches and the exclude glob does not,
-        each matched by :func:`glob_match`; a file whose path does not support globbing is kept
-    """
-    include_patterns = expand_braces(paths_include_glob) if paths_include_glob else None
-    exclude_patterns = expand_braces(paths_exclude_glob) if paths_exclude_glob else None
-    filtered = []
-    for file_proxy in file_collection:
-        if file_proxy.is_glob_supported():
-            path = file_proxy.get_relative_path()
-            if include_patterns and not any(glob_match(p, path) for p in include_patterns):
-                log.debug(f"Skipping {path}: does not match include pattern {paths_include_glob}")
-                continue
-            if exclude_patterns and any(glob_match(p, path) for p in exclude_patterns):
-                log.debug(f"Skipping {path}: matches exclude pattern {paths_exclude_glob}")
-                continue
-        filtered.append(file_proxy)
-    return FileCollection(filtered)
 
 
 def search_files(
@@ -527,7 +452,7 @@ def search_files(
         raise ValueError(f"Invalid regular expression {pattern!r}: {e}") from e
 
     # apply glob filter
-    file_collection = _filter_glob(file_collection, paths_include_glob, paths_exclude_glob)
+    file_collection = file_collection.filter_glob(paths_include_glob=paths_include_glob, paths_exclude_glob=paths_exclude_glob)
     log.info(f"Processing {len(file_collection)} files.")
 
     def process_single_file(file_proxy: FileProxy) -> dict[str, Any]:

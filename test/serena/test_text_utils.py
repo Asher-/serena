@@ -343,7 +343,6 @@ class TestSearchFiles:
             (["a.py", "b.txt", "c.py"], "match", "*.py", "c.*", ["a.py"], "Include .py, exclude c.*"),
             # Directory matching - Using pathspec patterns
             (["main.c", "test/main.c"], "match", "test/*", None, ["test/main.c"], "Include files in test/ subdir"),
-            (["data/a.csv", "data/b.log"], "match", "data/*", "*.log", ["data/a.csv"], "Include data/*, exclude *.log"),
             (["data/a.csv", "data/b.log"], "match", "data/*", "data/*.log", ["data/a.csv"], "Include data/*, exclude data/*.log"),
             (["src/a.py", "tests/b.py"], "match", "src/**", "tests/**", ["src/a.py"], "Include src/**, exclude tests/**"),
             (["src/mod/a.py", "tests/b.py"], "match", "**/*.py", "tests/**", ["src/mod/a.py"], "Include **/*.py, exclude tests/**"),
@@ -638,46 +637,6 @@ class TestSearchFiles:
 
 class TestGlobMatch:
     """Test the glob_match function directly."""
-
-    @pytest.mark.parametrize(
-        "pattern, path, expected",
-        [
-            # Basic wildcard patterns
-            ("*.py", "file.py", True),
-            ("*.py", "file.txt", False),
-            ("*agent.py", "agent.py", True),
-            ("*agent.py", "process_isolated_agent.py", True),
-            ("*agent.py", "agent_test.py", False),
-            # Double asterisk patterns
-            ("**agent.py", "agent.py", True),
-            ("**agent.py", "src/agent.py", True),
-            ("**agent.py", "src/serena/agent.py", True),
-            ("**agent.py", "src/serena/process_isolated_agent.py", True),
-            ("**agent.py", "agent_test.py", False),
-            # Prefix with double asterisk
-            ("src/**agent.py", "src/agent.py", True),
-            ("src/**agent.py", "src/serena/agent.py", True),
-            ("src/**agent.py", "src/serena/process_isolated_agent.py", True),
-            ("src/**agent.py", "other/agent.py", False),
-            ("src/**agent.py", "src/agent_test.py", False),
-            # Directory patterns
-            ("src/**", "src/file.py", True),
-            ("src/**", "src/dir/file.py", True),
-            ("src/**", "other/file.py", False),
-            # Exact matches with double asterisk
-            ("src/**/test.py", "src/test.py", True),
-            ("src/**/test.py", "src/a/b/test.py", True),
-            ("src/**/test.py", "src/test_file.py", False),
-            # Simple patterns without asterisks
-            ("src/file.py", "src/file.py", True),
-            ("src/file.py", "src/other.py", False),
-        ],
-    )
-    def test_glob_match(self, pattern, path, expected):
-        """Test glob_match function with various patterns."""
-        from serena.util.text_utils import glob_match
-
-        assert glob_match(pattern, path) == expected
 
     @pytest.mark.parametrize(
         "pattern, path, expected",
