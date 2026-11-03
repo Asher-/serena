@@ -19,7 +19,7 @@ language_backend: LSP
 #      https://oraios.github.io/serena/01-about/035_tools.html#repl-advantages
 # The interface is fixed at startup; it can be overridden by the project activated at startup.
 # Further information: https://oraios.github.io/serena/02-usage/050_configuration.html#agent-interfaces
-agent_interface: REPL
+agent_interface: tools
 
 # line ending convention to use when writing source files.
 # Possible values: "lf" (Unix), "crlf" (Windows), "native" (platform default).
