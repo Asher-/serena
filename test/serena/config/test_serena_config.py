@@ -395,7 +395,7 @@ class TestEffectiveLanguageBackend:
 
     def test_activate_project_switches_backend_with_repl_interface(self):
         """With the REPL interface, post-init activation of a project with a different backend switches the backend."""
-        config, name = _make_config_with_project("lsp_proj", language_backend=None, global_backend=BuiltinLanguageBackend.LSP)
+        config, name = _make_config_with_project("lsp_proj", language_backend=None, global_backend=BuiltinLanguageBackend.LSP.get_instance())
         config.agent_interface = AgentInterface.REPL
         jb_project = Project(
             project_root=str(Path(__file__).parent.parent / "resources" / "repos" / "java" / "test_repo"),

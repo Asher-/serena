@@ -332,6 +332,15 @@ class GitignoreParser:
             try:
                 entries = os.scandir(abs_path)
             except PermissionError as ex:
+                if abs_path == self.repo_root:
+                    # The repository root itself cannot be read — e.g. a macOS privacy-protected
+                    # folder such as ~/Desktop, ~/Documents or ~/Downloads. Fail with an actionable
+                    # message rather than an opaque crash or a silently-empty parser.
+                    raise PermissionError(
+                        f"serena cannot read the folder '{abs_path}': macOS is blocking access to it. "
+                        f"Desktop, Documents, and Downloads are protected by the system's privacy "
+                        f"settings, and serena does not have permission to open them."
+                    ) from ex
                 log.debug(f"Skipping unreadable directory {abs_path}: {ex}")
                 return
             for entry in entries:

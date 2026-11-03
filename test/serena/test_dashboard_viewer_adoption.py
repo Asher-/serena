@@ -203,7 +203,7 @@ def test_nothing_is_started_where_no_display_is_usable(agent: SerenaAgent, root:
 
     agent._dashboard_manager._start_dashboard_viewer(minimized=False)
 
-    assert agent._dashboard_viewer_process is None
+    assert agent._dashboard_manager.viewer_process is None
     assert supervise.records() == []
 
 
@@ -225,7 +225,7 @@ def test_where_the_platform_has_no_viewer_the_dashboard_opens_in_the_browser(
         assert time.monotonic() < deadline, "no browser was opened"
         time.sleep(0.01)
     assert opened.read_text() == _URL
-    assert agent._dashboard_viewer_process is None
+    assert agent._dashboard_manager.viewer_process is None
 
 
 def test_where_the_platform_has_no_viewer_a_minimized_start_opens_nothing(
@@ -235,5 +235,5 @@ def test_where_the_platform_has_no_viewer_a_minimized_start_opens_nothing(
 
     agent._dashboard_manager._start_dashboard_viewer(minimized=True)
 
-    assert agent._dashboard_viewer_process is None
+    assert agent._dashboard_manager.viewer_process is None
     assert supervise.records() == []

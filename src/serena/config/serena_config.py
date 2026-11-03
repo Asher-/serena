@@ -1346,7 +1346,7 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
         """Save the dashboard launch preference without persisting transient configuration overrides."""
         # persist against the latest disk configuration under the shared file lock
         if self.config_file_path is not None:
-            with FileLock(self.config_file_path + ".lock"):
+            with FileLock(self.config_file_path + ".lock", is_singleton=True):
                 persisted = SerenaConfig.from_config_file()
                 persisted.web_dashboard_open_on_launch = value
                 persisted._save()
@@ -1371,7 +1371,7 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
         if self.config_file_path is None:
             return
 
-        with FileLock(self.config_file_path + ".lock"):
+        with FileLock(self.config_file_path + ".lock", is_singleton=True):
             persisted = SerenaConfig.from_config_file()
             current_projects_by_path = {str(project.project_root): project for project in self.projects}
             current_paths = set(current_projects_by_path)
@@ -1432,7 +1432,7 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
 
         # the project roots the file holds now, with this instance's own registrations and removals applied, read and
         # replaced under one lock so that no other process's save falls between the two
-        with FileLock(self.config_file_path + ".lock"):
+        with FileLock(self.config_file_path + ".lock", is_singleton=True):
             on_file = self._project_roots_of(load_yaml(self.config_file_path)) if os.path.exists(self.config_file_path) else set()
             own = {str(project.project_root) for project in self.projects}
             roots = (on_file | (own - self._project_roots_on_file)) - (self._project_roots_on_file - own)

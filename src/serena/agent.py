@@ -599,17 +599,22 @@ class DashboardManager:
             log.info("Not starting the Serena dashboard viewer because no usable display was detected.")
             return
 
-        # the viewer of this dashboard an ended instance started, or else a new one; it watches no pid of serena's,
-        # since it outlives serena as a language server does (bug://serena/language_server/initialize/process_id/client/watch)
-        program = "import sys; from serena.agent import DashboardManager; DashboardManager._start_dashboard_viewer_process_function(sys.argv[1], sys.argv[2] == 'True')"
-        self._dashboard_viewer_process = self._adopt_dashboard_viewer(self.url) or supervise.Popen(
-            [sys.executable, "-c", program, self.url, str(minimized)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            call_id="",
-            waiting=supervise.Waiting.of(_DASHBOARD_VIEWER_KIND, {"url": self.url}),
-            keep=True,
-        )
+        if SerenaDashboardViewer.is_current_platform_supported():
+            # the viewer of this dashboard an ended instance started, or else a new one; it watches no pid of serena's,
+            # since it outlives serena as a language server does (bug://serena/language_server/initialize/process_id/client/watch)
+            program = "import sys; from serena.agent import DashboardManager; DashboardManager._start_dashboard_viewer_process_function(sys.argv[1], sys.argv[2] == 'True')"
+            self._dashboard_viewer_process = self._adopt_dashboard_viewer(self.url) or supervise.Popen(
+                [sys.executable, "-c", program, self.url, str(minimized)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                call_id="",
+                waiting=supervise.Waiting.of(_DASHBOARD_VIEWER_KIND, {"url": self.url}),
+                keep=True,
+            )
+        else:
+            log.info("Not starting Serena dashboard viewer because the current platform does not support it; using browser-based fallback")
+            if not minimized:
+                self.open_dashboard_in_browser()
 
     @staticmethod
     def _adopt_dashboard_viewer(url: str) -> supervise.Popen | None:
