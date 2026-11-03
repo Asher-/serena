@@ -2,18 +2,22 @@ import os
 import tempfile
 from pathlib import Path
 from typing import cast
+from unittest.mock import patch
 
 import pytest
+from sensai.util import logging
 
+from serena.util.logging import SuspendedLoggersContext
 from solidlsp import SolidLanguageServer
 from solidlsp.language_servers.csharp_language_server import (
     CSharpLanguageServer,
     breadth_first_file_scan,
     find_solution_or_project_file,
 )
-from solidlsp.ls_config import LanguageServerId
+from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.ls_types import SymbolKind
 from solidlsp.ls_utils import SymbolUtils
+from solidlsp.settings import SolidLSPSettings
 from test.conftest import find_identifier_position, get_repo_path, ls_has_verified_implementation_support
 from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name, request_all_symbols
 
@@ -348,6 +352,57 @@ class TestCSharpSolutionProjectOpening:
 
             # Should still prefer .sln file even though it's deeper
             assert result == str(solution_file)
+
+    @patch("solidlsp.language_servers.csharp_language_server.CSharpLanguageServer.DependencyProvider._ensure_server_installed")
+    @patch("solidlsp.language_servers.csharp_language_server.CSharpLanguageServer._start_server")
+    def test_csharp_language_server_logs_solution_discovery(self, mock_start_server, mock_ensure_server_installed):
+        """Test that CSharpLanguageServer logs solution/project discovery during initialization."""
+        mock_ensure_server_installed.return_value = ("/usr/bin/dotnet", "/path/to/server.dll")
+
+        # Create test directory with solution file
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            solution_file = temp_path / "TestSolution.sln"
+            solution_file.touch()
+
+            config = LanguageServerConfig(ls_id=LanguageServerId.CSHARP)
+
+            # Create CSharpLanguageServer instance
+            settings = SolidLSPSettings(solidlsp_dir=str(temp_path / "solidlsp"), project_data_path=str(temp_path / "project_data"))
+
+            with SuspendedLoggersContext():
+                logging.getLogger().setLevel(logging.DEBUG)
+                with logging.MemoryLoggerContext() as mem_log:
+                    CSharpLanguageServer(config, str(temp_path), settings)
+
+                    # Verify that logger was called with solution file discovery
+                    expected_log_msg = f"Found solution/project file: {solution_file}"
+                    assert expected_log_msg in mem_log.get_log()
+
+    @patch("solidlsp.language_servers.csharp_language_server.CSharpLanguageServer.DependencyProvider._ensure_server_installed")
+    @patch("solidlsp.language_servers.csharp_language_server.CSharpLanguageServer._start_server")
+    def test_csharp_language_server_logs_no_solution_warning(self, mock_start_server, mock_ensure_server_installed):
+        """Test that CSharpLanguageServer logs warning when no solution/project files are found."""
+        # Mock the server installation
+        mock_ensure_server_installed.return_value = ("/usr/bin/dotnet", "/path/to/server.dll")
+
+        # Create empty test directory
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+
+            config = LanguageServerConfig(ls_id=LanguageServerId.CSHARP)
+
+            settings = SolidLSPSettings(solidlsp_dir=str(temp_path / "solidlsp"), project_data_path=str(temp_path / "project_data"))
+
+            # Create CSharpLanguageServer instance
+            with SuspendedLoggersContext():
+                logging.getLogger().setLevel(logging.DEBUG)
+                with logging.MemoryLoggerContext() as mem_log:
+                    CSharpLanguageServer(config, str(temp_path), settings)
+
+                    # Verify that logger was called with warning about no solution/project files
+                    expected_log_msg = "No .sln/.slnx or .csproj file found, language server will attempt auto-discovery"
+                    assert expected_log_msg in mem_log.get_log()
 
     def test_solution_and_project_opening_with_real_test_repo(self):
         """Test solution and project opening with the actual C# test repository."""

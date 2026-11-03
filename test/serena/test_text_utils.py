@@ -344,6 +344,7 @@ class TestSearchFiles:
             # Directory matching - Using pathspec patterns
             (["main.c", "test/main.c"], "match", "test/*", None, ["test/main.c"], "Include files in test/ subdir"),
             (["data/a.csv", "data/b.log"], "match", "data/*", "*.log", ["data/a.csv"], "Include data/*, exclude *.log"),
+            (["data/a.csv", "data/b.log"], "match", "data/*", "data/*.log", ["data/a.csv"], "Include data/*, exclude data/*.log"),
             (["src/a.py", "tests/b.py"], "match", "src/**", "tests/**", ["src/a.py"], "Include src/**, exclude tests/**"),
             (["src/mod/a.py", "tests/b.py"], "match", "**/*.py", "tests/**", ["src/mod/a.py"], "Include **/*.py, exclude tests/**"),
             (["file.py", "dir/file.py"], "match", "dir/*.py", None, ["dir/file.py"], "Include files directly in dir"),
@@ -677,6 +678,63 @@ class TestGlobMatch:
         from serena.util.text_utils import glob_match
 
         assert glob_match(pattern, path) == expected
+
+    @pytest.mark.parametrize(
+        "pattern, path, expected",
+        [
+            # Basic wildcard patterns
+            ("*.py", "file.py", True),
+            ("*.py", "src/file.py", False),
+            ("*.py", "file.txt", False),
+            ("*agent.py", "agent.py", True),
+            ("*agent.py", "process_isolated_agent.py", True),
+            ("*agent.py", "src/agent.py", False),
+            ("*agent.py", "agent_test.py", False),
+            ("a?b.py", "acb.py", True),
+            ("a?b.py", "a/b.py", False),
+            ("src/*.py", "src/file.py", True),
+            ("src/*.py", "src/sub/file.py", False),
+            # Double asterisk patterns
+            ("**agent.py", "agent.py", True),
+            ("**/agent.py", "agent.py", True),
+            ("**/agent.py", "src/serena/agent.py", True),
+            ("src/**/agent.py", "src/agent.py", True),
+            ("src/**/agent.py", "src/serena/foo/agent.py", True),
+            ("src/s**a/agent.py", "src/serena/agent.py", True),
+            ("src/s**a/agent.py", "src/serena/a/agent.py", True),
+            ("**agent.py", "src/agent.py", True),
+            ("**agent.py", "src/serena/agent.py", True),
+            ("**agent.py", "src/serena/process_isolated_agent.py", True),
+            ("**agent.py", "agent_test.py", False),
+            ("src/**agent.py", "src/agent.py", True),
+            ("src/**agent.py", "src/serena/agent.py", True),
+            ("src/**agent.py", "src/serena/process_isolated_agent.py", True),
+            ("src/**agent.py", "other/agent.py", False),
+            ("src/**agent.py", "src/agent_test.py", False),
+            ("src/**", "src/file.py", True),
+            ("src/**", "src/dir/file.py", True),
+            ("src/**", "other/file.py", False),
+            # Exact matches with double asterisk
+            ("src/**/test.py", "src/test.py", True),
+            ("src/**/test.py", "src/a/b/test.py", True),
+            ("src/**/test.py", "src/test_file.py", False),
+            # Simple patterns without asterisks
+            ("src/file.py", "src/file.py", True),
+            ("src/file.py", "src/other.py", False),
+            # Patterns with backslash
+            ("src\\file.py", "src/file.py", True),
+            ("src\\file.py", "src\\file.py", True),
+            ("src\\file.py", "src/other.py", False),
+            # Patterns with []
+            ("file[0-9].py", "file1.py", True),
+            ("file[0-9].py", "filea.py", False),
+            ("file[!0-9].py", "filea.py", True),
+            ("file[!0-9].py", "file1.py", False),
+        ],
+    )
+    def test_glob_matcher(self, pattern, path, expected):
+        """Test GlobMatcher with various patterns."""
+        assert GlobMatcher(pattern).matches(path) == expected
 
 
 class TestExpandBraces:

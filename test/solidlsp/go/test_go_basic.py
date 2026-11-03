@@ -9,7 +9,7 @@ from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_types import SymbolKind
 from solidlsp.ls_utils import SymbolUtils
-from test.conftest import get_repo_path
+from test.conftest import find_identifier_position, get_repo_path, ls_has_verified_implementation_support
 from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name, read_repo_file, request_all_symbols
 
 
@@ -167,6 +167,33 @@ class TestGoLanguageServer:
         assert "Alert" in ref_names
         assert "Notifier" in ref_names
         assert all(ref["kind"] != SymbolKind.File for ref in ref_symbols), f"File-level fallback attribution in {ref_names}"
+
+    if ls_has_verified_implementation_support(LanguageServerId.GO):
+
+        @pytest.mark.parametrize("language_server", [LanguageServerId.GO], indirect=True)
+        def test_find_implementations(self, language_server: SolidLanguageServer) -> None:
+            repo_path = get_repo_path(LanguageServerId.GO)
+            pos = find_identifier_position(repo_path / "main.go", "FormatGreeting")
+            assert pos is not None, "Could not find Greeter.FormatGreeting in fixture"
+
+            implementations = language_server.request_implementation("main.go", *pos)
+            assert implementations, "Expected at least one implementation of Greeter.FormatGreeting"
+            assert any("main.go" in implementation.get("relativePath", "") for implementation in implementations), (
+                f"Expected ConsoleGreeter.FormatGreeting in implementations, got: {implementations}"
+            )
+
+        @pytest.mark.parametrize("language_server", [LanguageServerId.GO], indirect=True)
+        def test_request_implementing_symbols(self, language_server: SolidLanguageServer) -> None:
+            repo_path = get_repo_path(LanguageServerId.GO)
+            pos = find_identifier_position(repo_path / "main.go", "FormatGreeting")
+            assert pos is not None, "Could not find Greeter.FormatGreeting in fixture"
+
+            implementing_symbols = language_server.request_implementing_symbols("main.go", *pos)
+            assert implementing_symbols, "Expected implementing symbols for Greeter.FormatGreeting"
+            assert any(
+                symbol.get("name") == "FormatGreeting" and "main.go" in symbol["location"].get("relativePath", "")
+                for symbol in implementing_symbols
+            ), f"Expected FormatGreeting symbol, got: {implementing_symbols}"
 
 
 def _filter_symbols_by_name_in_repo(symbols: list | None, target_name: str, repo_name: str = "test_repo") -> list:

@@ -1327,6 +1327,24 @@ class TestSerenaAgent:
         "serena_agent,name_path,relative_path",
         [
             pytest.param(
+                LanguageServerId.PYTHON,
+                "User",
+                os.path.join("test_repo", "models.py"),
+                marks=pytest.mark.python,
+            ),
+            pytest.param(
+                LanguageServerId.JAVA,
+                "Model",
+                os.path.join("src", "main", "java", "test_repo", "Model.java"),
+                marks=pytest.mark.java,
+            ),
+            pytest.param(
+                LanguageServerId.KOTLIN,
+                "Model",
+                os.path.join("src", "main", "kotlin", "test_repo", "Model.kt"),
+                marks=pytest.mark.kotlin,
+            ),
+            pytest.param(
                 LanguageServerId.TYPESCRIPT,
                 "helperFunction",
                 "index.ts",

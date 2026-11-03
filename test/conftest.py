@@ -67,9 +67,15 @@ class LanguageParamRequest:
 _LANGUAGE_REPO_ALIASES: dict[LanguageServerId, LanguageServerId] = {
     LanguageServerId.CPP_CCLS: LanguageServerId.CPP,
     LanguageServerId.PHP_PHPACTOR: LanguageServerId.PHP,
+    LanguageServerId.PHP_PHPANTOM: LanguageServerId.PHP,
+    LanguageServerId.JULIA_FATOU: LanguageServerId.JULIA,
+    LanguageServerId.LUA_EMMYLUA: LanguageServerId.LUA,
     LanguageServerId.PYTHON_JEDI: LanguageServerId.PYTHON,
+    LanguageServerId.PYTHON_BASEDPYRIGHT: LanguageServerId.PYTHON,
     LanguageServerId.RUBY_SOLARGRAPH: LanguageServerId.RUBY,
     LanguageServerId.PYTHON_TY: LanguageServerId.PYTHON,
+    LanguageServerId.PYTHON_PYREFLY: LanguageServerId.PYTHON,
+    LanguageServerId.TYPESCRIPT_TSGO: LanguageServerId.TYPESCRIPT,
 }
 
 
