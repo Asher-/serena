@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import json
-import multiprocessing
 import os
 import subprocess
 import sys
@@ -22,6 +21,7 @@ from sensai.util import logging
 from serena.config.serena_paths import SerenaPaths
 from serena.constants import SERENA_DASHBOARD_DIR, SerenaPorts
 from serena.dashboard.dashboard_viewer import SerenaDashboardViewer, open_url_in_browser
+from solidlsp.util import supervise
 
 log = logging.getLogger(__name__)
 
@@ -216,12 +216,15 @@ class SerenaDashboardTrayManager:
         """Opens the dashboard of the given instance."""
         if self._use_pywebview:
             # spawn pywebview process showing the dashboard
-            process = multiprocessing.Process(
-                target=self._run_viewer,
-                args=(instance.dashboard_url,),
-                daemon=True,
+            # no call waits on it
+            program = "import sys; from serena.dashboard.dashboard_tray_manager import SerenaDashboardTrayManager; SerenaDashboardTrayManager._run_viewer(sys.argv[1])"
+            supervise.Popen(
+                [sys.executable, "-c", program, instance.dashboard_url],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                call_id="",
             )
-            process.start()
         else:
             open_url_in_browser(instance.dashboard_url)
 
@@ -397,7 +400,8 @@ class SerenaDashboardTrayManager:
         else:
             kwargs["start_new_session"] = True
 
-        subprocess.Popen(cmd, **kwargs)
+        # no call waits on it
+        supervise.Popen(cmd, call_id="", **kwargs)
 
         # wait for the manager to become available
         for _ in range(30):

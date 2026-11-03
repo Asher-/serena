@@ -54,7 +54,8 @@ class DefaultInitializeParamsBuilder(InitializeParamsBuilder):
     def _apply_updates(self):
         root_abs_path = self._ls.repository_root_path
 
-        self._set("processId", os.getpid())
+        # the processId key, which send_request nulls, since a language server outlives this instance
+        self._params["processId"] = os.getpid()
         self._set("clientInfo", {"name": "Serena"})
 
         # Some language servers treat rootUri as an additional analysis root on top of

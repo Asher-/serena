@@ -16,7 +16,7 @@ from filelock import FileLock, Timeout
 
 from serena.jetbrains import jetbrains_plugin_client
 from serena.project import Project
-from solidlsp.util import subprocess_util
+from solidlsp.util import subprocess_util, supervise
 
 log = logging.getLogger(__name__)
 
@@ -97,7 +97,7 @@ def launch_and_wait_for_plugin_server(
                 cmd_list = [launch_command, project.project_root]
             cmd = subprocess_util.convert_shell_cmd(cmd_list)
             log.info("Launching IDE with command: %s", cmd)
-            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+            p = supervise.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
             stdout, stderr = p.communicate()
             if p.returncode != 0:
                 log.error("Failed to launch JetBrains IDE: %s", stderr.decode("utf-8"))

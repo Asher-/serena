@@ -2420,7 +2420,7 @@ class SerenaAgent:
         log.info(f"Running activation_command for project '{project.project_name}': {cmd}")
         try:
             with LogTime("Project activation command", logger=log):
-                p = subprocess.Popen(
+                p = supervise.Popen(
                     cmd,
                     shell=True,
                     cwd=project.project_root,
@@ -2437,7 +2437,8 @@ class SerenaAgent:
                         f"Activation_command for project '{project.project_name}' timed out after "
                         f"{timeout}s; terminating process and continuing with backend initialisation."
                     )
-                    terminate_process_tree_with_kill_fallback(p, terminate_timeout=5.0, process_name="activation_command")
+                    terminate_process_tree_with_kill_fallback(p, terminate_timeout=5.0, process_name="activation_command")  # type: ignore[arg-type]
+                    p.release()
         except Exception:
             log.exception(f"Unexpected error running activation_command for project '{project.project_name}'")
 

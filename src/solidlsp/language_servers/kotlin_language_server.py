@@ -27,6 +27,7 @@ IntelliJ system directory:
 import logging
 import os
 import pathlib
+import secrets
 import shutil
 import stat
 import threading
@@ -149,7 +150,8 @@ class KotlinLanguageServer(SolidLanguageServer):
             try:
                 lock.acquire(timeout=0)
             except Timeout:
-                instance_dir = f"{project_cache_dir}-instance-{os.getpid()}"
+                # named by a token rather than this instance's pid, which no launch command may hold, since the server outlives this instance
+                instance_dir = f"{project_cache_dir}-instance-{secrets.token_hex(8)}"
                 os.makedirs(instance_dir, exist_ok=True)
                 self._is_fallback_storage_dir = True
                 log.info(

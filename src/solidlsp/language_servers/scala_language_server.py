@@ -17,6 +17,7 @@ from overrides import override
 from solidlsp.initialize_params import DefaultInitializeParamsBuilder, InitializeParamsBuilder
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
+from solidlsp.ls_process import StdioLanguageServer
 from solidlsp.ls_utils import PlatformUtils
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
@@ -600,16 +601,20 @@ class ScalaLanguageServer(SolidLanguageServer):
 
     def _discover_bloop_descendants(self) -> list[psutil.Process]:
         """
-        Collect the Bloop server processes that are descendants of the current process.
+        Collect the Bloop server processes that are descendants of the Metals process, which a supervisor started and not this
+        process.
 
         The result holds process objects rather than PIDs, as psutil identifies a process by PID and
         creation time and thereby refuses to signal an unrelated process which has reused the PID.
         """
         daemons: list[psutil.Process] = []
+        process = self.server.process if isinstance(self.server, StdioLanguageServer) else None
+        if process is None:
+            return daemons
         try:
             for proc in psutil.process_iter(["pid", "name", "cmdline"]):
                 try:
-                    if self._is_bloop_server(proc) and os.getpid() in {p.pid for p in proc.parents()}:
+                    if self._is_bloop_server(proc) and process.pid in {p.pid for p in proc.parents()}:
                         daemons.append(proc)
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
