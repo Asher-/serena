@@ -1,3 +1,4 @@
+import contextvars
 import json
 import logging
 import os
@@ -13,13 +14,12 @@ import pytest
 import tiktoken
 from _pytest.mark import Mark, MarkDecorator, ParameterSet
 
-from serena.agent import SerenaAgent
+from serena.agent import _SESSION_KEY_VAR, SerenaAgent
 from serena.analytics import RegisteredTokenCountEstimator, ToolUsageStats
 from serena.config.context_mode import SerenaAgentContext
 from serena.config.serena_config import AgentInterface, ProjectConfig, RegisteredProject, SerenaConfig
 from serena.lsp.lsp_diagnostics import DiagnosticsContext
 from serena.project import Project
-from serena.session import SessionRegistry
 from serena.tools import (
     SUCCESS_RESULT,
     ActivateProjectTool,
@@ -822,6 +822,7 @@ def serena_config():
     test_projects = []
     for language in [
         LanguageServerId.PYTHON,
+        LanguageServerId.PYTHON_TY,
         LanguageServerId.GO,
         LanguageServerId.JAVA,
         LanguageServerId.KOTLIN,
@@ -832,10 +833,13 @@ def serena_config():
         LanguageServerId.CLOJURE,
         LanguageServerId.FSHARP,
         LanguageServerId.POWERSHELL,
+        LanguageServerId.CPP,
         LanguageServerId.CPP_CCLS,
         LanguageServerId.HAXE,
         LanguageServerId.LEAN4,
         LanguageServerId.MSL,
+        LanguageServerId.LATEX,
+        LanguageServerId.ASTRO,
     ]:
         repo_path = get_repo_path(language)
         if repo_path.exists():
@@ -1847,20 +1851,15 @@ class TestSerenaAgent:
 
 
 class TestPromptProvision:
-    SESSION_ID_PARAM_NAME = "session"
-
     @classmethod
     def _call_tool(cls, agent: SerenaAgent, tool_class: type[Tool], session_id: str = "global", **kwargs) -> str:
-        old_method = SessionRegistry._next_session_id
-        if tool_class == InitialInstructionsTool:
-            SessionRegistry._next_session_id = lambda x: session_id  # type: ignore
-        else:
-            kwargs[cls.SESSION_ID_PARAM_NAME] = session_id
-        try:
-            result = agent.get_tool(tool_class).apply_ex(catch_exceptions=False, **kwargs)
-        finally:
-            SessionRegistry._next_session_id = old_method
-        return result
+        """:return: the result of the tool call, run under ``session_id``'s key, as a tool call of that session runs"""
+
+        def call() -> str:
+            _SESSION_KEY_VAR.set(session_id)  # type: ignore[arg-type]
+            return agent.get_tool(tool_class).apply_ex(catch_exceptions=False, **kwargs)
+
+        return contextvars.copy_context().run(call)
 
     @staticmethod
     def _assert_activation_message(result: str, project_name: str, present: bool) -> None:

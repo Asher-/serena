@@ -134,7 +134,7 @@ _DASHBOARD_VIEWER_KIND = "serena.dashboard_viewer"
 
 log = logging.getLogger(__name__)
 
-_SINGLE_SLOT_SESSION_ID = "single-slot"
+_SINGLE_SLOT_SESSION_ID = "single_slot"
 """the id of the Serena session of callers outside any session"""
 
 TTool = TypeVar("TTool", bound="Tool")
