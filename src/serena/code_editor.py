@@ -313,13 +313,6 @@ class CodeEditor(Generic[TSymbol], ABC):
         Inserts content after the symbol with the given name in the given file.
         """
         symbol = self._find_unique_symbol(name_path, relative_file_path)
-        # Note: for body to be available, the symbol dto that the symbol instance is built from
-        # must have been retrieved either with body or at least with location.
-        # since _find_unique_symbol passes include_location=True, it works here
-        if symbol.body == symbol.name:
-            raise ValueError(
-                f"Cannot insert after this symbol (not a function, class or method): {symbol}. Consider using insert_before_symbol instead."
-            )
 
         # make sure body always ends with at least one newline
         if not body.endswith("\n"):
@@ -345,6 +338,15 @@ class CodeEditor(Generic[TSymbol], ABC):
             # reports narrower extents (e.g. Python Variable symbols) — prevents insertion inside
             # the RHS of multi-line assignments
             pos = self._get_statement_end_position(symbol, edited_file)
+
+            # Note: for body to be available, the symbol dto that the symbol instance is built from
+            # must have been retrieved either with body or at least with location.
+            # since _find_unique_symbol passes include_location=True, it works here.
+            # A symbol whose body is its bare name has no range to insert after, unless the statement end widens past it
+            if symbol.body == symbol.name and pos == symbol.get_body_end_position_or_raise():
+                raise ValueError(
+                    f"Cannot insert after this symbol (not a function, class or method): {symbol}. Consider using insert_before_symbol instead."
+                )
 
             # start at the beginning of the next line
             col = 0
