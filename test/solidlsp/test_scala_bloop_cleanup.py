@@ -70,7 +70,7 @@ def _stop_scala_ls(terminate_bloop_on_stop: bool, monkeypatch: pytest.MonkeyPatc
     ls = object.__new__(ScalaLanguageServer)
     ls._terminate_bloop_on_stop = terminate_bloop_on_stop
     server = object.__new__(StdioLanguageServer)
-    server._process = SimpleNamespace(pid=os.getpid())  # type: ignore[assignment]
+    server._process = SimpleNamespace(pid=os.getpid())
     ls.server = server
     ls.stop()
 

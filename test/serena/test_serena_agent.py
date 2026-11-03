@@ -1856,7 +1856,7 @@ class TestPromptProvision:
         """:return: the result of the tool call, run under ``session_id``'s key, as a tool call of that session runs"""
 
         def call() -> str:
-            _SESSION_KEY_VAR.set(session_id)  # type: ignore[arg-type]
+            _SESSION_KEY_VAR.set(session_id)
             return agent.get_tool(tool_class).apply_ex(catch_exceptions=False, **kwargs)
 
         return contextvars.copy_context().run(call)
