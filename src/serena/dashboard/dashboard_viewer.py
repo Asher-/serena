@@ -93,6 +93,21 @@ class SerenaDashboardViewer(WebViewWithTray):
             tray_icon_path=tray_icon_path,
         )
 
+    @property
+    def url(self) -> str:
+        """:return: the URL of the dashboard the viewer shows"""
+        return self._url
+
+    @property
+    def start_minimized(self) -> bool:
+        """:return: whether the viewer starts minimized"""
+        return self._start_minimized
+
+    @property
+    def parent_process_id(self) -> int | None:
+        """:return: the process id the viewer watches, ending with it, or None when it watches none"""
+        return self._parent_process_id
+
     @staticmethod
     def is_current_platform_supported() -> bool:
         """
