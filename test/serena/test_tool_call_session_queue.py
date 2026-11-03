@@ -354,9 +354,9 @@ def test_an_mcp_call_of_one_session_is_answered_while_a_task_of_another_session_
     _bind_project(agent, "session-b", tmp_path)
 
     async def scenario() -> tuple[str, bool, str]:
-        held_call = asyncio.create_task(held.run({}, context=_ForwardedMcpContext.for_session("session-a")))  # type: ignore[arg-type]
+        held_call = asyncio.create_task(held.run({}, context=_ForwardedMcpContext.for_session("session-a")))
         await asyncio.to_thread(gate.entered.wait)
-        stat_result = await stat.run({"relative_path": "probe.txt"}, context=_ForwardedMcpContext.for_session("session-b"))  # type: ignore[arg-type]
+        stat_result = await stat.run({"relative_path": "probe.txt"}, context=_ForwardedMcpContext.for_session("session-b"))
         released_before_stat_answered = gate.release.is_set()
         gate.release.set()
         return stat_result, released_before_stat_answered, await held_call
@@ -406,10 +406,10 @@ def test_an_mcp_call_past_its_deadline_returns_the_typed_timeout_and_the_next_ca
 
     async def scenario() -> tuple[str, bool, str, bool]:
         agent.serena_config.tool_timeout = 2.0
-        timed_out = await held.run({}, context=_ForwardedMcpContext.for_session("session-a"))  # type: ignore[arg-type]
+        timed_out = await held.run({}, context=_ForwardedMcpContext.for_session("session-a"))
         held_at_deadline = gate.entered.is_set() and not gate.release.is_set()
         agent.serena_config.tool_timeout = 10.0
-        next_result = await immediate.run({}, context=_ForwardedMcpContext.for_session("session-a"))  # type: ignore[arg-type]
+        next_result = await immediate.run({}, context=_ForwardedMcpContext.for_session("session-a"))
         return timed_out, held_at_deadline, next_result, gate.release.is_set()
 
     timed_out, held_at_deadline, next_result, released_before_next_answered = asyncio.run(scenario())
@@ -493,7 +493,7 @@ def test_an_mcp_call_with_no_derivable_session_is_refused_rather_than_run_on_the
     agent.serena_config.tool_timeout = 10.0
     immediate = _activated(_ImmediateProbeTool(agent), monkeypatch)
 
-    result = immediate.apply_ex(mcp_ctx=_OutsideRequestMcpContext())  # type: ignore[arg-type]
+    result = immediate.apply_ex(mcp_ctx=_OutsideRequestMcpContext())
 
     assert result.startswith(_ZERO_CROSSOVER_REFUSAL), result
 
@@ -505,7 +505,7 @@ def test_an_awaited_mcp_call_with_no_derivable_session_is_refused_rather_than_ru
     agent.serena_config.tool_timeout = 10.0
     immediate = _activated(_ImmediateProbeTool(agent), monkeypatch)
 
-    result = asyncio.run(immediate.apply_ex_async(mcp_ctx=_OutsideRequestMcpContext()))  # type: ignore[arg-type]
+    result = asyncio.run(immediate.apply_ex_async(mcp_ctx=_OutsideRequestMcpContext()))
 
     assert result.startswith(_ZERO_CROSSOVER_REFUSAL), result
 
@@ -542,11 +542,11 @@ def test_a_queued_call_of_an_evicted_session_is_answered_with_the_cancellation(
     session_a = _ForwardedMcpContext.for_session("session-a")
 
     held_results: list[str] = []
-    held_call = threading.Thread(target=lambda: held_results.append(held.apply_ex(mcp_ctx=session_a)))  # type: ignore[arg-type]
+    held_call = threading.Thread(target=lambda: held_results.append(held.apply_ex(mcp_ctx=session_a)))
     held_call.start()
     gate.entered.wait()
     queued_results: list[str] = []
-    queued_call = threading.Thread(target=lambda: queued_results.append(queued.apply_ex(mcp_ctx=session_a)))  # type: ignore[arg-type]
+    queued_call = threading.Thread(target=lambda: queued_results.append(queued.apply_ex(mcp_ctx=session_a)))
     queued_call.start()
     issue_signal.issued.wait()
 
@@ -576,9 +576,9 @@ def test_an_awaited_call_queued_for_an_evicted_session_is_answered_with_the_canc
     issue_signal.install(agent, monkeypatch)
 
     async def scenario() -> tuple[str, bool, str]:
-        held_call = asyncio.create_task(held.apply_ex_async(mcp_ctx=_ForwardedMcpContext.for_session("session-a")))  # type: ignore[arg-type]
+        held_call = asyncio.create_task(held.apply_ex_async(mcp_ctx=_ForwardedMcpContext.for_session("session-a")))
         await asyncio.to_thread(gate.entered.wait)
-        queued_call = asyncio.create_task(queued.apply_ex_async(mcp_ctx=_ForwardedMcpContext.for_session("session-a")))  # type: ignore[arg-type]
+        queued_call = asyncio.create_task(queued.apply_ex_async(mcp_ctx=_ForwardedMcpContext.for_session("session-a")))
         await asyncio.to_thread(issue_signal.issued.wait)
         agent._evict_session_state("session-a")
         queued_result = await queued_call
@@ -606,11 +606,11 @@ def test_an_awaited_call_whose_request_is_cancelled_propagates_the_cancellation_
     immediate = _activated(_ImmediateProbeTool(agent), monkeypatch)
 
     async def scenario() -> tuple[bool, str, bool]:
-        held_call = asyncio.create_task(held.apply_ex_async(mcp_ctx=_ForwardedMcpContext.for_session("session-a")))  # type: ignore[arg-type]
+        held_call = asyncio.create_task(held.apply_ex_async(mcp_ctx=_ForwardedMcpContext.for_session("session-a")))
         await asyncio.to_thread(gate.entered.wait)
         held_call.cancel()
         await asyncio.wait([held_call])
-        next_result = await immediate.apply_ex_async(mcp_ctx=_ForwardedMcpContext.for_session("session-a"))  # type: ignore[arg-type]
+        next_result = await immediate.apply_ex_async(mcp_ctx=_ForwardedMcpContext.for_session("session-a"))
         return held_call.cancelled(), next_result, gate.release.is_set()
 
     request_cancelled, next_result, released_before_next_answered = asyncio.run(scenario())
@@ -628,7 +628,7 @@ def test_an_awaited_call_whose_task_raises_is_answered_with_the_error_state(agen
     agent.serena_config.tool_timeout = 10.0
     failing = _activated(_FailingProbeTool(agent), monkeypatch)
 
-    result = asyncio.run(failing.apply_ex_async(catch_exceptions=False, mcp_ctx=_ForwardedMcpContext.for_session("session-a")))  # type: ignore[arg-type]
+    result = asyncio.run(failing.apply_ex_async(catch_exceptions=False, mcp_ctx=_ForwardedMcpContext.for_session("session-a")))
 
     assert result == "Error: ValueError - boom"
 

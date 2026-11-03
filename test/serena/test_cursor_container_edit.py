@@ -994,7 +994,7 @@ class TestStructuralConfigure:
             relative_path="s.py",
         )
 
-        project = manager._project  # type: ignore[attr-defined]
+        project = manager._project
         tool = _bind_tool(CursorConfigureTool, _ToolHarness(manager, project))
 
         # structural cursors have no LSP edges; edge_types is silently ignored,

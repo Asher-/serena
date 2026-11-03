@@ -47,7 +47,7 @@ def _make_tool(
     )
     # Tool's base constructor only stores ``agent`` on self — SimpleNamespace-style duck typing is
     # enough for apply() because it never touches tool_registry, execute_task, or project state.
-    return GetLanguageServerStatusTool(agent=agent)  # type: ignore[arg-type]
+    return GetLanguageServerStatusTool(agent=agent)
 
 
 def test_get_language_server_status_returns_empty_when_no_manager_state() -> None:

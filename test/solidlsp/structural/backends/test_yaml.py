@@ -561,7 +561,7 @@ class TestContainerReplaceMember:
     def test_replace_rejects_non_tree(self) -> None:
         backend = YamlStructuralLanguage()
         with pytest.raises(TypeError):
-            backend.container_replace_member("not a tree", "a", "1")  # type: ignore[arg-type]
+            backend.container_replace_member("not a tree", "a", "1")
 
     def test_replace_rejects_missing_key(self) -> None:
         backend = YamlStructuralLanguage()

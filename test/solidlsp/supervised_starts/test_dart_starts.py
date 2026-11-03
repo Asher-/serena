@@ -30,7 +30,7 @@ def test_the_dart_server_is_started_with_a_read_only_stdin(monkeypatch: pytest.M
     monkeypatch.setattr(DartLanguageServer, "_setup_runtime_dependencies", lambda *_args: "dart language-server")
     monkeypatch.setattr(SolidLanguageServer, "__init__", record_launch)
 
-    DartLanguageServer(None, "/root", None)  # type: ignore[arg-type]
+    DartLanguageServer(None, "/root", None)
 
     assert [(launch.cmd, launch.read_only_stdin) for launch in launches] == [("dart language-server", True)]
 
@@ -44,7 +44,7 @@ def test_the_dart_launch_reaches_its_supervised_process_as_a_read_only_stdin(mon
 
     monkeypatch.setattr(DartLanguageServer, "_setup_runtime_dependencies", lambda *_args: "dart language-server")
     monkeypatch.setattr(SolidLanguageServer, "__init__", record_launch)
-    DartLanguageServer(None, "/root", None)  # type: ignore[arg-type]
+    DartLanguageServer(None, "/root", None)
 
     # a stand-in for dart, which reports the mode its stdin was opened in and then runs until it is stopped
     mode = tmp_path / "mode"

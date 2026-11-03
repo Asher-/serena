@@ -82,7 +82,7 @@ from serena.util.gui import system_has_usable_display
 from serena.util.inspection import iter_subclasses
 from serena.util.logging import MemoryLogHandler
 from serena.util.session_project_roots import ExplicitProjectRootStore
-from solidlsp.ls_config import LanguageServerId, LanguageServerIdLike
+from solidlsp.ls_config import LanguageServerIdLike
 from solidlsp.ls_survival import LANGUAGE_SERVER_KIND, LanguageServerStates
 from solidlsp.structural.bridge_process import BRIDGE_KIND, BridgeStates
 from solidlsp.util import subprocess_util, supervise
@@ -2610,7 +2610,9 @@ class SerenaAgent:
 
         :param ls_id: the language to remove
         """
-        self.execute_task(lambda: self.get_active_project_or_raise().remove_language_server(ls_id), name=f"RemoveLanguage:{ls_id.get_key()}")
+        self.execute_task(
+            lambda: self.get_active_project_or_raise().remove_language_server(ls_id), name=f"RemoveLanguage:{ls_id.get_key()}"
+        )
 
     def get_tool(self, tool_class: type[TTool]) -> TTool:
         return cast(TTool, self._all_tools[tool_class])
@@ -2696,7 +2698,7 @@ class SerenaAgent:
             return []
         return ls_manager.get_active_language_server_ids()
 
-    def get_unavailable_lsp_languages(self) -> dict[LanguageServerId, Exception]:
+    def get_unavailable_lsp_languages(self) -> dict[LanguageServerIdLike, Exception]:
         """
         :return: a mapping from language to the captured startup exception for each language whose
             server failed to start (or failed a subsequent restart). Empty if no active project, no

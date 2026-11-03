@@ -92,7 +92,7 @@ def test_a_removal_by_one_instance_is_not_undone_by_a_later_save_of_another(home
     bystander = SerenaConfig.from_config_file()
 
     remover.remove_project(remover.projects[0].project_name)
-    bystander.save()
+    bystander._save()
 
     assert _roots_on_file(home) == set()
 
@@ -174,7 +174,7 @@ def test_a_configuration_with_no_file_saves_nothing(monkeypatch: pytest.MonkeyPa
     saved: list[str] = []
     monkeypatch.setattr(serena_config, "save_yaml", lambda path, data: saved.append(path))
 
-    SerenaConfig().save()
+    SerenaConfig()._save()
 
     assert saved == []
 
@@ -202,7 +202,7 @@ def test_a_save_over_a_file_that_lists_no_projects_keeps_what_this_instance_regi
 def test_a_save_drops_a_listed_root_whose_project_is_gone(home: Path, work_dir: Path) -> None:
     gone = work_dir / "gone"
     config = SerenaConfig.from_config_file()
-    config.save()
+    config._save()
     path = home / SerenaConfig.CONFIG_FILE
     data = load_yaml(str(path))
     data["projects"] = [str(gone)]
@@ -219,6 +219,6 @@ def test_a_save_refuses_a_file_it_cannot_read_and_leaves_it_as_it_was(home: Path
     path.write_text("projects: [unterminated\n")
 
     with pytest.raises(Exception, match="(?i)flow sequence|expected"):
-        config.save()
+        config._save()
 
     assert path.read_text() == "projects: [unterminated\n"

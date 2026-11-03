@@ -441,7 +441,6 @@ class TopLevelCommands(AutoRegisteringGroup):
         trace_lsp_communication: bool | None,
         tool_timeout: float | None,
     ) -> None:
-
         from serena.mcp import SerenaMCPFactory, SessionEndRoute, uvicorn_ignore_logging_config_context
 
         # initialize logging, using INFO level initially (will later be adjusted by SerenaAgent according to the config)

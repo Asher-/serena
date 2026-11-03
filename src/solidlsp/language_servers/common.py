@@ -105,11 +105,6 @@ class RuntimeDependencyCollection:
     @staticmethod
     def _run_command(command: str | list[str], cwd: str) -> None:
         kwargs = subprocess_util.subprocess_kwargs()
-        if not PlatformUtils.get_platform_id().is_windows():
-            import pwd
-
-            kwargs["user"] = pwd.getpwuid(os.getuid()).pw_name
-
         command = subprocess_util.convert_shell_cmd(command)
         log.info("Running command %s in '%s'", f"'{command}'" if isinstance(command, str) else command, cwd)
 

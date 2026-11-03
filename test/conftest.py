@@ -79,23 +79,27 @@ def get_repo_path(language: LanguageServerId) -> Path:
 
 
 def _create_ls(
-    language: LanguageServerId,
+    ls_id: LanguageServerId,
     repo_path: str | None = None,
     ignored_paths: list[str] | None = None,
     trace_lsp_communication: bool = False,
     ls_specific_settings: dict[LanguageServerId, dict[str, Any]] | None = None,
+    workspace_folders: list[str] | None = None,
+    additional_workspace_folders: list[str] | None = None,
     solidlsp_dir: Path | None = None,
 ) -> SolidLanguageServer:
     ignored_paths = ignored_paths or []
     if repo_path is None:
-        repo_path = str(get_repo_path(language))
+        repo_path = str(get_repo_path(ls_id))
     gitignore_parser = GitignoreParser(str(repo_path))
     for spec in gitignore_parser.get_ignore_specs():
         ignored_paths.extend(spec.patterns)
     config = LanguageServerConfig(
-        code_language=language,
+        ls_id=ls_id,
         ignored_paths=ignored_paths,
         trace_lsp_communication=trace_lsp_communication,
+        workspace_folders=workspace_folders or ["."],
+        additional_workspace_folders=additional_workspace_folders or [],
     )
     effective_solidlsp_dir = solidlsp_dir if solidlsp_dir is not None else SerenaPaths().serena_user_home_dir
     project_data_path = os.path.join(repo_path, SERENA_MANAGED_DIR_NAME)
@@ -112,29 +116,41 @@ def _create_ls(
 
 @contextmanager
 def start_ls_context(
-    language: LanguageServerId,
+    ls_id: LanguageServerId,
     repo_path: str | None = None,
     ignored_paths: list[str] | None = None,
     trace_lsp_communication: bool = False,
     ls_specific_settings: dict[LanguageServerId, dict[str, Any]] | None = None,
+    workspace_folders: list[str] | None = None,
+    additional_workspace_folders: list[str] | None = None,
     solidlsp_dir: Path | None = None,
 ) -> Iterator[SolidLanguageServer]:
-    ls = _create_ls(language, repo_path, ignored_paths, trace_lsp_communication, ls_specific_settings, solidlsp_dir)
-    log.info(f"Starting language server for {language} {repo_path}")
+    ls = _create_ls(
+        ls_id,
+        repo_path,
+        ignored_paths,
+        trace_lsp_communication,
+        ls_specific_settings,
+        workspace_folders,
+        additional_workspace_folders,
+        solidlsp_dir,
+    )
+    log.info(f"Starting language server for {ls_id} {repo_path}")
     ls.start()
     try:
-        log.info(f"Language server started for {language} {repo_path}")
+        log.info(f"Language server started for {ls_id} {repo_path}")
         yield ls
     finally:
-        log.info(f"Stopping language server for {language} {repo_path}")
+        log.info(f"Stopping language server for {ls_id} {repo_path}")
         try:
             ls.stop(shutdown_timeout=5)
         except Exception as e:
             log.warning(f"Warning: Error stopping language server: {e}")
             # try to force cleanup
-            if hasattr(ls, "server") and hasattr(ls.server, "process"):
+            process = getattr(getattr(ls, "server", None), "process", None)
+            if process is not None:
                 try:
-                    ls.server.process.terminate()
+                    process.terminate()
                 except:
                     pass
 

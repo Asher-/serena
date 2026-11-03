@@ -22,8 +22,8 @@ from mcp.server.mcpserver.context import LifespanContextT, RequestT
 from mcp.server.mcpserver.server import Context
 from mcp.server.mcpserver.server import MCPServer as FastMCP
 from mcp.server.mcpserver.tools.base import Tool as FastMCPTool
+from mcp.types import CallToolRequestParams, ToolAnnotations
 from mcp.types import Tool as WireTool
-from mcp.types import ToolAnnotations
 from sensai.util import logging
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -239,11 +239,12 @@ class _JournaledFastMCP(FastMCP):
         super().__init__(**settings)
         self._call_journal = journal
 
-        # the tools/call handler FastMCP registered, journaling the calls that name a call id
+        # the tools/call handler FastMCP registered, journaling the calls that name a call id; the registry erases each
+        # handler's parameter type, and this one takes CallToolRequestParams
         lowlevel = self._lowlevel_server
         entry = lowlevel.get_request_handler("tools/call")
         assert entry is not None
-        lowlevel.add_request_handler("tools/call", entry.params_type, JournaledCallHandler(entry.handler, journal))
+        lowlevel.add_request_handler("tools/call", CallToolRequestParams, JournaledCallHandler(cast(Any, entry.handler), journal))
 
     def streamable_http_app(self, **kwargs: Any) -> Any:
         path = kwargs.get("streamable_http_path", "/mcp")
@@ -523,7 +524,9 @@ class SerenaMCPFactory:
         # SDK enters server_lifespan per Server.run() (i.e. per SSE connection),
         # so per-session registration would race on the shared tool dict.
         openai_tool_compatible = self.context.name in ["chatgpt", "codex", "oaicompat-agent"]
-        self._set_mcp_tools(mcp, openai_tool_compatible=openai_tool_compatible, structured_output=self.agent.get_context().structured_tool_output)
+        self._set_mcp_tools(
+            mcp, openai_tool_compatible=openai_tool_compatible, structured_output=self.agent.get_context().structured_tool_output
+        )
 
         # Tear down the agent at process exit, not per SSE session: calling
         # agent.on_shutdown() in server_lifespan's finally block killed the

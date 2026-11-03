@@ -106,13 +106,22 @@ def agent(viewer: Path, monkeypatch: pytest.MonkeyPatch) -> SerenaAgent:
     return agent
 
 
+def _manager(agent: SerenaAgent) -> DashboardManager:
+    """
+    :param agent: an agent the ``agent`` fixture built.
+    :return: the dashboard manager the fixture gave it.
+    """
+    assert agent._dashboard_manager is not None
+    return agent._dashboard_manager
+
+
 def _live_viewers(root: Path) -> list[supervise.Record]:
     return [record for record in supervise.records() if record.waiting.kind == "serena.dashboard_viewer" and not record.outcome().ended]
 
 
 def test_the_viewer_is_given_no_pid_of_serenas(agent: SerenaAgent, scratch: Path, root: Path) -> None:
-    agent._dashboard_manager._start_dashboard_viewer(minimized=True)
-    process = agent._dashboard_manager.viewer_process
+    _manager(agent)._start_dashboard_viewer(minimized=True)
+    process = _manager(agent).viewer_process
     assert process is not None
     arguments = scratch / f"arguments.{process.pid}"
     deadline = time.monotonic() + 30
@@ -157,10 +166,11 @@ def test_a_live_viewer_an_ended_instance_started_is_adopted_and_no_second_is_sta
     os.killpg(instance.pid, signal.SIGKILL)
     instance.wait()
 
-    agent._dashboard_manager._start_dashboard_viewer(minimized=True)
+    _manager(agent)._start_dashboard_viewer(minimized=True)
     watchers = SerenaAgent.adopt_processes(agent, CallJournal())
 
-    assert agent._dashboard_manager.viewer_process is not None and agent._dashboard_manager.viewer_process.pid == first
+    process = _manager(agent).viewer_process
+    assert process is not None and process.pid == first
     assert len(_live_viewers(root)) == 1
     assert watchers == []
 
@@ -201,9 +211,9 @@ def test_a_viewer_of_the_url_whose_process_has_ended_is_passed_over(root: Path) 
 def test_nothing_is_started_where_no_display_is_usable(agent: SerenaAgent, root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(serena.agent, "system_has_usable_display", lambda: False)
 
-    agent._dashboard_manager._start_dashboard_viewer(minimized=False)
+    _manager(agent)._start_dashboard_viewer(minimized=False)
 
-    assert agent._dashboard_manager.viewer_process is None
+    assert _manager(agent).viewer_process is None
     assert supervise.records() == []
 
 
@@ -218,14 +228,14 @@ def test_where_the_platform_has_no_viewer_the_dashboard_opens_in_the_browser(
     monkeypatch.setattr(sys, "executable", _PYTHON)
     monkeypatch.setattr(SerenaDashboardViewer, "is_current_platform_supported", staticmethod(lambda: False))
 
-    agent._dashboard_manager._start_dashboard_viewer(minimized=False)
+    _manager(agent)._start_dashboard_viewer(minimized=False)
 
     deadline = time.monotonic() + 30
     while not opened.exists():
         assert time.monotonic() < deadline, "no browser was opened"
         time.sleep(0.01)
     assert opened.read_text() == _URL
-    assert agent._dashboard_manager.viewer_process is None
+    assert _manager(agent).viewer_process is None
 
 
 def test_where_the_platform_has_no_viewer_a_minimized_start_opens_nothing(
@@ -233,7 +243,7 @@ def test_where_the_platform_has_no_viewer_a_minimized_start_opens_nothing(
 ) -> None:
     monkeypatch.setattr(SerenaDashboardViewer, "is_current_platform_supported", staticmethod(lambda: False))
 
-    agent._dashboard_manager._start_dashboard_viewer(minimized=True)
+    _manager(agent)._start_dashboard_viewer(minimized=True)
 
-    assert agent._dashboard_manager.viewer_process is None
+    assert _manager(agent).viewer_process is None
     assert supervise.records() == []

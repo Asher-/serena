@@ -927,7 +927,7 @@ class TestSerenaAgent:
             for s in symbols
         ), f"Expected to find {symbol_name} ({expected_kind}) in {expected_file}"
         # testing retrieval of symbol info
-        if serena_agent.get_active_lsp_languages() == [LanguageServerId.KOTLIN]:
+        if serena_agent.get_active_language_server_ids() == [LanguageServerId.KOTLIN]:
             # kotlin LS doesn't seem to provide hover info right now, at least for the struct we test this on
             return
         for s in symbols:
@@ -937,10 +937,10 @@ class TestSerenaAgent:
             symbol_info = s.get("info")
             assert symbol_info, f"Expected symbol info to be present for symbol: {s}"
             assert symbol_name in s["info"], (
-                f"[{serena_agent.get_active_lsp_languages()[0]}] Expected symbol info to contain symbol name {symbol_name}. Info: {s['info']}"
+                f"[{serena_agent.get_active_language_server_ids()[0]}] Expected symbol info to contain symbol name {symbol_name}. Info: {s['info']}"
             )
             # special additional test for Java, since Eclipse returns hover in a complex format and we want to make sure to get it right
-            if s["kind"] == SymbolKind.Class.name and serena_agent.get_active_lsp_languages() == [LanguageServerId.JAVA]:
+            if s["kind"] == SymbolKind.Class.name and serena_agent.get_active_language_server_ids() == [LanguageServerId.JAVA]:
                 assert "A simple model class" in symbol_info, f"Java class docstring not found in symbol info: {s}"
 
     @pytest.mark.php

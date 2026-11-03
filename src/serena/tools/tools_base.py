@@ -17,6 +17,7 @@ from sensai.util.helper import mark_used
 from sensai.util.string import dict_string
 
 from serena.code_editor import EditedFileContext
+from serena.language_backend import LanguageBackend
 from serena.lsp.lsp_diagnostics import DiagnosticsContext
 from serena.memories.memory_manager import MemoryManager
 from serena.project import Project
@@ -79,7 +80,10 @@ class Component(ABC):
             replacing that file; ``None`` saves unconditionally.
         :return: a code editor for the agent's language backend.
         """
-        return self.agent.get_language_backend().create_code_editor(self.project, write_precondition)
+        backend = self.agent.get_language_backend()
+        if not isinstance(backend, LanguageBackend):
+            raise ValueError(f"No code editor for the unknown language backend {backend!r}")
+        return backend.create_code_editor(self.project, write_precondition)
 
 
 class ToolMarker:

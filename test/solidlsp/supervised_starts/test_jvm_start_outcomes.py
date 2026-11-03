@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from solidlsp.language_servers.scala_language_server import ScalaLanguageServer
-from solidlsp.ls_config import LanguageServerId, LanguageServerConfig
+from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.settings import SolidLSPSettings
 from solidlsp.structural.backends import java as java_backend
 from solidlsp.util import supervise
@@ -54,7 +54,7 @@ def test_metals_setup_fails_with_what_a_failing_coursier_setup_wrote(stand_ins: 
     settings = SolidLSPSettings(solidlsp_dir=str(tmp_path / "solidlsp"))
 
     with pytest.raises(RuntimeError) as caught:
-        ScalaLanguageServer._setup_runtime_dependencies(LanguageServerConfig(code_language=LanguageServerId.SCALA), settings)
+        ScalaLanguageServer._setup_runtime_dependencies(LanguageServerConfig(ls_id=LanguageServerId.SCALA), settings)
     assert "Failed to set up 'cs' command with 'coursier setup'. Stderr: Error: cannot download the cs launcher" in str(caught.value)
     assert_started_through_brain_supervise(coursier)
 

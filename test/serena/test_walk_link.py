@@ -50,7 +50,11 @@ def _project(root: Path) -> Project:
         log_level=logging.ERROR,
         language_backend=BuiltinLanguageBackend.LSP.get_instance(),
     )
-    project_config = ProjectConfig(project_name="walk_link_test", language_servers=[LanguageServerId.PYTHON], language_backend=BuiltinLanguageBackend.LSP.get_instance())
+    project_config = ProjectConfig(
+        project_name="walk_link_test",
+        language_servers=[LanguageServerId.PYTHON],
+        language_backend=BuiltinLanguageBackend.LSP.get_instance(),
+    )
     return Project(project_root=str(root), project_config=project_config, serena_config=serena_config)
 
 
@@ -131,7 +135,7 @@ class TestSearchForPatternNamesTheLink:
 
     @pytest.mark.parametrize("restrict_search_to_code_files", [False, True])
     def test_match_is_returned_once_and_link_is_named(self, linked_tree: Path, restrict_search_to_code_files: bool) -> None:
-        tool = SearchForPatternTool(agent=_AgentStub(_project(linked_tree)))  # type: ignore[arg-type]
+        tool = SearchForPatternTool(agent=_AgentStub(_project(linked_tree)))
 
         result = tool.apply("NEEDLE", restrict_search_to_code_files=restrict_search_to_code_files)
 
@@ -146,7 +150,7 @@ class TestCursorGrepNamesTheLink:
 
     @pytest.mark.parametrize("restrict_to_code_files", [False, True])
     def test_match_is_returned_once_and_link_is_named(self, linked_tree: Path, restrict_to_code_files: bool) -> None:
-        tool = CursorGrepTool(agent=_CursorAgentStub(_project(linked_tree)))  # type: ignore[arg-type]
+        tool = CursorGrepTool(agent=_CursorAgentStub(_project(linked_tree)))
 
         result = tool.apply("NEEDLE", because="test", restrict_to_code_files=restrict_to_code_files)
 
@@ -157,7 +161,7 @@ class TestCursorGrepNamesTheLink:
 
     @pytest.mark.parametrize("restrict_to_code_files", [False, True])
     def test_link_is_named_when_nothing_matches(self, linked_tree: Path, restrict_to_code_files: bool) -> None:
-        tool = CursorGrepTool(agent=_CursorAgentStub(_project(linked_tree)))  # type: ignore[arg-type]
+        tool = CursorGrepTool(agent=_CursorAgentStub(_project(linked_tree)))
 
         result = tool.apply("ABSENT", because="test", restrict_to_code_files=restrict_to_code_files)
 

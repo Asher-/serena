@@ -77,7 +77,7 @@ class Project(ToStringMixin):
         :param replaced_project: the instance of the same root that this instance replaces after a change to the project
             configuration, if any; this instance creates no language server manager until that one has stopped its
             language servers
-                """
+        """
         assert serena_config is not None
         self.project_root = project_root
         self.project_config = project_config
@@ -641,7 +641,10 @@ class Project(ToStringMixin):
             file_collection = FileCollection([FileProxy.from_project_relative_path(self, relative_path)])
         else:
             project_files = self.gather_project_files(
-                relative_path=relative_path, code_files_only=code_files_only, skip_ignored_files=skip_ignored_files, skipped_links=skipped_links
+                relative_path=relative_path,
+                code_files_only=code_files_only,
+                skip_ignored_files=skip_ignored_files,
+                skipped_links=skipped_links,
             )
             file_collection = FileCollection.from_project_files(project_files, self)
 

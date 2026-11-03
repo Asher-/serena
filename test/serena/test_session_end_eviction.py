@@ -88,7 +88,9 @@ def make_go_project(agent: SerenaAgent, work_dir: Path) -> Callable[[str], Proje
         root = work_dir / name
         root.mkdir()
         (root / _GO_FILE).write_text("package main\n\nfunc Hello() {}\n", encoding="utf-8")
-        project_config = ProjectConfig(project_name=name, language_servers=[LanguageServerId.GO], language_backend=BuiltinLanguageBackend.LSP.get_instance())
+        project_config = ProjectConfig(
+            project_name=name, language_servers=[LanguageServerId.GO], language_backend=BuiltinLanguageBackend.LSP.get_instance()
+        )
         project = Project(project_root=str(root), project_config=project_config, serena_config=agent.serena_config)
         manager = MagicMock(spec=LanguageServerManager)
         manager.stopped = threading.Event()

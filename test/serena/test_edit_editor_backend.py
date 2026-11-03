@@ -12,11 +12,12 @@ observed failing.
 import os
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 import serena.tools.cursor_tools as cursor_tools
+from serena.code_editor import LanguageServerCodeEditor
 from serena.cursor import CursorManager
 from serena.jetbrains.jetbrains_plugin_client import JetBrainsPluginClient
 from serena.language_backend import BuiltinLanguageBackend
@@ -163,10 +164,14 @@ def _jetbrains_tool(work_dir: Path, encoding: str = "utf-8") -> CursorReplaceRan
     # the edited file, and a project over it in the given encoding
     (work_dir / EDITED_FILE).write_text(EDITED_SOURCE, encoding="utf-8")
     manager = _make_manager_via_subclass(work_dir)
-    project = manager._project  # type: ignore[attr-defined]
+    project = cast(Any, manager._project)
     project.project_config.encoding = encoding
+    # the project answers for its agent's language backend, as Project.language_backend does
+    project.language_backend = BuiltinLanguageBackend.JETBRAINS.get_instance()
 
-    return _bind_replace_range(_BackendAgent(manager, project, BuiltinLanguageBackend.JETBRAINS.get_instance(), using_language_server=False))
+    return _bind_replace_range(
+        _BackendAgent(manager, project, BuiltinLanguageBackend.JETBRAINS.get_instance(), using_language_server=False)
+    )
 
 
 class TestJetBrainsEditorSave:
@@ -261,7 +266,9 @@ class TestLanguageServerEditorSave:
 
         with project_with_ls_context(LanguageServerId.PYTHON, str(repo_path)) as project:
             # a tool whose agent runs the language server backend, and another writer changing the file after the version check
-            agent = _BackendAgent(CursorManager(project=project), project, BuiltinLanguageBackend.LSP.get_instance(), using_language_server=True)
+            agent = _BackendAgent(
+                CursorManager(project=project), project, BuiltinLanguageBackend.LSP.get_instance(), using_language_server=True
+            )
             tool = _bind_replace_range(agent)
             writer = _ChangeAfterVersionCheck(edited_path)
             writer.install(monkeypatch)
@@ -296,5 +303,5 @@ class TestCodeEditorFactory:
             _BackendAgent(manager, manager._project, BuiltinLanguageBackend.JETBRAINS.get_instance(), using_language_server=False)  # type: ignore[attr-defined]
         )
 
-        with pytest.raises(Exception, match="not in language server mode"):
-            tool.create_ls_code_editor()
+        # the editor is the agent's own backend's, so outside language server mode it is never a language server one
+        assert not isinstance(tool.create_code_editor(), LanguageServerCodeEditor)

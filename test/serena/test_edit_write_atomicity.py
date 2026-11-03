@@ -285,7 +285,7 @@ def _unopened_buffer(path: Path, language_server: _RecordingLanguageServer) -> L
         version=0,
         language_id="python",
         ref_count=1,
-        language_server=language_server,  # type: ignore[arg-type]
+        language_server=language_server,
         open_in_ls=False,
     )
 

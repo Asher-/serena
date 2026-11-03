@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from solidlsp.ls_config import LanguageServerId
-from solidlsp.ls_process import StdioLanguageServer, ProcessLaunchInfo
+from solidlsp.ls_process import ProcessLaunchInfo, StdioLanguageServer
 from solidlsp.util import supervise
 
 pytestmark = pytest.mark.skipif(not os.environ.get(supervise.PROGRAM_ENV), reason="BRAIN_SUPERVISE names no program")

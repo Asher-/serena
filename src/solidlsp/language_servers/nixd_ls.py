@@ -64,6 +64,18 @@ class NixLanguageServer(SolidLanguageServer):
         """Provides the nixd launch command and managed dependency fallback."""
 
         @staticmethod
+        def _get_nixd_version() -> str | None:
+            """Get the installed nixd version or None if not found."""
+            try:
+                result = supervise.run(["nixd", "--version"], capture_output=True, text=True, check=False)
+                if result.returncode == 0:
+                    # nixd outputs version like: nixd 2.0.0
+                    return result.stdout.strip()
+            except FileNotFoundError:
+                return None
+            return None
+
+        @staticmethod
         def _get_nixd_path() -> str | None:
             """Return an existing nixd executable path, if one can be found."""
             nixd_path = shutil.which("nixd")

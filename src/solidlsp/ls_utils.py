@@ -871,7 +871,7 @@ class PlatformUtils:
         Returns the dotnet version for the current system
         """
         try:
-            result = supervise.run(["dotnet", "--list-runtimes"], capture_output=True, check=True)
+            result = supervise.run(["dotnet", "--list-runtimes"], capture_output=True, check=True, text=True)
             available_version_cmd_output = []
             for line in result.stdout.split("\n"):
                 if line.startswith("Microsoft.NETCore.App"):

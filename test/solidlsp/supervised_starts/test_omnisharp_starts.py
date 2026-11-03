@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from solidlsp.language_servers.omnisharp import OmniSharp
-from solidlsp.ls_config import LanguageServerId, LanguageServerConfig
+from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.settings import SolidLSPSettings
 from solidlsp.util import supervise
@@ -40,7 +40,7 @@ def test_omnisharp_is_started_through_brain_supervise_and_handed_no_pid_to_watch
         OmniSharp, "_setup_runtime_dependencies", classmethod(lambda cls, config, settings: (str(omnisharp.path), str(plugin)))
     )
     settings = SolidLSPSettings(solidlsp_dir=str(tmp_path / "solidlsp"), project_data_path=str(tmp_path / "project_data"))
-    language_server = OmniSharp(LanguageServerConfig(code_language=LanguageServerId.CSHARP_OMNISHARP), str(repository), settings)
+    language_server = OmniSharp(LanguageServerConfig(ls_id=LanguageServerId.CSHARP_OMNISHARP), str(repository), settings)
 
     # the language server's process, started as serena starts it, and stopped once it has logged its arguments
     language_server.server.start()
@@ -66,4 +66,4 @@ def test_omnisharp_refuses_a_repository_holding_no_solution(tmp_path: Path, monk
     settings = SolidLSPSettings(solidlsp_dir=str(tmp_path / "solidlsp"), project_data_path=str(tmp_path / "project_data"))
 
     with pytest.raises(SolidLSPException, match="No SLN file found"):
-        OmniSharp(LanguageServerConfig(code_language=LanguageServerId.CSHARP_OMNISHARP), str(repository), settings)
+        OmniSharp(LanguageServerConfig(ls_id=LanguageServerId.CSHARP_OMNISHARP), str(repository), settings)

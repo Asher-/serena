@@ -11,7 +11,7 @@ import pytest
 
 from solidlsp.language_servers.ruby_lsp import RubyLsp
 from solidlsp.language_servers.solargraph import Solargraph
-from solidlsp.ls_config import LanguageServerId, LanguageServerConfig
+from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.settings import SolidLSPSettings
 from solidlsp.util import supervise
 from test.solidlsp.util.supervised_stand_in import StandIns, assert_started_through_brain_supervise
@@ -34,7 +34,7 @@ def test_ruby_lsp_setup_fails_with_what_a_failing_ruby_wrote(stand_ins: StandIns
     settings = SolidLSPSettings(solidlsp_dir=str(tmp_path / "solidlsp"))
 
     with pytest.raises(RuntimeError) as caught:
-        RubyLsp._setup_runtime_dependencies(LanguageServerConfig(code_language=LanguageServerId.RUBY), str(project), settings)
+        RubyLsp._setup_runtime_dependencies(LanguageServerConfig(ls_id=LanguageServerId.RUBY), str(project), settings)
     assert "ruby: cannot load the standard library" in str(caught.value)
     assert_started_through_brain_supervise(ruby)
 
@@ -46,7 +46,7 @@ def test_ruby_lsp_is_launched_from_where_gem_install_put_it(stand_ins: StandIns,
     gem = stand_ins.add("gem", f'if [ "$1" = install ]; then /usr/bin/touch {ruby_lsp}; /bin/chmod +x {ruby_lsp}; fi')
     settings = SolidLSPSettings(solidlsp_dir=str(tmp_path / "solidlsp"))
 
-    command = RubyLsp._setup_runtime_dependencies(LanguageServerConfig(code_language=LanguageServerId.RUBY), str(project), settings)
+    command = RubyLsp._setup_runtime_dependencies(LanguageServerConfig(ls_id=LanguageServerId.RUBY), str(project), settings)
 
     assert command == [str(stand_ins.bin / "ruby-lsp")]
     assert_started_through_brain_supervise(ruby, gem)
@@ -69,7 +69,7 @@ def test_solargraph_is_installed_exactly_where_gem_list_says_it_is_not(
         """,
     )
 
-    command = Solargraph._setup_runtime_dependencies(LanguageServerConfig(code_language=LanguageServerId.RUBY), str(project))
+    command = Solargraph._setup_runtime_dependencies(LanguageServerConfig(ls_id=LanguageServerId.RUBY), str(project))
 
     assert command == "gem exec solargraph"
     assert marker.exists() is installed

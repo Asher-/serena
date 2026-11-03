@@ -15,7 +15,7 @@ import pytest
 
 from solidlsp.language_servers.clojure_lsp import run_command
 from solidlsp.language_servers.scala_language_server import ScalaLanguageServer
-from solidlsp.ls_config import LanguageServerId, LanguageServerConfig
+from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.settings import SolidLSPSettings
 from solidlsp.structural.backends import java as java_backend
 from solidlsp.structural.errors import ParseError
@@ -56,7 +56,7 @@ def test_metals_is_launched_from_where_cs_bootstrapped_it_once_coursier_set_cs_u
     mkdir = stand_ins.add("mkdir", 'exec /bin/mkdir "$@"')
     settings = SolidLSPSettings(solidlsp_dir=str(tmp_path / "solidlsp"))
 
-    command = ScalaLanguageServer._setup_runtime_dependencies(LanguageServerConfig(code_language=LanguageServerId.SCALA), settings)
+    command = ScalaLanguageServer._setup_runtime_dependencies(LanguageServerConfig(ls_id=LanguageServerId.SCALA), settings)
 
     assert Path(command[0]).read_text() == "bootstrapped by cs\n"
     assert_started_through_brain_supervise(coursier, mkdir, cs)

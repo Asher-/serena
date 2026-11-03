@@ -23,7 +23,7 @@ from secrets import token_hex
 import pytest
 
 from solidlsp.ls_config import LanguageServerId
-from solidlsp.ls_process import StdioLanguageServer, ProcessLaunchInfo
+from solidlsp.ls_process import ProcessLaunchInfo, StdioLanguageServer
 from solidlsp.ls_survival import HOLDINGS, LanguageServerStates
 from solidlsp.util import supervise
 from test.conftest import SCRATCH_ROOT

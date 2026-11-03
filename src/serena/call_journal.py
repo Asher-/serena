@@ -255,7 +255,9 @@ class JournaledCallHandler:
     again: the call is answered as ``brain/resume`` answers it.
     """
 
-    def __init__(self, handler: Callable[[ServerRequestContext, CallToolRequestParams], Awaitable[CallToolResult]], journal: CallJournal) -> None:
+    def __init__(
+        self, handler: Callable[[ServerRequestContext, CallToolRequestParams], Awaitable[CallToolResult]], journal: CallJournal
+    ) -> None:
         """
         :param handler: the handler FastMCP registered for ``tools/call``.
         :param journal: the journal.

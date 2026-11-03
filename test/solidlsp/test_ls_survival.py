@@ -17,12 +17,13 @@ import textwrap
 import threading
 import time
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_exceptions import SolidLSPException
-from solidlsp.ls_process import StdioLanguageServer, ProcessLaunchInfo
+from solidlsp.ls_process import ProcessLaunchInfo, StdioLanguageServer
 from solidlsp.ls_survival import LanguageServerStates
 from solidlsp.util import supervise
 from test.conftest import _create_ls, get_repo_path
@@ -225,7 +226,8 @@ def test_a_server_adopted_after_it_went_quiet_starts_without_the_signal_it_gave_
     starting.join(60)
     try:
         assert not starting.is_alive(), "the start of the adopted server still waits on a signal it will not get"
-        assert ls.server.adopted and ls.server.process is not None and ls.server.process.pid == pid
+        server = cast(StdioLanguageServer, ls.server)
+        assert server.adopted and server.process is not None and server.process.pid == pid
     finally:
         for record in supervise.records():
             record.stop()

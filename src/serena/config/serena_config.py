@@ -1372,6 +1372,13 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
             return
 
         with FileLock(self.config_file_path + ".lock", is_singleton=True):
+            # a file another process left listing no projects keeps this instance's registrations rather than refusing the
+            # reload (bug://serena/config/file/write/atomicity)
+            if os.path.exists(self.config_file_path):
+                on_file = load_yaml(self.config_file_path)
+                if "projects" not in on_file:
+                    on_file["projects"] = []
+                    save_yaml(self.config_file_path, on_file)
             persisted = SerenaConfig.from_config_file()
             current_projects_by_path = {str(project.project_root): project for project in self.projects}
             current_paths = set(current_projects_by_path)

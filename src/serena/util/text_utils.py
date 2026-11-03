@@ -200,6 +200,8 @@ def search_text(
 
     # Convert a glob-like pattern to a regular expression
     if is_glob:
+        if not isinstance(pattern, str):
+            raise ValueError(f"A glob is given as text, not as the compiled regular expression {pattern.pattern!r}")
         pattern = glob_to_regex(pattern)
 
     # precompute line start offsets once so that each match's coordinates can be resolved via binary search

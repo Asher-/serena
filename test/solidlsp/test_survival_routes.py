@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 from solidlsp.ls_config import LanguageServerId
-from solidlsp.ls_process import StdioLanguageServer, ProcessLaunchInfo
+from solidlsp.ls_process import ProcessLaunchInfo, StdioLanguageServer
 from solidlsp.ls_survival import Holdings, LanguageServerState, LanguageServerStates
 from solidlsp.structural.bridge_process import BridgeState, BridgeStates, StructuralBridge
 from solidlsp.util import supervise

@@ -145,7 +145,7 @@ def test_gather_failure_leaves_no_reader_waiting(failure: BaseException) -> None
     # a read blocks exactly when this event is unset, so checking it first keeps the test from blocking on the defect
     assert project._ignore_spec_available.is_set(), "a reader of the ignore spec would wait forever"
     with contextlib.suppress(Exception):
-        project._ignore_spec
+        _ = project._ignore_spec
 
 
 class _InitFailure(Exception):

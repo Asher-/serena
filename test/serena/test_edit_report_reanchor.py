@@ -310,7 +310,7 @@ class TestStructuralOnlyToolGuards:
         bytes_before = edited_path.read_bytes()
         manager = _make_manager_via_subclass(work_dir)
         manager.start_cursor(name_path="members", relative_path="doc.json", cursor_id="c1")
-        tool = _bind_tool(CursorRemoveMemberTool, _ToolHarness(manager, manager._project))  # type: ignore[attr-defined]
+        tool = _bind_tool(CursorRemoveMemberTool, _ToolHarness(manager, manager._project))
 
         with pytest.raises(ValueError, match="no parent container"):
             tool.apply(cursor_id="c1", expect_version="*")

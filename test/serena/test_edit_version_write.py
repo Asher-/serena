@@ -106,7 +106,7 @@ def _bind_structural(tool_cls: type, manager: CursorManager) -> Any:
     :return: an instance of ``tool_cls`` bound to ``manager`` and its project.
     """
     tool = tool_cls.__new__(tool_cls)  # type: ignore[call-overload]
-    tool.__dict__["agent"] = _AgentStandIn(manager, manager._project)  # type: ignore[attr-defined]
+    tool.__dict__["agent"] = _AgentStandIn(manager, manager._project)
     return tool
 
 

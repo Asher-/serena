@@ -132,7 +132,7 @@ class LanguageServerManager:
         if len(self._language_servers) == 0:
             unavailable = dict(self._unavailable_languages)
             if unavailable:
-                summary = ", ".join(f"{lang.value}: {exc}" for lang, exc in unavailable.items())
+                summary = ", ".join(f"{lang.get_key()}: {exc}" for lang, exc in unavailable.items())
                 raise LanguageUnavailableError(
                     f"No language server is running. All requested languages failed to start ({summary}).",
                     unavailable_languages=unavailable,

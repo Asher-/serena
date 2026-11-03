@@ -1375,7 +1375,7 @@ class TestCursorTools:
         editing = {
             tool_class.get_name_from_cls()
             for tool_class in ToolRegistry().get_all_tool_classes()
-            if issubclass(tool_class, (ToolMarkerCanEdit, ToolMarkerSymbolicEdit))
+            if issubclass(tool_class, ToolMarkerCanEdit | ToolMarkerSymbolicEdit)
         }
         assert {"cursor_replace_body", "cursor_rename", "cursor_insert_after", "create_text_file"} <= editing
         assert editing - EDIT_CAPABLE_TOOL_NAMES == set()
