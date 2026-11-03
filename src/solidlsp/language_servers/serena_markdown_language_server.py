@@ -60,6 +60,12 @@ class SerenaMarkdownLanguageServer(SolidLanguageServer):
         )
         self.server_ready = threading.Event()
 
+    def _create_base_initialize_params(self) -> dict:
+        """
+        :return: the initialize params of the Serena markdown server, which upstream's initialize builder starts from.
+        """
+        return dict(self._get_initialize_params(self.repository_root_path))
+
     @staticmethod
     def _get_initialize_params(repository_absolute_path: str) -> InitializeParams:
         """
