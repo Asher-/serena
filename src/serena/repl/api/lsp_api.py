@@ -119,11 +119,15 @@ class LspSymbolCollectionRenderer(Renderer[LspSymbolCollection]):
         max_answer_chars: int,
         output_params: SymbolOutputParams,
         grouper: SymbolDictGrouper | None = None,
+        widened_body_by_symbol: dict[LanguageServerSymbol, str] | None = None,
     ):
+        """
+        :param widened_body_by_symbol: the body text of each symbol whose body is widened to its enclosing statement
+        """
         super().__init__(agent, max_answer_chars)
-        self._agent = agent
         self._output_params = output_params
         self._grouper = grouper
+        self._widened_body_by_symbol = widened_body_by_symbol or {}
 
     def symbol_dicts_(
         self, symbols: list[LanguageServerSymbol], info_by_symbol: dict[LanguageServerSymbol, str]
@@ -161,11 +165,8 @@ class LspSymbolCollectionRenderer(Renderer[LspSymbolCollection]):
         # widen the body text to the enclosing statement, so that a consumer does not receive the narrow identifier-only
         # range a language server reports for a variable-like symbol, matching cursor_configure's body formatting
         if p.include_body:
-            from serena.symbol_extent import compute_widened_body_text
-
-            project = self._agent.get_active_project_or_raise()
             for s, s_dict in zip(symbols, symbol_dicts, strict=True):
-                widened = compute_widened_body_text(s, project)
+                widened = self._widened_body_by_symbol.get(s)
                 if widened is not None:
                     s_dict["body"] = widened
         return symbol_dicts
@@ -533,7 +534,23 @@ class LspApi(FacadeApi):
             children_name_path=False,
             include_info=include_info,
         )
-        renderer = LspSymbolCollectionRenderer(self._agent, max_answer_chars, output_params, grouper=self.find_symbol_dict_grouper_)
+        # widened here, where the project's files are, since the collection is rendered wherever it is sent
+        widened_body_by_symbol: dict[LanguageServerSymbol, str] = {}
+        if include_body:
+            from serena.symbol_extent import compute_widened_body_text
+
+            project = self._get_project()
+            for s in symbols:
+                widened = compute_widened_body_text(s, project)
+                if widened is not None:
+                    widened_body_by_symbol[s] = widened
+        renderer = LspSymbolCollectionRenderer(
+            self._agent,
+            max_answer_chars,
+            output_params,
+            grouper=self.find_symbol_dict_grouper_,
+            widened_body_by_symbol=widened_body_by_symbol,
+        )
         symbol_collection = LspSymbolCollection(symbols, renderer, self._request_info(symbol_retriever, symbols, output_params))
 
         # check for max_matches limit exceeded
