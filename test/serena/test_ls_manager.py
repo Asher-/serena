@@ -5,7 +5,7 @@ import time
 import psutil
 import pytest
 
-from serena.ls_manager import LanguageServerManager, LanguageServerManagerInitialisationError
+from serena.ls_manager import LanguageServerManager
 from solidlsp.ls_config import LanguageServerId
 
 
@@ -18,7 +18,7 @@ def _pid_alive(pid: int) -> bool:
 
 
 class _FakeLanguageServer:
-    """Duck-typed stand-in for SolidLanguageServer: `from_languages` only calls
+    """Duck-typed stand-in for SolidLanguageServer: `from_languages` and `stop_all` only call
     `.start()`/`.is_running()`/`.stop()` on it, never isinstance-checks the object.
     """
 
@@ -82,22 +82,26 @@ def _cleanup_leftover_pids():
 def test_from_languages_stops_process_of_server_that_raises_after_spawning(_cleanup_leftover_pids):
     """End-to-end: a language server whose `start()` spawns its OS subprocess and then raises
     (e.g. a capability assertion or an initialize() timeout firing after the process is
-    already up) must not leak that process, and a sibling that started successfully must be
-    stopped too since `from_languages` fails the whole batch. The failing server cleans up its
-    own process (SolidLanguageServer.start()); `from_languages` is responsible only for
-    stopping the siblings that succeeded.
+    already up) must not leak that process. The failing server cleans up its own process
+    (SolidLanguageServer.start()); `from_languages` records its language as unavailable and
+    returns a manager serving the sibling that started successfully, whose process runs
+    until the manager stops it.
     """
     ok_id = LanguageServerId("python")
     failing_id = LanguageServerId("rust")
     factory = _FakeLanguageServerFactory(fail_ids={failing_id})
 
-    with pytest.raises(LanguageServerManagerInitialisationError):
-        LanguageServerManager.from_languages([ok_id, failing_id], factory, project=None)
+    manager = LanguageServerManager.from_languages([ok_id, failing_id], factory, project=None)
 
     time.sleep(0.3)
     pids = {ls_id: ls.proc.pid for ls_id, ls in factory.created.items() if ls.proc is not None}
     _cleanup_leftover_pids.extend(pids.values())
 
     assert set(pids) == {ok_id, failing_id}
-    assert not _pid_alive(pids[ok_id]), "the successfully-started server's process should be stopped"
+    assert not manager.is_language_available(failing_id)
+    assert failing_id in manager.get_unavailable_languages()
     assert not _pid_alive(pids[failing_id]), "the process spawned by the server that raised post-spawn must not leak"
+    assert _pid_alive(pids[ok_id]), "the successfully-started server should keep running under the returned manager"
+
+    manager.stop_all()
+    assert not _pid_alive(pids[ok_id]), "the manager should stop the successfully-started server's process"
