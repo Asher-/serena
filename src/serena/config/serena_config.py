@@ -710,6 +710,22 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
                     save_yaml(project_local_yml_path, local_config_with_comments)
 
 
+def _project_yml_state(project_yml_path: str) -> tuple:
+    """
+    :param project_yml_path: the path of a project.yml
+    :return: the inode, size and modification time of it and of its project.local.yml, None for a file that does not exist
+    """
+    states: list[tuple[int, int, int] | None] = []
+    for path in (project_yml_path, ProjectConfig._project_local_yml_path(project_yml_path)):
+        try:
+            stat = os.stat(path)
+        except OSError:
+            states.append(None)
+        else:
+            states.append((stat.st_ino, stat.st_size, stat.st_mtime_ns))
+    return tuple(states)
+
+
 class RegisteredProject(ToStringMixin):
     def __init__(
         self,
@@ -730,6 +746,9 @@ class RegisteredProject(ToStringMixin):
         # the instance a change to the project configuration dropped (see reload_if_changed), handed to the instance
         # get_project_instance builds in its place
         self._replaced_project_instance: Optional["Project"] = None
+        # the state of project.yml and project.local.yml when this project was registered from an instance, whose
+        # configuration may have been given in memory; None once project.yml has changed since (see reload_if_changed)
+        self._registered_project_yml_state: tuple | None = None
 
     def _tostring_exclude_private(self) -> bool:
         return True
@@ -740,11 +759,14 @@ class RegisteredProject(ToStringMixin):
 
     @classmethod
     def from_project_instance(cls, project_instance: "Project") -> "RegisteredProject":
-        return RegisteredProject(
+        registered_project = RegisteredProject(
             project_root=project_instance.project_root,
             project_config=project_instance.project_config,
             project_instance=project_instance,
         )
+        # the instance's configuration may have been given in memory rather than read from project.yml
+        registered_project._registered_project_yml_state = _project_yml_state(project_instance.path_to_project_yml())
+        return registered_project
 
     @classmethod
     def from_project_root(
@@ -815,6 +837,13 @@ class RegisteredProject(ToStringMixin):
             False if the configuration was unchanged or could not be loaded (e.g., the project.yml file no
             longer exists or is malformed). In the latter case the cached configuration is preserved.
         """
+        registered_state = self._registered_project_yml_state
+        if registered_state is not None:
+            if registered_state == _project_yml_state(serena_config.get_project_yml_location(self.project_root)):
+                # project.yml is unchanged since this project was registered from an instance, whose configuration stays
+                # in effect until project.yml changes
+                return False
+            self._registered_project_yml_state = None
         try:
             new_config = ProjectConfig.load(self.project_root, serena_config=serena_config)
         except Exception as e:
