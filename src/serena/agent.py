@@ -1728,7 +1728,8 @@ class SerenaAgent:
 
         :param mode_names: List of mode names or paths to use
         """
-        mode_overrides = ModeSelectionDefinition(default_modes=mode_names)
+        # the named modes are exactly the active ones: they replace the base modes as well as the default modes
+        mode_overrides = ModeSelectionDefinitionWithBaseModes(base_modes=[], default_modes=mode_names)
         session_key = _SESSION_KEY_VAR.get(None)
         if session_key is not None:
             self._mode_overrides_by_session[session_key] = mode_overrides
