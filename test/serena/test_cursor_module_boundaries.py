@@ -1,4 +1,7 @@
-"""The cursor surface reaches upstream's modules only through the names it imports (task://upstream_merge.15)."""
+"""
+The cursor surface reaches upstream's modules only through the names it imports, and the structural package reaches the
+serena and solidlsp packages only within itself and through the supervised starts (task://upstream_merge.15).
+"""
 
 import ast
 import importlib
@@ -11,10 +14,21 @@ from serena.agent import SerenaAgent
 
 _SRC = Path(__file__).resolve().parents[2] / "src"
 _CURSOR_MODULES = [_SRC / "serena" / "cursor.py", _SRC / "serena" / "tools" / "cursor_tools.py"]
+_STRUCTURAL = _SRC / "solidlsp" / "structural"
+_STRUCTURAL_SUPERVISION_MODULES = {"solidlsp.util.supervise", "solidlsp.ls_survival"}
+
+
+def _is_source_module(name: str) -> bool:
+    """:return: whether the dotted name is a module or package under src"""
+    path = _SRC.joinpath(*name.split("."))
+    return path.with_suffix(".py").is_file() or path.is_dir()
 
 
 def _imported_modules(path: Path) -> set[str]:
-    """:return: every module the file imports, at any depth of its code, relative imports resolved within its package"""
+    """
+    :return: every module the file imports, at any depth of its code, relative imports resolved within its package;
+        ``from A import B`` imports the module A.B where B is a module under src, else the module A
+    """
     package = ".".join(path.relative_to(_SRC).with_suffix("").parts[:-1])
     modules = set()
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
@@ -23,9 +37,12 @@ def _imported_modules(path: Path) -> set[str]:
         elif isinstance(node, ast.ImportFrom):
             if node.level:
                 base = package.split(".")[: len(package.split(".")) - node.level + 1]
-                modules.add(".".join([*base, node.module] if node.module else base))
+                origin = ".".join([*base, node.module] if node.module else base)
             else:
-                modules.add(node.module or "")
+                origin = node.module or ""
+            for alias in node.names:
+                submodule = f"{origin}.{alias.name}"
+                modules.add(submodule if _is_source_module(submodule) else origin)
     return modules
 
 
@@ -40,6 +57,19 @@ def test_both_cursor_modules_import_and_name_their_tools() -> None:
 def test_a_cursor_module_imports_no_configuration_or_dashboard_module(path: Path) -> None:
     reached = sorted(m for m in _imported_modules(path) if m.startswith(("serena.config", "serena.dashboard")))
     assert reached == [], f"{path.name} imports {reached}"
+
+
+@pytest.mark.parametrize("path", sorted(_STRUCTURAL.rglob("*.py")), ids=lambda p: p.relative_to(_STRUCTURAL).as_posix())
+def test_a_structural_module_imports_only_structural_and_supervision_modules(path: Path) -> None:
+    reached = sorted(
+        m
+        for m in _imported_modules(path)
+        if m.split(".")[0] in ("serena", "solidlsp")
+        and m != "solidlsp.structural"
+        and not m.startswith("solidlsp.structural.")
+        and m not in _STRUCTURAL_SUPERVISION_MODULES
+    )
+    assert reached == [], f"{path.relative_to(_SRC)} imports {reached}"
 
 
 _RENAME_SANDBOX = "def sandbox_fn():\n    return 1\n\n\ndef caller():\n    return sandbox_fn()\n"
