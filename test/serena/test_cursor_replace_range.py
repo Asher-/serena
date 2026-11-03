@@ -22,6 +22,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -90,6 +91,8 @@ class _InMemoryCodeEditor(CodeEditor):
         self.encoding = "utf-8"
         self.newline = "\n"
         self._files = files
+        # the project whose language backend tells external paths apart; no in-memory file is one
+        self.project = SimpleNamespace(language_backend=SimpleNamespace(is_external_path=lambda relative_path: False))
 
     @contextmanager
     def _open_file_context(self, relative_path: str) -> Iterator["CodeEditor.EditedFile"]:
