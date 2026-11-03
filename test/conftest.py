@@ -299,6 +299,23 @@ _LANGUAGE_PYTEST_MARKERS: dict[LanguageServerId, list[MarkDecorator | Mark]] = {
         pytest.mark.skipif(_sh.which("rust-analyzer") is None, reason="rust-analyzer is not installed"),
     ],
     LanguageServerId.TYPESCRIPT: [pytest.mark.typescript],
+    LanguageServerId.ADA: [pytest.mark.ada],
+    LanguageServerId.CUE: [pytest.mark.cue],
+    LanguageServerId.DENO: [pytest.mark.deno],
+    LanguageServerId.JULIA_FATOU: [pytest.mark.julia],
+    LanguageServerId.LATEX: [pytest.mark.latex],
+    LanguageServerId.LUA_EMMYLUA: [pytest.mark.lua],
+    LanguageServerId.PHP_PHPANTOM: [pytest.mark.php],
+    LanguageServerId.PYTHON_PYREFLY: [pytest.mark.python],
+    LanguageServerId.PYTHON_BASEDPYRIGHT: [pytest.mark.python],
+    LanguageServerId.TYPESCRIPT_TSGO: [pytest.mark.typescript],
+    LanguageServerId.BSL: [pytest.mark.bsl],
+    LanguageServerId.SVELTE: [pytest.mark.svelte],
+    LanguageServerId.ANGULAR: [pytest.mark.angular],
+    LanguageServerId.HTML: [pytest.mark.html],
+    LanguageServerId.SCSS: [pytest.mark.scss],
+    LanguageServerId.GRAPHQL: [pytest.mark.graphql],
+    LanguageServerId.ASTRO: [pytest.mark.astro],
 }
 
 
