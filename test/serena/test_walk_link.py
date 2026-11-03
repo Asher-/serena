@@ -124,7 +124,7 @@ class TestWalkEntersNoLinkToADirectory:
         assert files == [_SOURCE_FILE]
 
     def test_gather_source_files(self, linked_tree: Path) -> None:
-        files = _project(linked_tree).gather_source_files()
+        files = [project_file.rel_path for project_file in _project(linked_tree).gather_source_files()]
 
         assert files == [_SOURCE_FILE]
         assert not any(_is_beneath_link(path) for path in files)

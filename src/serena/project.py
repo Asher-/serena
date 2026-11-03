@@ -599,7 +599,9 @@ class Project(ToStringMixin):
 
             # collect non-ignored files
             result = []
-            for root, dirs, files in walk_dir_entries(start_path, followlinks=False, is_ignored_dir=is_skipped_dir):
+            # is_skipped_dir refuses every symbolic link to a directory, reporting it, so no link is followed; the walk must
+            # hand it the links, which it drops unasked when not following them
+            for root, dirs, files in walk_dir_entries(start_path, followlinks=True, is_ignored_dir=is_skipped_dir):
                 for file in files:
                     if not follow_links and file.is_symlink():
                         continue
