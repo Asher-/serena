@@ -7,3 +7,7 @@
 # emmylua_ls does not find cross-file references into a file whose on-disk line endings (CRLF) differ from the LF text
 # Serena sends when opening it, which made the Lua tests fail on Windows runners that check out files with CRLF.
 *.lua text eol=lf
+
+# Language-server test repositories are test data, not Serena's product: the merge-audit build-vet of brain skips a Go module
+# carrying this attribute (test/resources/repos/go/test_repo is deliberately uncompilable for the diagnostics tests).
+test/resources/repos/** test-data
