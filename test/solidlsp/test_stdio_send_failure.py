@@ -26,7 +26,7 @@ from solidlsp.ls_process import (
     Request,
     StdioLanguageServer,
 )
-from solidlsp.util.subprocess_util import ManagedSubprocess
+from solidlsp.util import supervise
 
 
 def _server() -> StdioLanguageServer:
@@ -55,15 +55,16 @@ def server_with_live_process() -> Iterator[StdioLanguageServer]:
     closed-stdin case needs an actual pipe rather than a stand-in.
     """
     server = _server()
-    popen = subprocess.Popen(
+    process = supervise.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    server._process = ManagedSubprocess(popen, name="Test ls", start_new_session=False)
+    server._process = process
     yield server
-    server._process.terminate(timeout=2)
+    process.kill()
+    process.wait(timeout=2)
 
 
 def test_broken_pipe_fails_pending_request_with_terminated() -> None:
