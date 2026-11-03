@@ -358,6 +358,10 @@ def _await_closed(pid: int, port: int) -> None:
 def test_resume_answers_a_call_whose_connection_closed_while_it_ran_with_the_tools_real_answer(
     instances: Any, project: Path, tmp_path: Path
 ) -> None:
+    # a project.yml inside the project, so that the project's data folder, and its memories, are inside it
+    (project / ".serena").mkdir(exist_ok=True)
+    (project / ".serena" / "project.yml").write_text("project_name: project\nlanguages:\n  - python\n", encoding="utf-8")
+
     # serena under a home of its own, whose configuration excludes none of the memory tools
     first = instances(home=tmp_path / "home")
     first.activate(project)
