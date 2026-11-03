@@ -6,18 +6,21 @@ The Bloop daemon is represented by a plain Python helper process whose command l
 ``bloop.BloopServer``, so no JVM is required.
 """
 
+import os
 import platform
 import subprocess
 import sys
 import textwrap
 import time
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 
 import pytest
 
 from solidlsp.language_servers.scala_language_server import ScalaLanguageServer, _get_scala_settings
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
+from solidlsp.ls_process import StdioLanguageServer
 from solidlsp.settings import SolidLSPSettings
 
 pytestmark = pytest.mark.skipif(platform.system() == "Windows", reason="POSIX signal semantics are used by the helper processes")
@@ -59,10 +62,16 @@ def _start_idle_process(processes: list[subprocess.Popen], *args: str, code: str
 
 
 def _stop_scala_ls(terminate_bloop_on_stop: bool, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stops a Scala language server whose Metals shutdown is a no-op."""
+    """
+    Stops a Scala language server whose Metals shutdown is a no-op and whose Metals process is this process,
+    so the helper processes stand in for the Bloop daemons Metals starts.
+    """
     monkeypatch.setattr(SolidLanguageServer, "stop", lambda self, **kwargs: None)
     ls = object.__new__(ScalaLanguageServer)
     ls._terminate_bloop_on_stop = terminate_bloop_on_stop
+    server = object.__new__(StdioLanguageServer)
+    server._process = SimpleNamespace(pid=os.getpid())  # type: ignore[assignment]
+    ls.server = server
     ls.stop()
 
 
