@@ -2,7 +2,7 @@
 
 the :class:`GetLanguageServerStatusTool` tests here are the MCP-tool counterpart of
 ``test_dashboard.py::test_language_server_status_reports_active_and_unavailable`` — both
-exercise the same agent accessors (``get_active_lsp_languages`` / ``get_unavailable_lsp_languages``)
+exercise the same agent accessors (``get_active_language_server_ids`` / ``get_unavailable_lsp_languages``)
 through different front-doors (the dashboard HTTP endpoint vs. the MCP tool), so keeping the
 shape assertions parallel guards against the two surfaces drifting apart.
 """
@@ -30,7 +30,7 @@ class _DummyAgent:
         self._active_lsp_languages = list(active_lsp_languages or [])
         self._unavailable_lsp_languages = dict(unavailable_lsp_languages or {})
 
-    def get_active_lsp_languages(self) -> list[LanguageServerId]:
+    def get_active_language_server_ids(self) -> list[LanguageServerId]:
         return list(self._active_lsp_languages)
 
     def get_unavailable_lsp_languages(self) -> dict[LanguageServerId, Exception]:
