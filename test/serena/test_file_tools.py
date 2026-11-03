@@ -49,6 +49,10 @@ class _ProjectStub:
         # the stub project ignores nothing; gitignore policy is exercised at the service level
         return False
 
+    def validate_relative_path(self, relative_path: str) -> None:
+        # the stub project confines nothing; confinement is exercised at the service level
+        pass
+
 
 class _DummyAgent:
     """the smallest agent surface :class:`CreateTextFileTool` needs when invoked via ``apply()``.

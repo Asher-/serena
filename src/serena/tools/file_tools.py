@@ -7,6 +7,7 @@ File and file system-related tools, specifically for
 """
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+import os
 from typing import TYPE_CHECKING, Literal, cast
 
 from serena.tools import EditingToolWithDiagnostics, Tool, ToolMarkerCanEdit, ToolMarkerOptional
@@ -90,6 +91,12 @@ class CreateTextFileTool(Tool, ToolMarkerCanEdit, FsApiMixin):
             compare-and-swap overwrite; empty overwrites unconditionally
         :return: a confirmation, a refusal (already exists), or a typed stale state
         """
+        # a path inside the root lexically may still leave it through a symbolic link, which upstream's create_text_file
+        # refuses (bug://serena/file/lifecycle/root/symlink/escape); a lexical escape keeps the lifecycle's typed refusal
+        root = os.path.normpath(self.get_project_root())
+        destination = os.path.normpath(os.path.join(root, relative_path))
+        if destination == root or destination.startswith(root + os.sep):
+            self.project.validate_relative_path(relative_path)
         # mutate through the lifecycle service (read-root == write-root)
         return self._api().lifecycle().create(relative_path, content, overwrite=overwrite, expect_version=expect_version).render()
 
