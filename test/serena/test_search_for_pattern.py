@@ -26,6 +26,8 @@ def test_search_for_pattern_snippet_stage(tmp_path):
     project = Project.load(str(tmp_path), serena_config=SerenaConfig(gui_log_window=False, web_dashboard=False))
     agent = MagicMock()
     agent.get_active_project_or_raise.return_value = project
+    # a project with no language server: matches are not grouped by enclosing symbol
+    agent.get_language_backend.return_value.is_lsp.return_value = False
     tool = SearchForPatternTool(agent)
 
     def run(cap: int) -> str:
@@ -37,12 +39,10 @@ def test_search_for_pattern_snippet_stage(tmp_path):
             max_answer_chars=cap,
         )
 
-    # wide but overflowing cap: the snippet stage (line + matched text) is returned
-    snippet = run(7000)
-    assert "The answer is too long" in snippet
-    assert '"text":' in snippet and "MATCHME item number 0000" in snippet
-    assert "Match lines per file" not in snippet  # not the bare-line-numbers stage
-
-    # tighter cap: the chain degrades past the snippet stage to bare line numbers
-    bare = run(1000)
-    assert "Match lines per file" in bare and '"text":' not in bare
+    # an overflowing answer degrades to the per-file match summary, within each cap
+    for cap in (7000, 1000):
+        summary = run(cap)
+        assert len(summary) <= cap
+        assert "The answer is too long" in summary
+        assert "Found 60 matches across 0 symbols in 1 files." in summary
+        assert "@ data.txt [data.txt] - 60 matches" in summary
