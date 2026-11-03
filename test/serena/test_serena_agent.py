@@ -1894,7 +1894,7 @@ class TestPromptProvision:
         """
         Tests that when a new project is activated within a session that has a different mode configuration (e.g. no-onboarding),
         the new mode's prompts are provided at project activation but not in subsequent initial instructions calls within the same
-        session, while they are provided in the initial instructions of a new session.
+        session, while a new session that activates the project itself is provided them at its activation.
         """
         project_name1 = "test_repo_python"
         project_name2 = "test_repo_java"
@@ -1924,13 +1924,13 @@ class TestPromptProvision:
             f"Expected new mode message '{expected_new_mode_message}' to not be included in subsequent calls, but it was found in result:\n{result3}"
         )
 
-        # the mode prompt must be included in the initial instructions of a new session
-        result4 = self._call_tool(serena_agent, InitialInstructionsTool, session_id=session2)
+        # the mode prompt must be included in the activation answer of a new session that activates the project itself
+        result4 = self._call_tool(serena_agent, ActivateProjectTool, project=project_name2, session_id=session2)
         assert expected_new_mode_message in result4, (
             f"Expected new mode message '{expected_new_mode_message}' to be included in new session, but it was not found in result:\n{result4}"
         )
 
-        # the initial instructions for the new session must also include the activation message for the project
+        # the activation answer of the new session must also include the activation message for the project
         self._assert_activation_message(result4, project_name2, present=True)
 
     @pytest.mark.parametrize("serena_agent", [LanguageServerId.PYTHON], indirect=True)
@@ -1949,8 +1949,8 @@ class TestPromptProvision:
     def test_initial_instructions_report_project_activation_error_until_project_is_activated(self, serena_config) -> None:
         """
         Tests that a project activation error passed to the agent at startup is reported in the initial instructions
-        of every session for as long as no project is active, and that it is no longer reported once a project
-        has been activated. #1773
+        of every session for as long as that session has activated no project, and that it is no longer reported to
+        a session once that session has activated a project. #1773
         """
         project_name = "test_repo_python"
         activation_error = "No project root found from cwd"
@@ -1968,9 +1968,18 @@ class TestPromptProvision:
             result3 = self._call_tool(agent, ActivateProjectTool, project=project_name, session_id="session1")
             self._assert_activation_message(result3, project_name, present=True)
 
-            # after activation, the error must no longer be reported
-            result4 = self._call_tool(agent, InitialInstructionsTool, session_id="session2")
-            self._assert_activation_message(result4, project_name, present=True)
+            # after its own activation, the error must no longer be reported to session1
+            result4 = self._call_tool(agent, InitialInstructionsTool, session_id="session1")
             assert activation_error not in result4, f"Expected activation error to no longer be reported in result:\n{result4}"
+
+            # session2 has activated no project, so the error must still be reported to it
+            result5 = self._call_tool(agent, InitialInstructionsTool, session_id="session2")
+            assert activation_error in result5, f"Expected activation error to be reported in result:\n{result5}"
+
+            # once session2 has activated a project, the error must no longer be reported to it
+            result6 = self._call_tool(agent, ActivateProjectTool, project=project_name, session_id="session2")
+            self._assert_activation_message(result6, project_name, present=True)
+            result7 = self._call_tool(agent, InitialInstructionsTool, session_id="session2")
+            assert activation_error not in result7, f"Expected activation error to no longer be reported in result:\n{result7}"
         finally:
             agent.on_shutdown(timeout=5)

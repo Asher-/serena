@@ -1947,10 +1947,11 @@ class SerenaAgent:
             tool_names=prompt_params.tool_names_mapping,
         )
 
-        # provide the project activation message if it hasn't yet been provided
+        # provide the project activation message if it hasn't yet been provided; the startup activation error is reported to
+        # every session that has activated no project, since one session's activation does not activate a project for another
         if self._active_project is not None and not self._project_prompt_status.is_project_activation_message_already_provided(session_id):
             system_prompt += "\n\n" + self._format_prompt_tag(self.get_project_activation_message(session_id), tag="active-project")
-        elif self._project_activation_error:
+        elif self._active_project is None and self._project_activation_error:
             system_prompt += f"\n\nNo project is active ({self._project_activation_error})."
 
         # inform about the session id
@@ -2295,8 +2296,6 @@ class SerenaAgent:
             return False
 
         log.info(f"Activating {project.project_name} at {project.project_root}")
-
-        self._project_activation_error = None
 
         # handle the case where the project requires a different language backend than the current one.
         # With the tool interface, the backend cannot change, since the set of exposed tools depends on it and is fixed
