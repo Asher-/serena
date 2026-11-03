@@ -15,7 +15,7 @@ import weakref
 from collections import defaultdict
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from logging import Logger
@@ -24,7 +24,6 @@ from typing import TYPE_CHECKING, Optional, TypeVar, cast
 import requests
 import webview
 from sensai.util import logging
-from sensai.util.helper import mark_used
 from sensai.util.logging import LogTime
 from sensai.util.string import ToStringMixin, dict_string, list_string
 
@@ -399,26 +398,34 @@ class ActiveModes:
 
 class ProjectPromptProvisionStatus:
     """
-    Manages the status of the provision of project-specific prompts
+    Manages the status of the provision of project-specific prompts, per client session: a project activation changes the
+    status of the activating session only, since it activates the project for that session only
     """
 
     @dataclass
     class SessionStatus:
         mode_prompts_provided: bool = False
         project_activation_message_provided: bool = False
+        newly_activated_mode_names: set[str] = field(default_factory=set)
+        """
+        the names of the modes that have been newly activated (by dynamic project activation) in the session and for which
+        prompts must still be provided (either in the system prompt or via the activation message)
+        """
 
-    def __init__(self, newly_activated_mode_names: set[str] | None = None):
-        """
-        :param newly_activated_mode_names: list of mode names that have been newly activated (by dynamic project activation)
-            and for which prompts must still be provided (either in the system prompt or via the activation message)
-        """
-        if newly_activated_mode_names is None:
-            newly_activated_mode_names = set()
-        self._newly_activated_mode_names: set[str] = newly_activated_mode_names
+    def __init__(self) -> None:
         self._session_status_dict: dict[str, ProjectPromptProvisionStatus.SessionStatus] = defaultdict(lambda: self.SessionStatus())
 
     def _get_session_status(self, session_id: str) -> SessionStatus:
         return self._session_status_dict[session_id]
+
+    def on_project_activated(self, session_id: str, newly_activated_mode_names: set[str] | None) -> None:
+        """
+        Resets the status of the given session, whose project has been (re-)activated.
+
+        :param session_id: the client session ID
+        :param newly_activated_mode_names: the names of the modes that the activation newly activated in the session
+        """
+        self._session_status_dict[session_id] = self.SessionStatus(newly_activated_mode_names=set(newly_activated_mode_names or ()))
 
     def is_mode_prompt_already_provided(self, mode_name: str, session_id: str) -> bool:
         """
@@ -427,9 +434,10 @@ class ProjectPromptProvisionStatus:
         :return: whether the mode name was already provided (in a project-specific activation message) and therefore
             should not be included again (in the Serena instructions manual)
         """
-        if not self._get_session_status(session_id).mode_prompts_provided:
+        session_status = self._get_session_status(session_id)
+        if not session_status.mode_prompts_provided:
             return False
-        return mode_name in self._newly_activated_mode_names
+        return mode_name in session_status.newly_activated_mode_names
 
     def get_modes_with_prompts_to_be_provided_for_project_activation(self, session_id: str) -> list[SerenaAgentMode]:
         """
@@ -448,10 +456,9 @@ class ProjectPromptProvisionStatus:
         # Because of this, we cannot use a condition like this:
         #   new_mode_prompts_must_be_provided_for_activation = not self._get_session_status(session_id).mode_prompts_provided
         new_mode_prompts_must_be_provided_for_activation = True
-        mark_used(session_id)
 
         if new_mode_prompts_must_be_provided_for_activation:
-            for mode_name in self._newly_activated_mode_names:
+            for mode_name in self._get_session_status(session_id).newly_activated_mode_names:
                 mode = ActiveModes.get_mode_instance(mode_name)
                 if mode.has_prompt():
                     result.append(mode)
@@ -2355,7 +2362,7 @@ class SerenaAgent:
         else:
             newly_activated_mode_names = None
 
-        self._project_prompt_status = ProjectPromptProvisionStatus(newly_activated_mode_names=newly_activated_mode_names)
+        self._project_prompt_status.on_project_activated(self.get_calling_session_id(), newly_activated_mode_names)
 
         if update_active_tools:
             self._update_active_tools()

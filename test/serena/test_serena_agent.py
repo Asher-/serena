@@ -1934,6 +1934,34 @@ class TestPromptProvision:
         self._assert_activation_message(result4, project_name2, present=True)
 
     @pytest.mark.parametrize("serena_agent", [LanguageServerId.PYTHON], indirect=True)
+    def test_project_activation_leaves_another_sessions_prompt_provision_unchanged(self, serena_agent: SerenaAgent) -> None:
+        """
+        Tests that a project activation in one session changes the prompt provision of that session only: another session
+        is neither provided the prompts of the modes the activation enabled nor provided its own activation message again.
+        """
+        session1 = "session1"
+        session2 = "session2"
+
+        result1 = self._call_tool(serena_agent, InitialInstructionsTool, session_id=session2)
+        self._assert_activation_message(result1, "test_repo_python", present=True)
+
+        # session1 activates a project which dynamically enables a new mode (no-onboarding)
+        reg_project = serena_agent.serena_config.get_registered_project("test_repo_java")
+        assert reg_project is not None
+        reg_project.project_config.default_modes = ["no-onboarding"]
+        expected_new_mode_message = "The onboarding process is not applied."
+        result2 = self._call_tool(serena_agent, ActivateProjectTool, project="test_repo_java", session_id=session1)
+        assert expected_new_mode_message in result2, (
+            f"Expected new mode message '{expected_new_mode_message}' not found in result:\n{result2}"
+        )
+
+        result3 = self._call_tool(serena_agent, InitialInstructionsTool, session_id=session2)
+        assert expected_new_mode_message not in result3, (
+            f"Expected new mode message '{expected_new_mode_message}' of another session's activation to not be included, but it was found in result:\n{result3}"
+        )
+        self._assert_activation_message(result3, "test_repo_python", present=False)
+
+    @pytest.mark.parametrize("serena_agent", [LanguageServerId.PYTHON], indirect=True)
     def test_activate_project_tool_always_returns_activation_message(self, serena_agent: SerenaAgent) -> None:
         project_name = "test_repo_python"
         session = "session1"
