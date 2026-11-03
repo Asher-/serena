@@ -35,10 +35,11 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import httpx2
 import psutil
 import pytest
 from mcp.client.session import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 
 from solidlsp.ls_config import LanguageServerId
 from test.conftest import get_repo_path, language_tests_enabled
@@ -188,10 +189,9 @@ async def _run_overview(url: str, label: str) -> str:
     lifespan teardown ever returns, the second client through this path will
     fail with "No active project" rather than reach the assert.
     """
-    async with streamablehttp_client(url, timeout=60.0, sse_read_timeout=120.0) as (
-        read,
-        write,
-        _get_session_id,
+    async with (
+        httpx2.AsyncClient(timeout=httpx2.Timeout(60.0, read=120.0)) as http_client,
+        streamable_http_client(url, http_client=http_client) as (read, write),
     ):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -206,7 +206,7 @@ async def _run_overview(url: str, label: str) -> str:
                     ),
                 },
             )
-            if result.isError:
+            if result.is_error:
                 raise AssertionError(f"client {label} got tool error: {result.content!r}")
             return f"{label}:ok"
 
@@ -221,10 +221,9 @@ async def _run_overview_then_disconnect_midflight(url: str, label: str) -> str:
     """
     sleep_secs = 0.10  # land the cancellation after initialize, before completion
     try:
-        async with streamablehttp_client(url, timeout=60.0, sse_read_timeout=120.0) as (
-            read,
-            write,
-            _get_session_id,
+        async with (
+            httpx2.AsyncClient(timeout=httpx2.Timeout(60.0, read=120.0)) as http_client,
+            streamable_http_client(url, http_client=http_client) as (read, write),
         ):
             async with ClientSession(read, write) as session:
                 await session.initialize()
