@@ -1385,7 +1385,8 @@ class SerenaAgent:
         Without this, per-session entries accumulate for every session that ever connected, and
         ``id()`` reuse lets a future session land on a dead session's key and inherit its state.
 
-        :param mcp_session: the ``mcp_ctx.session`` object whose lifetime gates eviction.
+        :param mcp_session: the object whose lifetime gates eviction: the client's connection of ``mcp_ctx.session``, or
+            ``mcp_ctx.session`` itself where it has none.
         :param session_key: the per-session dict key (``id(mcp_session)``).
         """
         with self._session_finalizers_lock:
@@ -1647,7 +1648,7 @@ class SerenaAgent:
         self._warned_missing_forwarded_session_keys.add(session_key)
         log.warning(
             "streamable-http session without X-Forwarded-Mcp-Session-Id header; "
-            "falling back to id(mcp_ctx.session)=%s. Multiple Claude Code sessions "
+            "falling back to the id of the MCP client's connection=%s. Multiple Claude Code sessions "
             "sharing a multiplexer will collapse onto this same daemon-side slot. "
             "See plan://Serena:serena/streamable-http-cc-session-id-pass-through-v2.",
             session_key,

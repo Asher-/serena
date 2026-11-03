@@ -35,6 +35,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from mcp.server.connection import Connection
 
 from serena.agent import _PIPE_SESSION_ID_VAR, _SESSION_KEY_VAR, SerenaAgent
 from serena.config.serena_config import SerenaConfig
@@ -322,6 +323,26 @@ class TestLegacyIdFallbackTier:
                 f"expected exactly one missing-header warning across 3 apply_ex calls on the same session; "
                 f"got {len(warning_msgs)}: {warning_msgs!r}"
             )
+        finally:
+            _PIPE_SESSION_ID_VAR.reset(token)
+
+    def test_per_request_sessions_of_one_connection_share_the_connections_key(
+        self, agent: SerenaAgent, tool: _NoOpProbeTool
+    ) -> None:
+        """The mcp 2.2.0 SDK builds a session per request around the client's connection: the calls of one MCP session reach one
+        session key, the connection's, with one finalizer on the connection, and not a key per request.
+        """
+        token = _reset_pipe_var()
+        try:
+            connection = Connection.__new__(Connection)
+            sessions = [_FakeSession(), _FakeSession()]
+            for session in sessions:
+                session._connection = connection  # type: ignore[attr-defined]
+                tool.apply_ex(mcp_ctx=_make_mcp_ctx(forwarded_header=None, session=session), log_call=False)
+
+            assert tool.observed_session_keys == [id(connection), id(connection)]
+            assert id(connection) in agent._session_finalizers
+            assert not any(id(session) in agent._session_finalizers for session in sessions)
         finally:
             _PIPE_SESSION_ID_VAR.reset(token)
 

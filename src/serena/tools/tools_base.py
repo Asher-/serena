@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
 from mcp import Implementation
+from mcp.server.connection import Connection
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.utilities.func_metadata import FuncMetadata, func_metadata
 from sensai.util import logging
@@ -434,11 +435,14 @@ class Tool(Component):
                         session_key = f"{session_key}/agent/{agent_id}"
                 else:
                     # tier 3: legacy direct-stdio / streamable-http without the multiplexer.
-                    # id(mcp_ctx.session) is unique for the lifetime of a Session but unstable
-                    # across streamable-http per-request task churn; emit a one-time warning
-                    # per session for observability so the legacy path stays visible in logs.
-                    session_key = id(mcp_ctx.session)
-                    self.agent._register_session_finalizer(mcp_ctx.session, session_key)
+                    # The SDK builds a ServerSession per request and holds the client's Connection
+                    # for the lifetime of the MCP session, so the key and its eviction follow the
+                    # Connection; emit a one-time warning per session for observability so the
+                    # legacy path stays visible in logs.
+                    mcp_connection = getattr(mcp_ctx.session, "_connection", None)
+                    mcp_client = mcp_connection if isinstance(mcp_connection, Connection) else mcp_ctx.session
+                    session_key = id(mcp_client)
+                    self.agent._register_session_finalizer(mcp_client, session_key)
                     self.agent._warn_missing_forwarded_session_id_once(session_key)
             except Exception as e:
                 log.info(f"Failed to derive MCP session key: {e}.")
