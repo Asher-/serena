@@ -63,6 +63,30 @@ def test_default_launch_command_uses_managed_dependency_resolution(tmp_path: Pat
     managed_resolution.assert_called_once_with()
 
 
+def test_missing_nix_raises_the_required_cli_error(tmp_path: Path) -> None:
+    provider = _make_provider(tmp_path)
+
+    with patch("solidlsp.language_servers.common.shutil.which", return_value=None):
+        with pytest.raises(RuntimeError, match=r"^nix is not installed or not in PATH\.") as exc_info:
+            provider._get_or_install_core_dependency()
+
+    assert "Install options:" in str(exc_info.value)
+
+
+def test_missing_nixd_raises_the_required_cli_error(tmp_path: Path) -> None:
+    provider = _make_provider(tmp_path)
+
+    with (
+        patch("solidlsp.language_servers.common.shutil.which", return_value="/usr/bin/nix"),
+        patch.object(NixLanguageServer.DependencyProvider, "_get_nixd_path", return_value=None),
+        patch.object(NixLanguageServer.DependencyProvider, "_install_nixd_with_nix", return_value=None),
+    ):
+        with pytest.raises(RuntimeError, match=r"^nixd is not installed or not in PATH\.") as exc_info:
+            provider._get_or_install_core_dependency()
+
+    assert "nix profile install github:nix-community/nixd" in str(exc_info.value)
+
+
 def test_default_nixd_settings_use_schema_valid_options_map() -> None:
     settings = NixLanguageServer._load_nixd_settings(SolidLSPSettings.CustomLSSettings({}))
 

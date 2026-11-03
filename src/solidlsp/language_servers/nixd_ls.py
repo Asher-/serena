@@ -152,9 +152,8 @@ class NixLanguageServer(SolidLanguageServer):
 
         def _get_or_install_core_dependency(self) -> str:
             """Return a working nixd path, installing nixd when necessary."""
-            if not shutil.which("nix"):
-                log.error("Nix is not installed. nixd requires Nix to function properly.")
-                raise RuntimeError("Nix is required for nixd. Please install Nix from https://nixos.org/download.html")
+            # preflight: nix itself must be on PATH; nixd relies on it at runtime
+            _NIX_CLI_REQUIREMENT.resolve_or_raise()
 
             nixd_path = self._get_nixd_path()
             if not nixd_path:
@@ -162,14 +161,7 @@ class NixLanguageServer(SolidLanguageServer):
                 nixd_path = self._install_nixd_with_nix()
 
             if not nixd_path:
-                raise RuntimeError(
-                    "nixd (Nix Language Server) is not installed.\n"
-                    "Please install nixd using one of the following methods:\n"
-                    "  - Using Nix flakes: nix profile install github:nix-community/nixd\n"
-                    "  - From nixpkgs: nix-env -iA nixpkgs.nixd\n"
-                    "  - On macOS with Homebrew: brew install nixd\n\n"
-                    "After installation, make sure 'nixd' is in your PATH."
-                )
+                raise _NIXD_CLI_REQUIREMENT.build_missing_error()
 
             try:
                 result = supervise.run([nixd_path, "--version"], capture_output=True, text=True, check=False, timeout=5)
