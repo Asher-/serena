@@ -564,6 +564,21 @@ class TestCursorGrep:
         # at least one cursor id was assigned
         assert re.search(r"\[c\w+\]", result)
 
+    def test_cursor_grep_caret_def_returns_every_top_level_function(
+        self, python_serena_agent: SerenaAgent, throwaway_python_file: str
+    ) -> None:
+        """cursor_grep with ^def matches at the start of every line, so each top-level function of a Python file is found."""
+        from serena.tools.cursor_tools import CursorGrepTool
+
+        grep_tool = python_serena_agent.get_tool(CursorGrepTool)
+        result = grep_tool.apply(
+            because="test fixture: exercising the tool behaviour",
+            substring_pattern=r"^def",
+            relative_path=throwaway_python_file,
+        )
+        assert re.search(r"Found 2 match\(es\)", result), result
+        assert "sandbox_fn" in result and "other_fn" in result, result
+
     def test_cursor_grep_collapses_multiple_hits_to_one_cursor(self, python_serena_agent: SerenaAgent) -> None:
         """Multiple hits inside one method collapse to a single cursor."""
         from serena.tools.cursor_tools import CursorGrepTool

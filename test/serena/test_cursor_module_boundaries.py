@@ -2,9 +2,12 @@
 
 import ast
 import importlib
+import os
 from pathlib import Path
 
 import pytest
+
+from serena.agent import SerenaAgent
 
 _SRC = Path(__file__).resolve().parents[2] / "src"
 _CURSOR_MODULES = [_SRC / "serena" / "cursor.py", _SRC / "serena" / "tools" / "cursor_tools.py"]
@@ -37,3 +40,31 @@ def test_both_cursor_modules_import_and_name_their_tools() -> None:
 def test_a_cursor_module_imports_no_configuration_or_dashboard_module(path: Path) -> None:
     reached = sorted(m for m in _imported_modules(path) if m.startswith(("serena.config", "serena.dashboard")))
     assert reached == [], f"{path.name} imports {reached}"
+
+
+_RENAME_SANDBOX = "def sandbox_fn():\n    return 1\n\n\ndef caller():\n    return sandbox_fn()\n"
+
+
+def test_cursor_rename_lands_on_a_python_file(python_serena_agent: SerenaAgent) -> None:
+    """CursorRenameTool renames a function through the code editor of the agent's backend, its call site included."""
+    from serena.tools.cursor_tools import CursorRenameTool, CursorStartTool
+
+    relative_path = os.path.join("test_repo", "_cursor_rename_sandbox.py")
+    path = Path(python_serena_agent.get_active_project_or_raise().project_root) / relative_path
+    path.write_text(_RENAME_SANDBOX, encoding="utf-8")
+    python_serena_agent.reset_language_server_manager()
+    try:
+        python_serena_agent.get_tool(CursorStartTool).apply(
+            because="test fixture: a cursor on the function to rename",
+            name_path="sandbox_fn",
+            relative_path=relative_path,
+            cursor_id="rename-lands",
+        )
+        python_serena_agent.get_tool(CursorRenameTool).apply(cursor_id="rename-lands", new_name="renamed_fn")
+
+        renamed = path.read_text(encoding="utf-8")
+        assert "def renamed_fn():" in renamed and "return renamed_fn()" in renamed, renamed
+        assert "sandbox_fn" not in renamed, renamed
+    finally:
+        path.unlink(missing_ok=True)
+        python_serena_agent.reset_language_server_manager()
