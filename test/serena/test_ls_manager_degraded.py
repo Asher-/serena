@@ -49,6 +49,7 @@ class _ScriptedLanguageServerFactory(LanguageServerFactory):
 
         mock_server = MagicMock(spec=SolidLanguageServer)
         mock_server.language = language
+        mock_server.ls_id = language
         # the manager's startup thread calls start(), then is_running(); is_running() must be True
         mock_server.is_running.return_value = True
         # stop() is called when the manager tears down

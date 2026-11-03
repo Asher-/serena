@@ -552,8 +552,11 @@ class Tool(Component):
                 # record tool usage
                 self.agent.record_tool_usage(apply_kwargs, result, self)
 
-            except ToolCallError:
-                raise
+            except ToolCallError as e:
+                # a refusal is answered with its Error: text, as main answers it, unless the caller takes exceptions
+                if not catch_exceptions:
+                    raise
+                return str(e)
             except Exception as e:
                 if not catch_exceptions:
                     raise

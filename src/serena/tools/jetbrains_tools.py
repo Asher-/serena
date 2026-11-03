@@ -272,6 +272,9 @@ class JetBrainsGetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOp
         Gets an overview of the top-level symbols defined in the given file (classes, methods, fields) — its
         STRUCTURE, without their bodies. This is the cheap, structure-first way to learn what a file
         contains: it costs far less context than reading the whole file.
+        Before requesting a symbol overview, it is usually a good idea to narrow down the scope of the overview
+        by first understanding the basic directory structure of the repository that you can get from memories
+        or by using the `list_dir` and `find_file` tools (or similar).
 
         :param relative_path: the relative path to the file to get the overview of
         :param depth: depth up to which descendants shall be retrieved.

@@ -187,7 +187,7 @@ def test_a_record_of_another_kind_another_url_or_a_live_instance_is_passed_over(
     process = supervise.Popen(["/bin/sleep", "300"], call_id="", waiting=waiting, keep=True)
 
     assert [record.path for record in supervise.records()] == [process.record]
-    assert SerenaAgent._adopt_dashboard_viewer(_URL) is None
+    assert DashboardManager._adopt_dashboard_viewer(_URL) is None
 
 
 def test_a_viewer_of_the_url_whose_process_has_ended_is_passed_over(root: Path) -> None:
@@ -195,13 +195,13 @@ def test_a_viewer_of_the_url_whose_process_has_ended_is_passed_over(root: Path) 
     process.wait()
 
     assert [record.outcome().ended for record in supervise.records()] == [True]
-    assert SerenaAgent._adopt_dashboard_viewer(_URL) is None
+    assert DashboardManager._adopt_dashboard_viewer(_URL) is None
 
 
 def test_nothing_is_started_where_no_display_is_usable(agent: SerenaAgent, root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(serena.agent, "system_has_usable_display", lambda: False)
 
-    agent._start_dashboard_viewer(minimized=False)
+    agent._dashboard_manager._start_dashboard_viewer(minimized=False)
 
     assert agent._dashboard_viewer_process is None
     assert supervise.records() == []
@@ -218,7 +218,7 @@ def test_where_the_platform_has_no_viewer_the_dashboard_opens_in_the_browser(
     monkeypatch.setattr(sys, "executable", _PYTHON)
     monkeypatch.setattr(SerenaDashboardViewer, "is_current_platform_supported", staticmethod(lambda: False))
 
-    agent._start_dashboard_viewer(minimized=False)
+    agent._dashboard_manager._start_dashboard_viewer(minimized=False)
 
     deadline = time.monotonic() + 30
     while not opened.exists():

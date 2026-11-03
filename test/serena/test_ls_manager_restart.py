@@ -44,6 +44,7 @@ class _GatedLanguageServerFactory(LanguageServerFactory):
     def create_language_server(self, language: LanguageServerId) -> SolidLanguageServer:  # type: ignore[override]
         server = MagicMock(spec=SolidLanguageServer)
         server.language = language
+        server.ls_id = language
         server.is_running.return_value = True
         server.start.side_effect = self._start
         self.created.append(server)

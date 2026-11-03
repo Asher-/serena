@@ -195,12 +195,12 @@ class LanguageServerManager:
             if thread.exception is not None:
                 unavailable[thread.ls_id] = thread.exception
                 # if a server was partially created before start() failed, stop it so we don't leak the process
-                if thread.ls_id_server is not None:
+                if thread.language_server is not None:
                     try:
-                        thread.ls_id_server.stop()
+                        thread.language_server.stop()
                     except Exception as cleanup_error:
                         log.debug(
-                            f"Ignoring cleanup error while stopping partially-started {thread.ls_id.value} server: {cleanup_error}"
+                            f"Ignoring cleanup error while stopping partially-started {thread.ls_id.get_key()} server: {cleanup_error}"
                         )
             elif thread.language_server is not None:
                 language_servers[thread.ls_id] = thread.language_server
