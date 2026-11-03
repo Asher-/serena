@@ -13,8 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from serena.config.serena_config import LanguageBackend, ProjectConfig, SerenaConfig
+from serena.config.serena_config import ProjectConfig, SerenaConfig
 from serena.cursor import CursorManager
+from serena.language_backend import BuiltinLanguageBackend
 from serena.project import Project
 from serena.tools.cursor_tools import CursorGrepTool
 from serena.tools.file_tools import SearchForPatternTool
@@ -47,9 +48,9 @@ def _project(root: Path) -> Project:
         gui_log_window=False,
         web_dashboard=False,
         log_level=logging.ERROR,
-        language_backend=LanguageBackend.LSP,
+        language_backend=BuiltinLanguageBackend.LSP.get_instance(),
     )
-    project_config = ProjectConfig(project_name="walk_link_test", languages=[LanguageServerId.PYTHON], language_backend=LanguageBackend.LSP)
+    project_config = ProjectConfig(project_name="walk_link_test", language_servers=[LanguageServerId.PYTHON], language_backend=BuiltinLanguageBackend.LSP.get_instance())
     return Project(project_root=str(root), project_config=project_config, serena_config=serena_config)
 
 

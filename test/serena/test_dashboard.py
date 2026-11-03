@@ -1,6 +1,13 @@
+from collections.abc import Callable
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
-from serena.dashboard import SerenaDashboardAPI
+import pytest
+
+from serena.config.context_mode import SerenaAgentContext
+from serena.config.serena_config import AgentInterface
+from serena.dashboard.dashboard_api import SerenaDashboardAPI
+from serena.language_backend import BuiltinLanguageBackend
 from solidlsp.ls_config import LanguageServerId
 
 
@@ -23,6 +30,9 @@ class _DummyAgent:
         self._active_lsp_languages = active_lsp_languages or []
         self._unavailable_lsp_languages = unavailable_lsp_languages or {}
 
+    def register_config_changed_callback(self, callback: Callable[[], None]) -> None:
+        pass
+
     def execute_task(self, func, *, logged: bool | None = None, name: str | None = None):
         del logged, name
         return func()
@@ -30,7 +40,7 @@ class _DummyAgent:
     def get_active_project(self):
         return self._project
 
-    def get_active_lsp_languages(self) -> list[LanguageServerId]:
+    def get_active_language_server_ids(self) -> list[LanguageServerId]:
         return list(self._active_lsp_languages)
 
     def get_unavailable_lsp_languages(self) -> dict[LanguageServerId, Exception]:
@@ -44,7 +54,7 @@ def _make_dashboard(
 ) -> SerenaDashboardAPI:
     project = None
     if project_languages is not None:
-        project = SimpleNamespace(project_config=SimpleNamespace(languages=project_languages))
+        project = SimpleNamespace(project_config=SimpleNamespace(language_servers=project_languages))
     agent = _DummyAgent(
         project,
         active_lsp_languages=active_lsp_languages,
@@ -101,3 +111,38 @@ def test_language_server_status_sorts_active_languages():
     )
     response = dashboard._get_language_server_status()
     assert response.active == sorted([LanguageServerId.TYPESCRIPT.value, LanguageServerId.MARKDOWN.value, LanguageServerId.PYTHON.value])
+
+
+@pytest.mark.parametrize("open_on_launch", [True, False, None])
+@pytest.mark.parametrize("trusted", [True, False, None])
+def test_config_overview_reports_project_trust(monkeypatch: pytest.MonkeyPatch, trusted: bool | None, open_on_launch: bool | None) -> None:
+    # isolate background network work and provide the configuration used by the overview
+    monkeypatch.setattr(SerenaDashboardAPI, "_fetch_news", lambda self: None)
+    monkeypatch.setattr(SerenaDashboardAPI, "_determine_newer_serena_version", lambda self: None)
+    agent = MagicMock()
+    agent.version = "2.0.0"
+    agent.get_context.return_value = SerenaAgentContext.load_default()
+    agent.get_active_modes.return_value.get_modes.return_value = []
+    agent.get_active_tool_names.return_value = []
+    agent.serena_config.projects = []
+    agent.serena_config.web_dashboard_open_on_launch = open_on_launch
+    agent._all_tools = {}
+    agent.is_tool_function_available.return_value = False
+    agent.get_agent_interface.return_value = AgentInterface.TOOLS
+    agent.get_language_backend.return_value = BuiltinLanguageBackend.LSP.get_instance()
+    project = None
+    if trusted is not None:
+        project = MagicMock()
+        project.project_name = "example"
+        project.project_root = "/example"
+        project.project_config.language_servers = []
+        project.project_config.encoding = "utf-8"
+        project.is_trusted.return_value = trusted
+    agent.get_active_project.return_value = project
+    dashboard = SerenaDashboardAPI(memory_log_handler=_DummyMemoryLogHandler(), tool_names=[], agent=agent)
+
+    # expose a boolean for active projects and no trust status without a project
+    response = dashboard._compute_config_overview().model_dump()
+    assert response["web_dashboard_open_on_launch"] is open_on_launch
+    assert response["active_project"]["is_trusted"] is trusted
+    assert response["active_project"]["name"] == ("example" if project is not None else None)

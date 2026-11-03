@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 from solidlsp.ls_config import LanguageServerId
-from solidlsp.ls_process import LanguageServerProcess, ProcessLaunchInfo
+from solidlsp.ls_process import StdioLanguageServer, ProcessLaunchInfo
 from solidlsp.ls_survival import Holdings, LanguageServerState, LanguageServerStates
 from solidlsp.structural.bridge_process import BridgeState, BridgeStates, StructuralBridge
 from solidlsp.util import supervise
@@ -203,7 +203,7 @@ def test_a_client_keeps_the_documents_a_server_holds_as_it_opens_changes_and_clo
     server.write_text(SERVER)
     journal = tmp_path / "journal"
     command = [sys.executable, str(server), str(journal)]
-    client = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), LanguageServerId.PYTHON, lambda _: logging.INFO)
+    client = StdioLanguageServer(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), LanguageServerId.PYTHON, lambda _: logging.INFO)
     client._mark_consumed(10)
     client.start()
     client.send_request("initialize", {})
@@ -285,7 +285,7 @@ def test_an_adopted_server_that_ends_before_its_fifo_is_read_is_reported_as_ende
     states = LanguageServerStates(command, str(tmp_path))
     states.save(LanguageServerState(record=str(server.record), instance_pid=1, instance_start="1.000000", initialize_result={}))
 
-    client = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), LanguageServerId.PYTHON, lambda _: logging.INFO)
+    client = StdioLanguageServer(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), LanguageServerId.PYTHON, lambda _: logging.INFO)
     raised: list[BaseException] = []
 
     def start() -> None:

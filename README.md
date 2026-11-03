@@ -180,18 +180,6 @@ Exclusive to the JetBrains plugin, Serena supports a highly general debugging to
 which allows an agent to set breakpoints, inspect variables, evaluate expressions and control execution flow 
 via a persistent REPL-style interface.
 
-### Basic Features
-
-Beyond its semantic capabilities, Serena includes a set of basic utilities for completeness.
-When Serena is used inside an agentic harness such as Claude Code or Codex, these tools are typically disabled by default,
-since the surrounding harness already provides overlapping file, search, and shell capabilities.
-
-- **`search_for_pattern`** – flexible regex search across the codebase 
-- **`replace_content`** – agent-optimised regex-based and literal text replacement
-- **`list_dir` / `find_file`** – directory listing and file search
-- **`read_file`** – read files or file chunks
-- **`execute_shell_command`** – run shell commands (e.g. builds, tests, linters)
-
 ### Memory Management
 
 A memory system is elemental to long-lived agent workflows, especially when knowledge is to be shared across

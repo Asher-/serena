@@ -100,7 +100,7 @@ def _project_at(root: Path, serena_config: SerenaConfig) -> Project:
         project_root=str(root.resolve()),
         project_config=ProjectConfig(
             project_name=root.name,
-            languages=[LanguageServerId.PYTHON],
+            language_servers=[LanguageServerId.PYTHON],
             ignored_paths=[],
             excluded_tools=[],
             read_only=False,

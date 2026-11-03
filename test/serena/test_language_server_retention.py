@@ -19,7 +19,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from serena.agent import _SESSION_KEY_VAR, SerenaAgent
-from serena.config.serena_config import LanguageBackend, ProjectConfig, SerenaConfig
+from serena.config.serena_config import ProjectConfig, SerenaConfig
+from serena.language_backend import BuiltinLanguageBackend
 from serena.ls_manager import LanguageServerManager
 from serena.project import Project
 from solidlsp.ls_config import LanguageServerId
@@ -50,7 +51,7 @@ def _held_project(agent: SerenaAgent, root: Path) -> _HeldProject:
         language server
     """
     root.mkdir()
-    project_config = ProjectConfig(project_name=root.name, languages=[LanguageServerId.PYTHON], language_backend=LanguageBackend.LSP)
+    project_config = ProjectConfig(project_name=root.name, language_servers=[LanguageServerId.PYTHON], language_backend=BuiltinLanguageBackend.LSP.get_instance())
     project = Project(project_root=str(root), project_config=project_config, serena_config=agent.serena_config)
     manager = MagicMock(spec=LanguageServerManager)
     manager.stopped = threading.Event()

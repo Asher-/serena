@@ -72,7 +72,7 @@ def _project(root: Path, name: str, read_only: bool = False, excluded_tools: lis
     root.mkdir(parents=True, exist_ok=True)
     config = ProjectConfig(
         project_name=name,
-        languages=[],
+        language_servers=[],
         ignored_paths=[],
         excluded_tools=excluded_tools or [],
         read_only=read_only,
@@ -185,10 +185,10 @@ class TestToolsDeriveFromOwnSessionProject:
         configured = sorted(mode.name for mode in agent._config_active_modes.get_modes())
         sessions.run("cc-session-1", lambda: agent.set_modes(["no-memories"]))
 
-        assert sessions.run("cc-session-1", lambda: sorted(mode.name for mode in agent.get_active_modes())) != configured, (
+        assert sessions.run("cc-session-1", lambda: sorted(mode.name for mode in agent.get_active_modes().get_modes())) != configured, (
             "session 1's set_modes left its own modes unchanged"
         )
-        assert sessions.run("cc-session-2", lambda: sorted(mode.name for mode in agent.get_active_modes())) == configured, (
+        assert sessions.run("cc-session-2", lambda: sorted(mode.name for mode in agent.get_active_modes().get_modes())) == configured, (
             "a session holding no project was answered with another session's modes"
         )
 
@@ -241,7 +241,7 @@ class TestActiveToolsOutsideTheExposedSet:
         assert unexposed not in agent._exposed_tools.tool_names, f"{unexposed} is exposed, so including it leaves no active tool unexposed"
         root = tmp_path / "including"
         root.mkdir()
-        config = ProjectConfig(project_name="including", languages=[], included_optional_tools=[unexposed])
+        config = ProjectConfig(project_name="including", language_servers=[], included_optional_tools=[unexposed])
         project = Project(project_root=str(root), project_config=config, serena_config=agent.serena_config)
         sessions = _Sessions(agent)
 

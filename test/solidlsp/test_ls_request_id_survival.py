@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from solidlsp.ls_config import LanguageServerId
-from solidlsp.ls_process import LanguageServerProcess, ProcessLaunchInfo
+from solidlsp.ls_process import StdioLanguageServer, ProcessLaunchInfo
 from solidlsp.util import supervise
 
 pytestmark = pytest.mark.skipif(not os.environ.get(supervise.PROGRAM_ENV), reason="BRAIN_SUPERVISE names no program")
@@ -58,8 +58,8 @@ FIRST_INSTANCE = textwrap.dedent(
     """
     import json, logging, sys, threading, time
     from solidlsp.ls_config import LanguageServerId
-    from solidlsp.ls_process import LanguageServerProcess, ProcessLaunchInfo
-    process = LanguageServerProcess(ProcessLaunchInfo(cmd=json.loads(sys.argv[1]), cwd=sys.argv[2]), LanguageServerId.PYTHON, lambda _: logging.INFO)
+    from solidlsp.ls_process import StdioLanguageServer, ProcessLaunchInfo
+    process = StdioLanguageServer(ProcessLaunchInfo(cmd=json.loads(sys.argv[1]), cwd=sys.argv[2]), LanguageServerId.PYTHON, lambda _: logging.INFO)
     process.start()
     process.send_request("initialize", {"processId": None})
     threading.Thread(target=process.send_request, args=("workspace/held", {}), daemon=True).start()
@@ -93,7 +93,7 @@ def test_the_next_instance_never_receives_the_answer_to_a_request_in_flight_at_t
     instance.wait()
 
     # the next instance's request is answered with its own answer, not the held one
-    process = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), LanguageServerId.PYTHON, lambda _: logging.INFO)
+    process = StdioLanguageServer(ProcessLaunchInfo(cmd=command, cwd=str(tmp_path)), LanguageServerId.PYTHON, lambda _: logging.INFO)
     process.start()
     assert process.send_request("workspace/symbol", {"query": ""}) == "workspace/symbol"
     process.stop()

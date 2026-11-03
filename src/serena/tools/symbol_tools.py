@@ -196,7 +196,7 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptiona
         )
 
 
-class FindImplementationsTool(Tool, ToolMarkerSymbolicRead, LspApiMixin):
+class FindImplementationsTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional, LspApiMixin):
     """
     Finds the implementations of a symbol
     """
@@ -237,7 +237,7 @@ class FindImplementationsTool(Tool, ToolMarkerSymbolicRead, LspApiMixin):
         )
 
 
-class FindDeclarationTool(Tool, ToolMarkerSymbolicRead, LspApiMixin):
+class FindDeclarationTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional, LspApiMixin):
     """
     Finds the declaration/definition of a symbol
     """
@@ -278,7 +278,7 @@ class FindDeclarationTool(Tool, ToolMarkerSymbolicRead, LspApiMixin):
         )
 
 
-class GetDiagnosticsForFileTool(Tool, ToolMarkerSymbolicRead, LspApiMixin):
+class GetDiagnosticsForFileTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional, LspApiMixin):
     """
     Gets diagnostics for a file, grouped by symbol.
     """

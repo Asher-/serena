@@ -38,7 +38,7 @@ def markdown_serena_agent() -> Iterator[SerenaAgent]:
         project_root=str(repo_path),
         project_config=ProjectConfig(
             project_name="test_repo_markdown",
-            languages=[LanguageServerId.MARKDOWN],
+            language_servers=[LanguageServerId.MARKDOWN],
             ignored_paths=[],
             excluded_tools=[],
             read_only=False,

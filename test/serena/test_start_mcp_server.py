@@ -101,7 +101,7 @@ def daemon(work_dir: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Daemon]
     pipe_listener.start = AsyncMock()
     pipe_listener.stop = AsyncMock()
     with (
-        patch("serena.cli.SerenaMCPFactory") as factory_cls,
+        patch("serena.mcp.SerenaMCPFactory") as factory_cls,
         patch("serena.util.watchdog.start_wedge_watchdog"),
         patch("serena.pipe.run_pipe_client") as run_pipe_client,
         patch("serena.mcp.build_pipe_listener", return_value=pipe_listener) as build_pipe_listener,
@@ -169,7 +169,7 @@ class TestFaultHandler:
 
         assert result.exit_code == 0, repr(result.exception)
         register.assert_called_once()
-        daemon.server.run.assert_called_once_with(transport="streamable-http")
+        daemon.server.run.assert_called_once_with(transport="streamable-http", host="127.0.0.1", port=8000)
 
 
 class TestProjectFromCwd:
@@ -222,7 +222,7 @@ class TestDaemonServer:
         handler = daemon.server.custom_route.return_value.call_args.args[0]
         assert isinstance(handler.__self__, SessionEndRoute)
         assert handler.__self__._agent is daemon.factory_cls.return_value.agent
-        daemon.server.run.assert_called_once_with(transport="streamable-http")
+        daemon.server.run.assert_called_once_with(transport="streamable-http", host="127.0.0.1", port=8000)
         daemon.build_pipe_listener.assert_not_called()
 
     def test_a_positional_project_argument_is_activated_with_a_deprecation_warning(
@@ -254,7 +254,8 @@ class TestPipeListener:
         assert result.exit_code == 0, repr(result.exception)
         daemon.build_pipe_listener.assert_called_once_with(daemon.factory_cls.return_value.agent, openai_tool_compatible=False)
         daemon.pipe_listener.start.assert_awaited_once_with(socket_path)
-        getattr(daemon.server, serve).assert_awaited_once_with()
+        listener_address = {} if transport == "stdio" else {"host": "127.0.0.1", "port": 8000}
+        getattr(daemon.server, serve).assert_awaited_once_with(**listener_address)
         daemon.pipe_listener.stop.assert_awaited_once_with()
         daemon.server.run.assert_not_called()
 
@@ -274,8 +275,10 @@ class TestPipeListener:
                 project_file_arg=None,
                 project_from_cwd=False,
                 context="agent",
-                modes=(),
+                default_modes=(),
+                added_modes=(),
                 language_backend=None,
+                agent_interface=None,
                 transport="websocket",
                 daemon_url=f"unix://{work_dir / 'serena-daemon.sock'}",
                 pipe_socket_path=socket_path,

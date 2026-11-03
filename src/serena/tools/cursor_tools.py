@@ -1538,7 +1538,7 @@ class CursorRenameTool(Tool, ToolMarkerSymbolicEdit):
         relative_path = state.current_location.relative_path
         if relative_path is None:
             raise ValueError(f"Cursor {cursor_id} has no relative path; cannot perform edit.")
-        code_editor = self.create_ls_code_editor()
+        code_editor = self.create_code_editor()
         status_message = code_editor.rename_symbol(old_name_path, relative_path=relative_path, new_name=new_name)
 
         # Re-anchor: the old name path's last segment is replaced by new_name

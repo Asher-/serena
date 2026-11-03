@@ -23,7 +23,7 @@ from secrets import token_hex
 import pytest
 
 from solidlsp.ls_config import LanguageServerId
-from solidlsp.ls_process import LanguageServerProcess, ProcessLaunchInfo
+from solidlsp.ls_process import StdioLanguageServer, ProcessLaunchInfo
 from solidlsp.ls_survival import HOLDINGS, LanguageServerStates
 from solidlsp.util import supervise
 from test.conftest import SCRATCH_ROOT
@@ -69,11 +69,11 @@ FIRST_INSTANCE = textwrap.dedent(
     """
     import json, logging, sys, threading, time
     from solidlsp.ls_config import LanguageServerId
-    from solidlsp.ls_process import LanguageServerProcess, ProcessLaunchInfo
+    from solidlsp.ls_process import StdioLanguageServer, ProcessLaunchInfo
     command, directory, servers, big = json.loads(sys.argv[1]), sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
     started = []
     for _ in range(servers):
-        process = LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=directory), LanguageServerId.PYTHON, lambda _: logging.INFO)
+        process = StdioLanguageServer(ProcessLaunchInfo(cmd=command, cwd=directory), LanguageServerId.PYTHON, lambda _: logging.INFO)
         process.start()
         started.append(process)
         if "silent" in command:
@@ -137,8 +137,8 @@ def _first_instance(
     return pids
 
 
-def _client(command: list[str], scratch: Path) -> LanguageServerProcess:
-    return LanguageServerProcess(ProcessLaunchInfo(cmd=command, cwd=str(scratch)), LanguageServerId.PYTHON, lambda _: logging.INFO)
+def _client(command: list[str], scratch: Path) -> StdioLanguageServer:
+    return StdioLanguageServer(ProcessLaunchInfo(cmd=command, cwd=str(scratch)), LanguageServerId.PYTHON, lambda _: logging.INFO)
 
 
 def _state_files(root: Path) -> list[Path]:

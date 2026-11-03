@@ -1,7 +1,10 @@
 import logging
+import logging as std_logging
 import os
 import platform
+import re
 import shutil as _sh
+import subprocess
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -12,15 +15,18 @@ import pytest
 from _pytest.mark import Mark, MarkDecorator
 from sensai.util.logging import configure
 
+from serena.agent import SerenaAgent
 from serena.config.serena_config import SerenaConfig, SerenaPaths
 from serena.constants import SERENA_MANAGED_DIR_NAME
 from serena.project import Project
 from serena.util.file_system import GitignoreParser
 from solidlsp.ls import SolidLanguageServer
-from solidlsp.ls_config import LanguageServerId, LanguageServerConfig
+from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.settings import SolidLSPSettings
 
 from .solidlsp.clojure import is_clojure_cli_available
+from .solidlsp.elixir import EXPERT_UNAVAILABLE
+from .solidlsp.erlang import ERLANG_UNAVAILABLE
 
 configure(level=logging.INFO)
 
@@ -69,7 +75,7 @@ _LANGUAGE_REPO_ALIASES: dict[LanguageServerId, LanguageServerId] = {
 
 def get_repo_path(language: LanguageServerId) -> Path:
     repo_language = _LANGUAGE_REPO_ALIASES.get(language, language)
-    return Path(__file__).parent / "resources" / "repos" / repo_language / "test_repo"
+    return Path(__file__).parent / "resources" / "repos" / repo_language.get_key() / "test_repo"
 
 
 def _create_ls(
@@ -288,7 +294,10 @@ _LANGUAGE_PYTEST_MARKERS: dict[LanguageServerId, list[MarkDecorator | Mark]] = {
     LanguageServerId.PYTHON: [pytest.mark.python],
     LanguageServerId.PYTHON_JEDI: [pytest.mark.python],
     LanguageServerId.PYTHON_TY: [pytest.mark.python],
-    LanguageServerId.RUST: [pytest.mark.rust, pytest.mark.skipif(_sh.which("rust-analyzer") is None, reason="rust-analyzer is not installed")],
+    LanguageServerId.RUST: [
+        pytest.mark.rust,
+        pytest.mark.skipif(_sh.which("rust-analyzer") is None, reason="rust-analyzer is not installed"),
+    ],
     LanguageServerId.TYPESCRIPT: [pytest.mark.typescript],
 }
 
@@ -373,3 +382,316 @@ def language_tests_enabled(language: LanguageServerId) -> bool:
     :return: True if tests for the language are enabled, False otherwise
     """
     return language not in _disabled_languages
+
+
+PYTEST_LOG_LEVEL = logging.DEBUG
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    if os.getenv("PYCHARM_HOSTED") == "1":
+        config.option.patch_pycharm_diff = True
+
+
+@pytest.fixture(autouse=True)
+def _restore_root_logging() -> Iterator[None]:
+    """
+    Restore the root logger's handlers around every test.
+
+    Serena's CLI configures process-wide logging: `serena.cli` calls `logging.configure` (which
+    drops the handlers already installed, pytest's own capture handlers included) and attaches its
+    own stderr and file handlers to the root logger. Tests that invoke those commands in-process
+    through click's runner leave that state behind, and the leaked stderr handler is bound to the
+    capture stream pytest closes once the test ends. Every later record in the session then fails
+    inside the stale handler with `ValueError: I/O operation on closed file.`: the records are lost,
+    and the logging machinery prints a `--- Logging error ---` block whenever stderr happens to be
+    live, which is why CI output carried tracebacks that no test was responsible for.
+    """
+    root = std_logging.getLogger()
+    saved_handlers = list(root.handlers)
+    saved_level = root.level
+    yield
+    for handler in list(root.handlers):
+        if handler not in saved_handlers:
+            root.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:
+                pass
+    for handler in saved_handlers:
+        if handler not in root.handlers:
+            root.addHandler(handler)
+    root.setLevel(saved_level)
+
+
+PYTHON_LANGUAGE_BACKENDS = [LanguageServerId.PYTHON, LanguageServerId.PYTHON_TY, LanguageServerId.PYTHON_BASEDPYRIGHT]
+
+
+TYPESCRIPT_LANGUAGE_BACKENDS = [LanguageServerId.TYPESCRIPT, LanguageServerId.TYPESCRIPT_TSGO]
+
+
+@contextmanager
+def agent_for_project_context(ls_id: LanguageServerId, repo_root_override: str | None = None) -> Iterator[SerenaAgent]:
+    project_root = str(get_repo_path(ls_id)) if repo_root_override is None else repo_root_override
+    agent = SerenaAgent(project=project_root, serena_config=create_default_serena_config())
+
+    # wait for agent to be ready
+    agent.execute_task(lambda: None)
+
+    try:
+        yield agent
+    finally:
+        agent.on_shutdown()
+
+
+is_macos = platform.system() == "Darwin"
+
+
+is_linux = platform.system() == "Linux"
+
+
+def _is_perl_language_server_available() -> bool:
+    """
+    Whether Perl::LanguageServer is installed.
+
+    Perl itself ships with most base systems, so checking for the ``perl`` binary is not enough;
+    we verify that the ``Perl::LanguageServer`` module can be loaded -- which is exactly what the
+    Perl language server launcher requires to start.
+    """
+    if _sh.which("perl") is None:
+        return False
+    try:
+        return subprocess.run(["perl", "-MPerl::LanguageServer", "-e", "1"], capture_output=True, timeout=30, check=False).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _is_matlab_available() -> bool:
+    """Whether a MATLAB installation can be located (env var or a known install path)."""
+    if os.environ.get("MATLAB_PATH") is not None:
+        return True
+    return any(
+        os.path.exists(p)
+        for p in (
+            "/Applications/MATLAB_R2024b.app",
+            "/Applications/MATLAB_R2025b.app",
+            "/Volumes/S1/Applications/MATLAB_R2024b.app",
+            "/Volumes/S1/Applications/MATLAB_R2025b.app",
+        )
+    )
+
+
+def _is_r_language_server_available() -> bool:
+    """Whether R *and* its ``languageserver`` package are installed.
+
+    The R binary alone is not enough -- the language server runs as ``R -e "languageserver::run()"``,
+    which fails (RuntimeError) if the package is missing -- so check the package, not just ``which("R")``.
+    """
+    if _sh.which("R") is None:
+        return False
+    try:
+        return (
+            subprocess.run(
+                ["R", "--vanilla", "-e", 'quit(status = as.integer(!requireNamespace("languageserver", quietly = TRUE)))'],
+                capture_output=True,
+                timeout=60,
+                check=False,
+            ).returncode
+            == 0
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _is_ocaml_lsp_available() -> bool:
+    """Whether opam *and* the ``ocaml-lsp-server`` (``ocamllsp``) are installed.
+
+    opam alone is not enough -- the language server is launched via ``opam exec -- ocamllsp`` and
+    raises if the package is missing -- so verify ocamllsp resolves in the active switch.
+    """
+    if _sh.which("opam") is None:
+        return False
+    try:
+        return (
+            subprocess.run(
+                ["opam", "exec", "--", "ocamllsp", "--version"],
+                capture_output=True,
+                timeout=60,
+                check=False,
+            ).returncode
+            == 0
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _determine_disabled_language_servers() -> list[LanguageServerId]:
+    """
+    Determine which language server tests are disabled in the current environment.
+
+    Every language falls into exactly ONE of the categories below; a language that is not appended
+    here is **category 4 (enabled everywhere)**, e.g. python, typescript, go, java, kotlin-locally.
+
+    1. ALWAYS DISABLED -- flaky/broken; not worth running anywhere.
+    2. DISABLED OFF-CI when a precondition (toolchain/LS) is missing, but EXPECTED ON CI -- guarded
+       with ``and not is_ci`` so a missing tool *on CI* fails loudly (catches a CI setup regression)
+       instead of silently skipping.
+    3. DISABLED WHEREVER the precondition is missing, INCLUDING on CI -- the precondition may or may
+       not be provided on CI (e.g. via the maximal container, see Dockerfile.maximal); if it isn't,
+       the tests just skip gracefully rather than fail.
+    4. ENABLED EVERYWHERE -- not listed in this function at all.
+    5. DISABLED ONLY ON CI (resource/stability reasons) even though the precondition holds locally.
+    """
+    result: list[LanguageServerId] = []
+
+    # === 1. Always disabled (flaky / broken everywhere) ===
+    result.append(LanguageServerId.BSL)  # 1C:Enterprise; niche and the tests are slow and flaky
+    result.append(LanguageServerId.FSHARP)  # F# language server is currently unreliable
+
+    # === 2. Disabled off-CI if the precondition is missing; expected to be present on CI ===
+    if _sh.which("terraform") is None and not is_ci:
+        result.append(LanguageServerId.TERRAFORM)
+    if _sh.which("regal") is None and not is_ci:
+        result.append(LanguageServerId.REGO)
+    if _sh.which("elm") is None and not is_ci:
+        result.append(LanguageServerId.ELM)
+    # qmlls is installed (standalone build; see pytest.yml) only on the Ubuntu other-langs CI batch. It is
+    # expected there, so a missing binary on Linux CI is NOT skipped here -- the test runs and fails loudly,
+    # catching a CI setup regression. On Windows/macOS CI (never installed) and off-CI without the binary it skips.
+    if (_sh.which("qmlls6") is None and _sh.which("qmlls") is None) and not (is_ci and is_linux):
+        result.append(LanguageServerId.QML)
+    # gleam is installed (see pytest.yml) on the Ubuntu other-langs CI batch. Same rationale as
+    # qmlls: a missing binary on Linux CI is NOT skipped (fails loudly on a CI setup regression);
+    # Windows/macOS CI and off-CI without the binary skip.
+    if _sh.which("gleam") is None and not (is_ci and is_linux):
+        result.append(LanguageServerId.GLEAM)
+
+    # === 3. Disabled wherever the precondition is missing (including on CI) ===
+    # 3a. Platform precondition: these language servers have no native Windows support.
+    if is_windows:
+        result.append(LanguageServerId.ANSIBLE)  # ansible-language-server has no native Windows support
+    if not is_macos:
+        result.append(LanguageServerId.SWIFT)  # swiftly toolchain is only set up on the macOS native batch
+    # 3b. Toolchain / language-server availability (the LS/compiler must be on PATH or installed).
+    if _sh.which("clangd") is None:
+        result.append(LanguageServerId.CPP)
+    if _sh.which("ccls") is None or is_windows:  # no recent ccls binary is available for Windows
+        result.append(LanguageServerId.CPP_CCLS)
+    if _sh.which("php") is None:
+        result.append(LanguageServerId.PHP_PHPACTOR)
+        result.append(LanguageServerId.PHP_PHPANTOM)
+    if not is_clojure_cli_available():
+        result.append(LanguageServerId.CLOJURE)
+    if _sh.which("verible-verilog-ls") is None:
+        result.append(LanguageServerId.SYSTEMVERILOG)
+    if not _is_matlab_available():
+        result.append(LanguageServerId.MATLAB)
+    if ERLANG_UNAVAILABLE:  # no Erlang/OTP / no rebar3 / unsupported platform -- see test/solidlsp/erlang
+        result.append(LanguageServerId.ERLANG)
+    if EXPERT_UNAVAILABLE:  # Elixir not installed -- see test/solidlsp/elixir
+        result.append(LanguageServerId.ELIXIR)
+    if _sh.which("lean") is None:
+        result.append(LanguageServerId.LEAN4)
+    if _sh.which("crystalline") is None:
+        result.append(LanguageServerId.CRYSTAL)
+    if _sh.which("julia") is None:  # LanguageServer.jl is auto-installed by the LS when julia is present
+        result.append(LanguageServerId.JULIA)
+    if _sh.which("nixd") is None:
+        result.append(LanguageServerId.NIX)
+    if _sh.which("haskell-language-server-wrapper") is None:
+        result.append(LanguageServerId.HASKELL)
+    if not _is_r_language_server_available():  # `which("R")` isn't enough -- needs the languageserver package
+        result.append(LanguageServerId.R)
+    if not _is_ocaml_lsp_available():  # opam alone isn't enough -- needs the ocaml-lsp-server package
+        result.append(LanguageServerId.OCAML)
+    if not _is_perl_language_server_available():  # perl ships with the OS; the LS module is the real signal
+        result.append(LanguageServerId.PERL)
+    if _sh.which("deno") is None:  # deno bundles the language server (`deno lsp`); skip where the CLI is absent
+        result.append(LanguageServerId.DENO)
+
+    # === 4. Enabled everywhere: every language NOT listed in this function (python, go, java, ...) ===
+
+    # === 5. Disabled only on CI (works locally; too unstable/costly on the CI runners) ===
+    if is_ci:
+        result.append(LanguageServerId.KOTLIN)  # IntelliJ-based Kotlin LSP crashes on JVM restart under CI memory limits
+
+    # Disable Wolfram tests if WolframKernel is not available (checked with the same
+    # discovery logic used by the language server itself)
+    from solidlsp.language_servers.wolfram_language_server import _find_wolfram_kernel
+
+    try:
+        _find_wolfram_kernel()
+    except FileNotFoundError:
+        result.append(LanguageServerId.WOLFRAM)
+
+    return result
+
+
+_disabled_language_servers = _determine_disabled_language_servers()
+
+
+def language_server_tests_enabled(ls_id: LanguageServerId) -> bool:
+    """
+    Check if tests for the given language server are enabled in the current environment.
+
+    :param ls_id: the language server to check
+    :return: True if tests for the language are enabled, False otherwise
+    """
+    return ls_id not in _disabled_language_servers
+
+
+def ls_supports_implementation(language: LanguageServerId) -> bool:
+    return language.supports_implementation_request()
+
+
+def language_servers_supporting_implementation(*languages: LanguageServerId) -> list[LanguageServerId]:
+    return [language for language in languages if ls_supports_implementation(language)]
+
+
+_VERIFIED_IMPLEMENTATION_LANGUAGES = {
+    LanguageServerId.ANGULAR,
+    LanguageServerId.CSHARP,
+    LanguageServerId.GO,
+    LanguageServerId.JAVA,
+    LanguageServerId.RUST,
+    LanguageServerId.TYPESCRIPT,
+}
+
+
+def ls_has_verified_implementation_support(language: LanguageServerId) -> bool:
+    """
+    True only for languages where the server advertises implementation support and
+    the repo fixtures contain a verified working go-to-implementation scenario.
+    """
+    return language in _VERIFIED_IMPLEMENTATION_LANGUAGES and ls_supports_implementation(language)
+
+
+def find_identifier_position(file_path: Path, identifier: str) -> tuple[int, int] | None:
+    pattern = re.compile(r"\b" + re.escape(identifier) + r"\b")
+    with file_path.open(encoding="utf-8") as f:
+        for line_idx, line in enumerate(f):
+            match = pattern.search(line)
+            if match:
+                return line_idx, match.start()
+    return None
+
+
+def find_identifier_pos(
+    file_path: Path,
+    identifier: str,
+    occurrence_index: int = 0,
+    column_offset: int = 0,
+) -> tuple[int, int] | None:
+    if occurrence_index < 0:
+        raise ValueError("occurrence_index must be non-negative")
+    if column_offset < 0:
+        raise ValueError("column_offset must be non-negative")
+
+    pattern = re.compile(r"\b" + re.escape(identifier) + r"\b")
+    current_index = 0
+    with file_path.open(encoding="utf-8") as f:
+        for line_idx, line in enumerate(f):
+            for match in pattern.finditer(line):
+                if current_index == occurrence_index:
+                    return line_idx, match.start() + column_offset
+                current_index += 1
+    return None

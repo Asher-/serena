@@ -2,7 +2,6 @@
 
 import subprocess
 import sys
-import threading
 from pathlib import Path
 
 from sensai.util import logging
@@ -10,6 +9,7 @@ from sensai.util import logging
 from serena.config.serena_paths import SerenaPaths
 from serena.constants import SERENA_DASHBOARD_DIR
 from serena.util.pywebview import WebViewWithTray
+from solidlsp.util import supervise
 
 log = logging.getLogger(__name__)
 
@@ -26,14 +26,15 @@ def open_url_in_browser(url: str, use_subprocess: bool = False) -> None:
     if use_subprocess:
         # Use a subprocess to avoid any output from webbrowser.open being written to stdout
         try:
-            p = subprocess.Popen(
+            # no call waits on it
+            supervise.Popen(
                 [sys.executable, "-c", f"import webbrowser; webbrowser.open({url!r})"],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=False,
+                call_id="",
             )
-            threading.Thread(target=p.wait, daemon=True).start()
         except Exception as e:
             # Subprocess creation can fail in rare cases (e.g. on some Linux systems; possibly subprocess/glibc bug)
             # See #1363

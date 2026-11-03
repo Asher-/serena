@@ -74,7 +74,7 @@ def python_serena_agent() -> Iterator[SerenaAgent]:
         project_root=str(repo_path),
         project_config=ProjectConfig(
             project_name="test_repo_python",
-            languages=[LanguageServerId.PYTHON],
+            language_servers=[LanguageServerId.PYTHON],
             ignored_paths=[],
             excluded_tools=[],
             read_only=False,

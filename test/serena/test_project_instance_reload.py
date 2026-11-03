@@ -74,7 +74,7 @@ class _ManagerFactory:
         self._log_length = 0
         self._managers: list[_StandInManager] = []
 
-    def build(self, languages: list[LanguageServerId], factory: LanguageServerFactory) -> LanguageServerManager:
+    def build(self, languages: list[LanguageServerId], factory: LanguageServerFactory, project: object = None) -> LanguageServerManager:
         """Builds a stand-in manager for the project ``factory`` serves, in place of :meth:`LanguageServerManager.from_languages`."""
         with self._condition:
             running = [m for m in self._managers if m.project_root == factory.project_root and not m.stopped.is_set()]

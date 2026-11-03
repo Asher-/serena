@@ -1877,7 +1877,7 @@ class CursorManager:
         # delegate the regex pass to the project search machinery so the
         # result set matches what SearchForPatternTool would surface
         if restrict_to_code_files:
-            matches = self._project.search_source_files_for_pattern(
+            matches = self._project.search_project_files_for_pattern(
                 pattern=substring_pattern,
                 relative_path=rel,
                 context_lines_before=context_lines_before,
@@ -1902,8 +1902,8 @@ class CursorManager:
                     skipped_links=skipped_links,
                 )
             matches = search_files(
-                rel_paths_to_search,
-                substring_pattern,
+                relative_file_paths=rel_paths_to_search,
+                pattern=substring_pattern,
                 context_lines_before=context_lines_before,
                 context_lines_after=context_lines_after,
                 file_reader=self._project.read_file,

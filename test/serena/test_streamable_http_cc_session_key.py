@@ -853,3 +853,35 @@ class TestExplicitRootSurvivesDaemonRestart:
         )
 
         assert ExplicitProjectRootStore(store_path).get("cc-session-norecord") is None
+
+
+class TestSessionKeyOverStreamableHttp:
+    """A tool call carried by a real streamable-HTTP request reaches the session key :meth:`Tool._issue_call` computes."""
+
+    _HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+
+    def test_a_call_carrying_the_session_identifier_reaches_the_forwarded_session_key(self, tool: _NoOpProbeTool) -> None:
+        from mcp.server.mcpserver.server import MCPServer
+        from starlette.testclient import TestClient
+
+        from serena.mcp import SerenaMCPFactory
+        from serena.tools.tools_base import SESSION_ID_ARGUMENT
+
+        server = MCPServer(name="test")
+        server._tool_manager._tools[tool.get_name()] = SerenaMCPFactory.make_mcp_tool(tool)
+        with TestClient(server.streamable_http_app(), base_url="http://127.0.0.1:8000") as client:
+            initialize = {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}}
+            response = client.post("/mcp", json={"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": initialize}, headers=self._HEADERS)
+            assert response.status_code == 200, response.text
+            headers = {**self._HEADERS, "Mcp-Session-Id": response.headers["mcp-session-id"], "X-Forwarded-Mcp-Session-Id": "cc-forwarded"}
+            client.post("/mcp", json={"jsonrpc": "2.0", "method": "notifications/initialized"}, headers=headers)
+            call = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": tool.get_name(), "arguments": {SESSION_ID_ARGUMENT: "claude-session"}},
+            }
+            response = client.post("/mcp", json=call, headers=headers)
+            assert response.status_code == 200, response.text
+
+        assert tool.observed_session_keys == ["cc-forwarded/session/claude-session"]

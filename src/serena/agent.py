@@ -4,12 +4,12 @@ The Serena Model Context Protocol (MCP) Server
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import json
-import multiprocessing
 import os
 import platform
 import re
 import signal
 import subprocess
+import sys
 import threading
 import weakref
 from collections import defaultdict
@@ -549,7 +549,7 @@ class DashboardManager:
 
         self._port = port
         self._mode = mode
-        self._dashboard_viewer_process: multiprocessing.Process | None = None
+        self._dashboard_viewer_process: supervise.Popen | None = None
         self._tray_manager_lock = threading.Lock()
 
         dashboard_host = host_listen_address
@@ -575,12 +575,12 @@ class DashboardManager:
         open_url_in_browser(self.url, use_subprocess=True)
 
     @staticmethod
-    def _start_dashboard_viewer_process_function(url: str, minimized: bool, parent_process_id: int) -> None:
+    def _start_dashboard_viewer_process_function(url: str, minimized: bool) -> None:
         """
         Main function of the subprocess for starting the dashboard viewer
         """
         try:
-            SerenaDashboardViewer(url, start_minimized=minimized, parent_process_id=parent_process_id).run()
+            SerenaDashboardViewer(url, start_minimized=minimized).run()
         except webview.errors.WebViewException as e:
             log.warning(f"Could not open Serena Dashboard viewer. Cause:\n{e}")
             # Fall back to opening the browser window if the window was supposed to be shown directly
@@ -595,10 +595,43 @@ class DashboardManager:
         :param minimized: whether the dashboard viewer should be started minimized (if supported on the current platform).
             If the viewer is not supported on the current platform, then this controls whether to open the browser window.
         """
-        self._dashboard_viewer_process = multiprocessing.Process(
-            target=self._start_dashboard_viewer_process_function, args=(self.url, minimized, os.getpid()), daemon=True
+        if not system_has_usable_display():
+            log.info("Not starting the Serena dashboard viewer because no usable display was detected.")
+            return
+
+        # the viewer of this dashboard an ended instance started, or else a new one; it watches no pid of serena's,
+        # since it outlives serena as a language server does (bug://serena/language_server/initialize/process_id/client/watch)
+        program = "import sys; from serena.agent import DashboardManager; DashboardManager._start_dashboard_viewer_process_function(sys.argv[1], sys.argv[2] == 'True')"
+        self._dashboard_viewer_process = self._adopt_dashboard_viewer(self.url) or supervise.Popen(
+            [sys.executable, "-c", program, self.url, str(minimized)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            call_id="",
+            waiting=supervise.Waiting.of(_DASHBOARD_VIEWER_KIND, {"url": self.url}),
+            keep=True,
         )
-        self._dashboard_viewer_process.start()
+
+    @staticmethod
+    def _adopt_dashboard_viewer(url: str) -> supervise.Popen | None:
+        """
+        :param url: the dashboard's URL.
+        :return: a live viewer of that URL an ended instance started, now this instance's, so that no second viewer is
+            started (pg://brain/daemon/restart/readoption), or None when there is none.
+        """
+        for record in supervise.records():
+            waiting = record.waiting
+            if waiting.kind != _DASHBOARD_VIEWER_KIND or waiting.state != {"url": url} or waiting.started_by_a_live_instance():
+                continue
+            if not record.outcome().ended:
+                return supervise.Popen.adopt(record.path)
+        return None
+
+    @property
+    def viewer_process(self) -> supervise.Popen | None:
+        """
+        :return: the viewer process this manager started or took over, if any.
+        """
+        return self._dashboard_viewer_process
 
     def _tray_manager_register(self, open_on_launch: bool, active_project: Project | None) -> None:
         """
@@ -1221,21 +1254,6 @@ class SerenaAgent:
             return None
         return self._dashboard_manager.url
 
-    @staticmethod
-    def _adopt_dashboard_viewer(url: str) -> supervise.Popen | None:
-        """
-        :param url: the dashboard's URL.
-        :return: a live viewer of that URL an ended instance started, now this instance's, so that no second viewer is
-            started (pg://brain/daemon/restart/readoption), or None when there is none.
-        """
-        for record in supervise.records():
-            waiting = record.waiting
-            if waiting.kind != _DASHBOARD_VIEWER_KIND or waiting.state != {"url": url} or waiting.started_by_a_live_instance():
-                continue
-            if not record.outcome().ended:
-                return supervise.Popen.adopt(record.path)
-        return None
-
     def adopt_processes(self, calls: supervise.Calls) -> list[threading.Thread]:
         """
         Takes up every process an ended instance of serena started whose outcome no instance has consumed, before serena
@@ -1252,7 +1270,8 @@ class SerenaAgent:
 
         # every other record, but that of the viewer this instance took over already
         kept_records = LanguageServerStates.named_records() | BridgeStates.named_records()
-        held = [self._dashboard_viewer_process.record] if self._dashboard_viewer_process is not None else []
+        viewer = self._dashboard_manager.viewer_process if self._dashboard_manager is not None else None
+        held = [viewer.record] if viewer is not None else []
         return supervise.Adoption(calls, (LANGUAGE_SERVER_KIND, BRIDGE_KIND), kept_records).adopt(skip=held)
 
     def open_dashboard(self) -> bool:

@@ -3,7 +3,10 @@
 import asyncio
 import json
 import logging
+import os
+import pathlib
 import socket
+import subprocess
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -17,6 +20,7 @@ from sensai.util.string import ToStringMixin
 from solidlsp.ls_config import LanguageServerIdLike
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_request import LanguageServerRequest
+from solidlsp.ls_survival import HOLDINGS, LANGUAGE_SERVER_KIND, LanguageServerState, LanguageServerStates, OpenDocument, text_digest
 from solidlsp.lsp_protocol_handler.lsp_requests import LspNotification
 from solidlsp.lsp_protocol_handler.lsp_types import ErrorCodes, LSPErrorCodes
 from solidlsp.lsp_protocol_handler.server import (
@@ -32,8 +36,7 @@ from solidlsp.lsp_protocol_handler.server import (
     make_request,
     make_response,
 )
-from solidlsp.util import subprocess_util
-from solidlsp.util.subprocess_util import ManagedSubprocess
+from solidlsp.util import subprocess_util, supervise
 
 log = logging.getLogger(__name__)
 
@@ -208,6 +211,14 @@ class LanguageServerInterface(ABC):
             raise ValueError("ContentModified max_attempts must be at least 1")
         self._content_modified_max_attempts = max_attempts
 
+    @property
+    def adopted(self) -> bool:
+        """
+        :return: whether this client attached to a server an ended instance started, so that what a start waits to hear
+            from a new server has been said, to that instance, and will not be said again.
+        """
+        return False
+
     @abstractmethod
     def is_running(self) -> bool:
         """
@@ -350,6 +361,7 @@ class LanguageServerInterface(ABC):
         with self._request_id_lock:
             request_id = self.request_id
             self.request_id += 1
+        self._on_request_numbered()
 
         request = Request(request_id=request_id, method=method)
         log.debug("Starting: %s", request)
@@ -363,6 +375,11 @@ class LanguageServerInterface(ABC):
         result = request.get_result(timeout=self._request_timeout)
         log.debug("Completed: %s", request)
         return result
+
+    def _on_request_numbered(self) -> None:
+        """
+        Called once a request has taken its id, before the request is sent.
+        """
 
     def send_request(self, method: str, params: dict | None = None) -> PayloadLike:
         """
@@ -517,20 +534,67 @@ class StdioLanguageServer(LanguageServerInterface):
         super().__init__(ls_id, determine_log_level, logger, request_timeout)
 
         self._process_launch_info = process_launch_info
-        self._process: ManagedSubprocess[bytes] | None = None
+        self._process: supervise.Popen | None = None
+        self._state: LanguageServerState | None = None
+        self._states: LanguageServerStates | None = None
+        self._state_lock = threading.Lock()
+        self._reclaimed = 0
+        self._adopted = False
         self._start_independent_lsp_process = start_independent_lsp_process
         self._stdin_lock = threading.Lock()
+
+    @property
+    def process(self) -> supervise.Popen | None:
+        """
+        :return: the supervised language server process, if it was started.
+        """
+        return self._process
+
+    @property
+    def adopted(self) -> bool:
+        return self._adopted
 
     def is_running(self) -> bool:
         return self._process is not None and self._process.returncode is None
 
     def _start(self) -> None:
-        log.info("Starting language server process via command: %s", self._process_launch_info.cmd)
+        child_proc_env = os.environ.copy()
+        child_proc_env.update(self._process_launch_info.env)
 
-        process = subprocess_util.ManagedSubprocessLauncher.get_instance().launch(
-            self._process_launch_info, name=f"LS[{self.ls_id.get_key()}]", start_new_session=self._start_independent_lsp_process
-        )
+        cmd = subprocess_util.convert_shell_cmd(self._process_launch_info.cmd)
+        log.info("Starting language server process via command: %s", self._process_launch_info.cmd)
+        kwargs = subprocess_util.subprocess_kwargs()
+        kwargs["start_new_session"] = self._start_independent_lsp_process
+
+        # a live server this instance took over when it started or an ended instance held, or else a new one, which
+        # outlives the call that starts it and so names none
+        self._states = LanguageServerStates(self._process_launch_info.cmd, self._process_launch_info.cwd)
+        adoptable = HOLDINGS.take(self._states) or self._states.take_over()
+        self._reclaimed = 0
+        if adoptable is not None:
+            log.info("Adopting language server %s from its record", adoptable.record)
+            process = supervise.Popen.adopt(pathlib.Path(adoptable.record), adoptable.stdout_offset)
+            self.request_id = adoptable.request_id
+            self._state, self._adopted = adoptable, True
+        else:
+            process = supervise.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stdin=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=child_proc_env,
+                cwd=self._process_launch_info.cwd,
+                shell=True,
+                call_id="",
+                waiting=supervise.Waiting.of(LANGUAGE_SERVER_KIND),
+                keep=True,
+                read_only_stdin=self._process_launch_info.read_only_stdin,
+                **kwargs,
+            )
+            self._state = LanguageServerState(record=str(process.record), instance_pid=0)
         self._process = process
+        self._state.hold()
+        self._save_state()
 
         # Check if process terminated immediately
         if process.returncode is not None:
@@ -552,23 +616,40 @@ class StdioLanguageServer(LanguageServerInterface):
             daemon=True,
         ).start()
 
+    def stop(self, timeout: float = 5.0) -> None:
+        try:
+            super().stop(timeout)
+        finally:
+            # a server that had already ended is released here as well
+            process = self._process
+            self._process = None
+            if process is not None:
+                self._safely_close_pipe(process.stdin)
+                self._safely_close_pipe(process.stdout)
+                self._safely_close_pipe(process.stderr)
+                process.release()
+            if self._states is not None and self._state is not None:
+                self._states.remove(self._state)
+            self._state = None
+
     def _stop(self, timeout: float) -> None:
         if self._process is None:
             log.debug("Server process is None, cannot shutdown.")
             return
 
+        # send LSP shutdown and close stdin to signal no more input
         try:
-            # send LSP shutdown and close stdin to signal no more input
-            try:
-                self._send_shutdown_in_thread()
-                self._safely_close_pipe(self._process.stdin)
-            except Exception as e:
-                log.debug(f"Exception during graceful shutdown: {e}")
-                # Ignore errors here, we are proceeding to terminate anyway.
-            # terminate the process
-            self._process.terminate(timeout=timeout)
-        finally:
-            self._process = None
+            self._send_shutdown_in_thread()
+            self._safely_close_pipe(self._process.stdin)
+        except Exception as e:
+            log.debug(f"Exception during graceful shutdown: {e}")
+            # Ignore errors here, we are proceeding to terminate anyway.
+        # terminate the process
+        subprocess_util.terminate_process_tree_with_kill_fallback(
+            self._process,  # type: ignore[arg-type]
+            terminate_timeout=timeout,
+            process_name=f"LS[{self.ls_id.get_key()}]",
+        )
 
     @staticmethod
     def _safely_close_pipe(pipe: IO[AnyStr] | None) -> None:
@@ -579,7 +660,7 @@ class StdioLanguageServer(LanguageServerInterface):
             except Exception:
                 pass
 
-    def _read_bytes_from_process(self, process: ManagedSubprocess[bytes], stream: IO[bytes], num_bytes: int) -> bytes:
+    def _read_bytes_from_process(self, process: supervise.Popen, stream: IO[bytes], num_bytes: int) -> bytes:
         """Read exactly num_bytes from process stdout"""
         data = b""
         while len(data) < num_bytes:
@@ -609,19 +690,24 @@ class StdioLanguageServer(LanguageServerInterface):
                 line = self._process.stdout.readline()
                 if not line:
                     continue
+                consumed = len(line)
                 try:
                     num_bytes = content_length(line)
                 except ValueError:
+                    self._mark_consumed(consumed)
                     continue
                 if num_bytes is None:
+                    self._mark_consumed(consumed)
                     continue
                 while line and line.strip():
                     line = self._process.stdout.readline()
+                    consumed += len(line)
                 if not line:
                     continue
                 body = self._read_bytes_from_process(self._process, self._process.stdout, num_bytes)
 
                 self._handle_body(body)
+                self._mark_consumed(consumed + num_bytes)
         except LanguageServerTerminatedException as e:
             exception = e
         except (BrokenPipeError, ConnectionResetError) as e:
@@ -660,6 +746,92 @@ class StdioLanguageServer(LanguageServerInterface):
             log.error("Language server stderr reader thread terminated unexpectedly")
         else:
             log.info("Language server stderr reader thread has terminated")
+
+    def send_notification(self, method: str, params: dict | None = None) -> None:
+        if self._admit_notification(method, params):
+            super().send_notification(method, params)
+
+    def _on_request_numbered(self) -> None:
+        # the next id persisted before the request is sent, so an instance adopting the server numbers past it
+        with self._state_lock:
+            self._save_state()
+
+    def send_request(self, method: str, params: dict | None = None) -> PayloadLike:
+        if method == "initialize" and self._adopted and self._state is not None:
+            return self._state.initialize_result
+
+        # a server told its client's pid watches it and ends with it, and a server must outlive serena
+        # (pg://brain/daemon/restart/survival): null is the protocol's own value for a client it does not watch
+        if method == "initialize" and params is not None:
+            params = {**params, "processId": None}
+
+        result = super().send_request(method, params)
+
+        if method == "initialize" and self._state is not None:
+            with self._state_lock:
+                self._state.initialize_result = result
+                self._save_state()
+
+        return result
+
+    def _save_state(self) -> None:
+        if self._state is not None and self._states is not None:
+            self._state.request_id = self.request_id
+            self._states.save(self._state)
+
+    def _mark_consumed(self, count: int) -> None:
+        with self._state_lock:
+            if self._state is not None:
+                self._state.stdout_offset += count
+                self._save_state()
+
+                # the blocks of what was consumed freed, below the offset saved for a next instance to read on from
+                if self._process is not None and self._state.stdout_offset - self._reclaimed >= supervise.RECLAIM_BYTES:
+                    self._process.reclaim_stdout(self._state.stdout_offset)
+                    self._reclaimed = self._state.stdout_offset
+
+    def _admit_notification(self, method: str, params: dict | None) -> bool:
+        """
+        Keeps the state of the documents the server holds, and holds back what an adopted server has had.
+
+        :param method: the notification's method.
+        :param params: the notification's parameters.
+        :return: whether to send the notification.
+        """
+        state = self._state
+        if state is None or params is None:
+            return not (self._adopted and method == "initialized")
+        if method == "initialized":
+            return not self._adopted
+        if method not in ("textDocument/didOpen", "textDocument/didChange", "textDocument/didClose"):
+            return True
+
+        document = params["textDocument"]
+        uri = document["uri"]
+        admit = True
+        with self._state_lock:
+            known = state.open_documents.get(uri)
+            if method == "textDocument/didClose":
+                state.open_documents.pop(uri, None)
+            elif method == "textDocument/didChange":
+                changes = params.get("contentChanges", [])
+                whole = len(changes) == 1 and "range" not in changes[0]
+
+                # a server's versions only rise, and a client that reopened a document an adopted server holds counts from 0
+                document["version"] = max(document.get("version", 0), known.version + 1 if known is not None else 0)
+                state.open_documents[uri] = OpenDocument(document["version"], text_digest(changes[0]["text"]) if whole else None)
+            elif known is None or not self._adopted:
+                state.open_documents[uri] = OpenDocument(document.get("version", 0), text_digest(document["text"]))
+            else:
+                admit = False
+                digest = text_digest(document["text"])
+                if known.digest != digest:
+                    version = known.version + 1
+                    change = {"textDocument": {"uri": uri, "version": version}, "contentChanges": [{"text": document["text"]}]}
+                    self._send_payload(make_notification("textDocument/didChange", change))
+                    state.open_documents[uri] = OpenDocument(version, digest)
+            self._save_state()
+        return admit
 
     def _send_payload(self, payload: StringDict) -> None:
         # Read the process and its stdin once: `_stop` closes stdin, waits for the process to

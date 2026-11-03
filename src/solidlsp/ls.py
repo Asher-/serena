@@ -184,6 +184,53 @@ class LSPFileBuffer:
         """
         self._open_in_ls()
 
+    def reload_from_disk(self, force: bool = False) -> bool:
+        """
+        Reloads the buffer from disk and notifies the language server of the full
+        new contents (via didChange) when the file on disk has been modified since
+        the last read. This is needed because external mutations (e.g. git
+        operations during a project re-activation) invalidate both the in-memory
+        cache and the language server's document copy — the contents getter's
+        cache-invalidation alone is not enough, because it refreshes the buffer
+        but leaves the language server serving stale document symbols until the
+        next explicit LSP edit.
+
+        :param force: whether to reload even though the file on disk has not been
+            modified since the last read -- the case of an edit applied to the buffer
+            whose save failed, leaving the file on disk as it was
+        :return: True if a reload was performed, False if the buffer was already
+            in sync with disk
+        """
+        # no prior read → nothing to reload; the first read through the contents
+        # property will populate the cache naturally
+        if self._read_file_modified_date is None:
+            return False
+
+        file_modified_date = self.abs_path.stat().st_mtime
+        if not force and file_modified_date <= self._read_file_modified_date:
+            return False
+
+        # refresh the in-memory buffer from disk
+        self._read_file_modified_date = file_modified_date
+        self._contents = FileUtils.read_file(str(self.abs_path), self.encoding)
+        self._content_hash = None
+
+        # resync the language server's copy via a full-document didChange; an
+        # incremental delta would be meaningless because the whole file was
+        # rewritten externally
+        if self._is_open_in_ls:
+            self.version += 1
+            self.language_server.server.notify.did_change_text_document(
+                {
+                    LSPConstants.TEXT_DOCUMENT: {  # type: ignore
+                        LSPConstants.URI: self.uri,
+                        LSPConstants.VERSION: self.version,
+                    },
+                    LSPConstants.CONTENT_CHANGES: [{"text": self._contents}],
+                }
+            )
+        return True
+
     def _invalidate_cached_data(self, mtime: float | None = None) -> float | None:
         """
         Invalidates cached data (file contents, hash) if the file was modified since it was read
@@ -348,6 +395,100 @@ class DocumentSymbols:
         if self._all_symbols is None:
             self._all_symbols = list(self.iter_symbols())
         return self._all_symbols, self.root_symbols
+
+
+class SymbolRangeIndex:
+    """
+    ... fast lookup of the innermost container symbol for a position in a file.
+
+    Precomputes a flat list of candidate container-kind symbols (classes,
+    methods, functions) and variable-kind symbols, each unpacked to its range
+    tuple, and sorts the list so that a single forward scan of the candidates
+    can short-circuit once the sought-after line is passed. Serves
+    :py:meth:`SolidLanguageServer.request_containing_symbol` and the inner
+    loop of :py:meth:`SolidLanguageServer.request_referencing_symbols`, which
+    previously walked the entire document-symbol set for every lookup.
+
+    Instances are cached per ``(relative_file_path, content_hash)`` on the
+    owning :py:class:`SolidLanguageServer`, so content changes signalled via
+    ``didChange`` naturally invalidate the cache entry through the hash-based
+    staleness check.
+    """
+
+    _CONTAINER_KIND_PRIORITY = 0
+    _VARIABLE_KIND_PRIORITY = 1
+
+    def __init__(
+        self,
+        document_symbols: "DocumentSymbols",
+        container_symbol_kinds: set[ls_types.SymbolKind],
+    ) -> None:
+        candidates: list[tuple[int, int, int, int, int, ls_types.UnifiedSymbolInformation]] = []
+
+        # collect container-kind candidates that span more than one line plus all variables;
+        # one-line entries of container kinds are excluded to avoid matching imports.
+        for symbol in document_symbols.iter_symbols():
+            kind = symbol["kind"]
+            s_range = symbol["location"]["range"]  # type: ignore[typeddict-item]
+            start = s_range["start"]
+            end = s_range["end"]
+            start_line = start["line"]
+            end_line = end["line"]
+            if kind in container_symbol_kinds and start_line != end_line:
+                priority = self._CONTAINER_KIND_PRIORITY
+            elif kind in {ls_types.SymbolKind.Variable, ls_types.SymbolKind.Constant}:
+                priority = self._VARIABLE_KIND_PRIORITY
+            else:
+                continue
+            candidates.append((start_line, start["character"], end_line, end["character"], priority, symbol))
+
+        # sort by start_line ascending, then priority so containers precede variables at ties;
+        # preserves the original two-pass iteration order that seeded ``max`` tie-breaking.
+        candidates.sort(key=lambda c: (c[0], c[4], c[1]))
+        self._candidates = candidates
+
+    def find_innermost_container(self, line: int, column: int | None, strict: bool) -> "ls_types.UnifiedSymbolInformation | None":
+        """
+        Return the innermost candidate whose range contains ``(line, column)``.
+
+        Matches the containment semantics previously expressed by the
+        ``is_position_in_range`` closure inside ``request_containing_symbol``:
+        in non-strict mode the range is inclusive on both ends; in strict mode
+        the start line is excluded.
+
+        :param line: 0-indexed target line.
+        :param column: 0-indexed target column; ``None`` uses line-only
+            containment.
+        :param strict: if ``True``, require the position to lie strictly inside
+            the candidate range (start line excluded).
+        :return: the matching symbol or ``None`` if no candidate matches.
+        """
+        best: ls_types.UnifiedSymbolInformation | None = None
+        best_start_line = -1
+
+        # candidates are sorted by start_line ascending so we can terminate once past the target.
+        for start_line, start_char, end_line, _end_char, _priority, symbol in self._candidates:
+            if start_line > line:
+                break
+
+            # containment check mirrors the original is_position_in_range helper
+            if strict:
+                if not (end_line >= line > start_line):
+                    continue
+                if column is not None and line == start_line and not (column > start_char):
+                    continue
+            else:
+                if not (end_line >= line >= start_line):
+                    continue
+                if column is not None and line == start_line and not (column >= start_char):
+                    continue
+
+            # innermost = greatest start_line; equality preserves first-encountered (sort order).
+            if start_line > best_start_line:
+                best = symbol
+                best_start_line = start_line
+
+        return best
 
 
 class SolidLanguageServer(ABC):
@@ -1435,6 +1576,10 @@ class SolidLanguageServer(ABC):
             fb.ref_count += 1
             if open_in_ls:
                 fb.ensure_open_in_ls()
+            # resync the language server with disk before yielding: an external
+            # mutation (e.g. git checkout during a project re-activation) could
+            # have made both the cached buffer and the LSP copy stale
+            fb.reload_from_disk()
         else:
             version = 0
             language_id = self._get_language_id_for_file(relative_file_path)
@@ -2673,6 +2818,160 @@ class SolidLanguageServer(ABC):
 
         return result
 
+    def request_call_hierarchy_incoming(self, relative_file_path: str, line: int, column: int) -> list[lsp_types.CallHierarchyIncomingCall]:
+        """
+        Finds all callers of the symbol at the given position.
+
+        Uses the LSP callHierarchy/incomingCalls request (prepareCallHierarchy + incomingCalls).
+
+        :param relative_file_path: The relative path of the file containing the symbol
+        :param line: The 0-indexed line number of the symbol
+        :param column: The 0-indexed column number of the symbol
+        :return: List of incoming calls (callers) for the symbol
+        """
+        if not self.server_started:
+            raise SolidLSPException("Language Server not started")
+
+        uri = PathUtils.path_to_uri(os.path.join(self.repository_root_path, relative_file_path))
+        with self.open_file(relative_file_path):
+            items = self.server.send.prepare_call_hierarchy({"textDocument": {"uri": uri}, "position": {"line": line, "character": column}})
+            if not items:
+                return []
+            result: list[lsp_types.CallHierarchyIncomingCall] = []
+            for item in items:
+                incoming = self.server.send.incoming_calls({"item": item})
+                if incoming:
+                    result.extend(incoming)
+            return result
+
+    def request_call_hierarchy_outgoing(self, relative_file_path: str, line: int, column: int) -> list[lsp_types.CallHierarchyOutgoingCall]:
+        """
+        Finds all symbols called by the symbol at the given position.
+
+        Uses the LSP callHierarchy/outgoingCalls request (prepareCallHierarchy + outgoingCalls).
+
+        :param relative_file_path: The relative path of the file containing the symbol
+        :param line: The 0-indexed line number of the symbol
+        :param column: The 0-indexed column number of the symbol
+        :return: List of outgoing calls (callees) from the symbol
+        """
+        if not self.server_started:
+            raise SolidLSPException("Language Server not started")
+
+        uri = PathUtils.path_to_uri(os.path.join(self.repository_root_path, relative_file_path))
+        with self.open_file(relative_file_path):
+            items = self.server.send.prepare_call_hierarchy({"textDocument": {"uri": uri}, "position": {"line": line, "character": column}})
+            if not items:
+                return []
+            result: list[lsp_types.CallHierarchyOutgoingCall] = []
+            for item in items:
+                outgoing = self.server.send.outgoing_calls({"item": item})
+                if outgoing:
+                    result.extend(outgoing)
+            return result
+
+    def request_type_hierarchy_supertypes(self, relative_file_path: str, line: int, column: int) -> list[lsp_types.TypeHierarchyItem]:
+        """
+        Finds all supertypes (parents) of the type at the given position.
+
+        Uses the LSP typeHierarchy/supertypes request (prepareTypeHierarchy + supertypes).
+
+        :param relative_file_path: The relative path of the file containing the type
+        :param line: The 0-indexed line number of the type
+        :param column: The 0-indexed column number of the type
+        :return: List of supertype items
+        """
+        if not self.server_started:
+            raise SolidLSPException("Language Server not started")
+
+        uri = PathUtils.path_to_uri(os.path.join(self.repository_root_path, relative_file_path))
+        with self.open_file(relative_file_path):
+            items = self.server.send.prepare_type_hierarchy({"textDocument": {"uri": uri}, "position": {"line": line, "character": column}})
+            if not items:
+                return []
+            result: list[lsp_types.TypeHierarchyItem] = []
+            for item in items:
+                supertypes = self.server.send.type_hierarchy_supertypes({"item": item})
+                if supertypes:
+                    result.extend(supertypes)
+            return result
+
+    def request_type_hierarchy_subtypes(self, relative_file_path: str, line: int, column: int) -> list[lsp_types.TypeHierarchyItem]:
+        """
+        Finds all subtypes (children) of the type at the given position.
+
+        Uses the LSP typeHierarchy/subtypes request (prepareTypeHierarchy + subtypes).
+
+        :param relative_file_path: The relative path of the file containing the type
+        :param line: The 0-indexed line number of the type
+        :param column: The 0-indexed column number of the type
+        :return: List of subtype items
+        """
+        if not self.server_started:
+            raise SolidLSPException("Language Server not started")
+
+        uri = PathUtils.path_to_uri(os.path.join(self.repository_root_path, relative_file_path))
+        with self.open_file(relative_file_path):
+            items = self.server.send.prepare_type_hierarchy({"textDocument": {"uri": uri}, "position": {"line": line, "character": column}})
+            if not items:
+                return []
+            result: list[lsp_types.TypeHierarchyItem] = []
+            for item in items:
+                subtypes = self.server.send.type_hierarchy_subtypes({"item": item})
+                if subtypes:
+                    result.extend(subtypes)
+            return result
+
+    def _get_symbol_range_index(self, relative_file_path: str, file_data: LSPFileBuffer) -> SymbolRangeIndex:
+        """
+        ... return a cached :py:class:`SymbolRangeIndex` for the file, rebuilding on content change.
+
+        The cache is lazy-initialised on the first lookup to avoid adding a
+        new attribute to ``__init__`` (which is customised by every
+        language-server subclass). Staleness is detected via the same
+        ``content_hash`` comparison used by
+        :py:attr:`_document_symbols_cache`, so content mutations signalled via
+        ``didChange`` invalidate the entry on next access.
+
+        :param relative_file_path: path of the file whose symbols to index.
+        :param file_data: already-opened buffer for the file, used for the
+            content-hash lookup and to avoid re-reading the file from disk.
+        :return: the cached or newly built ``SymbolRangeIndex`` for the file.
+        """
+        # lazy-init the cache dict so this method is safe to add without touching __init__
+        cache: dict[str, tuple[str, SymbolRangeIndex]] = self.__dict__.setdefault("_symbol_range_index_cache", {})
+
+        # cache lookup: same hash → return cached index, else rebuild
+        entry = cache.get(relative_file_path)
+        if entry is not None:
+            cached_hash, cached_index = entry
+            if cached_hash == file_data.content_hash:
+                return cached_index
+
+        # cache miss: rebuild after normalising each symbol's location to the current workspace path
+        document_symbols = self.request_document_symbols(relative_file_path, file_buffer=file_data)
+        absolute_file_path = str(PurePath(self.repository_root_path, relative_file_path))
+        for symbol in document_symbols.iter_symbols():
+            if "location" not in symbol:
+                symbol_range = symbol["range"]
+                symbol["location"] = ls_types.Location(
+                    uri=f"file:/{absolute_file_path}",
+                    range=symbol_range,
+                    absolutePath=absolute_file_path,
+                    relativePath=relative_file_path,
+                )
+            else:
+                location = symbol["location"]
+                assert "range" in location
+                location["absolutePath"] = absolute_file_path
+                location["relativePath"] = relative_file_path
+                location["uri"] = Path(absolute_file_path).as_uri()
+
+        container_symbol_kinds = {kind for kind in ls_types.SymbolKind if SymbolKind.is_container(kind)}
+        index = SymbolRangeIndex(document_symbols, container_symbol_kinds)
+        cache[relative_file_path] = (file_data.content_hash, index)
+        return index
+
     def request_containing_symbol(
         self,
         relative_file_path: str,
@@ -2710,7 +3009,7 @@ class SolidLanguageServer(ABC):
         :return: The container symbol (if found) or None.
         """
         # checking if the line is empty, unfortunately ugly and duplicating code, but I don't want to refactor
-        with self.open_file(relative_file_path):
+        with self.open_file(relative_file_path) as file_data:
             absolute_file_path = os.path.join(self.repository_root_path, relative_file_path)
             if self._path_contains_dots(relative_file_path):
                 absolute_file_path = str(pathlib.Path(absolute_file_path).resolve())
@@ -2719,72 +3018,17 @@ class SolidLanguageServer(ABC):
                 log.error(f"Passing empty lines to request_container_symbol is currently not supported, {relative_file_path=}, {line=}")
                 return None
 
-        document_symbols = self.request_document_symbols(relative_file_path)
+            # delegate the lookup to the cached per-file range index (O(candidates-up-to-line) per call)
+            index = self._get_symbol_range_index(relative_file_path, file_data)
+            containing_symbol = index.find_innermost_container(line, column, strict)
+            if containing_symbol is None:
+                return None
 
-        # make jedi and pyright api compatible
-        # the former has no location, the later has no range
-        # we will just always add location of the desired format to all symbols
-        for symbol in document_symbols.iter_symbols():
-            if "location" not in symbol:
-                range = symbol["range"]
-                location = ls_types.Location(
-                    uri=f"file:/{absolute_file_path}",
-                    range=range,
-                    absolutePath=absolute_file_path,
-                    relativePath=relative_file_path,
-                )
-                symbol["location"] = location
-            else:
-                location = symbol["location"]
-                assert "range" in location
-                location["absolutePath"] = absolute_file_path
-                location["relativePath"] = relative_file_path
-                location["uri"] = Path(absolute_file_path).as_uri()
-
-        def is_position_in_range(line: int, range_d: ls_types.Range) -> bool:
-            start = range_d["start"]
-            end = range_d["end"]
-
-            column_condition = True
-            if strict:
-                line_condition = end["line"] >= line > start["line"]
-                if column is not None and line == start["line"]:
-                    column_condition = column > start["character"]
-            else:
-                line_condition = end["line"] >= line >= start["line"]
-                if column is not None and line == start["line"]:
-                    column_condition = column >= start["character"]
-            return line_condition and column_condition
-
-        def is_multiline_container(s):
-            return SymbolKind.is_container(s["kind"]) and s["location"]["range"]["start"]["line"] != s["location"]["range"]["end"]["line"]
-
-        def is_variable_or_constant(s):
-            return s["kind"] in {ls_types.SymbolKind.Variable, ls_types.SymbolKind.Constant}
-
-        # Only consider containers that are not one-liners (otherwise we may get imports)
-        # variables and constants are admitted even as one-liners (e.g. members of a Go const group)
-        candidate_containers = [s for s in document_symbols.iter_symbols() if is_multiline_container(s) or is_variable_or_constant(s)]
-
-        if not candidate_containers:
-            return None
-
-        # From the candidates, find those whose range contains the given position.
-        containing_symbols = []
-        for symbol in candidate_containers:
-            s_range = symbol["location"]["range"]
-            if not is_position_in_range(line, s_range):
-                continue
-            containing_symbols.append(symbol)
-
-        if containing_symbols:
-            # Return the one with the greatest starting position (i.e. the innermost container).
-            containing_symbol = max(containing_symbols, key=lambda s: s["location"]["range"]["start"]["line"])
+            # symbol-body materialisation happens under the open-file context so the underlying
+            # buffer is still readable for SymbolBodyFactory.
             if include_body:
                 containing_symbol["body"] = self.create_symbol_body(containing_symbol, factory=body_factory)
             return containing_symbol
-        else:
-            return None
 
     def request_container_of_symbol(
         self, symbol: ls_types.UnifiedSymbolInformation, include_body: bool = False
@@ -3274,22 +3518,85 @@ class SolidLanguageServer(ABC):
 
     def apply_text_edits_to_file(self, relative_path: str, edits: list[ls_types.TextEdit]) -> None:
         """
-        Apply a list of text edits to a file.
+        Apply a list of text edits to a file in a single in-memory pass.
+
+        The previous implementation ran ``delete_text_between_positions`` and
+        ``insert_text_at_position`` per edit. Each call re-scanned the buffer via
+        ``get_index_from_line_col`` (O(N)), so E edits cost O(E*N). For large
+        files with many edits (common during refactors) this dominated runtime.
+
+        Now: precompute line-start offsets once (O(N)), sort edits ascending by
+        start position, verify they don't overlap, and rebuild the new buffer in
+        a single forward pass (O(N + total_new_text)). LSP is notified once with
+        all content changes in reverse order, which keeps each change's range
+        coordinates valid against the incrementally-updated document.
 
         :param relative_path: The relative path of the file to edit
-        :param edits: List of TextEdit dictionaries to apply
+        :param edits: List of TextEdit dictionaries to apply; must not overlap
         """
+        if not edits:
+            return
+
         with self.open_file(relative_path):
-            # Sort edits by position (latest first) to avoid position shifts
-            sorted_edits = sorted(edits, key=lambda e: (e["range"]["start"]["line"], e["range"]["start"]["character"]), reverse=True)
+            if not self.server_started:
+                log.error("apply_text_edits_to_file called before Language Server started")
+                raise SolidLSPException("Language Server not started")
 
+            absolute_file_path = str(PurePath(self.repository_root_path, relative_path))
+            uri = pathlib.Path(absolute_file_path).as_uri()
+            assert uri in self.open_file_buffers, f"File buffer missing for {relative_path}"
+            file_buffer = self.open_file_buffers[uri]
+            original_contents = file_buffer.contents
+
+            # sort ascending so we can walk the buffer forward in one pass
+            sorted_edits = sorted(
+                edits,
+                key=lambda e: (e["range"]["start"]["line"], e["range"]["start"]["character"]),
+            )
+
+            # precompute line-start offsets on the original buffer once (O(N))
+            line_starts = TextUtils.compute_line_starts(original_contents)
+
+            def _to_index(pos: ls_types.Position) -> int:
+                line = pos["line"]
+                if line < 0 or line >= len(line_starts):
+                    raise SolidLSPException(
+                        f"Text edit references line {line} which is outside {relative_path} (has {len(line_starts)} lines)"
+                    )
+                return line_starts[line] + pos["character"]
+
+            # rebuild the new contents in a single forward pass (O(N + total_new_text))
+            parts: list[str] = []
+            cursor_idx = 0
             for edit in sorted_edits:
-                start_pos = ls_types.Position(line=edit["range"]["start"]["line"], character=edit["range"]["start"]["character"])
-                end_pos = ls_types.Position(line=edit["range"]["end"]["line"], character=edit["range"]["end"]["character"])
+                start_idx = _to_index(edit["range"]["start"])
+                end_idx = _to_index(edit["range"]["end"])
+                if start_idx < cursor_idx:
+                    raise SolidLSPException(f"Overlapping text edits in {relative_path} at line {edit['range']['start']['line']}")
+                if end_idx < start_idx:
+                    raise SolidLSPException(f"Text edit end precedes its start in {relative_path}")
+                parts.append(original_contents[cursor_idx:start_idx])
+                parts.append(edit["newText"])
+                cursor_idx = end_idx
+            parts.append(original_contents[cursor_idx:])
+            new_contents = "".join(parts)
 
-                # Delete the old text and insert the new text
-                self.delete_text_between_positions(relative_path, start_pos, end_pos)
-                self.insert_text_at_position(relative_path, start_pos["line"], start_pos["character"], edit["newText"])
+            # commit buffer state and send a single LSP notification; changes must be
+            # listed in reverse order so each range stays valid against the doc as
+            # prior changes are applied by the server
+            file_buffer.version += 1
+            file_buffer.contents = new_contents
+            self.server.notify.did_change_text_document(
+                {
+                    LSPConstants.TEXT_DOCUMENT: {  # type: ignore
+                        LSPConstants.VERSION: file_buffer.version,
+                        LSPConstants.URI: file_buffer.uri,
+                    },
+                    LSPConstants.CONTENT_CHANGES: [
+                        {LSPConstants.RANGE: edit["range"], "text": edit["newText"]} for edit in reversed(sorted_edits)
+                    ],
+                }
+            )
 
     def start(self) -> "SolidLanguageServer":
         """

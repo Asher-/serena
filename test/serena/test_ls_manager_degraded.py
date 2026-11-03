@@ -21,15 +21,17 @@ import pytest
 
 from serena.agent import SerenaAgent
 from serena.config.serena_config import (
-    LanguageBackend,
     ProjectConfig,
     RegisteredProject,
     SerenaConfig,
 )
+from serena.language_backend import BuiltinLanguageBackend
 from serena.ls_manager import LanguageServerFactory, LanguageServerManager, LanguageUnavailableError
 from serena.project import Project
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
+
+
 class _ScriptedLanguageServerFactory(LanguageServerFactory):
     def __init__(self, failures: dict[LanguageServerId, Exception] | None = None) -> None:
         # stored as instance state only; the base constructor is deliberately not invoked because
@@ -71,9 +73,9 @@ class TestDegradedStartup:
         # one language fails, one succeeds: the manager must come up with the working language only
         factory = _ScriptedLanguageServerFactory(failures={LanguageServerId.SCALA: RuntimeError("metals crashed")})
 
-        manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON, LanguageServerId.SCALA], factory)
+        manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON, LanguageServerId.SCALA], factory, project=None)
 
-        assert manager.get_active_languages() == [LanguageServerId.PYTHON]
+        assert manager.get_active_language_server_ids() == [LanguageServerId.PYTHON]
         assert manager.is_language_available(LanguageServerId.PYTHON)
         assert not manager.is_language_available(LanguageServerId.SCALA)
 
@@ -89,9 +91,9 @@ class TestDegradedStartup:
         python_failure = RuntimeError("pyright missing")
         factory = _ScriptedLanguageServerFactory(failures={LanguageServerId.SCALA: scala_failure, LanguageServerId.PYTHON: python_failure})
 
-        manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON, LanguageServerId.SCALA], factory)
+        manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON, LanguageServerId.SCALA], factory, project=None)
 
-        assert manager.get_active_languages() == []
+        assert manager.get_active_language_server_ids() == []
         assert manager.get_unavailable_languages().keys() == {LanguageServerId.PYTHON, LanguageServerId.SCALA}
 
         with pytest.raises(LanguageUnavailableError) as exc_info:
@@ -104,9 +106,9 @@ class TestDegradedStartup:
         # baseline: when every requested language starts, nothing is recorded as unavailable
         factory = _ScriptedLanguageServerFactory()
 
-        manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON, LanguageServerId.TYPESCRIPT], factory)
+        manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON, LanguageServerId.TYPESCRIPT], factory, project=None)
 
-        assert manager.get_active_languages() == [LanguageServerId.PYTHON, LanguageServerId.TYPESCRIPT]
+        assert manager.get_active_language_server_ids() == [LanguageServerId.PYTHON, LanguageServerId.TYPESCRIPT]
         assert manager.get_unavailable_languages() == {}
 
 
@@ -117,7 +119,7 @@ class TestRestartRecoversUnavailableLanguage:
         # initial start fails for Scala; after the underlying fault is cleared, a restart must succeed
         # and move Scala from unavailable to available without affecting Python
         factory = _ScriptedLanguageServerFactory(failures={LanguageServerId.SCALA: RuntimeError("metals crashed")})
-        manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON, LanguageServerId.SCALA], factory)
+        manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON, LanguageServerId.SCALA], factory, project=None)
         assert not manager.is_language_available(LanguageServerId.SCALA)
 
         factory.clear_failure(LanguageServerId.SCALA)
@@ -133,7 +135,7 @@ class TestRestartRecoversUnavailableLanguage:
         # restart of a still-broken language re-records the unavailability with the new failure cause
         first_failure = RuntimeError("metals crashed")
         factory = _ScriptedLanguageServerFactory(failures={LanguageServerId.SCALA: first_failure})
-        manager = LanguageServerManager.from_languages([LanguageServerId.SCALA], factory)
+        manager = LanguageServerManager.from_languages([LanguageServerId.SCALA], factory, project=None)
 
         # swap the scripted failure for a different exception so we can distinguish the two
         second_failure = RuntimeError("metals still broken")
@@ -151,7 +153,7 @@ class TestRestartRecoversUnavailableLanguage:
         # a language that was never requested is neither running nor tracked as unavailable;
         # restart must refuse rather than silently trying to add it
         factory = _ScriptedLanguageServerFactory()
-        manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON], factory)
+        manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON], factory, project=None)
 
         with pytest.raises(ValueError, match="cannot restart"):
             manager.restart_language_server(LanguageServerId.SCALA)
@@ -176,14 +178,14 @@ class TestActivationMessageWaitsForLsInit:
             gui_log_window=False,
             web_dashboard=False,
             log_level=logging.ERROR,
-            language_backend=LanguageBackend.LSP,
+            language_backend=BuiltinLanguageBackend.LSP.get_instance(),
         )
         project = Project(
             project_root=self._PYTHON_REPO,
             project_config=ProjectConfig(
                 project_name="race_test",
-                languages=[LanguageServerId.PYTHON, LanguageServerId.SCALA],
-                language_backend=LanguageBackend.LSP,
+                language_servers=[LanguageServerId.PYTHON, LanguageServerId.SCALA],
+                language_backend=BuiltinLanguageBackend.LSP.get_instance(),
             ),
             serena_config=config,
         )
@@ -206,7 +208,7 @@ class TestActivationMessageWaitsForLsInit:
         def create_manager(project: Project) -> LanguageServerManager:
             time.sleep(0.3)
             fake_manager = MagicMock(spec=LanguageServerManager)
-            fake_manager.get_active_languages.return_value = [LanguageServerId.PYTHON]
+            fake_manager.get_active_language_server_ids.return_value = [LanguageServerId.PYTHON]
             fake_manager.get_unavailable_languages.return_value = {
                 LanguageServerId.SCALA: RuntimeError("metals crashed"),
             }
@@ -225,7 +227,7 @@ class TestActivationMessageWaitsForLsInit:
         agent, project = self._build_agent(create_manager)
         try:
             agent._activate_project(project)
-            msg = agent.get_project_activation_message()
+            msg = agent.get_project_activation_message(agent.get_calling_session_id())
 
             assert "Active language servers: python" in msg
             assert "Language servers that failed to start" in msg
@@ -243,7 +245,7 @@ class TestActivationMessageWaitsForLsInit:
         def create_manager(project: Project) -> LanguageServerManager:
             init_gate.wait(timeout=5.0)
             fake_manager = MagicMock(spec=LanguageServerManager)
-            fake_manager.get_active_languages.return_value = []
+            fake_manager.get_active_language_server_ids.return_value = []
             fake_manager.get_unavailable_languages.return_value = {}
             fake_manager.stop_all.return_value = None
             project.language_server_manager = fake_manager
@@ -262,7 +264,7 @@ class TestActivationMessageWaitsForLsInit:
         project.serena_config.tool_timeout = 0.1
         try:
             agent._activate_project(project)
-            msg = agent.get_project_activation_message()
+            msg = agent.get_project_activation_message(agent.get_calling_session_id())
 
             assert "had not finished starting" in msg
         finally:
@@ -292,15 +294,15 @@ class TestGetLanguageServerManagerOrRaiseBlocksOnReadiness:
             gui_log_window=False,
             web_dashboard=False,
             log_level=logging.ERROR,
-            language_backend=LanguageBackend.LSP,
+            language_backend=BuiltinLanguageBackend.LSP.get_instance(),
             tool_timeout=tool_timeout,
         )
         project = Project(
             project_root=self._PYTHON_REPO,
             project_config=ProjectConfig(
                 project_name="readiness_test",
-                languages=[LanguageServerId.PYTHON],
-                language_backend=LanguageBackend.LSP,
+                language_servers=[LanguageServerId.PYTHON],
+                language_backend=BuiltinLanguageBackend.LSP.get_instance(),
             ),
             serena_config=config,
         )

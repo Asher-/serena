@@ -1370,7 +1370,7 @@ class MemoryCommands(AutoRegisteringGroup):
         )
 
     @staticmethod
-    def _load_memories_manager(project: str) -> "MemoryManager":
+    def _load_memory_manager(project: str) -> "MemoryManager":
         """
         Load the project at ``project`` and return its memories manager.
 
@@ -1397,7 +1397,7 @@ class MemoryCommands(AutoRegisteringGroup):
     )
     @click.argument("project", type=click.Path(exists=True, file_okay=False, dir_okay=True), default=os.getcwd())
     def initialize(project: str) -> None:
-        manager = MemoryCommands._load_memories_manager(project)
+        manager = MemoryCommands._load_memory_manager(project)
         name = manager.ensure_memory_maintenance_memory()
         click.echo(f"Memory maintenance memory ready: `mem:{name}`.")
 
@@ -1410,7 +1410,7 @@ class MemoryCommands(AutoRegisteringGroup):
     @click.argument("project", type=click.Path(exists=True, file_okay=False, dir_okay=True), default=os.getcwd())
     @click.option("--topic", "-t", type=str, default="", help="Restrict the listing to a single topic (e.g. 'auth' or 'global/style').")
     def list(project: str, topic: str) -> None:
-        manager = MemoryCommands._load_memories_manager(project)
+        manager = MemoryCommands._load_memory_manager(project)
         memories = manager.list_memories(topic=topic)
         if not len(memories):
             click.echo("(no memories found)")
@@ -1429,7 +1429,7 @@ class MemoryCommands(AutoRegisteringGroup):
     @click.argument("memory_name", type=str)
     @click.argument("project", type=click.Path(exists=True, file_okay=False, dir_okay=True), default=os.getcwd())
     def read(memory_name: str, project: str) -> None:
-        manager = MemoryCommands._load_memories_manager(project)
+        manager = MemoryCommands._load_memory_manager(project)
         click.echo(manager.load_memory(memory_name))
 
     @staticmethod
@@ -1450,7 +1450,7 @@ class MemoryCommands(AutoRegisteringGroup):
                 content = f.read()
         if content is None:
             content = sys.stdin.read()
-        manager = MemoryCommands._load_memories_manager(project)
+        manager = MemoryCommands._load_memory_manager(project)
         click.echo(manager.save_memory(memory_name, content, is_tool_context=False))
 
     @staticmethod
@@ -1462,7 +1462,7 @@ class MemoryCommands(AutoRegisteringGroup):
     @click.argument("memory_name", type=str)
     @click.argument("project", type=click.Path(exists=True, file_okay=False, dir_okay=True), default=os.getcwd())
     def delete(memory_name: str, project: str) -> None:
-        manager = MemoryCommands._load_memories_manager(project)
+        manager = MemoryCommands._load_memory_manager(project)
         click.echo(manager.delete_memory(memory_name, is_tool_context=False))
 
     @staticmethod
@@ -1479,7 +1479,7 @@ class MemoryCommands(AutoRegisteringGroup):
     @click.argument("new_name", type=str)
     @click.argument("project", type=click.Path(exists=True, file_okay=False, dir_okay=True), default=os.getcwd())
     def rename(old_name: str, new_name: str, project: str) -> None:
-        manager = MemoryCommands._load_memories_manager(project)
+        manager = MemoryCommands._load_memory_manager(project)
         message, n_refs = manager.rename_memory_and_propagate_references(old_name, new_name, is_tool_context=False)
         click.echo(message)
         if n_refs > 0:
@@ -1520,7 +1520,7 @@ class MemoryCommands(AutoRegisteringGroup):
         mode: Literal["literal", "regex"],
         allow_multiple_occurrences: bool,
     ) -> None:
-        manager = MemoryCommands._load_memories_manager(project)
+        manager = MemoryCommands._load_memory_manager(project)
         click.echo(
             manager.edit_memory(
                 memory_name,
@@ -1566,7 +1566,7 @@ class MemoryCommands(AutoRegisteringGroup):
                 "Warning: --fuzzy-matching has no effect without --include-unmarked; ignoring it.",
                 err=True,
             )
-        manager = MemoryCommands._load_memories_manager(project)
+        manager = MemoryCommands._load_memory_manager(project)
         report = manager.validate_referential_integrity(
             include_unmarked=include_unmarked,
             include_fuzzy_matching=fuzzy_matching,
@@ -1619,7 +1619,7 @@ class MemoryCommands(AutoRegisteringGroup):
     def auto_prefix_references(
         project: str, dry_run: bool, include_flat_names: bool, include_read_only: bool, include_global: bool
     ) -> None:
-        manager = MemoryCommands._load_memories_manager(project)
+        manager = MemoryCommands._load_memory_manager(project)
         report = manager.auto_prefix_bare_references(
             include_flat_names=include_flat_names,
             include_read_only=include_read_only,

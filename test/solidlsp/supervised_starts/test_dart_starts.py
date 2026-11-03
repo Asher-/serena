@@ -16,7 +16,7 @@ import pytest
 from solidlsp.language_servers.dart_language_server import DartLanguageServer
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
-from solidlsp.ls_process import LanguageServerProcess
+from solidlsp.ls_process import StdioLanguageServer
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.util import supervise
 
@@ -58,7 +58,7 @@ def test_the_dart_launch_reaches_its_supervised_process_as_a_read_only_stdin(mon
         "time.sleep(120)\n"
     )
     launch = dataclasses.replace(launches[0], cmd=[sys.executable, str(program)], cwd=str(tmp_path))
-    process = LanguageServerProcess(launch, LanguageServerId.PYTHON, lambda _: logging.INFO)
+    process = StdioLanguageServer(launch, LanguageServerId.PYTHON, lambda _: logging.INFO)
     process.start()
 
     try:

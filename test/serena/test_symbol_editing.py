@@ -671,3 +671,165 @@ VUE_STORE_REPLACED_CLEAR_BODY = """function clear() {
 def test_replace_body_vue_ts_file(test_case: ReplaceBodyTest, snapshot: SnapshotAssertion) -> None:
     """Test that TypeScript files within Vue projects can be edited."""
     test_case.run_test(content_after_ground_truth=snapshot)
+
+
+# A single `type` declaration body that re-supplies the leading `type` keyword, as a user would
+# after copying the body returned by find_symbol. Replacing the body with this must not duplicate
+# the keyword.
+GO_DECL_REPLACEMENT = """type NamedInt int64"""
+
+
+class GoDeclReplacementTest(EditingTest):
+    """Test for replacing a single Go ``type``/``var``/``const`` declaration that should NOT result
+    in a duplicated leading keyword (e.g. ``type type NamedInt``).
+    """
+
+    def __init__(self, ls_id: LanguageServerId, rel_path: str, symbol_name: str, new_body: str):
+        super().__init__(ls_id, rel_path)
+        self.symbol_name = symbol_name
+        self.new_body = new_body
+
+    def _apply_edit(self, code_editor: CodeEditor) -> None:
+        code_editor.replace_body(self.symbol_name, self.rel_path, self.new_body)
+
+    @overrides
+    def _test_diff(self, code_diff: CodeDiff, snapshot: SnapshotAssertion | None) -> None:
+        # the leading declaration keyword must appear exactly once (no `type type` corruption)
+        for keyword in ("type", "var", "const"):
+            assert f"{keyword} {keyword} " not in code_diff.modified_content, (
+                f"Replacement duplicated the '{keyword}' keyword: {code_diff.modified_content!r}"
+            )
+        return super()._test_diff(code_diff, snapshot)
+
+
+@pytest.mark.go
+@pytest.mark.skipif(sys.platform == "win32", reason="gopls is not provisioned on the Windows CI runner")
+def test_go_symbol_replacement_no_double_keyword(snapshot: SnapshotAssertion):
+    """
+    Test that replacing a Go ``type``/``var``/``const`` declaration does not duplicate the leading
+    keyword.
+
+    This exercises the bug where:
+    - Original: type NamedInt int
+    - Replacement body (as displayed by find_symbol): type NamedInt int64
+    - Bug result would be: type type NamedInt int64 (the original `type ` prefix is kept because the
+      gopls symbol range starts at the identifier, and the supplied body adds another `type`)
+    - Correct result should be: type NamedInt int64
+
+    gopls reports the symbol range of such declarations starting at the identifier (after the
+    keyword), unlike ``func`` declarations whose range includes the ``func`` keyword. The gopls
+    range extension prevents the duplicated keyword.
+    """
+    test_case = GoDeclReplacementTest(
+        LanguageServerId.GO,
+        "symbol_body.go",
+        "NamedInt",
+        GO_DECL_REPLACEMENT,
+    )
+    test_case.run_test(content_after_ground_truth=snapshot)
+
+
+# A single `export const` declaration body that re-supplies the leading `export const` prefix, as a
+# user would after copying the body returned by find_symbol. Replacing the body with this must not
+# duplicate the prefix.
+TS_DECL_REPLACEMENT = """export const twice = (n: number): number => n * 3;"""
+
+
+class TsDeclReplacementTest(EditingTest):
+    """Test for replacing a single TypeScript `const`/`let`/`var` declaration that should NOT
+    result in a duplicated leading `export`/keyword (e.g. `export const export const twice = ...`)
+    or a duplicated trailing semicolon (e.g. `... n * 3;;`).
+    """
+
+    def __init__(self, ls_id: LanguageServerId, rel_path: str, symbol_name: str, new_body: str):
+        super().__init__(ls_id, rel_path)
+        self.symbol_name = symbol_name
+        self.new_body = new_body
+
+    def _apply_edit(self, code_editor: CodeEditor) -> None:
+        code_editor.replace_body(self.symbol_name, self.rel_path, self.new_body)
+
+    @overrides
+    def _test_diff(self, code_diff: CodeDiff, snapshot: SnapshotAssertion | None) -> None:
+        # the leading `export`/declaration keyword must appear exactly once (no `export const
+        # export const` corruption); this doubles as a syntax check, since a duplicated prefix is
+        # `export`/`const`/`let`/`var` immediately followed by whitespace and the same word again
+        for keyword in ("export const", "const", "let", "var"):
+            assert f"{keyword} {keyword} " not in code_diff.modified_content, (
+                f"Replacement duplicated the '{keyword}' prefix: {code_diff.modified_content!r}"
+            )
+        # the trailing semicolon must appear exactly once, not doubled up
+        assert ";;" not in code_diff.modified_content, f"Replacement duplicated the trailing semicolon: {code_diff.modified_content!r}"
+        return super()._test_diff(code_diff, snapshot)
+
+
+@pytest.mark.typescript
+def test_typescript_symbol_replacement_no_double_keyword(snapshot: SnapshotAssertion):
+    """
+    Test that replacing a TypeScript `const`/`let`/`var` declaration does not duplicate the leading
+    `export`/keyword or the trailing semicolon.
+
+    This exercises the bug where:
+    - Original: export const twice = (n: number): number => n * 2;
+    - Replacement body (as displayed by find_symbol): export const twice = (n: number): number => n * 3;
+    - Bug result would be: export const export const twice = (n: number): number => n * 3;; (the
+      original `export const ` prefix and trailing `;` are kept because the tsserver symbol range
+      starts at the identifier and ends before the semicolon, and the supplied body adds both back)
+    - Correct result should be: export const twice = (n: number): number => n * 3;
+
+    tsserver reports the symbol range of such declarations starting at the identifier (after the
+    keyword(s)) and ending before the semicolon, unlike `function`/`class` declarations whose range
+    includes the leading keyword (and are not semicolon-terminated). The range extension in
+    TypeScriptLanguageServer.request_document_symbols prevents both the duplicated prefix and the
+    duplicated semicolon (GH #1956).
+    """
+    test_case = TsDeclReplacementTest(
+        LanguageServerId.TYPESCRIPT,
+        "symbol_body.ts",
+        "twice",
+        TS_DECL_REPLACEMENT,
+    )
+    test_case.run_test(content_after_ground_truth=snapshot)
+
+
+class InsertAndDeleteSymbolTest(EditingTest):
+    """
+    Inserts a symbol after another symbol and then deletes the inserted symbol, which should result
+    in no change to the file content.
+    """
+
+    def __init__(self, ls_id: LanguageServerId, rel_path: str, rel_symbol: str, deleted_symbol: str, insertion: str):
+        """
+        :param ls_id: specifies the language server to use
+        :param rel_path: relative path of the file
+        :param rel_symbol: symbol after which the insertion is made
+        :param deleted_symbol: the symbol to be deleted after the insertion
+        :param insertion: text which inserts the symbol `deleted_symbol`
+        """
+        super().__init__(ls_id, rel_path)
+        self.rel_symbol = rel_symbol
+        self.deleted_symbol = deleted_symbol
+        self.rel_path = rel_path
+        self.insertion = insertion
+
+    def _apply_edit(self, code_editor: CodeEditor) -> None:
+        code_editor.insert_after_symbol(self.rel_symbol, self.rel_path, self.insertion)
+        code_editor.delete_symbol(self.deleted_symbol, self.rel_path)
+
+    def _test_diff(self, code_diff: CodeDiff, snapshot: SnapshotAssertion | None) -> None:
+        assert not code_diff.has_changes
+
+
+def test_insert_and_delete_no_change():
+    """
+    Tests that inserting and immediately deleting a symbol results in no change to the file content.
+    """
+    insertion = "    def inserted_function():\n        pass"
+    test_case = InsertAndDeleteSymbolTest(
+        LanguageServerId.PYTHON,
+        PYTHON_TEST_REL_FILE_PATH,
+        "VariableContainer/modify_instance_var",
+        "VariableContainer/inserted_function",
+        insertion,
+    )
+    test_case.run_test(None)

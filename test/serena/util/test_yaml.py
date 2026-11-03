@@ -10,8 +10,10 @@ unparsable, which wedged every later load. ``save_yaml`` now writes to a temp fi
 import os
 import threading
 
+import pytest
 from ruamel.yaml import YAML
 
+from serena.util import file_lifecycle
 from serena.util.yaml import load_yaml, save_yaml
 
 
@@ -55,6 +57,26 @@ def test_no_tmp_files_left_behind(tmp_path):
     save_yaml(path, {"projects": ["a"]})
     leftovers = [p for p in os.listdir(tmp_path) if p != "config.yml"]
     assert leftovers == [], f"temp files not cleaned up: {leftovers}"
+
+
+def test_a_save_that_fails_during_its_write_leaves_the_prior_bytes_unchanged(tmp_path, monkeypatch):
+    path = str(tmp_path / "config.yml")
+    save_yaml(path, {"projects": ["a", "b"]})
+    with open(path, "rb") as f:
+        prior = f.read()
+
+    def failing_fsync(fd: int) -> None:
+        raise OSError(28, "No space left on device")
+
+    # the new bytes are written to the temporary file; the sync after them fails, before the rename
+    monkeypatch.setattr(file_lifecycle.os, "fsync", failing_fsync)
+    with pytest.raises(OSError, match="No space left"):
+        save_yaml(path, {"projects": ["c"]})
+    monkeypatch.undo()
+
+    with open(path, "rb") as f:
+        assert f.read() == prior
+    assert os.listdir(tmp_path) == ["config.yml"]
 
 
 def test_concurrent_saves_never_corrupt(tmp_path):

@@ -1,8 +1,10 @@
 import re
+from collections.abc import Callable
 
 import pytest
 
-from serena.util.text_utils import LineType, search_files, search_text
+from serena.util.file_proxy import FileCollection, FileProxy
+from serena.util.text_utils import ContentReplacer, GlobMatcher, LineType, MultiFileContentReplacer, search_files, search_text
 
 
 class TestSearchText:
@@ -214,6 +216,114 @@ class TestSearchText:
         matches = search_text("missing_function", content=content)
 
         assert len(matches) == 0
+
+    def test_search_text_with_regex_pattern2(self):
+        """Test searching with a pre-compiled regex pattern."""
+        content = """
+        import os
+        import sys
+        from pathlib import Path
+
+        # Configuration variables
+        DEBUG = True
+        MAX_RETRIES = 3
+
+        def configure_logging():
+            log_level = "DEBUG" if DEBUG else "INFO"
+            print(f"Setting log level to {log_level}")
+        """
+
+        # Search for variable assignments with a compiled regex
+        pattern = r"^\s*[A-Z_]+ = .*?$"
+        matches = search_text(pattern, content=content, multiline=True)
+
+        assert len(matches) == 2
+        assert "DEBUG = True" in matches[0].lines[0].line_content
+        assert "MAX_RETRIES = 3" in matches[1].lines[0].line_content
+
+    @pytest.mark.parametrize(
+        ("pattern", "expected_matched_lines"),
+        [
+            # matches ending with a newline: the trailing newline terminates the last matched line
+            # and must not pull in the line that follows
+            (r"alpha\n", [0]),
+            (r"alpha\nbeta\n", [0, 1]),
+            (r"gamma\n", [2]),
+            # controls: matches ending mid-line were always correct
+            (r"alpha", [0]),
+            (r"beta", [1]),
+            (r"alpha\nbeta", [0, 1]),
+        ],
+    )
+    def test_search_text_match_ending_at_line_break(self, pattern: str, expected_matched_lines: list[int]):
+        """The lines marked as matched are exactly the lines the matched text occupies."""
+        content = "alpha\nbeta\ngamma\n"
+
+        matches = search_text(pattern, content=content)
+
+        assert len(matches) == 1
+        matched_lines = [line.line_number for line in matches[0].lines if line.match_type == LineType.MATCH]
+        assert matched_lines == expected_matched_lines
+        assert matches[0].num_matched_lines == len(expected_matched_lines)
+
+    @pytest.mark.parametrize(
+        ("pattern", "expected_matched_lines"),
+        [
+            (r"alpha\r\n", [0]),
+            (r"alpha\r", [0]),
+            (r"alpha\r\nbeta\r\n", [0, 1]),
+            (r"alpha", [0]),
+        ],
+    )
+    def test_search_text_match_ending_at_line_break_crlf(self, pattern: str, expected_matched_lines: list[int]):
+        """As above for CRLF content, where the end index can fall inside the two-character line break.
+
+        The content is passed directly rather than read from a file, since the file read paths translate
+        line endings and CR would not reach this function.
+        """
+        content = "alpha\r\nbeta\r\ngamma\r\n"
+
+        matches = search_text(pattern, content=content)
+
+        assert len(matches) == 1
+        matched_lines = [line.line_number for line in matches[0].lines if line.match_type == LineType.MATCH]
+        assert matched_lines == expected_matched_lines
+        assert matches[0].num_matched_lines == len(expected_matched_lines)
+
+    def test_search_text_crlf_line_numbers(self):
+        """Matches in CRLF content report the same line numbers as with LF endings."""
+        crlf = "alpha\r\nbeta\r\ngamma\r\n"
+        lf = "alpha\nbeta\ngamma\n"
+        crlf_matches = search_text("beta", content=crlf)
+        lf_matches = search_text("beta", content=lf)
+        assert len(crlf_matches) == 1
+        assert len(lf_matches) == 1
+        assert crlf_matches[0].start_line == lf_matches[0].start_line == 1
+        assert crlf_matches[0].end_line == lf_matches[0].end_line == 1
+
+    def test_search_text_bare_cr_line_numbers(self):
+        r"""Bare \r line endings produce separate lines, matching TextStepper semantics."""
+        content = "alpha\rbeta\r"
+        matches = search_text("beta", content=content)
+        assert len(matches) == 1
+        assert matches[0].start_line == 1
+        assert matches[0].end_line == 1
+
+    def test_search_text_match_at_boundaries(self):
+        """Matches at the very start and very end of the content resolve to sane line numbers."""
+        content = "first\nmiddle\nlast"
+        first = search_text("first", content=content)
+        assert first[0].start_line == 0
+        last = search_text("last", content=content)
+        assert last[0].start_line == 2
+
+    def test_search_text_multiline_match_line_range(self):
+        """A multiline match spanning several lines reports the full matched range."""
+        content = "a\nTARGET_START\nb\nc\nTARGET_END\nd\n"
+        matches = search_text("TARGET_START[\\s\\S]*?TARGET_END", content=content)
+        assert len(matches) == 1
+        assert matches[0].start_line == 1
+        assert matches[0].end_line == 4
 
 
 # Mock file reader that always returns matching content
@@ -506,6 +616,24 @@ class TestSearchFiles:
         assert result.lines[2].line_content == "Line after 1", "Incorrect 'after' context line"
         assert result.lines[2].match_type == LineType.AFTER_MATCH
 
+    def test_search_files_rejects_an_invalid_pattern(self):
+        """A pattern that does not compile is an error in the request, not a per-file read failure.
+
+        The per-file error handling exists to skip files that cannot be read (e.g. binaries); it
+        must not turn a malformed regular expression into an empty result, which is
+        indistinguishable from "the pattern occurs nowhere in the project" for the caller.
+        """
+
+        def unreadable_mock_reader(file_path: str) -> str:
+            raise UnicodeDecodeError("utf-8", b"\x00", 0, 1, "simulated undecodable file")
+
+        with pytest.raises(ValueError, match="Invalid regular expression"):
+            search_files(MockFileCollection(["a.py"]), pattern="foo(")
+
+        # a file that genuinely cannot be read is still skipped rather than failing the search
+        results = search_files(MockFileCollection(["a.bin"], unreadable_mock_reader), pattern="match")
+        assert results == []
+
 
 class TestGlobMatch:
     """Test the glob_match function directly."""
@@ -576,3 +704,224 @@ class TestExpandBraces:
         from serena.util.text_utils import expand_braces
 
         assert sorted(expand_braces(pattern)) == sorted(expected)
+
+    @pytest.mark.parametrize(
+        "pattern",
+        [
+            "src/{}.py",
+            "src/{utils,models",
+            "src/utils,models}.py",
+        ],
+    )
+    def test_expand_braces_rejects_malformed_braces(self, pattern):
+        """Malformed brace globs should fail instead of looping forever."""
+        with pytest.raises(ValueError, match="Invalid glob brace expression"):
+            GlobMatcher._expand_braces(pattern)
+
+
+class MockFileProxy(FileProxy):
+    def __init__(self, relative_path: str, mock_reader: Callable[[str], str] = mock_reader_always_match):
+        self.relative_path = relative_path
+        self.mock_reader = mock_reader
+
+    def get_contents(self) -> str:
+        return self.mock_reader(self.relative_path)
+
+    def get_relative_path(self) -> str:
+        return self.relative_path
+
+    def is_glob_supported(self):
+        return True
+
+
+class MockFileCollection(FileCollection):
+    def __init__(self, file_paths, mock_reader: Callable[[str], str] = mock_reader_always_match):
+        super().__init__([MockFileProxy(path, mock_reader) for path in file_paths])
+
+
+class TestMultiFileContentReplacer:
+    FILES = [
+        ("a/first.py", "import old_pkg\n\nvalue = old_pkg.compute()\n"),
+        ("b/second.py", "import old_pkg\nother = 1\n"),
+    ]
+
+    def test_find_occurrences_order_ids_and_lines(self):
+        replacer = MultiFileContentReplacer(mode="literal")
+        occurrences = replacer.find_occurrences(self.FILES, "old_pkg", "new_pkg")
+        assert [o.relative_path for o in occurrences] == ["a/first.py", "a/first.py", "b/second.py"]
+        assert [o.index_in_file for o in occurrences] == [0, 1, 0]
+        assert [o.start_line for o in occurrences] == [0, 2, 0]
+        for o in occurrences:
+            assert o.matched_text == "old_pkg"
+            assert o.replacement == "new_pkg"
+            assert MultiFileContentReplacer.OCCURRENCE_ID_REGEX.match(o.occurrence_id)
+        # unchanged file contents yield the same ids across calls
+        again = replacer.find_occurrences(self.FILES, "old_pkg", "new_pkg")
+        assert [o.occurrence_id for o in again] == [o.occurrence_id for o in occurrences]
+
+    def test_regex_backreference_expansion(self):
+        replacer = MultiFileContentReplacer(mode="regex")
+        files = [("f.txt", "name=alpha\nname=beta\n")]
+        occurrences = replacer.find_occurrences(files, r"name=(\w+)", "id=$!1")
+        assert [o.replacement for o in occurrences] == ["id=alpha", "id=beta"]
+
+    def test_apply_to_content_selected_subset(self):
+        replacer = MultiFileContentReplacer(mode="literal")
+        path, content = self.FILES[0]
+        occurrences = [o for o in replacer.find_occurrences(self.FILES, "old_pkg", "new_pkg") if o.relative_path == path]
+        updated = replacer.apply_to_content(content, occurrences[1:])  # only the second occurrence
+        assert updated == "import old_pkg\n\nvalue = new_pkg.compute()\n"
+        updated_all = replacer.apply_to_content(content, occurrences)
+        assert updated_all == "import new_pkg\n\nvalue = new_pkg.compute()\n"
+
+    def test_ambiguous_multiline_match_is_flagged(self):
+        replacer = MultiFileContentReplacer(mode="regex")
+        files = [("f.txt", "start A\nstart B\nend\n")]
+        occurrences = replacer.find_occurrences(files, r"start.*?end", "X")
+        assert len(occurrences) == 1
+        assert occurrences[0].is_ambiguous
+
+    def test_render_occurrence_diff_minimal_lines(self):
+        replacer = MultiFileContentReplacer(mode="literal")
+        path, content = self.FILES[0]
+        occ = replacer.find_occurrences([(path, content)], "old_pkg.compute()", "new_pkg.compute_all()")[0]
+        diff = replacer.render_occurrence_diff(occ, content)
+        assert occ.occurrence_id in diff
+        assert "line 2" in diff
+        assert "    - value = old_pkg.compute()" in diff
+        assert "    + value = new_pkg.compute_all()" in diff
+        # only the affected line is shown, not the whole file
+        assert "import old_pkg" not in diff
+
+    def test_apply_to_content_rejects_drifted_occurrence(self):
+        replacer = MultiFileContentReplacer(mode="literal")
+        path, content = self.FILES[0]
+        occ = replacer.find_occurrences([(path, content)], "old_pkg", "new_pkg")[0]
+        with pytest.raises(AssertionError):
+            replacer.apply_to_content("completely different content", [occ])
+
+    def test_match_consuming_a_line_break_ends_on_the_matched_line(self):
+        replacer = MultiFileContentReplacer(mode="literal")
+        occ = replacer.find_occurrences([("f.txt", "alpha\nbeta\ngamma\n")], "beta\n", "BETA\n")[0]
+        assert (occ.start_line, occ.end_line) == (1, 1)
+
+    def test_render_occurrence_diff_omits_the_line_after_a_line_break_match(self):
+        replacer = MultiFileContentReplacer(mode="literal")
+        content = "alpha\nbeta\ngamma\n"
+        occ = replacer.find_occurrences([("f.txt", content)], "beta\n", "BETA\n")[0]
+        diff = replacer.render_occurrence_diff(occ, content)
+        assert f"[{occ.occurrence_id}] line 1" in diff
+        assert diff.endswith("    - beta\n    + BETA")
+
+    def test_render_occurrence_diff_shows_lines_added_by_the_replacement(self):
+        replacer = MultiFileContentReplacer(mode="literal")
+        content = "alpha\nbeta\ngamma\n"
+        occ = replacer.find_occurrences([("f.txt", content)], "beta\n", "one\ntwo\n")[0]
+        diff = replacer.render_occurrence_diff(occ, content)
+        assert diff.endswith("    - beta\n    + one\n    + two")
+        assert "gamma" not in diff
+
+    def test_render_occurrence_diff_shows_lines_merged_by_a_removed_line_break(self):
+        replacer = MultiFileContentReplacer(mode="literal")
+        content = "alpha\nbeta\ngamma\n"
+        occ = replacer.find_occurrences([("f.txt", content)], "beta\n", "BETA")[0]
+        diff = replacer.render_occurrence_diff(occ, content)
+        assert f"[{occ.occurrence_id}] line 1" in diff
+        assert diff.endswith("    - beta\n    - gamma\n    + BETAgamma")
+
+    def test_render_occurrence_diff_omits_the_files_final_line_break_at_the_end_of_the_file(self):
+        replacer = MultiFileContentReplacer(mode="literal")
+        content = "alpha\nbeta\n"  # a single line "beta", terminated by the file's final line break
+        occ = replacer.find_occurrences([("f.txt", content)], "beta\n", "BETA")[0]
+        diff = replacer.render_occurrence_diff(occ, content)
+        assert f"[{occ.occurrence_id}] line 1" in diff
+        assert diff.endswith("    - beta\n    + BETA")
+
+    def test_render_occurrence_diff_omits_the_final_line_break_of_a_replacement_ending_the_file(self):
+        replacer = MultiFileContentReplacer(mode="literal")
+        content = "alpha\nbeta\n"
+        occ = replacer.find_occurrences([("f.txt", content)], "beta\n", "BETA\n")[0]
+        diff = replacer.render_occurrence_diff(occ, content)
+        assert diff.endswith("    - beta\n    + BETA")
+
+    def test_render_occurrence_diff_omits_the_final_line_break_of_a_multi_line_match_at_the_end_of_the_file(self):
+        replacer = MultiFileContentReplacer(mode="literal")
+        content = "alpha\nbeta\ngamma\n"
+        split_occ = replacer.find_occurrences([("f.txt", content)], "beta\ngamma\n", "BETA\nGAMMA")[0]
+        diff = replacer.render_occurrence_diff(split_occ, content)
+        assert f"[{split_occ.occurrence_id}] lines 1-2" in diff
+        assert diff.endswith("    - beta\n    - gamma\n    + BETA\n    + GAMMA")
+        merged_occ = replacer.find_occurrences([("f.txt", content)], "beta\ngamma\n", "BETA")[0]
+        assert replacer.render_occurrence_diff(merged_occ, content).endswith("    - beta\n    - gamma\n    + BETA")
+
+    def test_render_occurrence_diff_omits_the_final_line_break_in_a_crlf_file(self):
+        replacer = MultiFileContentReplacer(mode="literal")
+        content = "alpha\r\nbeta\r\n"
+        occ = replacer.find_occurrences([("f.txt", content)], "beta\r\n", "BETA")[0]
+        diff = replacer.render_occurrence_diff(occ, content)
+        assert diff.endswith("    - beta\r\n    + BETA")
+
+    def test_render_occurrence_diff_keeps_a_blank_last_line_that_the_match_consumes(self):
+        replacer = MultiFileContentReplacer(mode="literal")
+        content = "alpha\nbeta\n\n"  # lines "beta" and an empty one, both consumed by the match
+        occ = replacer.find_occurrences([("f.txt", content)], "beta\n\n", "BETA")[0]
+        diff = replacer.render_occurrence_diff(occ, content)
+        assert f"[{occ.occurrence_id}] lines 1-2" in diff
+        assert diff.endswith("    - beta\n    - \n    + BETA")
+
+    def test_render_occurrence_diff_for_a_match_spanning_the_whole_newline_terminated_file(self):
+        replacer = MultiFileContentReplacer(mode="literal")
+        content = "alpha\nbeta\n"
+        occ = replacer.find_occurrences([("f.txt", content)], "alpha\nbeta\n", "X")[0]
+        diff = replacer.render_occurrence_diff(occ, content)
+        assert diff.endswith("    - alpha\n    - beta\n    + X")
+        blank_occ = replacer.find_occurrences([("f.txt", "\n")], "\n", "X")[0]
+        assert replacer.render_occurrence_diff(blank_occ, "\n").endswith("    - \n    + X")
+
+
+class TestBackreferenceExpansion:
+    """$!N backreferences in regex-mode replacements refer to matched groups. A group that
+    exists but did not participate in the match (e.g. inside an optional construct that was
+    skipped) must expand to the empty string; a reference to a group that the search
+    expression does not define at all must fail with an error naming the problem instead of
+    a raw IndexError. Literal mode has no backreference expansion at all: the replacement is
+    used verbatim (observed in practice when an agent tried to document the $!N convention
+    itself and the literal-mode replacement crashed instead of writing the text).
+    """
+
+    def test_unmatched_group_expands_to_empty_string(self):
+        replacer = ContentReplacer(mode="regex", allow_multiple_occurrences=False)
+        needle = r"EA_INPUT(?:\((\w*)\))?"
+
+        # the group participated and captured an empty string (empty parentheses)
+        assert replacer.replace("EA_INPUT()\n", needle, r"EA_INPUT$!1(...)") == "EA_INPUT(...)\n"
+        # the group did not participate at all (no parentheses)
+        assert replacer.replace("EA_INPUT\n", needle, r"EA_INPUT$!1(...)") == "EA_INPUT(...)\n"
+
+    def test_matched_group_expands_to_its_value(self):
+        replacer = ContentReplacer(mode="regex", allow_multiple_occurrences=False)
+        assert replacer.replace("id=alpha", r"id=(\w+)", r"[$!1]") == "[alpha]"
+
+    def test_nonexistent_group_reference_raises_clear_error(self):
+        replacer = ContentReplacer(mode="regex", allow_multiple_occurrences=False)
+        with pytest.raises(ValueError, match="does not exist"):
+            replacer.replace("id=alpha", r"id=(\w+)", r"[$!2]")
+
+    def test_literal_mode_repl_is_verbatim(self):
+        """Literal mode has no groups at all and no backreference expansion: a replacement
+        containing $!N sequences is written as-is instead of failing with a backreference error.
+        """
+        replacer = ContentReplacer(mode="literal", allow_multiple_occurrences=False)
+        assert replacer.replace("literal needle", "literal needle", "$!1 stuff $!2") == "$!1 stuff $!2"
+
+    def test_multi_file_replacer_expands_unmatched_group_to_empty_string(self):
+        replacer = MultiFileContentReplacer(mode="regex")
+        files = [("f.txt", "EA_INPUT\n")]
+        occurrences = replacer.find_occurrences(files, r"EA_INPUT(?:\((\w*)\))?", r"EA_INPUT$!1(...)")
+        assert [o.replacement for o in occurrences] == ["EA_INPUT(...)"]
+
+    def test_multi_file_replacer_nonexistent_group_reference_raises_clear_error(self):
+        replacer = MultiFileContentReplacer(mode="regex")
+        files = [("f.txt", "id=alpha\n")]
+        with pytest.raises(ValueError, match="does not exist"):
+            replacer.find_occurrences(files, r"id=(\w+)", r"[$!2]")

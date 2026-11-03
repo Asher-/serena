@@ -5,6 +5,8 @@ prompts:
   connection_prompt: |
     CRITICAL: Before starting to work on a coding task, call the `initial_instructions` tool to read the 'Serena Instructions Manual'.
   system_prompt: |
+    IMPORTANT — call `activate_project` before any other Serena tool. Every MCP session begins with NO active project bound. Until you call `activate_project(<absolute path of the project root>)`, every project-requiring Serena tool will fail-closed with: "Error: No active project for this MCP session." Pass the absolute path you know — typically the project root you are working in; if you do not know it, your current working directory is a sensible default. The Serena daemon auto-registers unknown projects on first activation, so a fresh path is fine.
+
     You have semantic coding functions/tools that you rely on heavily. Work resource-efficiently: don't read or
     generate content the task doesn't need.
 
@@ -19,7 +21,19 @@ prompts:
     {% endif %}
 
     {% if 'ToolMarkerSymbolicRead' in available_markers %}
-    Symbols are identified by their `name_path` and `relative_path`.
+    Symbols are identified by a `name_path` within a source file (e.g. `MyClass/my_method`) and an optional `relative_path`.
+    {% if 'cursor_start' in available_tools %}
+    The cursor is the primary interface for symbol-level activity: place a cursor at a symbol with `cursor_start`
+    (exact-match, unique) or `cursor_find` (pattern / substring search), then navigate along LSP graph edges with
+    `cursor_move` / `cursor_look` / `cursor_configure` (edge types: contains, references, referenced-by, calls,
+    called-by, inherits, inherited-by). Use `cursor_overview` to list top-level symbols in a file.
+    A new cursor renders only its position; pass `edge_types=[...]` to `cursor_start` / `cursor_find`, or call
+    `cursor_configure` afterwards, to opt the cursor into specific neighbor edges. Resolving `references` /
+    `referenced-by` / `calls` is a per-symbol LSP cost that can run minutes on large indexed projects, so ask
+    only for the edges you actually need at the current step and expand or contract later.
+    You only read symbol bodies when you need to — set `include_body=True` on `cursor_configure` (or `cursor_find`)
+    for the current position only.
+    {% elif 'find_symbol' in available_tools %}
     You can get an overview of the symbols in a file by using `{{ tool_names['get_symbols_overview'] }}`, or search for a specific symbol with `{{ tool_names['find_symbol'] }}`.
     You only read the bodies of symbols when you need to (e.g. if you want to fully understand or edit it).
     For example, if you are working with Python code and already know that you need to read the body of the constructor of the class Foo, you can directly
@@ -27,6 +41,7 @@ prompts:
     you can use `{{ tool_names['find_symbol'] }}` with name path pattern `Foo`, `include_body=False` and `depth=1` to get all (top-level) members of `Foo` before proceeding
     to read the desired methods with `include_body=True`.
     You can understand relationships between symbols by using `{{ tool_names['find_referencing_symbols'] }}`.
+    {% endif %}
     {% endif %}
     
     {% if 'read_memory' in available_tools -%}

@@ -84,7 +84,12 @@ _NON_SYMBOLIC_SERENA_TOOL_NAME_SUBSTRINGS = frozenset(
 
 
 def _is_serena_symbolic_tool_name(tool_name: str) -> bool:
-    return "serena" in tool_name and not any(substring in tool_name for substring in _NON_SYMBOLIC_SERENA_TOOL_NAME_SUBSTRINGS)
+    if "serena" not in tool_name:
+        return False
+    # every cursor tool works on symbols, whatever else its name contains (e.g. ``cursor_configure``)
+    if "cursor_" in tool_name:
+        return True
+    return not any(substring in tool_name for substring in _NON_SYMBOLIC_SERENA_TOOL_NAME_SUBSTRINGS)
 
 
 class PreToolUseHook(Hook, ABC):
@@ -460,8 +465,17 @@ class PreToolUseRemindAboutSymbolicToolsHook(PreToolUseHook):
         )
     )
 
-    def __init__(self, client: HookClient):
+    _count_reads: bool = True
+    """whether reads of source files count towards a burst"""
+
+    def __init__(self, client: HookClient, count_reads: bool = True):
+        """
+        :param client: the client that triggered the hook
+        :param count_reads: whether reads of source files count towards a burst; when False, reads are neutral:
+            they neither increment nor reset a counter, and only grep calls are counted
+        """
         super().__init__(client)
+        self._count_reads = count_reads
         self._tool_call_counter = self.ToolUseCounter.load(self)
 
         # extract the command line of a shell-command tool call (stays ``None`` for other calls)
@@ -542,8 +556,8 @@ class PreToolUseRemindAboutSymbolicToolsHook(PreToolUseHook):
         return self.is_read_call()
 
     def is_read_code_file_call(self) -> bool:
-        """:return: whether the tool call reads a source-like file target."""
-        if not self.is_read_file_call():
+        """:return: whether the tool call reads a source-like file target, and this hook counts such reads."""
+        if not self._count_reads or not self.is_read_file_call():
             return False
 
         if self._file_path is not None:
@@ -833,11 +847,11 @@ class HookCommands(AutoRegisteringGroup):
     @staticmethod
     @click.command(
         "remind",
-        help="Set this as hook at PreToolUse to remind the agent to use Serena's tools instead of overrelying on read_file and grep",
+        help="Set this as hook at PreToolUse to remind the agent to use Serena's tools instead of overrelying on grep",
     )
     @_client_option
     def remind(client: str) -> None:
-        PreToolUseRemindAboutSymbolicToolsHook(HookClient(client)).execute()
+        PreToolUseRemindAboutSymbolicToolsHook(HookClient(client), count_reads=False).execute()
 
     @staticmethod
     @click.command(

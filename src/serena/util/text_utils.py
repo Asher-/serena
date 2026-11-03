@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+import fnmatch
 import hashlib
 import json
 import logging
+import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -21,7 +23,6 @@ if TYPE_CHECKING:
     from serena.project import Project
 from serena.constants import DEFAULT_SOURCE_FILE_ENCODING
 from serena.util.line_numbers import to_display_line
-from solidlsp.ls_utils import TextUtils
 
 log = logging.getLogger(__name__)
 
@@ -349,28 +350,159 @@ class GlobMatcher(ToStringMixin):
         return any(regex.match(path) for regex in self._regex_patterns)
 
 
+def default_file_reader(file_path: str, encoding: str = DEFAULT_SOURCE_FILE_ENCODING) -> str:
+    """Reads using the given encoding (UTF-8 by default)."""
+    with open(file_path, encoding=encoding) as f:
+        return f.read()
+
+
+def expand_braces(pattern: str) -> list[str]:
+    """
+    Expands brace patterns in a glob string.
+    For example, "**/*.{js,jsx,ts,tsx}" becomes ["**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx"].
+    Handles multiple brace sets as well.
+    """
+    patterns = [pattern]
+    while any("{" in p for p in patterns):
+        new_patterns = []
+        for p in patterns:
+            match = re.search(r"\{([^{}]+)\}", p)
+            if match:
+                prefix = p[: match.start()]
+                suffix = p[match.end() :]
+                options = match.group(1).split(",")
+                for option in options:
+                    new_patterns.append(f"{prefix}{option}{suffix}")
+            else:
+                new_patterns.append(p)
+        patterns = new_patterns
+    return patterns
+
+
+def glob_match(pattern: str, path: str) -> bool:
+    """
+    Match a file path against a glob pattern.
+
+    Supports standard glob patterns:
+    - * matches any number of characters except /
+    - ** matches any number of directories (zero or more)
+    - ? matches a single character except /
+    - [seq] matches any character in seq
+
+    Supports brace expansion:
+    - {a,b,c} expands to multiple patterns (including nesting)
+
+    Unsupported patterns:
+    - Bash extended glob features are unavailable in Python's fnmatch
+    - Extended globs like !(), ?(), +(), *(), @() are not supported
+
+    :param pattern: Glob pattern (e.g., 'src/**/*.py', '**agent.py')
+    :param path: File path to match against
+    :return: True if path matches pattern
+    """
+    pattern = pattern.replace("\\", "/")  # Normalize backslashes to forward slashes
+    path = path.replace("\\", "/")  # Normalize path backslashes to forward slashes
+
+    # Handle ** patterns that should match zero or more directories
+    if "**" in pattern:
+        # Method 1: Standard fnmatch (matches one or more directories)
+        regex1 = fnmatch.translate(pattern)
+        if re.match(regex1, path):
+            return True
+
+        # Method 2: Handle zero-directory case by removing /** entirely
+        # Convert "src/**/test.py" to "src/test.py"
+        if "/**/" in pattern:
+            zero_dir_pattern = pattern.replace("/**/", "/")
+            regex2 = fnmatch.translate(zero_dir_pattern)
+            if re.match(regex2, path):
+                return True
+
+        # Method 3: Handle leading ** case by removing **/
+        # Convert "**/test.py" to "test.py"
+        if pattern.startswith("**/"):
+            zero_dir_pattern = pattern[3:]  # Remove "**/"
+            regex3 = fnmatch.translate(zero_dir_pattern)
+            if re.match(regex3, path):
+                return True
+
+        return False
+    else:
+        # Simple pattern without **, use fnmatch directly
+        return fnmatch.fnmatch(path, pattern)
+
+
+class _ReadFileProxy(FileProxy):
+    """A file named by its path relative to a root, read by a given reader."""
+
+    def __init__(self, relative_path: str, root_path: str, file_reader: Callable[[str], str]):
+        self._relative_path = relative_path
+        self._root_path = root_path
+        self._file_reader = file_reader
+
+    def get_contents(self) -> str:
+        return self._file_reader(os.path.join(self._root_path, self._relative_path))
+
+    def get_relative_path(self) -> str:
+        return self._relative_path
+
+    def is_glob_supported(self) -> bool:
+        return True
+
+
+def _filter_glob(file_collection: FileCollection, paths_include_glob: str | None, paths_exclude_glob: str | None) -> FileCollection:
+    """
+    :return: the files of the collection whose relative paths the include glob matches and the exclude glob does not,
+        each matched by :func:`glob_match`; a file whose path does not support globbing is kept
+    """
+    include_patterns = expand_braces(paths_include_glob) if paths_include_glob else None
+    exclude_patterns = expand_braces(paths_exclude_glob) if paths_exclude_glob else None
+    filtered = []
+    for file_proxy in file_collection:
+        if file_proxy.is_glob_supported():
+            path = file_proxy.get_relative_path()
+            if include_patterns and not any(glob_match(p, path) for p in include_patterns):
+                log.debug(f"Skipping {path}: does not match include pattern {paths_include_glob}")
+                continue
+            if exclude_patterns and any(glob_match(p, path) for p in exclude_patterns):
+                log.debug(f"Skipping {path}: matches exclude pattern {paths_exclude_glob}")
+                continue
+        filtered.append(file_proxy)
+    return FileCollection(filtered)
+
+
 def search_files(
-    file_collection: FileCollection,
-    pattern: str,
+    file_collection: FileCollection | None = None,
+    pattern: str = "",
     context_lines_before: int = 0,
     context_lines_after: int = 0,
     paths_include_glob: str | None = None,
     paths_exclude_glob: str | None = None,
     multiline: bool = True,
+    relative_file_paths: list[str] | None = None,
+    root_path: str = "",
+    file_reader: Callable[[str], str] = default_file_reader,
 ) -> list[MatchedConsecutiveLines]:
     """
-    Search for a pattern in a list of files.
+    Search for a pattern in a list of files, given either as a collection or as relative paths.
 
-    :param file_collection: the collection of files to search (will be optionally filtered by glob patterns)
+    :param file_collection: the collection of files to search (will be optionally filtered by glob patterns);
+        None to search ``relative_file_paths`` instead
     :param pattern: pattern to search for
     :param context_lines_before: number of context lines to include before matches
     :param context_lines_after: number of context lines to include after matches
     :param paths_include_glob: optional glob pattern to include files from the list
     :param paths_exclude_glob: optional glob pattern to exclude files from the list
     :param multiline: whether to apply multi-line matching, enabling the flags re.DOTALL and re.MULTILINE (default: True)
+    :param relative_file_paths: the relative paths of the files to search, when no collection is given
+    :param root_path: the root path to resolve ``relative_file_paths`` against (by default, the current working directory)
+    :param file_reader: the function reading a file of ``relative_file_paths``; a file it cannot read is skipped
     :return: list of MatchedConsecutiveLines objects
     :raises ValueError: if the pattern is not a valid regular expression
     """
+    if file_collection is None:
+        file_collection = FileCollection([_ReadFileProxy(path, root_path, file_reader) for path in relative_file_paths or []])
+
     # Validate the pattern once, before the per-file processing below: a pattern that does not
     # compile is a defect in the request, not a per-file read failure, so it must not be turned
     # into the empty result that reads like "the pattern occurs nowhere" (see `search_text`,
@@ -381,7 +513,7 @@ def search_files(
         raise ValueError(f"Invalid regular expression {pattern!r}: {e}") from e
 
     # apply glob filter
-    file_collection = file_collection.filter_glob(paths_include_glob=paths_include_glob, paths_exclude_glob=paths_exclude_glob)
+    file_collection = _filter_glob(file_collection, paths_include_glob, paths_exclude_glob)
     log.info(f"Processing {len(file_collection)} files.")
 
     def process_single_file(file_proxy: FileProxy) -> dict[str, Any]:

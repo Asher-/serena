@@ -63,8 +63,8 @@ def _python_manager(factory: _GatedLanguageServerFactory) -> LanguageServerManag
     :param factory: the factory double the manager creates its servers with
     :return: a manager holding one running Python server, ``factory.created[0]``
     """
-    manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON], factory)
-    assert factory.created and manager.get_active_languages() == [LanguageServerId.PYTHON]
+    manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON], factory, project=None)
+    assert factory.created and manager.get_active_language_server_ids() == [LanguageServerId.PYTHON]
     return manager
 
 

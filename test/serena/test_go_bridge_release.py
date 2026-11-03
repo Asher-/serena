@@ -17,8 +17,9 @@ import psutil
 import pytest
 
 from serena.agent import _SESSION_KEY_VAR, SerenaAgent
-from serena.config.serena_config import LanguageBackend, ProjectConfig, SerenaConfig
+from serena.config.serena_config import ProjectConfig, SerenaConfig
 from serena.cursor import StructuralCursorState
+from serena.language_backend import BuiltinLanguageBackend
 from serena.ls_manager import LanguageServerManager
 from serena.project import Project
 from solidlsp.ls_config import LanguageServerId
@@ -44,7 +45,7 @@ def go_project(agent: SerenaAgent, tmp_path: Path) -> Project:
         language server
     """
     (tmp_path / _GO_FILE).write_text("package main\n\nfunc Hello() {}\n", encoding="utf-8")
-    project_config = ProjectConfig(project_name="go_bridge_test", languages=[LanguageServerId.GO], language_backend=LanguageBackend.LSP)
+    project_config = ProjectConfig(project_name="go_bridge_test", language_servers=[LanguageServerId.GO], language_backend=BuiltinLanguageBackend.LSP.get_instance())
     project = Project(project_root=str(tmp_path), project_config=project_config, serena_config=agent.serena_config)
     project.language_server_manager = MagicMock(spec=LanguageServerManager)
     return project

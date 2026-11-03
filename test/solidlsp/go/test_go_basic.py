@@ -4,10 +4,13 @@ from pathlib import Path
 import pytest
 
 from serena.symbol import LanguageServerSymbol
+from serena.util.text_utils import find_text_coordinates
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
+from solidlsp.ls_types import SymbolKind
 from solidlsp.ls_utils import SymbolUtils
-from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name, request_all_symbols
+from test.conftest import get_repo_path
+from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name, read_repo_file, request_all_symbols
 
 
 @pytest.mark.go
@@ -69,6 +72,102 @@ class TestGoLanguageServer:
             hits = [match for root in roots for match in LanguageServerSymbol(root).find(name)]
             assert hits, f"cursor_find must resolve bare name '{name}' that cursor_overview lists (find-vs-overview parity)"
 
+    @pytest.mark.parametrize("language_server", [LanguageServerId.GO], indirect=True)
+    def test_type_var_const_body_includes_leading_keyword(self, language_server: SolidLanguageServer) -> None:
+        """
+        Single ``type``/``var``/``const`` declarations must expose a body and replacement range that
+        include the leading keyword, just like ``func`` declarations do.
+
+        Regression test for gopls reporting the symbol range of such declarations starting at the
+        declared identifier (after the keyword) rather than at the keyword. That asymmetry made
+        replace_symbol_body drop the keyword from the body and replacement range, so a natural
+        keyword-inclusive round-trip edit corrupted the file (e.g. ``type Foo`` -> ``type type Foo``).
+        """
+        all_symbols, _ = language_server.request_document_symbols("symbol_body.go").get_all_symbols_and_roots()
+        symbols_by_name = {sym.get("name"): sym for sym in all_symbols}
+
+        # single declarations: body starts with the keyword, the range start moves to the keyword
+        # (column 0 here), and the selection range still points at the identifier after the keyword
+        expected_keyword_by_name = {
+            "BodyStruct": "type ",
+            "NamedInt": "type ",
+            "AliasInt": "type ",
+            "GlobalCounter": "var ",
+            "MaxItems": "const ",
+        }
+        for name, keyword in expected_keyword_by_name.items():
+            sym = symbols_by_name.get(name)
+            assert sym is not None, f"{name} not found in symbol_body.go"
+            body = sym["body"].get_text()
+            assert body.startswith(keyword), f"Expected body of {name} to start with {keyword!r}, got {body[:24]!r}"
+            assert sym["location"]["range"]["start"]["character"] == 0, f"Expected {name} body range to start at the keyword (col 0)"
+            assert sym["selectionRange"]["start"]["character"] > 0, f"Expected {name} selectionRange to point at the identifier"
+
+        # grouped declarations keep the keyword on a separate line (e.g. ``var ( ... )``), so their
+        # bodies must NOT include it and their ranges must be left untouched
+        for name in ("GroupedA", "GroupedB"):
+            sym = symbols_by_name.get(name)
+            assert sym is not None, f"{name} not found in symbol_body.go"
+            body = sym["body"].get_text()
+            assert body.startswith(name), f"Expected grouped var {name} body to start with the identifier, got {body[:24]!r}"
+            assert not body.startswith("var"), f"Grouped var {name} body must not include the 'var' keyword"
+
+    @pytest.mark.parametrize("language_server", [LanguageServerId.GO], indirect=True)
+    def test_request_containing_symbol_const_group_member(self, language_server: SolidLanguageServer) -> None:
+        """A reference inside a ``const`` group must be attributed to the enclosing constant."""
+        file_path = os.path.join("containment_sample.go")
+        file_content = read_repo_file(language_server, file_path)
+        coords = find_text_coordinates(file_content, r"SevLow (Severity) = iota")
+        assert coords is not None, "Could not find the Severity reference in the const group"
+        containing_symbol = language_server.request_containing_symbol(file_path, coords.line, coords.col)
+        assert containing_symbol is not None, "Expected a containing symbol for a reference inside a const group"
+        assert containing_symbol["name"] == "SevLow"
+        assert containing_symbol["kind"] == SymbolKind.Constant
+
+    @pytest.mark.parametrize("language_server", [LanguageServerId.GO], indirect=True)
+    def test_request_containing_symbol_struct_field(self, language_server: SolidLanguageServer) -> None:
+        """A reference in a struct field declaration must be attributed to the enclosing struct."""
+        file_path = os.path.join("containment_sample.go")
+        file_content = read_repo_file(language_server, file_path)
+        coords = find_text_coordinates(file_content, r"Level (Severity)")
+        assert coords is not None, "Could not find the Severity reference in the struct field"
+        containing_symbol = language_server.request_containing_symbol(file_path, coords.line, coords.col)
+        assert containing_symbol is not None, "Expected a containing symbol for a reference inside a struct body"
+        assert containing_symbol["name"] == "Alert"
+        assert containing_symbol["kind"] == SymbolKind.Struct
+
+    @pytest.mark.parametrize("language_server", [LanguageServerId.GO], indirect=True)
+    def test_request_containing_symbol_interface_method(self, language_server: SolidLanguageServer) -> None:
+        """A reference in an interface method signature must be attributed to the enclosing interface."""
+        file_path = os.path.join("containment_sample.go")
+        file_content = read_repo_file(language_server, file_path)
+        coords = find_text_coordinates(file_content, r"Notify\(level (Severity)\)")
+        assert coords is not None, "Could not find the Severity reference in the interface method"
+        containing_symbol = language_server.request_containing_symbol(file_path, coords.line, coords.col)
+        assert containing_symbol is not None, "Expected a containing symbol for a reference inside an interface body"
+        assert containing_symbol["name"] == "Notifier"
+        assert containing_symbol["kind"] == SymbolKind.Interface
+
+    @pytest.mark.parametrize("language_server", [LanguageServerId.GO], indirect=True)
+    def test_request_referencing_symbols_attributes_containers(self, language_server: SolidLanguageServer) -> None:
+        """References to a type used in a const group, a struct field and an interface method must
+        be attributed to the constant, the struct and the interface respectively, not to the file.
+        """
+        file_path = os.path.join("containment_sample.go")
+        all_symbols, _ = language_server.request_document_symbols(file_path).get_all_symbols_and_roots()
+        severity_symbol = next((sym for sym in all_symbols if sym.get("name") == "Severity"), None)
+        assert severity_symbol is not None, "Could not find the 'Severity' type symbol in containment_sample.go"
+        sel_start = severity_symbol["selectionRange"]["start"]
+        ref_symbols = [
+            ref.symbol for ref in language_server.request_referencing_symbols(file_path, sel_start["line"], sel_start["character"])
+        ]
+        assert ref_symbols, "Expected references to the Severity type"
+        ref_names = {ref["name"] for ref in ref_symbols}
+        assert "SevLow" in ref_names
+        assert "Alert" in ref_names
+        assert "Notifier" in ref_names
+        assert all(ref["kind"] != SymbolKind.File for ref in ref_symbols), f"File-level fallback attribution in {ref_names}"
+
 
 def _filter_symbols_by_name_in_repo(symbols: list | None, target_name: str, repo_name: str = "test_repo") -> list:
     """Filter workspace symbols to exact name matches in the test repo."""
@@ -84,8 +183,6 @@ class TestGoBuildTags:
     def _copy_go_fixture(self, tmp_path: Path) -> Path:
         """Copy Go fixture repo into tmp_path."""
         import shutil
-
-        from test.conftest import get_repo_path
 
         fixture_path = get_repo_path(LanguageServerId.GO)
         target_path = tmp_path / "test_repo"

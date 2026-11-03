@@ -185,7 +185,7 @@ class _LanguageAddingProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
 
         :return: a fixed marker, once the addition has returned
         """
-        self.agent.add_language(LanguageServerId.TYPESCRIPT)
+        self.agent.add_language_server(LanguageServerId.TYPESCRIPT)
         return "added"
 
 
@@ -204,9 +204,9 @@ class _LanguageRemovingProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
         """
         Removes Python from the active project, then reads the removals made so far, still inside the call.
 
-        :return: ``removed`` if the removal ran before ``remove_language`` returned, ``pending`` otherwise
+        :return: ``removed`` if the removal ran before ``remove_language_server`` returned, ``pending`` otherwise
         """
-        self.agent.remove_language(LanguageServerId.PYTHON)
+        self.agent.remove_language_server(LanguageServerId.PYTHON)
         return "removed" if self._removals == [LanguageServerId.PYTHON] else "pending"
 
 
@@ -298,7 +298,7 @@ def _project(root: Path, agent: SerenaAgent) -> Project:
     """
     return Project(
         project_root=str(root),
-        project_config=ProjectConfig(project_name=root.name, languages=[LanguageServerId.PYTHON]),
+        project_config=ProjectConfig(project_name=root.name, language_servers=[LanguageServerId.PYTHON]),
         serena_config=agent.serena_config,
     )
 
@@ -480,7 +480,7 @@ def test_an_activation_outside_any_session_queues_language_server_startup_on_the
     agent._activate_project(project, update_active_modes=False, update_active_tools=False, record_explicit=False)
     project._lsm_ready_event.wait()
 
-    assert len(started_on) == 1 and started_on[0].endswith(":init_language_server_manager"), started_on
+    assert len(started_on) == 1 and started_on[0].endswith(":init_project_services"), started_on
 
 
 def test_an_mcp_call_with_no_derivable_session_is_refused_rather_than_run_on_the_daemon_wide_queue(
@@ -669,7 +669,7 @@ def test_a_language_addition_within_a_session_call_completes_while_the_daemon_wi
     agent.serena_config.tool_timeout = 10.0
     project = _bind_project(agent, "session-a", tmp_path)
     additions: list[LanguageServerId] = []
-    monkeypatch.setattr(project, "add_language", additions.append)
+    monkeypatch.setattr(project, "add_language_server", additions.append)
     adding = _activated(_LanguageAddingProbeTool(agent), monkeypatch)
     agent.issue_task(gate.hold, name="DaemonWideHold")
     gate.entered.wait()
@@ -685,14 +685,14 @@ def test_a_language_removal_within_a_session_call_has_completed_when_the_request
     agent: SerenaAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    A language removal requested inside a call of session A has completed when ``remove_language`` returns, while that
+    A language removal requested inside a call of session A has completed when ``remove_language_server`` returns, while that
     call still runs. The failing shape issues the removal on session A's own queue, behind the very call that requested
     it, so the call reads the removal as pending.
     """
     agent.serena_config.tool_timeout = 10.0
     project = _bind_project(agent, "session-a", tmp_path)
     removals: list[LanguageServerId] = []
-    monkeypatch.setattr(project, "remove_language", removals.append)
+    monkeypatch.setattr(project, "remove_language_server", removals.append)
     removing = _activated(_LanguageRemovingProbeTool(agent, removals), monkeypatch)
 
     result = removing.apply_ex(mcp_ctx=_ForwardedMcpContext.for_session("session-a"))
@@ -755,8 +755,8 @@ def test_a_language_addition_outside_any_session_runs_as_the_running_task_of_the
 ) -> None:
     """
     A language addition requested outside any session, as the dashboard and the CLI request one, runs as the running
-    task of the daemon-wide queue and has completed when ``add_language`` returns: the addition reads the daemon-wide
-    queue's running tasks while it runs, and that reading is present once ``add_language`` has returned.
+    task of the daemon-wide queue and has completed when ``add_language_server`` returns: the addition reads the daemon-wide
+    queue's running tasks while it runs, and that reading is present once ``add_language_server`` has returned.
     """
     project = _project(tmp_path, agent)
     agent._active_project = project
@@ -766,9 +766,9 @@ def test_a_language_addition_outside_any_session_runs_as_the_running_task_of_the
         running = [task.name.split(":", 1)[1] for task in agent._task_executor.get_current_tasks() if task.is_running]
         running_during_addition.append(running)
 
-    monkeypatch.setattr(project, "add_language", add_language)
+    monkeypatch.setattr(project, "add_language_server", add_language)
 
-    agent.add_language(LanguageServerId.TYPESCRIPT)
+    agent.add_language_server(LanguageServerId.TYPESCRIPT)
 
     assert running_during_addition == [["AddLanguage:typescript"]], running_during_addition
 

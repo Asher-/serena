@@ -455,7 +455,7 @@ class FsApi(FacadeApi):
 
         # run the regex pass, collecting the links not entered
         skipped_links: list[str] = []
-        matches = project.search_source_files_for_pattern(
+        matches = project.search_project_files_for_pattern(
             pattern=substring_pattern,
             relative_path=relative_path,
             context_lines_before=context_lines_before,

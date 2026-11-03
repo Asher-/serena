@@ -37,7 +37,7 @@ def _build_agent(language: LanguageServerId, project_name: str) -> SerenaAgent:
         project_root=str(repo_path),
         project_config=ProjectConfig(
             project_name=project_name,
-            languages=[language],
+            language_servers=[language],
             ignored_paths=[],
             excluded_tools=[],
             read_only=False,

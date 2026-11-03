@@ -779,7 +779,6 @@ class ToolRegistry:
         "summarize_changes",
         "think_about_whether_you_are_done",
         "switch_modes",
-        "check_onboarding_performed",
     ]
 
     def __init__(self) -> None:

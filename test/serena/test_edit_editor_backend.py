@@ -17,9 +17,9 @@ from typing import Any
 import pytest
 
 import serena.tools.cursor_tools as cursor_tools
-from serena.config.serena_config import LanguageBackend
 from serena.cursor import CursorManager
 from serena.jetbrains.jetbrains_plugin_client import JetBrainsPluginClient
+from serena.language_backend import BuiltinLanguageBackend
 from serena.tools.cursor_tools import CursorReplaceRangeTool, CursorReplaceRangeVerifiedTool
 from serena.tools.tools_base import SUCCESS_RESULT
 from serena.util.file_lifecycle import content_version
@@ -166,7 +166,7 @@ def _jetbrains_tool(work_dir: Path, encoding: str = "utf-8") -> CursorReplaceRan
     project = manager._project  # type: ignore[attr-defined]
     project.project_config.encoding = encoding
 
-    return _bind_replace_range(_BackendAgent(manager, project, LanguageBackend.JETBRAINS, using_language_server=False))
+    return _bind_replace_range(_BackendAgent(manager, project, BuiltinLanguageBackend.JETBRAINS.get_instance(), using_language_server=False))
 
 
 class TestJetBrainsEditorSave:
@@ -261,7 +261,7 @@ class TestLanguageServerEditorSave:
 
         with project_with_ls_context(LanguageServerId.PYTHON, str(repo_path)) as project:
             # a tool whose agent runs the language server backend, and another writer changing the file after the version check
-            agent = _BackendAgent(CursorManager(project=project), project, LanguageBackend.LSP, using_language_server=True)
+            agent = _BackendAgent(CursorManager(project=project), project, BuiltinLanguageBackend.LSP.get_instance(), using_language_server=True)
             tool = _bind_replace_range(agent)
             writer = _ChangeAfterVersionCheck(edited_path)
             writer.install(monkeypatch)
@@ -293,7 +293,7 @@ class TestCodeEditorFactory:
         """Regression guard: an agent that is not in language server mode is given no language server code editor."""
         manager = _make_manager_via_subclass(work_dir)
         tool = _bind_replace_range(
-            _BackendAgent(manager, manager._project, LanguageBackend.JETBRAINS, using_language_server=False)  # type: ignore[attr-defined]
+            _BackendAgent(manager, manager._project, BuiltinLanguageBackend.JETBRAINS.get_instance(), using_language_server=False)  # type: ignore[attr-defined]
         )
 
         with pytest.raises(Exception, match="not in language server mode"):

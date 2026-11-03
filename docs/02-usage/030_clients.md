@@ -64,6 +64,76 @@ object, e.g.
 }
 ```
 
+### Advanced: Running Behind a Multiplexer
+
+Some deployments place a small multiplexer process in front of Serena, so a
+single client URL can aggregate Serena with other MCP servers and so backend
+restarts can be absorbed without ending client sessions. The wire protocol,
+session model, and tool surface are unchanged — Serena does not need to know
+the multiplexer is in the path. See
+[Running Serena Behind a Tool Multiplexer](../03-special-guides/multiplexer_architecture.md)
+for the network shape, the launchd port-binding change, and how to test
+Serena directly without the multiplexer in the loop.
+### Advanced: Pipe transport (one-daemon-per-machine, parallel-safe)
+
+When you run several Serena clients side-by-side — most commonly parallel
+sub-agents in Claude Code, or one editor session per project — the **pipe
+transport** keeps each client's per-session state strictly partitioned from
+every other client's, by construction. The wire protocol and tool surface
+are unchanged; the difference is that the client talks stdio to a small
+*per-client forwarder process*, which dials a single shared Serena daemon
+over a Unix-domain socket. The forwarder asserts the absolute path of its
+**project root** as the session id at handshake; the daemon trusts that
+assertion and pins all per-session state to that path. Two forwarders on
+the same project root are the same logical session by design; forwarders
+on different project roots are fully isolated. See
+[Running Serena Behind a Tool Multiplexer](../03-special-guides/multiplexer_architecture.md)
+§Project-root-as-session-id handshake for the architecture and the failure
+mode it addresses.
+
+The forwarder requires a resolvable project root at startup. Pass exactly
+one of:
+
+* ``--project <path>`` (or the deprecated positional project argument) to
+  pin the forwarder to an explicit project directory, or
+* ``--project-from-cwd`` to auto-detect the project root from the
+  forwarder's current working directory (searches for
+  ``.serena/project.yml`` or ``.git``, falling back to CWD).
+
+Without one of those flags ``serena start-mcp-server --transport pipe``
+exits non-zero with a clear operator-facing error rather than fall back to
+anonymous mode.
+
+To start a forwarder in pipe mode, point it at the daemon's Unix socket
+and supply the project root:
+
+```shell
+serena start-mcp-server --transport pipe --project-from-cwd --daemon-url unix:///tmp/serena-daemon.sock
+```
+
+This invocation is the **forwarder**, not a daemon: it expects a Serena
+daemon to already be running and listening on the given Unix socket. The
+daemon process (which serves all forwarders on the machine) needs
+``--pipe-socket-path /tmp/serena-daemon.sock`` in its launch arguments so
+the pipe listener binds at startup; the same daemon process can
+simultaneously serve streamable-HTTP and pipe traffic. If the daemon
+socket is briefly unreachable when the forwarder first runs (daemon
+restarting, socket file racing into existence), the forwarder retries the
+initial connection with bounded backoff (override the default 5 attempts
+via ``SERENA_PIPE_RECONNECT_ATTEMPTS``).
+
+For Claude Code specifically, replace the args list of your existing
+``serena`` MCP server entry with the pipe form, e.g.:
+
+```shell
+claude mcp add --scope user serena -- serena start-mcp-server --context claude-code --project-from-cwd --transport pipe --daemon-url unix:///tmp/serena-daemon.sock
+```
+
+Pipe mode supersedes the multiplexer for parallel sub-agent and multi-client
+setups; the multiplexer continues to provide catalog stability and
+backend-restart absorption for clients that go through it, and the two are
+not exclusive — a deployment can run either, neither, or both.
+
 ## Copilot in JetBrains
 
 Open the settings of your JetBrains IDE and go to Tools / GitHub Copilot / Model Context Protocol (MCP). Then click
@@ -195,13 +265,12 @@ Claude Code settings file (`.claude/settings.json` in your project directory, or
 The hooks will:
 
 - **`remind`**: Nudge the agent to use Serena's symbolic tools when it makes too many consecutive
-  `grep` or `read_file` calls without using any Serena tools in between. Searches and source-file reads
-  run via the `Bash` tool (as native Claude Code installations do) are counted as well.
+  `grep` calls without using any Serena tools in between.
 - **`activate`**: Prompt the agent to activate the project and read Serena's instructions at session start.
 - **`cleanup`**: Clean up hook session data when the session ends.
 - **`auto-approve`**: Auto-approve Serena tool calls whenever Claude Code is in a permissive
   permission mode (`acceptEdits` or `auto`), so blanket approvals cover Serena's destructive
-  tools (e.g. `replace_symbol_body`, `rename_symbol`) instead of prompting on every call.
+  tools (e.g. `cursor_replace_body`, `cursor_rename`) instead of prompting on every call.
 
 For more details on Claude Code's hook system, see the
 [Claude Code hooks documentation](https://code.claude.com/docs/en/hooks).
@@ -297,7 +366,7 @@ up the hooks as below (or a variation thereof) for optimal performance of Serena
 The hooks will:
 
 - **`remind`**: Nudge the agent to use Serena's symbolic tools when it makes too many consecutive
-  `grep` or `read_file` calls without using any Serena tools in between.
+  `grep` calls without using any Serena tools in between.
 - **`activate`**: Prompt the agent to activate the project and read Serena's instructions at session start.
 - **`cleanup`**: Clean up hook session data when the session ends.
 

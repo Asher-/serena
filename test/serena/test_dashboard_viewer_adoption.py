@@ -21,9 +21,9 @@ from secrets import token_hex
 import pytest
 
 import serena.agent
-from serena.agent import SerenaAgent
+from serena.agent import DashboardManager, SerenaAgent
 from serena.call_journal import CallJournal
-from serena.dashboard import SerenaDashboardViewer
+from serena.dashboard.dashboard_viewer import SerenaDashboardViewer, open_url_in_browser
 from solidlsp.util import supervise
 from test.conftest import SCRATCH_ROOT
 
@@ -43,16 +43,15 @@ FIRST_INSTANCE = textwrap.dedent(
     """
     import sys, time
     import serena.agent
-    from serena.agent import SerenaAgent
-    from serena.dashboard import SerenaDashboardViewer
+    from serena.agent import DashboardManager
+    from serena.dashboard.dashboard_viewer import SerenaDashboardViewer
     sys.executable = sys.argv[1]
     serena.agent.system_has_usable_display = lambda: True
-    SerenaDashboardViewer.is_current_platform_supported = staticmethod(lambda: True)
-    agent = SerenaAgent.__new__(SerenaAgent)
-    agent._dashboard_url = sys.argv[2]
-    agent._dashboard_viewer_process = None
-    agent._start_dashboard_viewer(minimized=True)
-    print(agent._dashboard_viewer_process.pid, flush=True)
+    manager = DashboardManager.__new__(DashboardManager)
+    manager.url = sys.argv[2]
+    manager._dashboard_viewer_process = None
+    manager._start_dashboard_viewer(minimized=True)
+    print(manager._dashboard_viewer_process.pid, flush=True)
     time.sleep(300)
     """
 )
@@ -99,10 +98,11 @@ def agent(viewer: Path, monkeypatch: pytest.MonkeyPatch) -> SerenaAgent:
     """An agent with only what starting the dashboard viewer reads of it, on a platform with a viewer and a display."""
     monkeypatch.setattr(sys, "executable", str(viewer))
     monkeypatch.setattr(serena.agent, "system_has_usable_display", lambda: True)
-    monkeypatch.setattr(SerenaDashboardViewer, "is_current_platform_supported", staticmethod(lambda: True))
+    manager = DashboardManager.__new__(DashboardManager)
+    manager.url = _URL
+    manager._dashboard_viewer_process = None
     agent = _ViewerAgent.__new__(_ViewerAgent)
-    agent._dashboard_url = _URL
-    agent._dashboard_viewer_process = None
+    agent._dashboard_manager = manager
     return agent
 
 
@@ -111,8 +111,8 @@ def _live_viewers(root: Path) -> list[supervise.Record]:
 
 
 def test_the_viewer_is_given_no_pid_of_serenas(agent: SerenaAgent, scratch: Path, root: Path) -> None:
-    agent._start_dashboard_viewer(minimized=True)
-    process = agent._dashboard_viewer_process
+    agent._dashboard_manager._start_dashboard_viewer(minimized=True)
+    process = agent._dashboard_manager.viewer_process
     assert process is not None
     arguments = scratch / f"arguments.{process.pid}"
     deadline = time.monotonic() + 30
@@ -134,7 +134,7 @@ def test_the_browser_is_opened_on_the_url_by_a_process_the_supervisor_started(
     browser.chmod(0o755)
     monkeypatch.setenv("BROWSER", str(browser))
 
-    SerenaAgent._open_dashboard_in_browser(_URL)
+    open_url_in_browser(_URL, use_subprocess=True)
 
     deadline = time.monotonic() + 30
     while not opened.exists():
@@ -157,10 +157,10 @@ def test_a_live_viewer_an_ended_instance_started_is_adopted_and_no_second_is_sta
     os.killpg(instance.pid, signal.SIGKILL)
     instance.wait()
 
-    agent._start_dashboard_viewer(minimized=True)
+    agent._dashboard_manager._start_dashboard_viewer(minimized=True)
     watchers = SerenaAgent.adopt_processes(agent, CallJournal())
 
-    assert agent._dashboard_viewer_process is not None and agent._dashboard_viewer_process.pid == first
+    assert agent._dashboard_manager.viewer_process is not None and agent._dashboard_manager.viewer_process.pid == first
     assert len(_live_viewers(root)) == 1
     assert watchers == []
 
@@ -171,7 +171,7 @@ def test_the_viewer_process_function_runs_a_viewer_of_the_url_that_watches_no_pi
         SerenaDashboardViewer, "run", lambda viewer: ran.append((viewer.url, viewer.start_minimized, viewer.parent_process_id))
     )
 
-    SerenaAgent._start_dashboard_viewer_process_function(_URL, True)
+    DashboardManager._start_dashboard_viewer_process_function(_URL, True)
 
     assert ran == [(_URL, True, None)]
 
@@ -233,7 +233,7 @@ def test_where_the_platform_has_no_viewer_a_minimized_start_opens_nothing(
 ) -> None:
     monkeypatch.setattr(SerenaDashboardViewer, "is_current_platform_supported", staticmethod(lambda: False))
 
-    agent._start_dashboard_viewer(minimized=True)
+    agent._dashboard_manager._start_dashboard_viewer(minimized=True)
 
     assert agent._dashboard_viewer_process is None
     assert supervise.records() == []

@@ -25,8 +25,9 @@ from starlette.testclient import TestClient
 
 from serena.agent import _SESSION_KEY_VAR, SerenaAgent
 from serena.cli import TopLevelCommands
-from serena.config.serena_config import LanguageBackend, ProjectConfig, SerenaConfig
+from serena.config.serena_config import ProjectConfig, SerenaConfig
 from serena.cursor import StructuralCursorState
+from serena.language_backend import BuiltinLanguageBackend
 from serena.ls_manager import LanguageServerManager
 from serena.project import Project
 from serena.tools import Tool
@@ -87,7 +88,7 @@ def make_go_project(agent: SerenaAgent, work_dir: Path) -> Callable[[str], Proje
         root = work_dir / name
         root.mkdir()
         (root / _GO_FILE).write_text("package main\n\nfunc Hello() {}\n", encoding="utf-8")
-        project_config = ProjectConfig(project_name=name, languages=[LanguageServerId.GO], language_backend=LanguageBackend.LSP)
+        project_config = ProjectConfig(project_name=name, language_servers=[LanguageServerId.GO], language_backend=BuiltinLanguageBackend.LSP.get_instance())
         project = Project(project_root=str(root), project_config=project_config, serena_config=agent.serena_config)
         manager = MagicMock(spec=LanguageServerManager)
         manager.stopped = threading.Event()
@@ -108,7 +109,7 @@ def listener(agent: SerenaAgent) -> FastMCP:
     root_handlers = list(logging.root.handlers)
     root_level = logging.root.level
     with (
-        patch("serena.cli.SerenaMCPFactory") as factory_cls,
+        patch("serena.mcp.SerenaMCPFactory") as factory_cls,
         patch("serena.util.watchdog.start_wedge_watchdog"),
         patch.object(server, "run") as run,
     ):
@@ -123,7 +124,7 @@ def listener(agent: SerenaAgent) -> FastMCP:
     logging.root.setLevel(root_level)
 
     assert result.exit_code == 0, repr(result.exception)
-    run.assert_called_once_with(transport="streamable-http")
+    run.assert_called_once_with(transport="streamable-http", host="127.0.0.1", port=8000)
     return server
 
 
