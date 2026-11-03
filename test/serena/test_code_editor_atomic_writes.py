@@ -53,6 +53,7 @@ class _StubCodeEditor(CodeEditor[Any]):
 
     def __init__(self, project_root: str, encoding: str = "utf-8", newline: str | None = None) -> None:
         self.project = self.DummyProject()
+        self._write_precondition = None
         self.project_root = project_root
         self.encoding = encoding
         self.newline = newline
