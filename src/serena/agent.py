@@ -1731,7 +1731,7 @@ class SerenaAgent:
         self._update_active_modes()
         self._update_active_tools()
 
-        log.info(f"Set modes to {[mode.name for mode in self.get_active_modes()]}")
+        log.info(f"Set modes to {list(self.get_active_modes().get_mode_names())}")
 
     @dataclass
     class PromptParams:

@@ -152,7 +152,7 @@ def glob_to_regex(glob_pat: str) -> str:
 
 
 def search_text(
-    pattern: str,
+    pattern: "str | re.Pattern[str]",
     content: str | None = None,
     source_file_path: str | None = None,
     context_lines_before: int = 0,
@@ -160,6 +160,7 @@ def search_text(
     multiline: bool = True,
     is_glob: bool = False,
     encoding: str = DEFAULT_SOURCE_FILE_ENCODING,
+    allow_multiline_match: bool | None = None,
 ) -> list[MatchedConsecutiveLines]:
     """
     Search for a pattern in text content. Supports both regex and glob-like patterns.
@@ -176,6 +177,7 @@ def search_text(
     :param context_lines_before: Number of context lines to include before matches
     :param context_lines_after: Number of context lines to include after matches
     :param multiline: whether to apply multi-line matching, enabling the flags re.DOTALL and re.MULTILINE
+    :param allow_multiline_match: main's name for ``multiline``, which it overrides when given
     :param is_glob: If True, pattern is treated as a glob-like pattern (e.g., "*.py", "test_??.py")
              and will be converted to regex internally
     :param encoding: Text encoding to use when ``source_file_path`` is read because ``content`` is None.
@@ -205,8 +207,18 @@ def search_text(
     coordinates = TextCoordinateProvider(content)
 
     # For multiline matches, optionally use DOTALL so '.' matches newlines
+    if allow_multiline_match is not None:
+        multiline = allow_multiline_match
+    elif is_glob:
+        # a glob matches within a line, as main's line-by-line glob search did: without DOTALL, '*' stops at a line break
+        multiline = False
     flags = (re.MULTILINE | re.DOTALL) if multiline else 0
-    compiled_pattern = re.compile(pattern, flags)
+    if isinstance(pattern, re.Pattern):
+        # a pattern compiled by the caller keeps its own flags; '^' and '$' still anchor at each line, as they did in
+        # main's line-by-line search
+        compiled_pattern = re.compile(pattern.pattern, pattern.flags | re.MULTILINE) if multiline else pattern
+    else:
+        compiled_pattern = re.compile(pattern, flags)
     # Search across the entire content as a single string
     for match in compiled_pattern.finditer(content):
         start_pos = match.start()

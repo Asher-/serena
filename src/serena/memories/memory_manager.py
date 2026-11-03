@@ -177,14 +177,14 @@ class MemoryManager:
         name = self._sanitize_name(name)
         parts = name.split("/")
 
-        if ".." in parts:
-            raise ValueError(f"Memory name cannot contain '..' segments. Got: {name}")
+        if ".." in parts or "." in parts:
+            raise ValueError(f"Memory name cannot contain '.' or '..' segments, a forbidden path segment. Got: {name}")
 
         # Reject absolute names and empty path segments: pathlib discards the base directory when
         # joined with an absolute path (e.g. "/etc/cron.d/backdoor" would reset to "/etc/cron.d"),
         # letting a memory name escape the sandbox. A leading "/" produces an empty first segment.
         if os.path.isabs(name) or "" in parts:
-            raise ValueError(f"Memory name cannot be absolute or contain empty path segments. Got: {name}")
+            raise ValueError(f"Memory name cannot be absolute or contain empty path segments, each a forbidden path segment. Got: {name}")
 
         if self._is_global(name):
             if name == self.GLOBAL_TOPIC:

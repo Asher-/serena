@@ -860,13 +860,17 @@ class TestSessionKeyOverStreamableHttp:
 
     _HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
 
-    def test_a_call_carrying_the_session_identifier_reaches_the_forwarded_session_key(self, tool: _NoOpProbeTool) -> None:
+    def test_a_call_carrying_the_session_identifier_reaches_the_forwarded_session_key(
+        self, tool: _NoOpProbeTool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from mcp.server.mcpserver.server import MCPServer
         from starlette.testclient import TestClient
 
         from serena.mcp import SerenaMCPFactory
         from serena.tools.tools_base import SESSION_ID_ARGUMENT
 
+        # the MCP tool is built from the apply method's docstring, which the probe leaves out
+        monkeypatch.setattr(type(tool).apply, "__doc__", "Records the session key the call is bound to.", raising=False)
         server = MCPServer(name="test")
         server._tool_manager._tools[tool.get_name()] = SerenaMCPFactory.make_mcp_tool(tool)
         with TestClient(server.streamable_http_app(), base_url="http://127.0.0.1:8000") as client:
