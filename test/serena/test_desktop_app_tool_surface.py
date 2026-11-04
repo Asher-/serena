@@ -1,7 +1,8 @@
 """The tools a desktop-app session exposes, with their required parameters, are those of main's deployed daemon.
 
 The record is fact://serena/upstream_merge/baseline/d69e440a: the daemon deployed at d69e440a, context desktop-app, modes
-editing and interactive, under a configuration excluding Serena's memory tools.
+editing and interactive. That daemon reads ~/.serena/serena_config.yml, since brain's launchd/ai.strong.serena.plist sets
+HOME to the user's home, and the excluded_tools of that file name the six memory tools of _EXCLUDED_MEMORY_TOOLS.
 """
 
 import pytest
@@ -51,7 +52,7 @@ _RECORDED = {
 """each tool's name and its required parameters, those named ``_serena*`` left out, as the deployed daemon listed them"""
 
 _EXCLUDED_MEMORY_TOOLS = ["read_memory", "write_memory", "list_memories", "delete_memory", "rename_memory", "edit_memory"]
-"""the tools the deployed daemon's configuration excluded"""
+"""the excluded_tools of ~/.serena/serena_config.yml, the configuration the deployed daemon reads"""
 
 
 @pytest.fixture

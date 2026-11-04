@@ -138,7 +138,7 @@ def glob_to_regex(glob_pat: str) -> str:
         if ch == "*":
             regex_parts.append(".*")
         elif ch == "?":
-            regex_parts.append("..")
+            regex_parts.append(".")
         elif ch == "\\":
             i += 1
             if i < len(glob_pat):
@@ -398,9 +398,9 @@ def glob_match(pattern: str, path: str) -> bool:
     Match a file path against a glob pattern.
 
     Supports standard glob patterns:
-    - * matches any number of characters except /
+    - * matches any number of characters, / included
     - ** matches any number of directories (zero or more)
-    - ? matches a single character except /
+    - ? matches a single character, / included
     - [seq] matches any character in seq
 
     Supports brace expansion:

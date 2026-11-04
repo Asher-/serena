@@ -710,6 +710,7 @@ class SerenaAgent:
         memory_log_handler: MemoryLogHandler | None = None,
     ):
         """
+        :param project: the project to load immediately or None to not load any project; may be a path to the project or a name of
             an already registered project;
         :param project_activation_callback: a callback function to be called when a project is activated.
         :param project_activation_error: an initial error to report back to the client/LLM pertaining to project determination/activation
@@ -906,7 +907,6 @@ class SerenaAgent:
         # activate the given project (if any), also updating the active modes
         # Note: We cannot update the active tools yet, because the base toolset has not been computed yet
         #       (and its computation depends on the active project)
-        self._active_modes: ActiveModes
         if project is not None:
             try:
                 self.activate_project_from_path_or_name(project, update_active_modes=False, update_active_tools=False)
