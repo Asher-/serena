@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from serena.agent import SerenaAgent
 from serena.config.serena_config import SerenaConfig
 from serena.project import Project
 from serena.repl.api.fs_api import FsApi
@@ -79,3 +80,39 @@ def test_search_for_pattern(api: FsApi) -> None:
     code_matches = api.search_for_pattern("foo", restrict_search_to_code_files=True)
     assert all(m.source_file_path.endswith("a.py") for m in code_matches.matches)  # type: ignore
     assert "foo(1)" in code_matches.represent()
+
+
+def test_search_by_enclosing_symbol_refuses_a_missing_root(api: FsApi) -> None:
+    with pytest.raises(FileNotFoundError, match="missing"):
+        api.search_by_enclosing_symbol("foo", relative_path="missing")
+
+
+def test_search_by_enclosing_symbol_groups_a_match_by_file_when_the_language_server_fails(
+    project: Project, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FailingRetriever:
+        def __init__(self, project: Project) -> None:
+            pass
+
+        def can_analyze_file(self, relative_path: str) -> bool:
+            return True
+
+        def get_language_server(self, relative_path: str) -> None:
+            raise RuntimeError("language server unavailable")
+
+    monkeypatch.setattr("serena.symbol.LanguageServerSymbolRetriever", FailingRetriever)
+    agent = MagicMock()
+    agent.get_active_project_or_raise.return_value = project
+    agent.get_language_backend.return_value.is_lsp.return_value = True
+
+    hits = FsApi(agent).search_by_enclosing_symbol("foo", relative_path="src/a.py")
+
+    assert hits.render_summary() == "Found 2 matches across 0 symbols in 1 files."
+    assert "@ src/a.py [src/a.py] - 2 matches" in hits.render_symbol_list()
+
+
+def test_search_by_enclosing_symbol_groups_a_match_under_its_enclosing_symbol(python_serena_agent: SerenaAgent) -> None:
+    hits = FsApi(python_serena_agent).search_by_enclosing_symbol("User with ID", relative_path="test_repo/services.py")
+
+    assert hits.render_summary() == "Found 1 matches across 1 symbols in 1 files."
+    assert "@ UserService/create_user (Method) [test_repo/services.py] - 1 matches" in hits.render_symbol_list()
