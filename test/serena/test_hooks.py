@@ -299,6 +299,14 @@ class TestPreToolUseRemindAboutSerenaHook:
                 hook = PreToolUseRemindAboutSymbolicToolsHook(client)
             assert hook.is_read_code_file_call() == expected, f"is_read_code_file_call() wrong for {client} / {payload}"
 
+    def test_read_without_file_path_or_shell_command_counts_as_code_read(self, tmp_path: Path):
+        """A read call that names no file-path field and no shell command line counts as a code read."""
+        payload = _base_input(tool_name="read", tool_input={})
+        with patch("sys.stdin", _make_stdin(payload)), patch("serena.hooks.serena_home_dir", str(tmp_path)):
+            hook = PreToolUseRemindAboutSymbolicToolsHook(HookClient.CLAUDE_CODE)
+        assert hook.is_read_file_call() is True
+        assert hook.is_read_code_file_call() is True
+
     def test_read_file_tool_detection_codex_shell_commands(self, tmp_path: Path):
         """Codex shell-command tools count PowerShell file reads, including non-code files."""
         cases = [

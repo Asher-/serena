@@ -487,6 +487,25 @@ class TestSerenaPipeFrameHandler:
         assert response["id"] == 11
         assert response["error"]["code"] == -32603
 
+    def test_handler_returns_internal_error_on_non_object_tools_call_arguments(self, agent: SerenaAgent) -> None:
+        # arguments that are not a JSON object cannot be passed to apply_ex as keyword
+        # arguments; they must produce a structured error before any tool is looked up
+        handler = SerenaPipeFrameHandler(agent)
+        response = asyncio.run(
+            handler.handle(
+                "session-1",
+                {
+                    "jsonrpc": "2.0",
+                    "id": 12,
+                    "method": "tools/call",
+                    "params": {"name": "get_current_config", "arguments": ["not", "an", "object"]},
+                },
+            )
+        )
+        assert response["id"] == 12
+        assert response["error"]["code"] == -32603
+        assert "params.arguments must be an object" in response["error"]["message"]
+
     def test_handler_isolates_concurrent_sessions(self, agent: SerenaAgent) -> None:
         """Two concurrent dispatches must each see only their own session_id."""
         _SessionKeyCapturingTool.reset()

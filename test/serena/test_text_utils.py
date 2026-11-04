@@ -218,6 +218,27 @@ class TestSearchText:
         assert re.fullmatch(rx, "ac") is None
         assert re.fullmatch(rx, "abbc") is None
 
+    def test_glob_to_regex_keeps_a_trailing_backslash(self):
+        """A backslash ending a glob escapes no character and is kept as a backslash."""
+        assert glob_to_regex("a\\") == "a\\"
+
+    def test_search_text_reads_the_file_when_only_its_path_is_given(self, work_dir):
+        """With no content, search_text searches the text of the file at source_file_path."""
+        path = work_dir / "f.txt"
+        path.write_text("alpha\nbeta\n", encoding="utf-8")
+        matches = search_text("beta", source_file_path=str(path))
+        assert [m.start_line for m in matches] == [1]
+
+    def test_search_text_refuses_a_call_without_content_or_path(self):
+        """A call giving neither content nor source_file_path has no text to search."""
+        with pytest.raises(ValueError, match="Pass either content or source_file_path"):
+            search_text("alpha")
+
+    def test_search_text_refuses_a_compiled_glob(self):
+        """A glob is text to convert, so a compiled regular expression given as a glob is refused."""
+        with pytest.raises(ValueError, match="A glob is given as text"):
+            search_text(re.compile("a.py"), content="a.py", is_glob=True)
+
     def test_search_text_glob_question_single_char(self):
         """search_text('c?t', is_glob=True) must match 'cat' (one char), not 'coat' (two chars)."""
         content = "value_cat_end\nvalue_coat_end"
@@ -662,6 +683,16 @@ class TestSearchFiles:
         results = search_files(MockFileCollection(["a.bin"], unreadable_mock_reader), pattern="match")
         assert results == []
 
+    def test_search_files_keeps_a_file_that_does_not_support_globbing(self):
+        """A file whose path does not support globbing is searched whatever the include glob says."""
+
+        class _NoGlobFileProxy(MockFileProxy):
+            def is_glob_supported(self):
+                return False
+
+        results = search_files(FileCollection([_NoGlobFileProxy("a.txt")]), pattern="match", paths_include_glob="*.py")
+        assert [r.source_file_path for r in results] == ["a.txt"]
+
 
 class TestGlobMatch:
     """Test the glob_match function directly."""
@@ -681,6 +712,7 @@ class TestGlobMatch:
             ("**agent.py", "src/serena/agent.py", True),
             ("**agent.py", "src/serena/process_isolated_agent.py", True),
             ("**agent.py", "agent_test.py", False),
+            ("**/agent.py", "agent.py", True),
             # Prefix with double asterisk
             ("src/**agent.py", "src/agent.py", True),
             ("src/**agent.py", "src/serena/agent.py", True),

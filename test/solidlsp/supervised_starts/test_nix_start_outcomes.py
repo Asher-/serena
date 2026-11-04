@@ -72,3 +72,13 @@ def test_nixd_is_the_one_on_path_where_it_runs(stand_ins: StandIns) -> None:
 
     assert _provider()._get_or_install_core_dependency() == str(nixd.path)
     assert_started_through_brain_supervise(nixd)
+
+
+def test_nixd_setup_fails_where_the_nixd_on_path_cannot_be_started(stand_ins: StandIns) -> None:
+    stand_ins.answering("nix")
+    stand_ins.unrunnable("nixd")
+
+    with pytest.raises(RuntimeError, match=r"^Failed to verify nixd installation: ") as caught:
+        _provider()._get_or_install_core_dependency()
+    assert "nixd failed to run" not in str(caught.value)
+    assert caught.value.__cause__ is not None
