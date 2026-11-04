@@ -1,6 +1,8 @@
 """The tests of task://upstream_merge.7 that fail at main d69e440a and pass at upstream ede329aa, one per issue upstream resolves.
 
-Their text is fact://serena/upstream_merge/issues_resolved's, as run on each side.
+They are the tests of the file fact://serena/upstream_merge/issues_resolved records as run on each side that failed at main
+and passed at upstream, carried onto the branch's API. test_gather_failure_leaves_no_reader_waiting keeps only its exception
+case: its base_exception case failed on both sides.
 """
 
 import contextlib
