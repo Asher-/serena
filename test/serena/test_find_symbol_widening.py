@@ -156,3 +156,19 @@ class TestFindSymbolIncludeBodyWidening:
                 python_serena_agent.reset_language_server_manager()
             except Exception:
                 pass
+
+    def test_without_include_body_no_body_is_returned(self, python_serena_agent: SerenaAgent) -> None:
+        """FindSymbolTool(include_body=False) widens nothing and returns no body."""
+        find_symbol_tool = python_serena_agent.get_tool(FindSymbolTool)
+
+        result_json = find_symbol_tool.apply(
+            name_path_pattern="UserService/create_user",
+            relative_path=os.path.join("test_repo", "services.py"),
+            include_body=False,
+        )
+
+        payload = json.loads(result_json)
+        symbols = [s for group in payload.values() for s in group] if isinstance(payload, dict) else payload
+        matches = [s for s in symbols if s.get("name_path") == "UserService/create_user"]
+        assert len(matches) == 1, f"Expected exactly one match for UserService/create_user in {payload}"
+        assert "body" not in matches[0], f"body returned without include_body: {matches[0]}"
