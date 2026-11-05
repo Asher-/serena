@@ -221,20 +221,25 @@ def search_text(
         compiled_pattern = re.compile(pattern.pattern, pattern.flags | re.MULTILINE) if multiline else pattern
     else:
         compiled_pattern = re.compile(pattern, flags)
-    # Search across the entire content as a single string
-    for match in compiled_pattern.finditer(content):
-        start_pos = match.start()
-        end_pos = match.end()
+    matched_line_spans: list[tuple[int, int]] = []
+    if multiline:
+        # Search across the entire content as a single string
+        for match in compiled_pattern.finditer(content):
+            # Find the line numbers for the start and end positions
+            start_loc = coordinates.compute_coordinates(match.start())
+            end_loc = coordinates.compute_coordinates(match.end())
+            start_line_num, end_line_num = start_loc.line, end_loc.line
+            if end_line_num > start_line_num and end_loc.col == 0:
+                # `end_pos` is exclusive, so if it is at the start of a line, the match ends with the
+                # preceding line's newline and does not extend into the line that `end_pos` points to
+                end_line_num -= 1
+            matched_line_spans.append((start_line_num, end_line_num))
+    else:
+        # without multi-line matching each line is searched on its own, as main's line-by-line search did: '^' and '$'
+        # anchor at the line, no match spans two lines, and a line is reported once
+        matched_line_spans = [(line_num, line_num) for line_num, line in enumerate(lines) if compiled_pattern.search(line)]
 
-        # Find the line numbers for the start and end positions
-        start_loc = coordinates.compute_coordinates(start_pos)
-        end_loc = coordinates.compute_coordinates(end_pos)
-        start_line_num, end_line_num = start_loc.line, end_loc.line
-        if end_line_num > start_line_num and end_loc.col == 0:
-            # `end_pos` is exclusive, so if it is at the start of a line, the match ends with the
-            # preceding line's newline and does not extend into the line that `end_pos` points to
-            end_line_num -= 1
-
+    for start_line_num, end_line_num in matched_line_spans:
         # Calculate the range of lines to include in the context
         context_start = max(0, start_line_num - context_lines_before)
         context_end = min(total_lines - 1, end_line_num + context_lines_after)

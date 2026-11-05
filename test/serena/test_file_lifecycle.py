@@ -387,6 +387,70 @@ class TestRename:
 # --- containment: read-root == write-root; nothing escapes the root (spec-v2 §5.4) ---
 
 
+class TestSymlinkContainment:
+    """No operation reaches outside the root through a symbolic link (bug://serena/file/lifecycle/root/symlink/escape)."""
+
+    @staticmethod
+    def _tree(tmp_path: Path) -> tuple[Path, Path]:
+        root, outside = tmp_path / "root", tmp_path / "outside"
+        (root / "sub").mkdir(parents=True)
+        outside.mkdir()
+        (outside / "x.txt").write_text("outside\n")
+        (root / "a.txt").write_text("inside\n")
+        (root / "linkdir").symlink_to(outside, target_is_directory=True)
+        (root / "inlink").symlink_to(root / "sub", target_is_directory=True)
+        return root, outside
+
+    def test_delete_through_a_linked_directory_is_refused(self, tmp_path: Path) -> None:
+        root, outside = self._tree(tmp_path)
+        result = _fs(root).delete("linkdir/x.txt")
+        assert result.ok is False
+        assert (outside / "x.txt").exists()
+
+    def test_rename_into_a_linked_directory_is_refused(self, tmp_path: Path) -> None:
+        root, outside = self._tree(tmp_path)
+        result = _fs(root).rename("a.txt", "linkdir/a.txt")
+        assert result.ok is False
+        assert (root / "a.txt").exists() and not (outside / "a.txt").exists()
+
+    def test_rename_out_of_a_linked_directory_is_refused(self, tmp_path: Path) -> None:
+        root, outside = self._tree(tmp_path)
+        result = _fs(root).rename("linkdir/x.txt", "x.txt")
+        assert result.ok is False
+        assert (outside / "x.txt").exists() and not (root / "x.txt").exists()
+
+    def test_create_in_a_linked_directory_is_refused(self, tmp_path: Path) -> None:
+        root, outside = self._tree(tmp_path)
+        result = _fs(root).create("linkdir/new.txt", "x")
+        assert result.ok is False
+        assert not (outside / "new.txt").exists()
+
+    def test_stat_through_a_linked_directory_is_refused(self, tmp_path: Path) -> None:
+        root, _ = self._tree(tmp_path)
+        assert _fs(root).stat("linkdir/x.txt").error == "path escapes the project root"
+
+    def test_list_dir_of_a_link_leaving_the_root_is_refused(self, tmp_path: Path) -> None:
+        root, _ = self._tree(tmp_path)
+        assert _fs(root).list_dir("linkdir").error == "path escapes the project root"
+
+    def test_find_file_under_a_link_leaving_the_root_is_refused(self, tmp_path: Path) -> None:
+        root, _ = self._tree(tmp_path)
+        assert _fs(root).find_file("*.txt", "linkdir").matches == ()
+
+    def test_the_link_itself_is_still_described_and_deleted(self, tmp_path: Path) -> None:
+        root, outside = self._tree(tmp_path)
+        fs = _fs(root)
+        assert fs.stat("linkdir").error is None
+        assert fs.delete("linkdir").ok is True
+        assert not (root / "linkdir").is_symlink() and (outside / "x.txt").exists()
+
+    def test_a_link_within_the_root_is_followed(self, tmp_path: Path) -> None:
+        root, _ = self._tree(tmp_path)
+        (root / "sub" / "b.txt").write_text("b\n")
+        assert _fs(root).list_dir("inlink").error is None
+        assert _fs(root).stat("inlink/b.txt").error is None
+
+
 class TestContainment:
     def test_list_dir_rejects_escape(self, tmp_path: Path) -> None:
         listing = _fs(tmp_path).list_dir("../..")

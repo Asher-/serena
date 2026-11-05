@@ -2520,7 +2520,7 @@ class SerenaAgent:
 
     def tool_is_active(self, tool_name: str) -> bool:
         """
-        :param tool_class: the name of the tool to check
+        :param tool_name: the name of the tool to check
         :return: True if the tool is active, False otherwise
         """
         return self._calling_active_tools().contains_tool_name(tool_name)
@@ -2650,7 +2650,7 @@ class SerenaAgent:
         if self._dashboard_manager:
             self._dashboard_manager.shutdown()
             self._dashboard_manager = None
-        # collect every project instance held in any slot, deduplicated by identity
+        # collect every project instance held in any slot, deduplicated by project root
         projects: list[Project] = []
         seen_roots: set[str] = set()
 

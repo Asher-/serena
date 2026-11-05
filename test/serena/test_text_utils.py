@@ -251,6 +251,17 @@ class TestSearchText:
         matches = search_text("test_??.py", content="test_ab.py\ntest_abcd.py", is_glob=True)
         assert [m.lines[0].line_content for m in matches] == ["test_ab.py"]
 
+    @pytest.mark.parametrize("arguments", [{"allow_multiline_match": False}, {"multiline": False}])
+    def test_search_text_without_multiline_matching_anchors_a_caret_at_each_line(self, arguments):
+        """Without multi-line matching each line is searched on its own, as main's line-by-line search did."""
+        matches = search_text("^def", content="x\ndef f()\n  def g()\ndef h()", **arguments)
+        assert [m.start_line for m in matches] == [1, 3]
+
+    def test_search_text_without_multiline_matching_reports_a_line_once_and_spans_no_lines(self):
+        """A line matched twice is one match, and a pattern able to match a line break does not join two lines."""
+        assert [m.start_line for m in search_text("a", content="aa\nb", allow_multiline_match=False)] == [0]
+        assert search_text(r"a\sb", content="a\nb", allow_multiline_match=False) == []
+
     def test_search_text_no_matches(self):
         """Test searching with a pattern that doesn't match anything."""
         content = """

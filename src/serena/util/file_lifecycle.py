@@ -368,12 +368,24 @@ class FilesystemLifecycle:
 
     # --- path resolution / containment ---
 
-    def _abs(self, relative_path: str) -> str | None:
-        """Resolve a relative path against the root; return ``None`` if it escapes the root."""
+    def _abs(self, relative_path: str, follow_final: bool = False) -> str | None:
+        """
+        Resolve a relative path against the root; return ``None`` if it escapes the root, lexically or through a
+        symbolic link (bug://serena/file/lifecycle/root/symlink/escape).
+
+        :param relative_path: the path relative to the root.
+        :param follow_final: whether the operation reads through the path's last component, so that a link there must
+            also resolve within the root; otherwise only the directories leading to it are resolved, and an operation
+            on the entry itself (a link inside the root included) is admitted.
+        """
         combined = os.path.normpath(os.path.join(self._root, relative_path))
-        if combined == self._root or combined.startswith(self._root + os.sep):
-            return combined
-        return None
+        if not (combined == self._root or combined.startswith(self._root + os.sep)):
+            return None
+        real_root = os.path.realpath(self._root)
+        resolved = os.path.realpath(combined if follow_final else os.path.dirname(combined))
+        if combined != self._root and not (resolved == real_root or resolved.startswith(real_root + os.sep)):
+            return None
+        return combined
 
     @staticmethod
     def _lstat(abs_path: str) -> os.stat_result | None:
@@ -406,7 +418,7 @@ class FilesystemLifecycle:
         false-inaccessibility, so the opt-outs make them explicit. Symlinks are reported and never
         followed. A not-found or not-a-directory target yields a typed error state, not an exception.
         """
-        abs_path = self._abs(relative_path)
+        abs_path = self._abs(relative_path, follow_final=True)
         if abs_path is None:
             return DirListing(relative_path, (), False, exists=False, error="path escapes the project root")
         if not os.path.exists(abs_path):
@@ -485,7 +497,7 @@ class FilesystemLifecycle:
         the base name; a plain pattern is matched as a path substring. Hidden and gitignored files are
         skipped; symlinked directories are not traversed.
         """
-        abs_path = self._abs(relative_path)
+        abs_path = self._abs(relative_path, follow_final=True)
         if abs_path is None or not os.path.isdir(abs_path):
             return FileMatches(pattern, relative_path, (), False)
 
