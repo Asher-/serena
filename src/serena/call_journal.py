@@ -31,6 +31,9 @@ CALL_ID_HEADER = "X-Brain-Call-Id"
 RESUME_METHOD = "brain/resume"
 """The method that asks a server for a call's answer."""
 
+RETIRE_METHOD = "brain/retire"
+"""The method by which the hop before a server, once it holds a call's answer, has the server retire the call's entry."""
+
 SERVER = "serena"
 """The name of the server, the owner of the records of the default daemon and of a serena listening on no port."""
 
@@ -330,8 +333,8 @@ class JournaledCallHandler:
 
 class CallJournalLayer:
     """
-    The ASGI layer around serena's streamable-http listener that answers ``brain/resume``, which FastMCP, refusing a
-    method it does not know, cannot. Every other request is passed on to the listener as it came.
+    The ASGI layer around serena's streamable-http listener that answers ``brain/resume`` and ``brain/retire``, which
+    FastMCP, refusing a method it does not know, cannot. Every other request is passed on to the listener as it came.
     """
 
     def __init__(self, app: Any, journal: CallJournal, path: str) -> None:
@@ -365,6 +368,9 @@ class CallJournalLayer:
         if message.get("method") == RESUME_METHOD:
             await self._answer_resume(message, send)
             return
+        if message.get("method") == RETIRE_METHOD:
+            await self._answer_retire(message, send)
+            return
         await self._app(scope, replay, send)
 
     async def _answer_resume(self, message: dict[str, Any], send: Send) -> None:
@@ -382,6 +388,28 @@ class CallJournalLayer:
             return
         content = [{"type": "text", "text": result.text}]
         await _respond(send, {"jsonrpc": "2.0", "id": request_id, "result": {"content": content, "isError": result.is_error}})
+
+    async def _answer_retire(self, message: dict[str, Any], send: Send) -> None:
+        """
+        Answers ``brain/retire``: the hop before serena holds the call's answer, so the call's entry leaves the journal. A
+        call the journal does not hold is one already retired, answered as retired; a call with no answer yet is refused
+        and its entry left as it is.
+        """
+        request_id = message.get("id")
+        call_id = (message.get("params") or {}).get("call_id")
+        if not call_id or not isinstance(call_id, str):
+            error = {"code": -32602, "message": f"{RETIRE_METHOD}: params must name a call_id"}
+            await _respond(send, {"jsonrpc": "2.0", "id": request_id, "error": error})
+            return
+        try:
+            await anyio.to_thread.run_sync(self._journal.retire, call_id)
+        except NoCallError:
+            pass
+        except UnansweredError:
+            error = {"code": -32000, "message": f"{RETIRE_METHOD}: the call {call_id} has no answer yet"}
+            await _respond(send, {"jsonrpc": "2.0", "id": request_id, "error": error})
+            return
+        await _respond(send, {"jsonrpc": "2.0", "id": request_id, "result": {}})
 
 
 def _call_id(ctx: ServerRequestContext) -> str:

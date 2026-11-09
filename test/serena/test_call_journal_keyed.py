@@ -6,11 +6,13 @@ layout before it whole by its known path, and retires an answered entry (task://
 import ast
 import json
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
+from starlette.testclient import TestClient
 
 from serena import call_journal
-from serena.call_journal import CallJournal, CallResult, NoCallError
+from serena.call_journal import CallJournal, CallJournalLayer, CallResult, NoCallError
 from solidlsp.util import supervise
 
 
@@ -87,3 +89,37 @@ def test_the_journal_lists_no_directory() -> None:
         if isinstance(node, ast.Call)
     }
     assert not called & listing, f"call_journal.py calls {sorted(called & listing)}"
+
+
+class _Unreached:
+    """The listener behind the layer, which a request the layer answers itself never reaches."""
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        raise AssertionError(f"the listener was reached by {scope['method']} {scope['path']}")
+
+
+def _retire(client: TestClient, call_id: str) -> dict[str, Any]:
+    response = client.post("/mcp", json={"jsonrpc": "2.0", "id": 4, "method": call_journal.RETIRE_METHOD, "params": {"call_id": call_id}})
+    assert response.status_code == 200
+    return response.json()
+
+
+def test_brain_retire_over_the_listener_retires_an_answered_call_and_refuses_an_unanswered_one() -> None:
+    journal = CallJournal()
+    try:
+        client = TestClient(cast(Any, CallJournalLayer(_Unreached(), journal, "/mcp")))
+        assert journal.receive("done", "t", {})
+        journal.finish("done", CallResult("answer", False))
+        assert journal.receive("open", "t", {})
+
+        assert _retire(client, "done") == {"jsonrpc": "2.0", "id": 4, "result": {}}
+        assert not (_owner() / "entry" / "done.json").exists()
+        with pytest.raises(NoCallError):
+            journal.resume("done")
+        assert _retire(client, "done") == {"jsonrpc": "2.0", "id": 4, "result": {}}
+
+        refused = _retire(client, "open")
+        assert refused["error"]["code"] == -32000
+        assert (_owner() / "entry" / "open.json").exists()
+    finally:
+        journal.close()
