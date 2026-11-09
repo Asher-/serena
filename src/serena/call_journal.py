@@ -9,6 +9,7 @@ process ends, and refuses to open while another live instance holds that lock. T
 
 import fcntl
 import json
+import shutil
 import threading
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
@@ -72,6 +73,10 @@ class NoCallError(Exception):
     """The journal holds no call of the id asked for."""
 
 
+class UnansweredError(Exception):
+    """A call the journal holds with no answer yet, which is not retired."""
+
+
 class JournalHeldError(Exception):
     """Another live instance holds the journal's lock."""
 
@@ -131,8 +136,8 @@ class CallJournal:
         :raises JournalHeldError: when another live instance holds the journal's lock.
         """
         owner = supervise.restart_root() / supervise.OWNER
-        self._directory = owner / "call"
-        self._directory.mkdir(parents=True, exist_ok=True)
+        owner.mkdir(parents=True, exist_ok=True)
+        self._directory = owner / "entry"
 
         # the instance lock, which the kernel releases when this process ends however it ends
         lock_path = owner / "instance.lock"
@@ -142,6 +147,17 @@ class CallJournal:
         except BlockingIOError as e:
             self._lock_file.close()
             raise JournalHeldError(f"another live instance of serena holds {lock_path}, so the calls under it are that instance's") from e
+
+        # the journal of the layout before entry/, removed whole by its known path, reading no entry in it; a removal an
+        # earlier instance began and did not end is finished the same way
+        legacy, removing = owner / "call", owner / "call.legacy"
+        if legacy.exists():
+            if removing.exists():
+                shutil.rmtree(removing)
+            legacy.rename(removing)
+        if removing.exists():
+            shutil.rmtree(removing)
+        self._directory.mkdir(exist_ok=True)
 
         self._lock = threading.Lock()
         self._finished = threading.Condition(self._lock)
@@ -245,6 +261,25 @@ class CallJournal:
             entry["finished"] = datetime.now(UTC).isoformat()
             self._write(entry)
             return CallResult(text, True)
+
+    def retire(self, call_id: str) -> None:
+        """
+        Removes an answered call's entry: the hop that received its answer holds it or has delivered it, so no hop will
+        ask for it again.
+
+        :param call_id: the call.
+        :raises NoCallError: when the journal holds no such call.
+        :raises UnansweredError: when the call has no answer yet; its entry is left as it is.
+        """
+        with self._lock:
+            path = self._path(call_id)
+            try:
+                entry = json.loads(path.read_text())
+            except FileNotFoundError as e:
+                raise NoCallError(call_id) from e
+            if "result" not in entry:
+                raise UnansweredError(call_id)
+            path.unlink(missing_ok=True)
 
 
 class JournaledCallHandler:
