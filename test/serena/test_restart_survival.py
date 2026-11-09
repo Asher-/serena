@@ -301,7 +301,7 @@ def test_resume_answers_a_call_finished_before_the_kill_with_its_result(instance
 def test_resume_answers_a_call_in_flight_at_the_kill_with_the_restart(instances: Any, project: Path, root: Path) -> None:
     first = instances()
     first.activate(project)
-    journaled = root / supervise.OWNER / "call" / "in-flight.json"
+    journaled = root / supervise.OWNER / "entry" / "in-flight.json"
 
     def call() -> None:
         try:

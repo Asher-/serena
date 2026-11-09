@@ -437,7 +437,7 @@ def test_a_call_that_names_no_call_id_is_not_journaled(tools: _Tools, root: Path
         answer = _Server(client).call("held", {"text": "x"})
 
     assert _text(answer) == CallResult("answered x")
-    assert list((root / supervise.OWNER / "call").glob("*.json")) == []
+    assert list((root / supervise.OWNER / "entry").glob("*.json")) == []
 
 
 def test_a_call_id_that_cannot_name_an_entry_is_answered_with_an_error_and_its_work_is_not_run(tools: _Tools, root: Path) -> None:
@@ -447,7 +447,7 @@ def test_a_call_id_that_cannot_name_an_entry_is_answered_with_an_error_and_its_w
 
     assert answer.is_error
     assert "../x" in answer.text
-    assert list((root / supervise.OWNER / "call").glob("*.json")) == []
+    assert list((root / supervise.OWNER / "entry").glob("*.json")) == []
 
 
 def test_a_call_the_listener_refused_is_not_journaled(tools: _Tools) -> None:

@@ -150,8 +150,8 @@ def test_a_serena_on_another_port_starts_beside_a_live_daemon_and_journals_its_c
         serena.close()
 
     assert not answer.get("isError"), answer
-    assert (root / f"{SERVER}-{port}" / "call" / "own.json").exists()
-    assert not (root / SERVER / "call" / "own.json").exists()
+    assert (root / f"{SERVER}-{port}" / "entry" / "own.json").exists()
+    assert not (root / SERVER / "entry" / "own.json").exists()
 
 
 def test_a_stdio_serena_starts_beside_a_live_daemon(daemon: _Holder, stdio: Any) -> None:
@@ -164,7 +164,7 @@ def test_a_stdio_serena_starts_beside_a_live_daemon(daemon: _Holder, stdio: Any)
 
 def test_a_stdio_serena_leaves_the_records_of_an_ended_instance_alone(root: Path, stdio: Any) -> None:
     _first_instance_killed_while(root, "left", "inline", "/bin/sleep 300")
-    entry = root / SERVER / "call" / "left.json"
+    entry = root / SERVER / "entry" / "left.json"
     record_before = [(record.path, record.call_id) for record in _records(root)]
     entry_before = entry.read_bytes()
 
