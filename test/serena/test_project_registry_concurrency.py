@@ -77,3 +77,36 @@ def test_concurrent_registrations_of_one_directory_register_it_once(project_root
     assert len(errors) == _THREAD_COUNT - 1
     assert all(isinstance(error, FileExistsError) for error in errors)
     assert [str(project.project_root) for project in config.projects] == [str(project_root.resolve())]
+
+
+def test_concurrent_additions_and_removals_of_distinct_projects_leave_the_registry_empty(project_root: Path) -> None:
+    config = SerenaConfig.from_config_file()
+    registered_projects = []
+    for i in range(_THREAD_COUNT):
+        root = project_root.parent / f"project_{i}"
+        root.mkdir()
+        registered_projects.append(
+            RegisteredProject.from_project_root(root, serena_config=config, autogen=ProjectConfigAutoGenerationMode.SYNCHRONOUS)
+        )
+    errors: list[BaseException] = []
+    all_ready = threading.Barrier(_THREAD_COUNT, timeout=30)
+
+    def add_and_remove(registered_project: RegisteredProject) -> None:
+        all_ready.wait()
+        try:
+            for _ in range(20):
+                config.add_registered_project(registered_project)
+                config.remove_registered_project(registered_project)
+        except BaseException as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=add_and_remove, args=(registered_project,)) for registered_project in registered_projects]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=120)
+    assert not any(thread.is_alive() for thread in threads)
+
+    assert errors == []
+    assert config.projects == []
+    assert SerenaConfig.from_config_file().projects == []

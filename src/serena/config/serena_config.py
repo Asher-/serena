@@ -1343,8 +1343,9 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
 
         :param registered_project: the project to remove, which must be an element of :attr:`projects`
         """
-        self.projects.remove(registered_project)
-        self._persist_projects()
+        with self._projects_lock:
+            self.projects.remove(registered_project)
+            self._persist_projects()
 
     def add_project_from_path(self, project_root: Path | str, asynchronous_autogen: bool = False) -> "Project":
         """

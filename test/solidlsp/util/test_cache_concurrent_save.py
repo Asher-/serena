@@ -2,6 +2,8 @@ import os
 import threading
 from pathlib import Path
 
+import pytest
+
 from solidlsp.util.cache import load_cache, save_cache
 
 _THREAD_COUNT = 8
@@ -30,3 +32,15 @@ def test_concurrent_saves_of_one_cache_leave_a_loadable_cache_and_no_other_file(
     assert errors == []
     assert load_cache(cache_path, 1) in saved_objects
     assert os.listdir(tmp_path) == ["symbols.pkl"]
+
+
+def test_a_failed_save_leaves_the_destination_directory_as_it_was(tmp_path: Path) -> None:
+    cache_path = tmp_path / "symbols.pkl"
+    save_cache(str(cache_path), 1, {"payload": "saved before"})
+    contents_before = cache_path.read_bytes()
+
+    with pytest.raises(TypeError, match="pickle"):
+        save_cache(str(cache_path), 1, {"payload": threading.Lock()})
+
+    assert os.listdir(tmp_path) == ["symbols.pkl"]
+    assert cache_path.read_bytes() == contents_before

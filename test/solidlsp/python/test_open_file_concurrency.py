@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from solidlsp import SolidLanguageServer
+from solidlsp.ls import LSPFileBuffer
 from solidlsp.ls_config import LanguageServerId
 
 pytestmark = pytest.mark.python
@@ -68,3 +69,71 @@ def test_threads_repeatedly_opening_and_closing_one_file_leave_it_closed(languag
 
     assert errors == []
     assert not any(uri.endswith("variables.py") for uri in language_server.open_file_buffers)
+
+
+@pytest.mark.parametrize("language_server", [LanguageServerId.PYTHON], indirect=True)
+def test_a_file_taken_again_while_its_last_holder_closes_it_is_reopened_after_the_close(
+    language_server: SolidLanguageServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    notify = language_server.server.notify
+    notifications: list[str] = []
+    open_document = notify.did_open_text_document
+    close_document = notify.did_close_text_document
+    ensure_open_in_ls = LSPFileBuffer.ensure_open_in_ls
+    close_started = threading.Event()
+    second_holder_entered = threading.Event()
+
+    def recorded_open_document(params: Any) -> None:
+        if params["textDocument"]["uri"].endswith("variables.py"):
+            notifications.append("didOpen")
+        open_document(params)
+
+    def held_back_close_document(params: Any) -> None:
+        if params["textDocument"]["uri"].endswith("variables.py"):
+            close_started.set()
+            second_holder_entered.wait(timeout=30)
+            notifications.append("didClose")
+        close_document(params)
+
+    def signalling_ensure_open_in_ls(file_buffer: LSPFileBuffer) -> None:
+        if close_started.is_set():
+            second_holder_entered.set()
+        ensure_open_in_ls(file_buffer)
+
+    monkeypatch.setattr(notify, "did_open_text_document", recorded_open_document)
+    monkeypatch.setattr(notify, "did_close_text_document", held_back_close_document)
+    monkeypatch.setattr(LSPFileBuffer, "ensure_open_in_ls", signalling_ensure_open_in_ls)
+    errors: list[BaseException] = []
+    second_holder_is_registered: list[bool] = []
+    notifications_seen_by_second_holder: list[str] = []
+
+    def last_holder() -> None:
+        with language_server.open_file(_FILE):
+            pass
+
+    def second_holder() -> None:
+        assert close_started.wait(timeout=30)
+        with language_server.open_file(_FILE) as file_buffer:
+            second_holder_is_registered.append(language_server.open_file_buffers.get(file_buffer.uri) is file_buffer)
+            notifications_seen_by_second_holder.extend(notifications)
+
+    def recording_errors(call: Callable[[], None]) -> Callable[[], None]:
+        def run() -> None:
+            try:
+                call()
+            except BaseException as e:
+                errors.append(e)
+
+        return run
+
+    threads = [threading.Thread(target=recording_errors(last_holder)), threading.Thread(target=recording_errors(second_holder))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    assert not any(thread.is_alive() for thread in threads)
+
+    assert errors == []
+    assert second_holder_entered.is_set()
+    assert second_holder_is_registered == [True]
+    assert notifications_seen_by_second_holder == ["didOpen", "didClose", "didOpen"]

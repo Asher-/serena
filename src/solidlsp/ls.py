@@ -120,8 +120,8 @@ class LSPFileBuffer:
         self.encoding = encoding
         self._content_hash: str | None = None
         self._is_open_in_ls = False
-        # serializes this document's didOpen/didChange/didClose notifications and the open-in-LS state they change,
-        # so that they reach the language server in the order in which they were requested
+        # serializes this document's didOpen, the didChange sent by ensure_open_in_ls and reload_from_disk, its didClose,
+        # and the open-in-LS flag they change, so that they reach the language server in the order in which they were requested
         self._notification_lock = threading.Lock()
         if open_in_ls:
             self._open_in_ls()
