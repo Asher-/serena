@@ -82,6 +82,7 @@ def test_a_file_taken_again_while_its_last_holder_closes_it_is_reopened_after_th
     ensure_open_in_ls = LSPFileBuffer.ensure_open_in_ls
     close_started = threading.Event()
     second_holder_entered = threading.Event()
+    close_held_until_second_holder_entered: list[bool] = []
 
     def recorded_open_document(params: Any) -> None:
         if params["textDocument"]["uri"].endswith("variables.py"):
@@ -90,8 +91,9 @@ def test_a_file_taken_again_while_its_last_holder_closes_it_is_reopened_after_th
 
     def held_back_close_document(params: Any) -> None:
         if params["textDocument"]["uri"].endswith("variables.py"):
-            close_started.set()
-            second_holder_entered.wait(timeout=30)
+            if not close_started.is_set():
+                close_started.set()
+                close_held_until_second_holder_entered.append(second_holder_entered.wait(timeout=30))
             notifications.append("didClose")
         close_document(params)
 
@@ -134,6 +136,6 @@ def test_a_file_taken_again_while_its_last_holder_closes_it_is_reopened_after_th
     assert not any(thread.is_alive() for thread in threads)
 
     assert errors == []
-    assert second_holder_entered.is_set()
+    assert close_held_until_second_holder_entered == [True]
     assert second_holder_is_registered == [True]
     assert notifications_seen_by_second_holder == ["didOpen", "didClose", "didOpen"]
