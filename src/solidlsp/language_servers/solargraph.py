@@ -342,7 +342,7 @@ class Solargraph(SolidLanguageServer):
         # Wait for Solargraph to complete its initial workspace analysis
         # This prevents issues by ensuring background tasks finish
         log.info("Waiting for Solargraph to complete initial workspace analysis...")
-        if self.analysis_complete.wait(timeout=60.0):
+        if self._wait_for_initial_analysis(self.analysis_complete, 60.0):
             log.info("Solargraph initial analysis complete, server ready")
         else:
             log.warning("Timeout waiting for Solargraph analysis completion, proceeding anyway")

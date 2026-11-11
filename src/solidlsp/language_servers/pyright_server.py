@@ -235,7 +235,7 @@ class PyrightServer(SolidLanguageServer):
         # Wait for Pyright to complete its initial workspace analysis
         # This prevents zombie processes by ensuring background tasks finish
         log.info(f"Waiting up to {self._TIMEOUT_FOR_INITIAL_ANALYSIS}s for Pyright to complete initial workspace analysis...")
-        if self.analysis_complete.wait(timeout=self._TIMEOUT_FOR_INITIAL_ANALYSIS):
+        if self._wait_for_initial_analysis(self.analysis_complete, self._TIMEOUT_FOR_INITIAL_ANALYSIS):
             log.info("Pyright initial analysis complete, server ready")
         else:
             log.warning("Timeout waiting for Pyright analysis completion, proceeding anyway")

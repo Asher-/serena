@@ -1525,6 +1525,19 @@ class SolidLanguageServer(ABC):
         finally:
             self.stop()
 
+    def _wait_for_initial_analysis(self, analysis_complete: threading.Event, timeout: float) -> bool:
+        """
+        Waits for the server's initial workspace analysis.
+
+        :param analysis_complete: the event the server's notifications set once its initial analysis has finished.
+        :param timeout: the most to wait, in seconds.
+        :return: whether the analysis has finished. A server adopted from an ended instance finished it under that
+            instance and does not announce it again, so for such a server this returns True at once.
+        """
+        if self.server.adopted:
+            return True
+        return analysis_complete.wait(timeout=timeout)
+
     @abstractmethod
     def _start_server(self) -> None:
         """

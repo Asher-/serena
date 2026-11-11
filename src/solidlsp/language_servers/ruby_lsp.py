@@ -457,7 +457,7 @@ class RubyLsp(SolidLanguageServer):
         # Wait for ruby-lsp to complete its initial indexing
         # ruby-lsp has fast indexing
         log.info("Waiting for ruby-lsp to complete initial indexing...")
-        if self.analysis_complete.wait(timeout=30.0):
+        if self._wait_for_initial_analysis(self.analysis_complete, 30.0):
             log.info("ruby-lsp initial indexing complete, server ready")
         else:
             log.warning("Timeout waiting for ruby-lsp indexing completion, proceeding anyway")

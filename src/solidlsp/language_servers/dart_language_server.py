@@ -239,7 +239,7 @@ class DartLanguageServer(SolidLanguageServer):
         self.server.notify.initialized({})
 
         log.info(f"Waiting up to {self._TIMEOUT_FOR_INITIAL_ANALYSIS}s for dart-language-server to finish initial analysis...")
-        if self.analysis_complete.wait(timeout=self._TIMEOUT_FOR_INITIAL_ANALYSIS):
+        if self._wait_for_initial_analysis(self.analysis_complete, self._TIMEOUT_FOR_INITIAL_ANALYSIS):
             log.info("dart-language-server initial analysis complete, server ready")
         else:
             log.warning("Timeout waiting for dart-language-server analysis completion, proceeding anyway")

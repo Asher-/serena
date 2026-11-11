@@ -191,7 +191,7 @@ class BasedPyrightLanguageServer(SolidLanguageServer):
             "Waiting up to %ss for BasedPyright to complete initial workspace analysis...",
             self._TIMEOUT_FOR_INITIAL_ANALYSIS,
         )
-        if self.analysis_complete.wait(timeout=self._TIMEOUT_FOR_INITIAL_ANALYSIS):
+        if self._wait_for_initial_analysis(self.analysis_complete, self._TIMEOUT_FOR_INITIAL_ANALYSIS):
             log.info("BasedPyright initial analysis complete, server ready")
         else:
             log.warning("Timeout waiting for BasedPyright analysis completion, proceeding anyway")
