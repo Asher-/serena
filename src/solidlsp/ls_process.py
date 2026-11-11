@@ -270,12 +270,13 @@ class LanguageServerInterface(ABC):
         self.notify.exit()
         log.info("Sent exit notification to server")
 
-    def _send_shutdown_in_thread(self) -> None:
+    def _send_shutdown_in_thread(self) -> bool:
         """
         Signals shutdown to the server in a separate thread (requests can hang),
         and waits for the thread to complete with a timeout.
 
-        :param timeout: timeout, in seconds, to wait for the requests to be handled
+        :return: whether the shutdown request and exit notification were sent and answered within the timeout; when
+            not, the thread may still be writing to the server.
         """
         log.debug("Sending LSP shutdown request...")
         shutdown_thread = threading.Thread(target=self._send_shutdown)
@@ -284,8 +285,9 @@ class LanguageServerInterface(ABC):
         shutdown_thread.join(timeout=2.0)
         if shutdown_thread.is_alive():
             log.debug("LSP shutdown request timed out, proceeding to terminate...")
-        else:
-            log.debug("LSP shutdown request completed.")
+            return False
+        log.debug("LSP shutdown request completed.")
+        return True
 
     def _trace(self, src: str, dest: str, message: str | StringDict) -> None:
         """
@@ -637,10 +639,12 @@ class StdioLanguageServer(LanguageServerInterface):
             log.debug("Server process is None, cannot shutdown.")
             return
 
-        # send LSP shutdown and close stdin to signal no more input
+        # send LSP shutdown and close stdin to signal no more input; a shutdown still being written leaves stdin open,
+        # since a close waits on that write, which a server that no longer reads never lets end, and stop closes it once
+        # the process is gone
         try:
-            self._send_shutdown_in_thread()
-            self._safely_close_pipe(self._process.stdin)
+            if self._send_shutdown_in_thread():
+                self._safely_close_pipe(self._process.stdin)
         except Exception as e:
             log.debug(f"Exception during graceful shutdown: {e}")
             # Ignore errors here, we are proceeding to terminate anyway.

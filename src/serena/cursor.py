@@ -9,6 +9,7 @@ import logging
 import os
 import time
 from collections.abc import Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -1932,56 +1933,65 @@ class CursorManager:
                 unsymboled_order.append(path)
             unsymboled[path].append(display)
 
-        for match in matches:
-            assert match.source_file_path is not None
-            rel_path = match.source_file_path
-            # MatchedConsecutiveLines.line_number is already 0-indexed --
-            # same convention as the LSP query, so no conversion is needed
-            matched_line = match.matched_lines[0]
-            line_0idx = matched_line.line_number
-            # query at the first non-whitespace column so the LSP's
-            # innermost-container lookup lands on actual code -- column 0
-            # of an indented line falls in the leading-whitespace gutter
-            # and some LSP implementations return None for it
-            line_content = matched_line.line_content or ""
-            stripped = line_content.lstrip()
-            col_0idx = len(line_content) - len(stripped) if stripped else 0
-            # rung check via the ONE ladder resolver: only the LSP rung can
-            # anchor a hit to an enclosing symbol. A structural/plaintext file
-            # still surfaces its matched line as a file-level hit (spec §5.1/§5.3).
-            if self.resolve_read_rung(rel_path, retriever=retriever) is not ReadRung.LSP:
-                _record_unsymboled(rel_path, match.to_display_string())
-                continue
-            try:
-                ls = retriever.get_language_server(rel_path)
-                sym_dict = ls.request_containing_symbol(rel_path, line_0idx, col_0idx, strict=False)
-            except Exception as e:
-                # rendering is best-effort: when the LSP cannot answer the
-                # containment query for one file, skip the hit rather than
-                # fail the whole search
-                log.debug(f"Could not resolve containing symbol for {rel_path}:{line_0idx}: {e}")
-                sym_dict = None
-            if sym_dict is None:
-                # request_containing_symbol(strict=False) returns None for a hit on a
-                # top-level symbol's OWN declaration line: it is not inside any deeper
-                # container. Recover that symbol from the file overview so the hit
-                # attaches to it instead of being counted as unsymboled.
-                # bug://serena/cursor-grep-skips-package-level-symbol-declarations
-                sym = self._top_level_symbol_covering_line(rel_path, line_0idx)
-                if sym is None:
-                    # genuine non-symbol region inside an LSP file (comment,
-                    # import, blank line): surface the matched line, don't drop it
+        # the language server's open document of the file whose matches are being resolved, held across all of
+        # that file's matches: each resolution opens the file, and a file nothing else holds open would be sent to
+        # the server whole once per match
+        with ExitStack() as held_file:
+            held_path: str | None = None
+            for match in matches:
+                assert match.source_file_path is not None
+                rel_path = match.source_file_path
+                # MatchedConsecutiveLines.line_number is already 0-indexed --
+                # same convention as the LSP query, so no conversion is needed
+                matched_line = match.matched_lines[0]
+                line_0idx = matched_line.line_number
+                # query at the first non-whitespace column so the LSP's
+                # innermost-container lookup lands on actual code -- column 0
+                # of an indented line falls in the leading-whitespace gutter
+                # and some LSP implementations return None for it
+                line_content = matched_line.line_content or ""
+                stripped = line_content.lstrip()
+                col_0idx = len(line_content) - len(stripped) if stripped else 0
+                # rung check via the ONE ladder resolver: only the LSP rung can
+                # anchor a hit to an enclosing symbol. A structural/plaintext file
+                # still surfaces its matched line as a file-level hit (spec §5.1/§5.3).
+                if self.resolve_read_rung(rel_path, retriever=retriever) is not ReadRung.LSP:
                     _record_unsymboled(rel_path, match.to_display_string())
                     continue
-            else:
-                sym = LanguageServerSymbol(sym_dict)
-            name_path = sym.get_name_path()
-            key = (rel_path, name_path)
-            if key not in groups:
-                groups[key] = sym
-                hits_per_group[key] = []
-                group_order.append(key)
-            hits_per_group[key].append(match.to_display_string())
+                try:
+                    ls = retriever.get_language_server(rel_path)
+                    if held_path != rel_path:
+                        held_file.close()
+                        held_file.enter_context(ls.open_file(rel_path))
+                        held_path = rel_path
+                    sym_dict = ls.request_containing_symbol(rel_path, line_0idx, col_0idx, strict=False)
+                except Exception as e:
+                    # rendering is best-effort: when the LSP cannot answer the
+                    # containment query for one file, skip the hit rather than
+                    # fail the whole search
+                    log.debug(f"Could not resolve containing symbol for {rel_path}:{line_0idx}: {e}")
+                    sym_dict = None
+                if sym_dict is None:
+                    # request_containing_symbol(strict=False) returns None for a hit on a
+                    # top-level symbol's OWN declaration line: it is not inside any deeper
+                    # container. Recover that symbol from the file overview so the hit
+                    # attaches to it instead of being counted as unsymboled.
+                    # bug://serena/cursor-grep-skips-package-level-symbol-declarations
+                    sym = self._top_level_symbol_covering_line(rel_path, line_0idx)
+                    if sym is None:
+                        # genuine non-symbol region inside an LSP file (comment,
+                        # import, blank line): surface the matched line, don't drop it
+                        _record_unsymboled(rel_path, match.to_display_string())
+                        continue
+                else:
+                    sym = LanguageServerSymbol(sym_dict)
+                name_path = sym.get_name_path()
+                key = (rel_path, name_path)
+                if key not in groups:
+                    groups[key] = sym
+                    hits_per_group[key] = []
+                    group_order.append(key)
+                hits_per_group[key].append(match.to_display_string())
 
         # build the ordered results preserving discovery order for both the
         # symbol-anchored groups and the file-level non-symbol blocks

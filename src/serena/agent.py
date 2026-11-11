@@ -2630,9 +2630,14 @@ class SerenaAgent:
         ToolRegistry().print_tool_overview(self._calling_active_tools().tools)
 
     def __del__(self) -> None:
+        # the teardown, on a thread of its own: the collector runs a finalizer on whichever thread it interrupts, which
+        # may hold a lock the teardown takes, such as a logging handler's; at interpreter shutdown no thread can start
         is_object_initialised = "_active_projects_by_session" in self.__dict__
         if is_object_initialised:
-            self.on_shutdown()
+            try:
+                threading.Thread(target=self.on_shutdown, name="SerenaAgentFinalizer", daemon=True).start()
+            except RuntimeError:
+                pass
 
     def on_shutdown(self, timeout: float = 2.0) -> None:
         """
