@@ -548,6 +548,8 @@ class _FifoWriter(io.RawIOBase):
         return self._fd
 
     def write(self, data: Any) -> int:
+        if self.closed:
+            raise ValueError("write to a closed FIFO writer")
         view = memoryview(data).cast("B")
         written = 0
         while written < len(view):

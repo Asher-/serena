@@ -1,7 +1,8 @@
 """
 The stdin of a process :mod:`solidlsp.util.supervise` starts, against the real brain-supervise program named by
-BRAIN_SUPERVISE: a message larger than the process's FIFO holds reaches a process that waits on it as node does, and a
-write to a process that has ended raises rather than waiting for a reader.
+BRAIN_SUPERVISE: a message larger than the process's FIFO holds reaches the process in every stream mode and reaches a
+process that waits on it as node does, a write to a process that has ended raises rather than waiting for a reader, and
+a write to a stdin that was closed raises.
 """
 
 import json
@@ -35,7 +36,7 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
             subprocess.run([supervise.program(), "stop", "-signal", "SIGKILL", str(path)], check=False, stderr=subprocess.DEVNULL)
 
 
-def _write_within(stream: Any, data: bytes, seconds: float) -> BaseException | None:
+def _write_within(stream: Any, data: bytes | str, seconds: float) -> BaseException | None:
     """
     :return: what the write and flush raised, or None; the test fails when they have not returned within the seconds.
     """
@@ -52,8 +53,20 @@ def _write_within(stream: Any, data: bytes, seconds: float) -> BaseException | N
     writer = threading.Thread(target=write, daemon=True)
     writer.start()
     writer.join(seconds)
-    assert raised, f"the write of {len(data)} bytes did not return within {seconds} s"
+    assert raised, f"the write of {len(data)} characters did not return within {seconds} s"
     return raised[0]
+
+
+@pytest.mark.parametrize("stream_mode", [{"bufsize": 0}, {}, {"text": True}], ids=["unbuffered", "buffered", "text"])
+def test_a_process_reads_a_message_larger_than_its_fifo_holds_in_each_stream_mode(stream_mode: dict[str, Any]) -> None:
+    process = supervise.Popen(["/usr/bin/head", "-c", str(_MESSAGE_BYTES)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, **stream_mode)
+    assert process.stdin is not None and process.stdout is not None
+    message = "x" * _MESSAGE_BYTES if stream_mode.get("text") else b"x" * _MESSAGE_BYTES
+
+    assert _write_within(process.stdin, message, 30) is None
+    assert process.wait(30) == 0
+    assert process.stdout.read() == message
+    process.close_streams()
 
 
 @pytest.mark.skipif(_NODE is None, reason="no node on the path")
@@ -81,3 +94,15 @@ def test_a_write_to_an_adopted_process_that_has_ended_raises_a_broken_pipe() -> 
     assert isinstance(_write_within(adopted.stdin, b"x" * _MESSAGE_BYTES, 30), BrokenPipeError)
     adopted.close_streams()
     adopted.release()
+
+
+def test_a_write_to_a_stdin_closed_once_or_twice_raises_a_value_error() -> None:
+    process = supervise.Popen(["/bin/sleep", "300"], stdin=subprocess.PIPE, bufsize=0)
+    assert process.stdin is not None
+    process.stdin.close()
+    process.stdin.close()
+
+    with pytest.raises(ValueError):
+        process.stdin.write(b"x")
+    process.kill()
+    process.wait(30)
