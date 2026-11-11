@@ -518,6 +518,53 @@ class _Follow(io.RawIOBase):
         super().close()
 
 
+class _FifoWriter(io.RawIOBase):
+    """
+    The writer of a process's FIFO. A write is made in pieces no larger than the FIFO holds, since on macOS a process
+    waiting on its FIFO through kqueue, as node does, is never woken by a single write larger than that. A write waits
+    for room in the FIFO while the process runs, and raises :class:`BrokenPipeError` once it has ended, since the FIFO
+    of an ended process may be held read-write by its writer alone and then takes nothing more.
+    """
+
+    _PIECE_BYTES = 8192
+    """the most a FIFO holds on macOS."""
+    _ROOM_CHECK_SECONDS = 0.05
+    """how long a write waits for room before it checks again whether the process has ended."""
+
+    def __init__(self, fd: int, ended: Callable[[], bool]) -> None:
+        """
+        :param fd: a descriptor writing to the FIFO, which this writer owns.
+        :param ended: answers whether the process has ended.
+        """
+        super().__init__()
+        self._fd = fd
+        os.set_blocking(fd, False)
+        self._ended = ended
+
+    def writable(self) -> bool:
+        return True
+
+    def fileno(self) -> int:
+        return self._fd
+
+    def write(self, data: Any) -> int:
+        view = memoryview(data).cast("B")
+        written = 0
+        while written < len(view):
+            try:
+                written += os.write(self._fd, view[written : written + self._PIECE_BYTES])
+            except BlockingIOError:
+                if self._ended():
+                    raise BrokenPipeError(errno.EPIPE, "the process reading the FIFO has ended") from None
+                select.select([], [self._fd], [], self._ROOM_CHECK_SECONDS)
+        return written
+
+    def close(self) -> None:
+        if not self.closed:
+            os.close(self._fd)
+        super().close()
+
+
 class Popen:
     """
     A supervised process, with the interface of ``subprocess.Popen``. Stdin is /dev/null unless it is
@@ -763,7 +810,8 @@ class Popen:
             return fd
 
     def _wrap_writer(self, fd: int) -> IO[Any]:
-        writer = os.fdopen(fd, "wb", buffering=0 if self._bufsize == 0 else -1)
+        fifo = _FifoWriter(fd, lambda: self.poll() is not None)
+        writer: IO[Any] = fifo if self._bufsize == 0 else io.BufferedWriter(fifo)  # type: ignore[assignment]
         if self._text:
             return io.TextIOWrapper(writer, encoding=self._encoding, errors=self._errors, write_through=True)
         return writer
