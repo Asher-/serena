@@ -431,23 +431,36 @@ def test_a_failed_call_is_journaled_as_the_failure_it_answered(tools: _Tools) ->
     assert journal.resume("call-1") == _text(answer)
 
 
+def _entries_written_or_removed(root: Path, before: int) -> bool:
+    """
+    :return: whether any entry was written into or removed from the journal's entry directory since its modification time
+        was ``before``; each such change advances that time, so the directory is read without being listed.
+    """
+    return (root / supervise.OWNER / "entry").stat().st_mtime_ns != before
+
+
 def test_a_call_that_names_no_call_id_is_not_journaled(tools: _Tools, root: Path) -> None:
     tools.release.set()
-    with _serve(CallJournal(), tools) as client:
+    journal = CallJournal()
+    before = (root / supervise.OWNER / "entry").stat().st_mtime_ns
+    with _serve(journal, tools) as client:
         answer = _Server(client).call("held", {"text": "x"})
 
     assert _text(answer) == CallResult("answered x")
-    assert list((root / supervise.OWNER / "entry").glob("*.json")) == []
+    assert not _entries_written_or_removed(root, before)
 
 
 def test_a_call_id_that_cannot_name_an_entry_is_answered_with_an_error_and_its_work_is_not_run(tools: _Tools, root: Path) -> None:
     # the tool holds until released, which this test never does, so an answer means its work was not run
-    with _serve(CallJournal(), tools) as client:
+    journal = CallJournal()
+    before = (root / supervise.OWNER / "entry").stat().st_mtime_ns
+    with _serve(journal, tools) as client:
         answer = _text(_Server(client).call("held", {"text": "x"}, call_id="../x"))
 
     assert answer.is_error
     assert "../x" in answer.text
-    assert list((root / supervise.OWNER / "entry").glob("*.json")) == []
+    assert not (root / supervise.OWNER / "x.json").exists()
+    assert not _entries_written_or_removed(root, before)
 
 
 def test_a_call_the_listener_refused_is_not_journaled(tools: _Tools) -> None:
