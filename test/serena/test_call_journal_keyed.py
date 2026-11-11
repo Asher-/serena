@@ -123,3 +123,43 @@ def test_brain_retire_over_the_listener_retires_an_answered_call_and_refuses_an_
         assert (_owner() / "entry" / "open.json").exists()
     finally:
         journal.close()
+
+
+def test_brain_retire_naming_no_call_is_refused_and_retires_nothing() -> None:
+    journal = CallJournal()
+    try:
+        client = TestClient(cast(Any, CallJournalLayer(_Unreached(), journal, "/mcp")))
+        assert journal.receive("done", "t", {})
+        journal.finish("done", CallResult("answer", False))
+
+        for params in ({}, {"call_id": ""}, {"call_id": 7}):
+            response = client.post("/mcp", json={"jsonrpc": "2.0", "id": 5, "method": call_journal.RETIRE_METHOD, "params": params})
+            assert response.status_code == 200
+            assert response.json()["error"]["code"] == -32602
+        assert (_owner() / "entry" / "done.json").exists()
+    finally:
+        journal.close()
+
+
+def test_a_legacy_removal_an_earlier_open_began_is_finished() -> None:
+    removing = _owner() / "call.legacy"
+    removing.mkdir(parents=True)
+    (removing / "c1.json").write_text(json.dumps({"id": "c1", "tool": "t"}))
+    journal = CallJournal()
+    try:
+        assert not removing.exists()
+    finally:
+        journal.close()
+
+
+def test_a_legacy_journal_beside_an_unfinished_removal_is_removed_with_it() -> None:
+    legacy, removing = _owner() / "call", _owner() / "call.legacy"
+    for directory in (legacy, removing):
+        directory.mkdir(parents=True)
+        (directory / "c1.json").write_text(json.dumps({"id": "c1", "tool": "t"}))
+    journal = CallJournal()
+    try:
+        assert not legacy.exists()
+        assert not removing.exists()
+    finally:
+        journal.close()
