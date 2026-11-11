@@ -346,13 +346,17 @@ class Record:
 def records() -> list[Record]:
     """
     :return: every record serena holds whose outcome no instance has consumed, oldest first. Serena discards a record
-        once it has consumed the outcome, so this is every record but one another server marked consumed.
+        once it has consumed the outcome, so this is every record but one another server marked consumed. The records are
+        those the index of live records names, each read by its path; no directory is listed.
     """
+    owner = restart_root() / OWNER
     found = []
-    for path in sorted((restart_root() / OWNER / "process").glob("*.json")):
+    for identifier in sorted(_live_ids(owner)):
+        path = owner / "process" / f"{identifier}.json"
         try:
             fields = json.loads(path.read_text())
         except (FileNotFoundError, ValueError):
+            # an id whose record is not yet written, or is torn
             continue
         if not fields.get("consumed"):
             found.append(Record.load(path))
@@ -395,13 +399,55 @@ def _signal(record: Path, sig: int) -> None:
     subprocess.run([program(), "stop", "-signal", name, str(record)], check=False, stderr=subprocess.DEVNULL)
 
 
+def _live_index(owner: Path) -> Path:
+    """
+    :param owner: an owner's directory under the restart root.
+    :return: the index of the owner's live records: the ids of its records whose outcome is unconsumed, as brain-supervise
+        keeps it.
+    """
+    return owner / "live" / "process.json"
+
+
+def _live_ids(owner: Path) -> list[str]:
+    """
+    :param owner: an owner's directory under the restart root.
+    :return: the ids the index of the owner's live records holds; none when there is no index.
+    """
+    try:
+        return json.loads(_live_index(owner).read_text())
+    except FileNotFoundError:
+        return []
+
+
+def _forget(owner: Path, identifier: str) -> None:
+    """
+    Takes the id of a removed record out of the index of its owner's live records, holding the index's lock while it reads
+    and replaces it, as every writer of the index does; the index is replaced whole by rename, so a reader needs no lock.
+
+    :param owner: an owner's directory under the restart root.
+    :param identifier: the removed record's id.
+    """
+    index = _live_index(owner)
+    index.parent.mkdir(parents=True, exist_ok=True)
+    with open(index.parent / "process.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        ids = _live_ids(owner)
+        if identifier not in ids:
+            return
+        kept = json.dumps([kept for kept in ids if kept != identifier], separators=(",", ":"))
+        with tempfile.NamedTemporaryFile("w", dir=index.parent, prefix=".process-", delete=False) as replacement:
+            replacement.write(kept)
+        os.replace(replacement.name, index)
+
+
 def _discard(directory: Path, identifier: str) -> None:
     """
     :param directory: the directory of a process record.
-    :param identifier: the record's id.
+    :param identifier: the record's id, which leaves the index of live records once the record is removed.
     """
     for suffix in (".json", ".in", ".out", ".err"):
         (directory / f"{identifier}{suffix}").unlink(missing_ok=True)
+    _forget(directory.parent, identifier)
 
 
 class _Growth:

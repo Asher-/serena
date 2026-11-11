@@ -241,6 +241,14 @@ class _Echo(supervise.Continuation):
         return CallResult(str(error), True)
 
 
+def _enter_live(root: Path, *identifiers: str) -> None:
+    """Enters each id into the index of serena's live records, as brain-supervise does before it writes a record."""
+    index = root / supervise.OWNER / "live" / "process.json"
+    index.parent.mkdir(parents=True, exist_ok=True)
+    ids = json.loads(index.read_text()) if index.exists() else []
+    index.write_text(json.dumps(ids + list(identifiers)))
+
+
 def _left(root: Path, call_id: str, kind: str, command: str) -> supervise.Popen:
     """:return: a process started for the call as an ended instance would have left it, its starter named as no live instance."""
     process = supervise.Popen(["/bin/sh", "-c", command], call_id=call_id, waiting=supervise.Waiting(kind, None, 1, "1.000000"), keep=True)
@@ -265,9 +273,10 @@ def test_startup_adoption_answers_a_call_by_its_continuation_or_its_failure_and_
     callless = _left(root, "", "", wait)
     malformed = root / supervise.OWNER / "process" / "malformed.json"
     malformed.write_text(json.dumps({"owner": supervise.OWNER, "id": "malformed", "pid": "not a pid", "start": "1.000000"}))
+    _enter_live(root, "malformed")
 
     watchers = supervise.Adoption(journal, (), (), continuations).adopt()
-    (root / supervise.OWNER / "call" / "removed.json").unlink()
+    (root / supervise.OWNER / "entry" / "removed.json").unlink()
     go.touch()
     for watcher in watchers:
         watcher.join(60)
@@ -313,6 +322,7 @@ def test_the_records_leave_out_one_that_cannot_be_read_and_one_whose_outcome_is_
     gone.symlink_to(directory / "nowhere.json")
     consumed = directory / "consumed.json"
     consumed.write_text(json.dumps({**json.loads(process.record.read_text()), "consumed": True}))
+    _enter_live(supervise.restart_root(), "torn", "gone", "consumed")
 
     found = [record.path for record in supervise.records()]
 

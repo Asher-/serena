@@ -45,6 +45,19 @@ def root(scratch: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
             subprocess.run([supervise.program(), "stop", "-signal", "SIGKILL", str(path)], check=False, stderr=subprocess.DEVNULL)
 
 
+def _enter_live(root: Path, *identifiers: str) -> None:
+    """Enters each id into the index of serena's live records, as brain-supervise does before it writes a record."""
+    index = root / supervise.OWNER / "live" / "process.json"
+    index.parent.mkdir(parents=True, exist_ok=True)
+    ids = json.loads(index.read_text()) if index.exists() else []
+    index.write_text(json.dumps(ids + list(identifiers)))
+
+
+def _live(root: Path) -> list[str]:
+    """:return: the ids the index of serena's live records holds."""
+    return json.loads((root / supervise.OWNER / "live" / "process.json").read_text())
+
+
 def _write_record(path: Path, **fields: object) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"owner": supervise.OWNER, "id": path.stem, **fields}))
@@ -151,7 +164,46 @@ def test_the_consumed_prefix_of_a_stream_file_is_freed_and_every_offset_keeps_it
 
 def test_a_record_whose_waiting_holds_fields_serena_does_not_write_is_still_read(root: Path) -> None:
     path = _write_record(root / supervise.OWNER / "process" / "r.json", call_id="c", waiting={"kind": "k", "since": "then"})
+    _enter_live(root, "r")
 
     [record] = supervise.records()
 
     assert (record.path, record.call_id, record.waiting) == (path, "c", supervise.Waiting("k"))
+
+
+def test_the_records_are_those_the_live_index_names_and_none_the_record_directory_holds_beside_them(root: Path) -> None:
+    named = _write_record(root / supervise.OWNER / "process" / "named.json")
+    _write_record(root / supervise.OWNER / "process" / "unnamed.json")
+    _enter_live(root, "named", "unwritten")
+
+    assert [record.path for record in supervise.records()] == [named]
+
+
+def test_a_discarded_record_leaves_the_live_index_and_the_others_stay(root: Path) -> None:
+    for identifier in ("kept", "discarded"):
+        _write_record(root / supervise.OWNER / "process" / f"{identifier}.json")
+    _enter_live(root, "kept", "discarded")
+
+    supervise.Record.load(root / supervise.OWNER / "process" / "discarded.json").discard()
+
+    assert _live(root) == ["kept"]
+    assert not (root / supervise.OWNER / "process" / "discarded.json").exists()
+
+
+def test_a_record_the_live_index_does_not_name_is_discarded_leaving_the_index_as_it_was(root: Path) -> None:
+    _write_record(root / supervise.OWNER / "process" / "kept.json")
+    _write_record(root / supervise.OWNER / "process" / "stray.json")
+    _enter_live(root, "kept")
+
+    supervise.Record.load(root / supervise.OWNER / "process" / "stray.json").discard()
+
+    assert _live(root) == ["kept"]
+
+
+def test_a_record_discarded_where_no_live_index_is_kept_writes_none(root: Path) -> None:
+    _write_record(root / supervise.OWNER / "process" / "alone.json")
+
+    supervise.Record.load(root / supervise.OWNER / "process" / "alone.json").discard()
+
+    assert not (root / supervise.OWNER / "live" / "process.json").exists()
+    assert supervise.records() == []
