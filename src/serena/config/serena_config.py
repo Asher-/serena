@@ -726,6 +726,29 @@ def _project_yml_state(project_yml_path: str) -> tuple:
     return tuple(states)
 
 
+class _CopyableLock:
+    """
+    A lock guarding the in-process state of an object that may be copied or pickled; a copy receives a fresh,
+    unheld lock of the same kind.
+    """
+
+    def __init__(self, reentrant: bool = False) -> None:
+        """
+        :param reentrant: whether the thread holding the lock may acquire it again
+        """
+        self._reentrant = reentrant
+        self._lock = threading.RLock() if reentrant else threading.Lock()
+
+    def __enter__(self) -> bool:
+        return self._lock.__enter__()
+
+    def __exit__(self, *exc_info: Any) -> None:
+        self._lock.__exit__(*exc_info)
+
+    def __reduce__(self) -> tuple:
+        return _CopyableLock, (self._reentrant,)
+
+
 class RegisteredProject(ToStringMixin):
     def __init__(
         self,
@@ -749,6 +772,8 @@ class RegisteredProject(ToStringMixin):
         # the state of project.yml and project.local.yml when this project was registered from an instance, whose
         # configuration may have been given in memory; None once project.yml has changed since (see reload_if_changed)
         self._registered_project_yml_state: tuple | None = None
+        # guards loading, memoizing and dropping the project instance
+        self._instance_lock = _CopyableLock()
 
     def _tostring_exclude_private(self) -> bool:
         return True
@@ -808,22 +833,24 @@ class RegisteredProject(ToStringMixin):
     def get_project_instance(self, serena_config: "SerenaConfig") -> "Project":
         """
         Returns the project instance for this registered project, loading it if necessary.
+        Concurrent callers receive the same instance.
         An instance loaded after :meth:`reload_if_changed` dropped one is handed the dropped instance as the one it replaces.
         """
-        if self._project_instance is None:
-            from ..project import Project
+        with self._instance_lock:
+            if self._project_instance is None:
+                from ..project import Project
 
-            serena_config.place_data_folder_outside_project(self.project_root)
+                serena_config.place_data_folder_outside_project(self.project_root)
 
-            with LogTime(f"Loading project instance for {self}", logger=log):
-                self._project_instance = Project(
-                    project_root=str(self.project_root),
-                    project_config=self.project_config,
-                    serena_config=serena_config,
-                    replaced_project=self._replaced_project_instance,
-                )
-            self._replaced_project_instance = None
-        return self._project_instance
+                with LogTime(f"Loading project instance for {self}", logger=log):
+                    self._project_instance = Project(
+                        project_root=str(self.project_root),
+                        project_config=self.project_config,
+                        serena_config=serena_config,
+                        replaced_project=self._replaced_project_instance,
+                    )
+                self._replaced_project_instance = None
+            return self._project_instance
 
     def reload_if_changed(self, serena_config: "SerenaConfig") -> bool:
         """
@@ -837,33 +864,34 @@ class RegisteredProject(ToStringMixin):
             False if the configuration was unchanged or could not be loaded (e.g., the project.yml file no
             longer exists or is malformed). In the latter case the cached configuration is preserved.
         """
-        registered_state = self._registered_project_yml_state
-        if registered_state is not None:
-            if registered_state == _project_yml_state(serena_config.get_project_yml_location(self.project_root)):
-                # project.yml is unchanged since this project was registered from an instance, whose configuration stays
-                # in effect until project.yml changes
+        with self._instance_lock:
+            registered_state = self._registered_project_yml_state
+            if registered_state is not None:
+                if registered_state == _project_yml_state(serena_config.get_project_yml_location(self.project_root)):
+                    # project.yml is unchanged since this project was registered from an instance, whose configuration stays
+                    # in effect until project.yml changes
+                    return False
+                self._registered_project_yml_state = None
+            try:
+                new_config = ProjectConfig.load(self.project_root, serena_config=serena_config)
+            except Exception as e:
+                log.warning(
+                    "Could not reload project configuration for %s from disk: %s. Keeping cached configuration.",
+                    self.project_root,
+                    e,
+                )
                 return False
-            self._registered_project_yml_state = None
-        try:
-            new_config = ProjectConfig.load(self.project_root, serena_config=serena_config)
-        except Exception as e:
-            log.warning(
-                "Could not reload project configuration for %s from disk: %s. Keeping cached configuration.",
+            if new_config == self.project_config:
+                return False
+            log.info(
+                "Detected on-disk change to project configuration for %s; dropping cached project instance.",
                 self.project_root,
-                e,
             )
-            return False
-        if new_config == self.project_config:
-            return False
-        log.info(
-            "Detected on-disk change to project configuration for %s; dropping cached project instance.",
-            self.project_root,
-        )
-        self.project_config = new_config
-        if self._project_instance is not None:
-            self._replaced_project_instance = self._project_instance
-        self._project_instance = None
-        return True
+            self.project_config = new_config
+            if self._project_instance is not None:
+                self._replaced_project_instance = self._project_instance
+            self._project_instance = None
+            return True
 
 
 @dataclass(kw_only=True)
@@ -974,6 +1002,8 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
     """
     _projects_at_load: set[str] = field(default_factory=set, repr=False)
     """Project roots present when this configuration instance was last persisted."""
+    _projects_lock: _CopyableLock = field(default_factory=lambda: _CopyableLock(reentrant=True), repr=False, compare=False)
+    """Lock over every check-then-act on :attr:`projects` within this process."""
 
     # *** static members ***
 
@@ -1258,32 +1288,33 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
             but have an existing project configuration file. Project configuration files are never auto-generated.
         :return: the registered project, or None if not found
         """
-        # look for project by name
-        project_candidates = []
-        for project in self.projects:
-            if project.project_config.project_name == project_root_or_name:
-                project_candidates.append(project)
-        if len(project_candidates) == 1:
-            return project_candidates[0]
-        elif len(project_candidates) > 1:
-            raise ValueError(
-                f"Multiple projects found with name '{project_root_or_name}'. Please reference it by location instead. "
-                f"Locations: {[p.project_root for p in project_candidates]}"
-            )
-        # no project found by name; check if it's a path
-        if os.path.isdir(project_root_or_name):
+        with self._projects_lock:
+            # look for project by name
+            project_candidates = []
             for project in self.projects:
-                if project.matches_root_path(project_root_or_name):
-                    return project
-        # no registered project found; optionally auto-register if a project configuration already exists
-        if autoregister:
-            config_path = self.get_project_yml_location(project_root_or_name)
-            if os.path.isfile(config_path):
-                registered_project = RegisteredProject.from_project_root(project_root_or_name, serena_config=self)
-                self.add_registered_project(registered_project)
-                return registered_project
-        # nothing found
-        return None
+                if project.project_config.project_name == project_root_or_name:
+                    project_candidates.append(project)
+            if len(project_candidates) == 1:
+                return project_candidates[0]
+            elif len(project_candidates) > 1:
+                raise ValueError(
+                    f"Multiple projects found with name '{project_root_or_name}'. Please reference it by location instead. "
+                    f"Locations: {[p.project_root for p in project_candidates]}"
+                )
+            # no project found by name; check if it's a path
+            if os.path.isdir(project_root_or_name):
+                for project in self.projects:
+                    if project.matches_root_path(project_root_or_name):
+                        return project
+            # no registered project found; optionally auto-register if a project configuration already exists
+            if autoregister:
+                config_path = self.get_project_yml_location(project_root_or_name)
+                if os.path.isfile(config_path):
+                    registered_project = RegisteredProject.from_project_root(project_root_or_name, serena_config=self)
+                    self.add_registered_project(registered_project)
+                    return registered_project
+            # nothing found
+            return None
 
     def get_project(self, project_root_or_name: str) -> Optional["Project"]:
         registered_project = self.get_registered_project(project_root_or_name)
@@ -1296,8 +1327,9 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
         """
         Adds a registered project, persisting the updated project list
         """
-        self.projects.append(registered_project)
-        self._persist_projects()
+        with self._projects_lock:
+            self.projects.append(registered_project)
+            self._persist_projects()
 
     def remove_registered_project(self, registered_project: RegisteredProject) -> None:
         """
@@ -1332,36 +1364,38 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
         if not project_root.is_dir():
             raise FileNotFoundError(f"Error: Path is not a directory: {project_root}")
 
-        for already_registered_project in self.projects:
-            if str(already_registered_project.project_root) == str(project_root):
-                raise FileExistsError(
-                    f"Project with path {project_root} was already added with name '{already_registered_project.project_name}'."
-                )
+        with self._projects_lock:
+            for already_registered_project in self.projects:
+                if str(already_registered_project.project_root) == str(project_root):
+                    raise FileExistsError(
+                        f"Project with path {project_root} was already added with name '{already_registered_project.project_name}'."
+                    )
 
-        self.place_data_folder_outside_project(project_root)
+            self.place_data_folder_outside_project(project_root)
 
-        autogen = ProjectConfigAutoGenerationMode.ASYNCHRONOUS if asynchronous_autogen else ProjectConfigAutoGenerationMode.SYNCHRONOUS
-        project_config = ProjectConfig.load(project_root, serena_config=self, autogen=autogen)
+            autogen = ProjectConfigAutoGenerationMode.ASYNCHRONOUS if asynchronous_autogen else ProjectConfigAutoGenerationMode.SYNCHRONOUS
+            project_config = ProjectConfig.load(project_root, serena_config=self, autogen=autogen)
 
-        new_project = Project(
-            project_root=str(project_root),
-            project_config=project_config,
-            is_newly_created=True,
-            serena_config=self,
-        )
-        self.add_registered_project(RegisteredProject.from_project_instance(new_project))
+            new_project = Project(
+                project_root=str(project_root),
+                project_config=project_config,
+                is_newly_created=True,
+                serena_config=self,
+            )
+            self.add_registered_project(RegisteredProject.from_project_instance(new_project))
 
-        return new_project
+            return new_project
 
     def remove_project(self, project_name: str) -> None:
-        # find the index of the project with the desired name and remove it
-        for i, project in enumerate(list(self.projects)):
-            if project.project_name == project_name:
-                del self.projects[i]
-                break
-        else:
-            raise ValueError(f"Project '{project_name}' not found in Serena configuration; valid project names: {self.project_names}")
-        self._persist_projects()
+        with self._projects_lock:
+            # find the index of the project with the desired name and remove it
+            for i, project in enumerate(list(self.projects)):
+                if project.project_name == project_name:
+                    del self.projects[i]
+                    break
+            else:
+                raise ValueError(f"Project '{project_name}' not found in Serena configuration; valid project names: {self.project_names}")
+            self._persist_projects()
 
     def is_dashboard_opened_on_launch(self) -> bool:
         """

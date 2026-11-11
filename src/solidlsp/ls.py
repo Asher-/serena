@@ -120,6 +120,9 @@ class LSPFileBuffer:
         self.encoding = encoding
         self._content_hash: str | None = None
         self._is_open_in_ls = False
+        # serializes this document's didOpen/didChange/didClose notifications and the open-in-LS state they change,
+        # so that they reach the language server in the order in which they were requested
+        self._notification_lock = threading.Lock()
         if open_in_ls:
             self._open_in_ls()
 
@@ -128,46 +131,71 @@ class LSPFileBuffer:
         Open the file in the language server if it is not already open.
         If it is already open, make sure the language server has the latest contents of the file.
         """
-        if not self._is_open_in_ls:
-            self._is_open_in_ls = True
-            current_contents = self.contents
-            self._read_file_modified_date_passed_to_ls = self._read_file_modified_date
-            self.language_server.server.notify.did_open_text_document(
-                {  # ty: ignore[invalid-argument-type]  # dict built from LSPConstants keys; shape matches the TypedDict
-                    LSPConstants.TEXT_DOCUMENT: {
-                        LSPConstants.URI: self.uri,
-                        LSPConstants.LANGUAGE_ID: self.language_id,
-                        LSPConstants.VERSION: self.version,
-                        LSPConstants.TEXT: current_contents,
-                    }
-                }
-            )
-        else:
-            # file already open: check if contents have changed and notify if so
-            current_contents = self.contents
-            if self._read_file_modified_date != self._read_file_modified_date_passed_to_ls:
+        with self._notification_lock:
+            if not self._is_open_in_ls:
+                self._is_open_in_ls = True
+                current_contents = self.contents
                 self._read_file_modified_date_passed_to_ls = self._read_file_modified_date
-                # A VersionedTextDocumentIdentifier's version must increase after each change,
-                # like the range-based didChange notifications sent for edits do. Reusing the
-                # previous number makes diagnostics/resolve data for the old and the new text
-                # indistinguishable to servers that key on it (rust-analyzer, pyright).
-                self.version += 1
-                self.language_server.server.notify.did_change_text_document(
+                self.language_server.server.notify.did_open_text_document(
                     {  # ty: ignore[invalid-argument-type]  # dict built from LSPConstants keys; shape matches the TypedDict
                         LSPConstants.TEXT_DOCUMENT: {
                             LSPConstants.URI: self.uri,
+                            LSPConstants.LANGUAGE_ID: self.language_id,
                             LSPConstants.VERSION: self.version,
-                        },
-                        LSPConstants.CONTENT_CHANGES: [
-                            {
-                                LSPConstants.TEXT: current_contents,
-                            }
-                        ],
+                            LSPConstants.TEXT: current_contents,
+                        }
                     }
                 )
+            else:
+                # file already open: check if contents have changed and notify if so
+                current_contents = self.contents
+                if self._read_file_modified_date != self._read_file_modified_date_passed_to_ls:
+                    self._read_file_modified_date_passed_to_ls = self._read_file_modified_date
+                    # A VersionedTextDocumentIdentifier's version must increase after each change,
+                    # like the range-based didChange notifications sent for edits do. Reusing the
+                    # previous number makes diagnostics/resolve data for the old and the new text
+                    # indistinguishable to servers that key on it (rust-analyzer, pyright).
+                    self.version += 1
+                    self.language_server.server.notify.did_change_text_document(
+                        {  # ty: ignore[invalid-argument-type]  # dict built from LSPConstants keys; shape matches the TypedDict
+                            LSPConstants.TEXT_DOCUMENT: {
+                                LSPConstants.URI: self.uri,
+                                LSPConstants.VERSION: self.version,
+                            },
+                            LSPConstants.CONTENT_CHANGES: [
+                                {
+                                    LSPConstants.TEXT: current_contents,
+                                }
+                            ],
+                        }
+                    )
 
     def close(self) -> None:
+        """
+        Closes the file in the language server if it is open there; a later :meth:`ensure_open_in_ls` opens it again.
+        """
+        with self._notification_lock:
+            self._close_in_ls()
+
+    def close_if_unreferenced(self, ref_count_lock: threading.Lock) -> bool:
+        """
+        Closes the file in the language server if no holder references this buffer.
+        A holder that takes the buffer while it is being closed, and then calls :meth:`ensure_open_in_ls`,
+        opens it again only after the close has been sent.
+
+        :param ref_count_lock: the lock that guards :attr:`ref_count`; it is held only while the count is read
+        :return: whether the buffer was unreferenced and is now closed
+        """
+        with self._notification_lock:
+            with ref_count_lock:
+                if self.ref_count > 0:
+                    return False
+            self._close_in_ls()
+            return True
+
+    def _close_in_ls(self) -> None:
         if self._is_open_in_ls:
+            self._is_open_in_ls = False
             self.language_server.server.notify.did_close_text_document(
                 {  # ty: ignore[invalid-argument-type]  # dict built from LSPConstants keys; shape matches the TypedDict
                     LSPConstants.TEXT_DOCUMENT: {
@@ -201,35 +229,36 @@ class LSPFileBuffer:
         :return: True if a reload was performed, False if the buffer was already
             in sync with disk
         """
-        # no prior read → nothing to reload; the first read through the contents
-        # property will populate the cache naturally
-        if self._read_file_modified_date is None:
-            return False
+        with self._notification_lock:
+            # no prior read → nothing to reload; the first read through the contents
+            # property will populate the cache naturally
+            if self._read_file_modified_date is None:
+                return False
 
-        file_modified_date = self.abs_path.stat().st_mtime
-        if not force and file_modified_date <= self._read_file_modified_date:
-            return False
+            file_modified_date = self.abs_path.stat().st_mtime
+            if not force and file_modified_date <= self._read_file_modified_date:
+                return False
 
-        # refresh the in-memory buffer from disk
-        self._read_file_modified_date = file_modified_date
-        self._contents = FileUtils.read_file(str(self.abs_path), self.encoding)
-        self._content_hash = None
+            # refresh the in-memory buffer from disk
+            self._read_file_modified_date = file_modified_date
+            self._contents = FileUtils.read_file(str(self.abs_path), self.encoding)
+            self._content_hash = None
 
-        # resync the language server's copy via a full-document didChange; an
-        # incremental delta would be meaningless because the whole file was
-        # rewritten externally
-        if self._is_open_in_ls:
-            self.version += 1
-            self.language_server.server.notify.did_change_text_document(
-                {
-                    LSPConstants.TEXT_DOCUMENT: {  # type: ignore
-                        LSPConstants.URI: self.uri,
-                        LSPConstants.VERSION: self.version,
-                    },
-                    LSPConstants.CONTENT_CHANGES: [{"text": self._contents}],
-                }
-            )
-        return True
+            # resync the language server's copy via a full-document didChange; an
+            # incremental delta would be meaningless because the whole file was
+            # rewritten externally
+            if self._is_open_in_ls:
+                self.version += 1
+                self.language_server.server.notify.did_change_text_document(
+                    {
+                        LSPConstants.TEXT_DOCUMENT: {  # type: ignore
+                            LSPConstants.URI: self.uri,
+                            LSPConstants.VERSION: self.version,
+                        },
+                        LSPConstants.CONTENT_CHANGES: [{"text": self._contents}],
+                    }
+                )
+            return True
 
     def _invalidate_cached_data(self, mtime: float | None = None) -> float | None:
         """
@@ -689,6 +718,8 @@ class SolidLanguageServer(ABC):
         default language identifier to be passed to the language server in `textDocument/didOpen` notifications.
         """
         self.open_file_buffers: dict[str, LSPFileBuffer] = {}
+        # guards open_file_buffers and the reference counts of its buffers; never held while the language server is notified
+        self._open_file_buffers_lock = threading.Lock()
         self.ls_id = ls_id
         """
         identifies the language server (not to be confused with the language_id passed to the language server)
@@ -1321,7 +1352,8 @@ class SolidLanguageServer(ABC):
                 language_server=self,
                 open_in_ls=True,
             )
-            self.open_file_buffers[uri] = fb
+            with self._open_file_buffers_lock:
+                self.open_file_buffers[uri] = fb
             opened_count += 1
 
         if opened_count > 0:
@@ -1564,6 +1596,8 @@ class SolidLanguageServer(ABC):
 
         Note: Opening a file in the language server is typically a precondition for further requests
         pertaining to the respective file.
+        Concurrent callers opening the same file share one buffer, which is opened in the language server
+        once and closed there when the last of them leaves.
 
         :param relative_file_path: The relative path of the file to open.
         :param open_in_ls: whether to open the file in the language server, sending the didOpen notification.
@@ -1581,40 +1615,44 @@ class SolidLanguageServer(ABC):
             absolute_file_path = absolute_file_path.resolve()
         uri = absolute_file_path.as_uri()
 
-        if uri in self.open_file_buffers:
-            fb = self.open_file_buffers[uri]
-            assert fb.uri == uri
-            assert fb.ref_count >= 1
-
-            fb.ref_count += 1
-            if open_in_ls:
-                fb.ensure_open_in_ls()
-            # resync the language server with disk before yielding: an external
-            # mutation (e.g. git checkout during a project re-activation) could
-            # have made both the cached buffer and the LSP copy stale
-            fb.reload_from_disk()
-        else:
-            version = 0
-            language_id = self._get_language_id_for_file(relative_file_path)
-            fb = LSPFileBuffer(
-                abs_path=absolute_file_path,
-                uri=uri,
-                encoding=self._encoding,
-                version=version,
-                language_id=language_id,
-                ref_count=1,
-                language_server=self,
-                open_in_ls=open_in_ls,
-            )
-            self.open_file_buffers[uri] = fb
+        # take a reference to the shared buffer, creating it if absent
+        with self._open_file_buffers_lock:
+            fb = self.open_file_buffers.get(uri)
+            is_new_buffer = fb is None
+            if fb is None:
+                fb = LSPFileBuffer(
+                    abs_path=absolute_file_path,
+                    uri=uri,
+                    encoding=self._encoding,
+                    version=0,
+                    language_id=self._get_language_id_for_file(relative_file_path),
+                    ref_count=1,
+                    language_server=self,
+                    open_in_ls=False,
+                )
+                self.open_file_buffers[uri] = fb
+            else:
+                fb.ref_count += 1
 
         try:
+            # notify the language server outside the registry lock
+            if open_in_ls:
+                fb.ensure_open_in_ls()
+            if not is_new_buffer:
+                # resync the language server with disk before yielding: an external
+                # mutation (e.g. git checkout during a project re-activation) could
+                # have made both the cached buffer and the LSP copy stale
+                fb.reload_from_disk()
             yield fb
         finally:
-            fb.ref_count -= 1
-            if fb.ref_count == 0:
-                fb.close()
-                del self.open_file_buffers[uri]
+            # release the reference; the last holder closes the buffer and unregisters it unless it was taken again meanwhile
+            with self._open_file_buffers_lock:
+                fb.ref_count -= 1
+                is_unreferenced = fb.ref_count == 0
+            if is_unreferenced and fb.close_if_unreferenced(self._open_file_buffers_lock):
+                with self._open_file_buffers_lock:
+                    if fb.ref_count == 0 and self.open_file_buffers.get(uri) is fb:
+                        del self.open_file_buffers[uri]
 
     @contextmanager
     def _open_file_context(

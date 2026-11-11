@@ -13,6 +13,7 @@ log = logging.getLogger(__name__)
 import contextlib
 import os
 import pickle
+import tempfile
 
 
 def load_cache(path: str, version: Any, loader: SafePickleLoader | None = None) -> Optional[Any]:
@@ -34,15 +35,15 @@ def save_cache(path: str, version: Any, obj: Any) -> None:
     """
     Atomically persist ``obj`` to ``path`` under ``version``.
 
-    A partially-written pickle previously produced a corrupt cache after a mid-write
-    crash because the destination was written in place. We now write to a sibling
-    ``<path>.tmp``, fsync it, and replace the destination in a single atomic rename.
-    The temporary file is removed on failure so orphans do not accumulate.
+    The data is written to a temporary file of its own in the destination directory, fsynced, and moved
+    onto the destination in a single atomic rename, so a crash mid-write or a concurrent save of the same
+    path never leaves a partially written cache. The temporary file is removed on failure.
     """
     data = {"__cache_version": version, "obj": obj}
-    tmp_path = path + ".tmp"
+    directory, file_name = os.path.split(os.path.abspath(path))
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=file_name + ".", suffix=".tmp")
     try:
-        with open(tmp_path, "wb") as f:
+        with os.fdopen(fd, "wb") as f:
             pickle.dump(data, f)
             f.flush()
             os.fsync(f.fileno())
