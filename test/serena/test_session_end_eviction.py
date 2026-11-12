@@ -1,6 +1,7 @@
 """unit tests for the eviction of every per-session slot under a forwarded session id (pg://serena/session/eviction).
 
-serena keys a tier-2 slot on the forwarded session id, optionally followed by ``/session/<id>`` and ``/agent/<id>``. When
+serena keys a tier-2 slot of a call carrying no session identifier on the forwarded session id, optionally followed by
+``/agent/<id>``, and the slot of a call carrying one on ``session/<id>``, which no forwarded session id prefixes. When
 the multiplexer reports that a forwarded session has ended, by posting /sessions/end to the streamable-http listener
 ``start-mcp-server`` builds, every slot whose key equals that id or begins with that id followed by ``/`` is evicted, and
 no other slot is touched. The tests wait on the exit of each bridge process and on the stop of each language-server
@@ -31,7 +32,7 @@ from serena.language_backend import BuiltinLanguageBackend
 from serena.ls_manager import LanguageServerManager
 from serena.project import Project
 from serena.tools import Tool
-from serena.tools.tools_base import SESSION_ID_ARGUMENT
+from serena.tools.tools_base import AGENT_ID_ARGUMENT, SESSION_ID_ARGUMENT
 from solidlsp.ls_config import LanguageServerId
 
 _GATE_TIMEOUT = 10.0
@@ -43,14 +44,11 @@ _GO_FILE = "hello.go"
 _FORWARDED = "f" * 64
 """the forwarded session id the multiplexer reports ended"""
 
-_OTHER_FORWARDED = "e" * 64
-"""a forwarded session id that stays live"""
-
-_UNDER_FORWARDED = (_FORWARDED, f"{_FORWARDED}/session/S1", f"{_FORWARDED}/session/S1/agent/A1")
+_UNDER_FORWARDED = (_FORWARDED, f"{_FORWARDED}/agent/A1")
 """the slot keys that lie under the ended forwarded session id"""
 
-_LIVE_KEY = f"{_OTHER_FORWARDED}/session/S2"
-"""a slot key under a forwarded session id that stays live"""
+_LIVE_KEY = "session/S2"
+"""the slot key of a Claude Code session, which no forwarded session end evicts"""
 
 _SESSION_END_PATH = "/sessions/end"
 """the path on which the multiplexer reports an ended forwarded session"""
@@ -227,7 +225,7 @@ class TestEvictionUnderAForwardedSessionId:
     def test_a_key_sharing_the_ids_characters_without_a_separator_is_kept(
         self, agent: SerenaAgent, make_go_project: Callable[[str], Project]
     ) -> None:
-        lookalike = f"{_FORWARDED}0/session/S3"
+        lookalike = f"{_FORWARDED}0/agent/A3"
         _open_go_cursor(agent, _FORWARDED, make_go_project("ended"))
         lookalike_bridges = _open_go_cursor(agent, lookalike, make_go_project("lookalike"))
 
@@ -239,7 +237,7 @@ class TestEvictionUnderAForwardedSessionId:
         assert all(psutil.pid_exists(pid) for pid in lookalike_bridges)
 
     def test_the_durable_record_of_an_evicted_key_is_kept(self, agent: SerenaAgent, make_go_project: Callable[[str], Project]) -> None:
-        key = f"{_FORWARDED}/session/S1"
+        key = f"{_FORWARDED}/agent/A1"
         project = make_go_project("recorded")
         _open_go_cursor(agent, key, project)
         agent._explicit_project_root_store.set(key, project.project_root)
@@ -343,7 +341,7 @@ class TestSessionEndRoute:
         make_go_project: Callable[[str], Project],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        key = f"{_FORWARDED}/session/S1"
+        key = f"{_FORWARDED}/agent/A1"
         project = make_go_project("recorded")
         _open_go_cursor(agent, key, project)
         agent._explicit_project_root_store.set(key, project.project_root)
@@ -366,7 +364,7 @@ class TestSessionEndRoute:
         tool = _ActiveProjectRootTool(agent)
         monkeypatch.setattr(tool, "is_active", lambda: True)
 
-        answer = tool.apply_ex(log_call=False, mcp_ctx=_forwarded_call_context(_FORWARDED), **{SESSION_ID_ARGUMENT: "S1"})
+        answer = tool.apply_ex(log_call=False, mcp_ctx=_forwarded_call_context(_FORWARDED), **{AGENT_ID_ARGUMENT: "A1"})
 
         assert answer == project.project_root
 
@@ -374,20 +372,16 @@ class TestSessionEndRoute:
 _CLAUDE_SESSION = "S1"
 """the Claude Code session id whose end the brain SessionEnd hook reports"""
 
-_CARRYING_CLAUDE_SESSION = (
-    f"{_FORWARDED}/session/{_CLAUDE_SESSION}",
-    f"{_FORWARDED}/session/{_CLAUDE_SESSION}/agent/A1",
-    f"{_OTHER_FORWARDED}/session/{_CLAUDE_SESSION}",
-)
-"""the slot keys that carry the ended Claude Code session id after ``/session/``, under either forwarded session id"""
+_CARRYING_CLAUDE_SESSION = (f"session/{_CLAUDE_SESSION}", f"session/{_CLAUDE_SESSION}/agent/A1")
+"""the slot keys of the ended Claude Code session: the session's own and its agent's"""
 
-_NOT_CARRYING_CLAUDE_SESSION = (f"{_FORWARDED}/session/S2", f"{_FORWARDED}/session/S10", _FORWARDED)
+_NOT_CARRYING_CLAUDE_SESSION = ("session/S2", "session/S10", _FORWARDED)
 """slot keys that do not carry the ended Claude Code session id: another session's, one whose session id begins with the
 ended id's characters, and the bare forwarded session id"""
 
 
 class TestEvictionOfAClaudeSession:
-    """verifies that ending a Claude Code session evicts exactly the slots whose keys carry its id after ``/session/``."""
+    """verifies that ending a Claude Code session evicts exactly the slots whose keys are ``session/<id>`` or lie under it."""
 
     def test_slots_carrying_the_ended_id_are_evicted_and_their_bridges_stop(
         self, agent: SerenaAgent, make_go_project: Callable[[str], Project]
@@ -482,7 +476,7 @@ class TestSessionEndRouteForAClaudeSession:
         make_go_project: Callable[[str], Project],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        key = f"{_FORWARDED}/session/{_CLAUDE_SESSION}"
+        key = f"session/{_CLAUDE_SESSION}"
         project = make_go_project("recorded")
         _open_go_cursor(agent, key, project)
         agent._explicit_project_root_store.set(key, project.project_root)
@@ -513,8 +507,8 @@ class TestSessionEndRouteForAClaudeSession:
     def test_a_body_naming_both_a_forwarded_and_a_claude_session_is_refused_and_evicts_nothing(
         self, agent: SerenaAgent, listener: FastMCP, make_go_project: Callable[[str], Project]
     ) -> None:
-        # the key lies under the forwarded id and carries the Claude Code session id, so either reading alone would evict it
-        key = f"{_FORWARDED}/session/{_CLAUDE_SESSION}"
+        # the key carries the Claude Code session id, so the claude_session_id reading alone would evict it
+        key = f"session/{_CLAUDE_SESSION}"
         bridges = _open_go_cursor(agent, key, make_go_project("kept"))
 
         response = _client(listener).post(

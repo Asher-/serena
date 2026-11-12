@@ -1536,6 +1536,20 @@ class SerenaAgent:
             target=self._release_project_if_unheld, args=(project,), name=f"ReleaseProject[{project.project_name}]", daemon=True
         ).start()
 
+    @staticmethod
+    def _executor_label(session_key: str | int) -> str:
+        """
+        :param session_key: the key of a session
+        :return: the label of the session's executor in the log: the first 8 characters of the session id, followed by
+            ``/`` and the first 8 characters of the agent id when there is one, for a key ``session/<id>[/agent/<id>]``,
+            and the first 8 characters of the key for any other key
+        """
+        match = re.fullmatch(r"session/([^/]+)(?:/agent/(.+))?", str(session_key), re.DOTALL)
+        if match is None:
+            return str(session_key)[:8]
+        session_id, agent_id = match.groups()
+        return session_id[:8] if agent_id is None else f"{session_id[:8]}/{agent_id[:8]}"
+
     def _evict_session_state(self, session_key: str | int, keep_durable_record: bool = False) -> None:
         """
         Pop ``session_key`` out of every per-session map so its entries cannot leak.
@@ -1607,11 +1621,10 @@ class SerenaAgent:
         """
         Evicts every per-session slot that carries an ended Claude Code session (pg://serena/session/eviction/claude_session).
 
-        A slot carries ``claude_session_id`` when its key is ``<F>/session/<claude_session_id>`` or begins with
-        ``<F>/session/<claude_session_id>/``, for any forwarded session id ``F``: the ``/session/<id>`` segment of a tier-2
-        key. A key whose session id merely begins with ``claude_session_id`` is not evicted. Each such slot is evicted
-        through :meth:`_evict_session_state`, keeping its durable explicit-activation record, so a call that later arrives
-        under the key restores its explicitly activated project.
+        A slot carries ``claude_session_id`` when its key is ``session/<claude_session_id>`` or begins with
+        ``session/<claude_session_id>/``. A key whose session id merely begins with ``claude_session_id`` is not evicted.
+        Each such slot is evicted through :meth:`_evict_session_state`, keeping its durable explicit-activation record, so a
+        call that later arrives under the key restores its explicitly activated project.
 
         :param claude_session_id: the Claude Code session id the brain SessionEnd hook reports ended
         :return: the evicted session keys
@@ -1627,8 +1640,8 @@ class SerenaAgent:
             *executor_keys,
         }
 
-        # the slots carrying the session id after a forwarded session id, followed by nothing or by "/"
-        carrying = re.compile(r".+/session/" + re.escape(claude_session_id) + r"(/.*)?", re.DOTALL)
+        # the slots keyed on the session id, followed by nothing or by "/"
+        carrying = re.compile(r"session/" + re.escape(claude_session_id) + r"(/.*)?", re.DOTALL)
         evicted = [key for key in candidate_keys if isinstance(key, str) and carrying.fullmatch(key)]
         for key in evicted:
             self._evict_session_state(key, keep_durable_record=True)
@@ -2218,8 +2231,7 @@ class SerenaAgent:
             with self._task_executors_by_session_lock:
                 executor = self._task_executors_by_session.get(session_key)
                 if executor is None:
-                    # short label keeps logs readable; raw uuid hex / id() values are noisy
-                    executor = TaskExecutor(f"SerenaAgentTaskExecutor[{str(session_key)[:8]}]")
+                    executor = TaskExecutor(f"SerenaAgentTaskExecutor[{self._executor_label(session_key)}]")
                     self._task_executors_by_session[session_key] = executor
         return executor.issue_task(task, name=name, logged=logged, timeout=timeout)
 

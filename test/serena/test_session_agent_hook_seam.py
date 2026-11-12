@@ -140,6 +140,6 @@ class TestHookCarriesAgentIdIntoPublishedTool:
         assert result == str(root_0), f"the main conversation's write through the hook ran against {result!r}"
         assert (root_0 / "out.txt").is_file(), "the main conversation's write did not land under its own project P0"
         assert not (root_1 / "out.txt").exists(), "the main conversation's write landed under agent A1's project P1"
-        assert agent._active_projects_by_session[f"{_CLIENT_SESSION}/session/cc-hook-session"].project_root == str(root_0), (
+        assert agent._active_projects_by_session["session/cc-hook-session"].project_root == str(root_0), (
             "the main conversation's call was not answered from the slot of its session id"
         )

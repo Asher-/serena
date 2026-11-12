@@ -424,13 +424,12 @@ class Tool(Component):
                             forwarded_project_root = None
                         break
                 if forwarded_cc_session_id:
-                    # each Claude Code session reaching serena through the client's connection holds its own session
-                    # under the client's forwarded session id (pg://serena/session/project/separation), and each agent
-                    # of it its own session within that (pg://serena/session/project/agent); a call carrying neither
-                    # identifier is keyed on the forwarded session id alone
-                    session_key = forwarded_cc_session_id
-                    if session_id is not None:
-                        session_key = f"{session_key}/session/{session_id}"
+                    # each Claude Code session holds its own session (pg://serena/session/project/separation), and each
+                    # agent of it its own session within that (pg://serena/session/project/agent); a call carrying a
+                    # session identifier is keyed on it without the forwarded session id, which names the client's
+                    # connection and changes whenever the client reconnects (pg://serena/session/continuity); a call
+                    # carrying no session identifier is keyed on the forwarded session id
+                    session_key = f"session/{session_id}" if session_id is not None else forwarded_cc_session_id
                     if agent_id is not None:
                         session_key = f"{session_key}/agent/{agent_id}"
                 else:
@@ -507,10 +506,7 @@ class Tool(Component):
                                     self.agent.activate_project_from_path_or_name(explicit_root, record_explicit=False)
                                     healed = self.agent.get_active_project() is not None
                                 except Exception as e:
-                                    log.error(
-                                        f"Self-heal restore of explicitly-activated project root "
-                                        f"{explicit_root!r} failed: {e}."
-                                    )
+                                    log.error(f"Self-heal restore of explicitly-activated project root {explicit_root!r} failed: {e}.")
                                 if not healed:
                                     # fail loud: never fall through to the forwarded origin here.
                                     raise ToolCallError(

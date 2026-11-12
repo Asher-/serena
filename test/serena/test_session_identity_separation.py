@@ -154,7 +154,7 @@ class TestSubagentOfASessionIsItsOwnSession:
 
         assert result == str(root_1), f"session S1's write ran against {result!r}"
         assert not (root_2 / "out.txt").exists(), "session S1's write landed under its subagent's project P2"
-        assert {f"{_CLIENT_SESSION}/session/S1", f"{_CLIENT_SESSION}/session/S1/agent/A1"} <= set(agent._active_projects_by_session)
+        assert {"session/S1", "session/S1/agent/A1"} <= set(agent._active_projects_by_session)
 
 
 class TestCallWithoutIdentifiersIsTheClientSession:
@@ -181,7 +181,7 @@ class TestCallWithoutIdentifiersIsTheClientSession:
         assert not (root_1 / "out.txt").exists() and not (root_2 / "out.txt").exists(), (
             "the write without identifiers landed under a session's project"
         )
-        assert {_CLIENT_SESSION, f"{_CLIENT_SESSION}/session/S1", f"{_CLIENT_SESSION}/session/S2"} <= set(agent._active_projects_by_session)
+        assert {_CLIENT_SESSION, "session/S1", "session/S2"} <= set(agent._active_projects_by_session)
 
     def test_call_with_only_an_agent_id_keeps_its_agent_key(
         self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -345,4 +345,4 @@ class TestSessionRootSurvivesDaemonRestart:
         for caller in ("the caller without identifiers", "session S2"):
             assert "No active project" in results[caller], f"{caller}'s call after the restart answered {results[caller]!r}"
         assert results["session S1"] == _RequiresProjectTool.RAN, f"session S1's call after the restart answered {results['session S1']!r}"
-        assert restored == [(str(root_1), f"{_CLIENT_SESSION}/session/S1")], f"the restarted daemon restored {restored!r}"
+        assert restored == [(str(root_1), "session/S1")], f"the restarted daemon restored {restored!r}"
