@@ -26,6 +26,7 @@ from test.serena.test_session_project_binding import _active, _project_at
 from test.serena.test_session_project_binding import (
     agent as _agent_fixture,
 )
+from test.serena.test_session_end_eviction import _ActiveProjectRootTool
 from test.serena.test_streamable_http_cc_session_key import _make_mcp_ctx, _RequiresProjectTool
 
 agent = _agent_fixture
@@ -127,6 +128,20 @@ def _call(agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, forwarded_session
     return tool.apply_ex(mcp_ctx=_make_mcp_ctx(forwarded_header=forwarded_session_id), log_call=False, **caller_arguments)
 
 
+def _root_of_call(agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, forwarded_session_id: str | None, **caller_arguments: str) -> str:
+    """
+    Presents a call of a tool that answers the root of the project the call runs on.
+
+    :param agent: the agent the call is issued to
+    :param monkeypatch: the test's monkeypatch fixture
+    :param forwarded_session_id: the forwarded session id the call arrives under
+    :param caller_arguments: the reserved arguments that identify the caller
+    :return: the call's answer: the root of the project it ran on, or the refusal of a call that has no active project
+    """
+    tool = _active(_ActiveProjectRootTool(agent), monkeypatch)
+    return tool.apply_ex(mcp_ctx=_make_mcp_ctx(forwarded_header=forwarded_session_id), log_call=False, **caller_arguments)
+
+
 def _write_records(path: str, roots_by_key: dict[str, Path]) -> None:
     """
     Writes the store's file with one record per key, however the store would key a record today.
@@ -157,9 +172,9 @@ class TestRecordOutlivesTheForwardedSessionId:
         (root_1,) = _make_roots(tmp_path, "P1")
         _activate(agent, monkeypatch, root_1, _FIRST_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1"})
 
-        result = _call(agent, monkeypatch, _SECOND_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1"})
+        result = _root_of_call(agent, monkeypatch, _SECOND_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1"})
 
-        assert result == _RequiresProjectTool.RAN, f"the call under the new forwarded session id answered {result!r}"
+        assert result == str(root_1), f"the call under the new forwarded session id answered {result!r}"
 
     def test_a_new_agent_reading_the_store_restores_the_recorded_root(
         self, agent: SerenaAgent, new_agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -167,12 +182,11 @@ class TestRecordOutlivesTheForwardedSessionId:
         """Session S1 activates P1 under F1, and a new agent reading the same store answers its call under F2 from P1."""
         (root_1,) = _make_roots(tmp_path, "P1")
         _activate(agent, monkeypatch, root_1, _FIRST_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1"})
-        restorations = _Restorations(new_agent, monkeypatch)
+        _Restorations(new_agent, monkeypatch)
 
-        result = _call(new_agent, monkeypatch, _SECOND_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1"})
+        result = _root_of_call(new_agent, monkeypatch, _SECOND_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1"})
 
-        assert result == _RequiresProjectTool.RAN, f"the call under the new forwarded session id answered {result!r}"
-        assert restorations.restored == [(str(root_1), "session/S1")]
+        assert result == str(root_1), f"the call under the new forwarded session id answered {result!r}"
 
     def test_the_record_outlives_the_eviction_of_the_forwarded_session(
         self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, store_path: str
@@ -182,9 +196,9 @@ class TestRecordOutlivesTheForwardedSessionId:
         _activate(agent, monkeypatch, root_1, _FIRST_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1"})
 
         agent.evict_forwarded_session(_FIRST_CONNECTION)
-        result = _call(agent, monkeypatch, _SECOND_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1"})
+        result = _root_of_call(agent, monkeypatch, _SECOND_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1"})
 
-        assert result == _RequiresProjectTool.RAN, f"the call after the eviction answered {result!r}"
+        assert result == str(root_1), f"the call after the eviction answered {result!r}"
 
     def test_the_record_outlives_the_eviction_of_the_claude_session(
         self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, store_path: str
@@ -192,13 +206,12 @@ class TestRecordOutlivesTheForwardedSessionId:
         """Session S1 activates P1 under F1, the end of session S1 evicts its slots, and its call under F2 is answered from P1."""
         (root_1,) = _make_roots(tmp_path, "P1")
         _activate(agent, monkeypatch, root_1, _FIRST_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1"})
-        restorations = _Restorations(agent, monkeypatch)
+        _Restorations(agent, monkeypatch)
 
         agent.evict_claude_session("S1")
-        result = _call(agent, monkeypatch, _SECOND_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1"})
+        result = _root_of_call(agent, monkeypatch, _SECOND_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1"})
 
-        assert result == _RequiresProjectTool.RAN, f"the call after the eviction answered {result!r}"
-        assert restorations.restored == [(str(root_1), "session/S1")]
+        assert result == str(root_1), f"the call after the eviction answered {result!r}"
 
 
 class TestRecordsOfDistinctCallersStayApart:
@@ -212,48 +225,41 @@ class TestRecordsOfDistinctCallersStayApart:
         _activate(agent, monkeypatch, root_1, _FIRST_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1"})
         _activate(agent, monkeypatch, root_2, _FIRST_CONNECTION, **{_SESSION_ID_ARGUMENT: "S2"})
 
-        results = [_call(agent, monkeypatch, _SECOND_CONNECTION, **{_SESSION_ID_ARGUMENT: session}) for session in ("S1", "S2")]
+        results = [_root_of_call(agent, monkeypatch, _SECOND_CONNECTION, **{_SESSION_ID_ARGUMENT: session}) for session in ("S1", "S2")]
 
-        assert results == [_RequiresProjectTool.RAN] * 2, f"the calls under the new forwarded session id answered {results!r}"
+        assert results == [str(root_1), str(root_2)], f"the calls under the new forwarded session id answered {results!r}"
 
     def test_one_session_identifier_and_an_agent_identifier_restore_neither_others_root(
         self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, store_path: str
     ) -> None:
-        """
-        Session S1 activates P1 and, carrying the agent identifier A1, activates P2 under F1. Under F2 each call is answered
-        from its own root, and neither restores the other's root.
-        """
+        """Session S1 activates P1 and, carrying the agent identifier A1, activates P2 under F1. Under F2 each call is answered
+        from its own root."""
         root_1, root_2 = _make_roots(tmp_path, "P1", "P2")
-        session_key = "session/S1"
-        agent_key = f"{session_key}/agent/A1"
         _activate(agent, monkeypatch, root_1, _FIRST_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1"})
         _activate(agent, monkeypatch, root_2, _FIRST_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1", _AGENT_ID_ARGUMENT: "A1"})
-        restorations = _Restorations(agent, monkeypatch)
+        _Restorations(agent, monkeypatch)
 
         results = [
-            _call(agent, monkeypatch, _SECOND_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1", _AGENT_ID_ARGUMENT: "A1"}),
-            _call(agent, monkeypatch, _SECOND_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1"}),
+            _root_of_call(agent, monkeypatch, _SECOND_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1", _AGENT_ID_ARGUMENT: "A1"}),
+            _root_of_call(agent, monkeypatch, _SECOND_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1"}),
         ]
 
-        assert results == [_RequiresProjectTool.RAN] * 2, f"the calls under the new forwarded session id answered {results!r}"
-        assert (str(root_1), agent_key) not in restorations.restored, "the agent restored its session's root"
-        assert (str(root_2), session_key) not in restorations.restored, "the session restored its agent's root"
+        assert results == [str(root_2), str(root_1)], f"the calls under the new forwarded session id answered {results!r}"
 
     def test_two_agents_of_one_session_restore_neither_others_root(
         self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, store_path: str
     ) -> None:
-        """Agents A1 and A2 of session S1 activate P1 and P2 under F1, and under F2 neither restores the other's root."""
+        """Agents A1 and A2 of session S1 activate P1 and P2 under F1, and under F2 each is answered from its own root."""
         root_1, root_2 = _make_roots(tmp_path, "P1", "P2")
-        key_1, key_2 = (f"session/S1/agent/{agent_id}" for agent_id in ("A1", "A2"))
         _activate(agent, monkeypatch, root_1, _FIRST_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1", _AGENT_ID_ARGUMENT: "A1"})
         _activate(agent, monkeypatch, root_2, _FIRST_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1", _AGENT_ID_ARGUMENT: "A2"})
 
         results = [
-            _call(agent, monkeypatch, _SECOND_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1", _AGENT_ID_ARGUMENT: agent_id})
+            _root_of_call(agent, monkeypatch, _SECOND_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1", _AGENT_ID_ARGUMENT: agent_id})
             for agent_id in ("A1", "A2")
         ]
 
-        assert results == [_RequiresProjectTool.RAN] * 2, f"the calls under the new forwarded session id answered {results!r}"
+        assert results == [str(root_1), str(root_2)], f"the calls under the new forwarded session id answered {results!r}"
 
     def test_an_agent_of_a_session_does_not_read_the_record_of_its_session(
         self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, store_path: str
@@ -261,12 +267,11 @@ class TestRecordsOfDistinctCallersStayApart:
         """Session S1 activates P1 under F1, and its agent A1, which activated nothing, is refused under F2."""
         (root_1,) = _make_roots(tmp_path, "P1")
         _activate(agent, monkeypatch, root_1, _FIRST_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1"})
-        restorations = _Restorations(agent, monkeypatch)
+        _Restorations(agent, monkeypatch)
 
-        result = _call(agent, monkeypatch, _SECOND_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1", _AGENT_ID_ARGUMENT: "A1"})
+        result = _root_of_call(agent, monkeypatch, _SECOND_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1", _AGENT_ID_ARGUMENT: "A1"})
 
         assert _NO_ACTIVE_PROJECT in result, f"the agent's call answered {result!r}"
-        assert restorations.restored == []
 
 
 class TestCallCarryingNoSessionIdentifier:
@@ -410,3 +415,15 @@ class TestStoreKeys:
         ExplicitProjectRootStore(str(path)).discard(f"{_FIRST_CONNECTION}/session/S1")
 
         assert not path.exists()
+
+    def test_a_record_written_under_a_session_key_is_restored_for_that_key(
+        self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, store_path: str
+    ) -> None:
+        """A record written under ``session/<session identifier>`` answers a call of that session under any forwarded session id."""
+        (root_1,) = _make_roots(tmp_path, "P1")
+        _write_records(store_path, {"session/S1": root_1})
+        _Restorations(agent, monkeypatch)
+
+        result = _root_of_call(agent, monkeypatch, _SECOND_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1"})
+
+        assert result == str(root_1), f"the call of the recorded session answered {result!r}"
