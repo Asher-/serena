@@ -880,10 +880,14 @@ class TestSessionKeyOverStreamableHttp:
 
 
 class _CursorPlantingTool(Tool):
-    """A tool that needs an active project and holds a cursor state under a given id in its session's cursor manager."""
+    """A tool that needs an active project and starts a structural cursor on the key ``key`` of its project's ``data.json``."""
 
     def apply(self, cursor_id: str) -> str:
-        self.agent.get_cursor_manager()._cursors[cursor_id] = MagicMock(name=cursor_id)
+        from unittest.mock import patch
+
+        # no language server knows the symbol, so the cursor falls through to the JSON structural backend
+        with patch("serena.cursor.LanguageServerSymbolRetriever"):
+            self.agent.get_cursor_manager().start_cursor("key", relative_path="data.json", cursor_id=cursor_id)
         return "planted"
 
 
@@ -916,6 +920,7 @@ class TestSessionContinuityAcrossForwardedIds:
         """Activates a stand-in project rooted at ``root`` for the caller ``ids`` names, under ``forwarded``."""
         from test.serena.test_session_project_binding import _Gate, _GatedActivationTool, _project_at
 
+        (root / "data.json").write_text('{"key": 1}\n')
         activation = _GatedActivationTool(agent, _project_at(root, root.name), _Gate.open())
         assert self._call(activation, monkeypatch, forwarded, **ids) == "activated"
 
@@ -953,6 +958,11 @@ class TestSessionContinuityAcrossForwardedIds:
         answer = self._call(_CursorFindingTool(agent), monkeypatch, "F1", cursor_id="k", _serena_session_id="S2")
 
         assert "No cursor with id 'k'" in answer, f"session S2 found session S1's cursor: {answer!r}"
+        from test.serena.test_session_project_binding import _RelativeWriteTool
+
+        written = self._call(_RelativeWriteTool(agent), monkeypatch, "F1", relative_path="out.txt", _serena_session_id="S2")
+        assert written == str(root_2), f"session S2's write ran against {written!r}"
+        assert not (root_1 / "out.txt").exists(), "session S2's write landed under session S1's project"
 
     def test_two_agents_of_one_session_keep_separate_cursors(
         self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -967,28 +977,35 @@ class TestSessionContinuityAcrossForwardedIds:
         answer = self._call(_CursorFindingTool(agent), monkeypatch, "F2", cursor_id="k", _serena_session_id="S", _serena_agent_id="A2")
 
         assert "No cursor with id 'k'" in answer, f"agent A2 found agent A1's cursor: {answer!r}"
+        from test.serena.test_session_project_binding import _RelativeWriteTool
+
+        written = self._call(
+            _RelativeWriteTool(agent), monkeypatch, "F2", relative_path="out.txt", _serena_session_id="S", _serena_agent_id="A2"
+        )
+        assert written == str(root_2), f"agent A2's write ran against {written!r}"
+        assert not (root_1 / "out.txt").exists(), "agent A2's write landed under agent A1's project"
 
 
 class TestExecutorLabelInTheLog:
-    """the per-session executor of a session key ``session/<id>[/agent/<id>]`` is labelled by the session and agent ids"""
+    """the executor a call runs on is labelled in the log by the caller's session and agent ids"""
 
     @pytest.mark.parametrize(
-        ("session_key", "label"),
+        ("caller_ids", "label"),
         [
-            ("session/S1234567-rest", "S1234567"),
-            ("session/S1234567-rest/agent/A7654321-rest", "S1234567/A7654321"),
-            ("forwarded-session-1", "forwarde"),
+            ({"_serena_session_id": "S1234567-rest"}, "S1234567"),
+            ({"_serena_session_id": "S1234567-rest", "_serena_agent_id": "A7654321-rest"}, "S1234567/A7654321"),
+            ({}, "forwarde"),
         ],
     )
-    def test_a_sessions_task_runs_on_an_executor_named_by_its_ids(
-        self, agent: SerenaAgent, caplog: pytest.LogCaptureFixture, session_key: str, label: str
+    def test_a_call_runs_on_an_executor_named_by_its_callers_ids(
+        self, tool: _NoOpProbeTool, caplog: pytest.LogCaptureFixture, caller_ids: dict[str, str], label: str
     ) -> None:
-        token = _SESSION_KEY_VAR.set(session_key)
+        token = _reset_pipe_var()
         try:
             with caplog.at_level(logging.INFO, logger="serena.task_executor"):
-                agent.issue_task(lambda: None, name="LabelProbe").result(timeout=30)
+                tool.apply_ex(mcp_ctx=_make_mcp_ctx(forwarded_header="forwarded-session-1"), log_call=False, **caller_ids)
         finally:
-            _SESSION_KEY_VAR.reset(token)
+            _PIPE_SESSION_ID_VAR.reset(token)
 
         starts = [record.threadName for record in caplog.records if "Starting execution of" in record.getMessage()]
-        assert starts == [f"SerenaAgentTaskExecutor[{label}]"], f"the task of {session_key!r} started on {starts!r}"
+        assert starts == [f"SerenaAgentTaskExecutor[{label}]"], f"the call of {caller_ids!r} started on {starts!r}"

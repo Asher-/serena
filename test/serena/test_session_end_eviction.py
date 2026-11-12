@@ -240,7 +240,6 @@ class TestEvictionUnderAForwardedSessionId:
         key = f"{_FORWARDED}/agent/A1"
         project = make_go_project("recorded")
         _open_go_cursor(agent, key, project)
-        agent._explicit_project_root_store.set(key, project.project_root)
 
         agent.evict_forwarded_session(_FORWARDED)
 
@@ -344,7 +343,6 @@ class TestSessionEndRoute:
         key = f"{_FORWARDED}/agent/A1"
         project = make_go_project("recorded")
         _open_go_cursor(agent, key, project)
-        agent._explicit_project_root_store.set(key, project.project_root)
         manager = _manager_double(project)
 
         response = _client(listener).post(_SESSION_END_PATH, json={"forwarded_session_id": _FORWARDED})
@@ -424,7 +422,6 @@ class TestEvictionOfAClaudeSession:
         key = _CARRYING_CLAUDE_SESSION[0]
         project = make_go_project("recorded")
         _open_go_cursor(agent, key, project)
-        agent._explicit_project_root_store.set(key, project.project_root)
 
         agent.evict_claude_session(_CLAUDE_SESSION)
 
@@ -479,7 +476,6 @@ class TestSessionEndRouteForAClaudeSession:
         key = f"session/{_CLAUDE_SESSION}"
         project = make_go_project("recorded")
         _open_go_cursor(agent, key, project)
-        agent._explicit_project_root_store.set(key, project.project_root)
         manager = _manager_double(project)
 
         response = _client(listener).post(_SESSION_END_PATH, json={"claude_session_id": _CLAUDE_SESSION})
