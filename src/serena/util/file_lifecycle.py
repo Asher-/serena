@@ -246,6 +246,12 @@ class AtomicFileWriter:
     TEMP_FILE_PREFIX = ".serena-tmp-"
     """the name prefix of the temporary file a write creates beside its target"""
 
+    _UMASK = os.umask(0o022)
+    os.umask(_UMASK)
+    _NEW_FILE_MODE = 0o666 & ~_UMASK
+    """the mode a plain open() gives a new file under the umask the process had when this module was imported; read once,
+    because reading the umask means setting it, which is not safe once other threads run"""
+
     def write_bytes(self, abs_path: str, data: bytes, precondition: WritePrecondition | None = None) -> None:
         """
         Replace the bytes of the file at ``abs_path`` with ``data``, creating the file and its parent directories when absent.
@@ -275,10 +281,9 @@ class AtomicFileWriter:
                 handle.write(data)
                 handle.flush()
                 os.fsync(handle.fileno())
-            # restore the overwritten file's mode (mkstemp reset it to 0o600); a brand-new file
-            # keeps mkstemp's 0o600
-            if prior_mode is not None:
-                os.chmod(tmp_path, prior_mode)
+            # give the file the overwritten file's mode, or for a brand-new file the mode a plain open()
+            # would give it, since mkstemp created the temporary file at 0o600
+            os.chmod(tmp_path, prior_mode if prior_mode is not None else self._NEW_FILE_MODE)
             # the precondition, evaluated as close to the swap as the write allows
             if precondition is not None:
                 stale = precondition.check()
@@ -606,7 +611,7 @@ class FilesystemLifecycle:
         # before the replace leaves the original intact and never litters a temp); a failure is reported
         # as its text
         try:
-            AtomicFileWriter().write_bytes(abs_path, data)
+            AtomicFileWriter().write_bytes(os.path.realpath(abs_path), data)
         except BaseException as error:
             return str(error)
         return None

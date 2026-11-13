@@ -340,6 +340,27 @@ class TestCreate:
         # the executable bits survive the atomic overwrite (mode preserved, not reset to 0o600)
         assert os.stat(target).st_mode & 0o111 == 0o111
 
+    def test_a_new_file_gets_the_mode_open_gives_under_the_umask(self, tmp_path: Path) -> None:
+        umask = os.umask(0o022)
+        os.umask(umask)
+
+        result = _fs(tmp_path).create("new.txt", "hello")
+
+        assert result.ok is True
+        assert os.stat(tmp_path / "new.txt").st_mode & 0o777 == 0o666 & ~umask
+
+    def test_overwriting_through_a_symlink_writes_its_target(self, tmp_path: Path) -> None:
+        target = tmp_path / "real.txt"
+        target.write_text("OLD")
+        link = tmp_path / "link.txt"
+        link.symlink_to(target)
+
+        result = _fs(tmp_path).create("link.txt", "NEW", overwrite=True)
+
+        assert result.ok is True
+        assert link.is_symlink()
+        assert target.read_text() == "NEW"
+
 
 # --- delete: idempotent + CAS (spec-v2 §5.4/§5.5) ---
 
