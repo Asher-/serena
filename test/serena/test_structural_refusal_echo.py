@@ -3,6 +3,7 @@ A refusal of a structural backend names the caller's container path, member path
 and an edit the same backend accepts still lands.
 """
 
+import dataclasses
 from collections.abc import Callable
 from pathlib import Path
 
@@ -57,7 +58,45 @@ _CPP_TREE = _CPP.parse("class A { int y; };\n")
 _CPP_ANCHOR = next(ref for name, _, ref in _CPP.walk_symbols(_CPP_TREE) if name == "A")
 _CPP_CHILD = _CPP.build_declaration("include", {"statement": "#include <map>"}, ())
 
+_YAML_PAIR = _YAML.build_declaration("pair", {"key": "it's"}, (_YAML.build_declaration("scalar", {"value": 2}, ()),))
+_TOML_PAIR = _TOML.build_declaration("pair", {"key": "it's"}, (_TOML.build_declaration("scalar", {"value": 2}, ()),))
+
 _REFUSALS: list[tuple[str, Callable[[], object], str]] = [
+    # keys of a container member
+    ("yaml remove a missing key", lambda: _YAML.container_remove_member(_YAML_TREE, "m/it's"), "key 'it's' not found in mapping"),
+    ("yaml replace a missing key", lambda: _YAML.container_replace_member(_YAML_TREE, "m/it's", "1"), "key 'it's' not found in mapping"),
+    (
+        "yaml insert beside a missing key",
+        lambda: _YAML.container_insert_member(_YAML_TREE, "m/it's", "b: 1", position="before"),
+        "anchor key 'it's' not found in mapping",
+    ),
+    ("toml remove a missing key", lambda: _TOML.container_remove_member(_TOML_TREE, "m/it's"), "key 'it's' not found in mapping"),
+    ("toml replace a missing key", lambda: _TOML.container_replace_member(_TOML_TREE, "m/it's", "1"), "key 'it's' not found in mapping"),
+    (
+        "toml insert beside a missing key",
+        lambda: _TOML.container_insert_member(_TOML_TREE, "m/it's", "b = 1", position="before"),
+        "anchor key 'it's' not found in mapping",
+    ),
+    # duplicate keys of a declaration
+    (
+        "yaml mapping declaration with a duplicate key",
+        lambda: _YAML.build_declaration("mapping", {}, (_YAML_PAIR, _YAML_PAIR)),
+        "duplicate key 'it's' in mapping",
+    ),
+    ("yaml insert a declared duplicate key", lambda: _YAML.insert_child(_YAML_TREE, _YAML_PAIR), "duplicate key 'it's' in mapping"),
+    (
+        "toml table declaration with a duplicate key",
+        lambda: _TOML.build_declaration("table", {}, (_TOML_PAIR, _TOML_PAIR)),
+        "duplicate key 'it's' in table",
+    ),
+    ("toml insert a declared duplicate key", lambda: _TOML.insert_child(_TOML_TREE, _TOML_PAIR), "duplicate key 'it's' in mapping"),
+    # logical names
+    ("python logical name", lambda: _PYTHON.name_resolver.parse("a.it's"), "invalid Python identifier part: 'it's'"),
+    ("json logical name", lambda: _JSON.name_resolver.parse("a.it's"), "invalid json name part: 'it's'"),
+    ("yaml logical name", lambda: _YAML.name_resolver.parse("a.it's"), "invalid yaml name part: 'it's'"),
+    ("toml logical name", lambda: _TOML.name_resolver.parse("a.it's"), "invalid toml name part: 'it's'"),
+    ("markdown logical name", lambda: _MARKDOWN.name_resolver.parse("a.it's"), "invalid markdown name part: 'it's'"),
+    ("cpp logical name", lambda: _CPP.name_resolver.parse("a::it's"), "invalid C++ identifier part: 'it's'"),
     # python
     (
         "python unbracketed member path",
@@ -604,3 +643,48 @@ def test_a_sequence_item_removed_through_a_cursor_leaves_its_siblings(
     manager.apply_container_edit(cursor_id, "remove", "")
 
     assert target.read_text(encoding="utf-8") == expected
+
+
+_YAML_SCALAR = _YAML.build_declaration("scalar", {"value": 2}, ())
+_YAML_KEYLESS_PAIR = dataclasses.replace(_YAML_PAIR, key=None)
+_TOML_KEYLESS_PAIR = dataclasses.replace(_TOML_PAIR, key=None)
+_YAML_SEQUENCE_TREE = _YAML.parse("- 1\n")
+
+_MALFORMED: list[tuple[str, Callable[[], object], str]] = [
+    # yaml declarations
+    ("yaml unknown kind", lambda: _YAML.build_declaration("nope", {}, ()), "yaml has no kind 'nope'"),
+    ("yaml scalar without a value", lambda: _YAML.build_declaration("scalar", {}, ()), "attribute 'value' is required"),
+    ("yaml pair of a foreign child", lambda: _YAML.build_declaration("pair", {"key": "k"}, (object(),)), "pair child must be"),
+    ("yaml mapping of a keyless pair", lambda: _YAML.build_declaration("mapping", {}, (_YAML_KEYLESS_PAIR,)), "is missing its key"),
+    ("yaml sequence of a foreign child", lambda: _YAML.build_declaration("sequence", {}, (object(),)), "sequence child 0 must be"),
+    # yaml insertions
+    ("yaml insert into a foreign parent", lambda: _YAML.insert_child(_TOML_TREE, _YAML_PAIR), "parent must be _YamlTree"),
+    ("yaml insert a foreign child", lambda: _YAML.insert_child(_YAML_TREE, _TOML_PAIR), "child must be a _YamlDeclaration"),
+    ("yaml insert at an unknown position", lambda: _YAML.insert_child(_YAML_TREE, _YAML_PAIR, position="middle"), "invalid position"),
+    ("yaml insert a keyless pair", lambda: _YAML.insert_child(_YAML_TREE, _YAML_KEYLESS_PAIR), "is missing its key"),
+    ("yaml insert a pair into a sequence", lambda: _YAML.insert_child(_YAML_SEQUENCE_TREE, _YAML_PAIR), "requires a value declaration"),
+    ("yaml insert into a scalar root", lambda: _YAML.insert_child(_YAML_SCALAR_TREE, _YAML_SCALAR), "cannot insert into scalar root"),
+    # toml declarations
+    ("toml unknown kind", lambda: _TOML.build_declaration("nope", {}, ()), "toml has no kind 'nope'"),
+    ("toml scalar without a value", lambda: _TOML.build_declaration("scalar", {}, ()), "attribute 'value' is required"),
+    ("toml pair of a foreign child", lambda: _TOML.build_declaration("pair", {"key": "k"}, (object(),)), "pair child must be"),
+    ("toml table of a keyless pair", lambda: _TOML.build_declaration("table", {}, (_TOML_KEYLESS_PAIR,)), "is missing its key"),
+    ("toml array of a foreign child", lambda: _TOML.build_declaration("array", {}, (object(),)), "array child 0 must be"),
+    # toml insertions
+    ("toml insert into a foreign parent", lambda: _TOML.insert_child(_YAML_TREE, _TOML_PAIR), "parent must be _TomlTree"),
+    ("toml insert a foreign child", lambda: _TOML.insert_child(_TOML_TREE, _YAML_PAIR), "child must be a _TomlDeclaration"),
+    ("toml insert at an unknown position", lambda: _TOML.insert_child(_TOML_TREE, _TOML_PAIR, position="middle"), "invalid position"),
+    ("toml insert a keyless pair", lambda: _TOML.insert_child(_TOML_TREE, _TOML_KEYLESS_PAIR), "is missing its key"),
+]
+
+
+@pytest.mark.parametrize(("refuse", "expected"), [(refuse, expected) for _, refuse, expected in _MALFORMED], ids=[c[0] for c in _MALFORMED])
+def test_a_malformed_declaration_or_insertion_is_refused(refuse: Callable[[], object], expected: str) -> None:
+    with pytest.raises((ValueError, TypeError, KeyError, StructuralError)) as refusal:
+        refuse()
+
+    assert expected in str(refusal.value)
+
+
+def test_a_value_declared_for_a_sequence_root_is_appended() -> None:
+    assert _YAML.serialize(_YAML.insert_child(_YAML_SEQUENCE_TREE, _YAML_SCALAR)) == "- 1\n- 2\n"

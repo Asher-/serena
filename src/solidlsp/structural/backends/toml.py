@@ -236,7 +236,7 @@ class TomlLogicalNameResolver(LogicalNameResolver):
         parts = tuple(re.split(r"[./]", raw))
         for part in parts:
             if not part or not _TOML_NAME_PART.fullmatch(part):
-                raise NameResolutionError(raw, f"invalid toml name part: {part!r}")
+                raise NameResolutionError(raw, f"invalid toml name part: '{part}'")
         return LogicalName(parts=parts, raw=raw)
 
     def resolve(self, name: LogicalName) -> NameResolution:
@@ -714,7 +714,7 @@ class TomlStructuralLanguage(StructuralLanguage):
                 if child.key is None:
                     raise DeclarationError(kind, f"table child {idx} is missing its key")
                 if child.key in table_data:
-                    raise DeclarationError(kind, f"duplicate key {child.key!r} in table")
+                    raise DeclarationError(kind, f"duplicate key '{child.key}' in table")
                 table_data[child.key] = child.data
             return _TomlDeclaration(kind=kind, data=table_data)
 
@@ -767,7 +767,7 @@ class TomlStructuralLanguage(StructuralLanguage):
         if child.key is None:
             raise DeclarationError(child.kind, "pair declaration is missing its key")
         if child.key in root:
-            raise DeclarationError(child.kind, f"duplicate key {child.key!r} in mapping")
+            raise DeclarationError(child.kind, f"duplicate key '{child.key}' in mapping")
         new_root = _mapping_with_inserted(root, child.key, child.data, anchor, position)
         return self.parse(_dump(new_root))
 
@@ -1282,7 +1282,7 @@ def _mapping_insert_in_place(
         raise ValueError(f"position {position!r} requires an anchor")
     idx = _keyed_body_index(body, anchor_key)
     if idx is None:
-        raise ValueError(f"anchor key {anchor_key!r} not found in mapping")
+        raise ValueError(f"anchor key '{anchor_key}' not found in mapping")
     if position == "before":
         body.insert(idx, new_pair)
     else:  # after
@@ -1310,7 +1310,7 @@ def _mapping_remove_in_place(mapping: Any, key_str: str) -> None:
             target_key = k
             break
     if target_key is None:
-        raise ValueError(f"key {key_str!r} not found in mapping")
+        raise ValueError(f"key '{key_str}' not found in mapping")
     del mapping[target_key]
 
 
@@ -1328,7 +1328,7 @@ def _mapping_replace_value_in_place(mapping: Any, key_str: str, new_value: Any) 
                 new_value.trivia.trail = old_v.trivia.trail
             body[i] = (k, new_value)
             return
-    raise ValueError(f"key {key_str!r} not found in mapping")
+    raise ValueError(f"key '{key_str}' not found in mapping")
 
 
 def _sequence_insert_in_place(

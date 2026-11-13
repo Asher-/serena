@@ -225,7 +225,7 @@ class PythonLogicalNameResolver(LogicalNameResolver):
         parts = raw.split(".")
         for part in parts:
             if not part.isidentifier():
-                raise NameResolutionError(raw, f"invalid Python identifier part: {part!r}")
+                raise NameResolutionError(raw, f"invalid Python identifier part: '{part}'")
         return LogicalName(parts=tuple(parts), raw=raw)
 
     def resolve(self, name: LogicalName) -> NameResolution:

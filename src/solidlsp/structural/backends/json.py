@@ -677,7 +677,7 @@ class JsonLogicalNameResolver(LogicalNameResolver):
         parts = tuple(re.split(r"[./]", raw))
         for part in parts:
             if not part or not _JSON_NAME_PART.fullmatch(part):
-                raise NameResolutionError(raw, f"invalid json name part: {part!r}")
+                raise NameResolutionError(raw, f"invalid json name part: '{part}'")
         return LogicalName(parts=parts, raw=raw)
 
     def resolve(self, name: LogicalName) -> NameResolution:

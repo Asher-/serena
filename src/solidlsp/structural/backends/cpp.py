@@ -367,7 +367,7 @@ class CppLogicalNameResolver(LogicalNameResolver):
         parts = tuple(re.split(r"::|\.", raw))
         for part in parts:
             if not part or not _is_cpp_identifier(part):
-                raise NameResolutionError(raw, f"invalid C++ identifier part: {part!r}")
+                raise NameResolutionError(raw, f"invalid C++ identifier part: '{part}'")
         return LogicalName(parts=parts, raw=raw)
 
     def resolve(self, name: LogicalName) -> NameResolution:
