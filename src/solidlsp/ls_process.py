@@ -1011,7 +1011,7 @@ class TCPLanguageServer(LanguageServerInterface):
                 if len(body) < num_bytes:
                     break
                 self._handle_body(body)
-        except Exception as exc:
+        except BaseException as exc:
             exception = LanguageServerTerminatedException("Unexpected error in TCP language server read loop", self.ls_id, cause=exc)
         log.info("TCP language server read loop has terminated")
         if not self._is_stopping:
