@@ -546,7 +546,7 @@ class CursorManager:
             )
         raise TypeError(
             f"Cursor '{cursor_id}' is a structural cursor at "
-            f"{state.relative_path}:'{state.name_path}'; this operation requires an LSP cursor",
+            f"'{state.relative_path}':'{state.name_path}'; this operation requires an LSP cursor",
         )
 
     def list_cursors(self) -> list[str]:
