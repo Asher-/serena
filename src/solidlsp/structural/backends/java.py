@@ -278,7 +278,7 @@ class JavaLogicalNameResolver:
             if not _JAVA_IDENTIFIER_RE.match(segment):
                 raise NameResolutionError(
                     raw,
-                    f"invalid identifier segment: {segment!r}",
+                    f"invalid identifier segment: '{segment}'",
                 )
         return LogicalName(raw=raw, parts=parts)
 

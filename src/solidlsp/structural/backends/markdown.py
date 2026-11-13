@@ -661,11 +661,11 @@ class MarkdownStructuralLanguage(StructuralLanguage):
         # anchor-relative positions
         if position == "start":
             if anchor.body_range is None:
-                raise ValueError(f"anchor {anchor.name_path!r} has no body scope to insert into")
+                raise ValueError(f"anchor '{anchor.name_path}' has no body scope to insert into")
             return anchor.body_range[0]
         if position == "end":
             if anchor.body_range is None:
-                raise ValueError(f"anchor {anchor.name_path!r} has no body scope to insert into")
+                raise ValueError(f"anchor '{anchor.name_path}' has no body scope to insert into")
             return anchor.body_range[1]
         if position == "before":
             return anchor.extent_offset

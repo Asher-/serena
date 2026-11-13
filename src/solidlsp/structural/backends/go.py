@@ -188,7 +188,7 @@ class GoLogicalNameResolver:
             if not _GO_IDENTIFIER_RE.match(segment):
                 raise NameResolutionError(
                     raw,
-                    f"invalid identifier segment: {segment!r}",
+                    f"invalid identifier segment: '{segment}'",
                 )
         return LogicalName(raw=raw, parts=parts)
 

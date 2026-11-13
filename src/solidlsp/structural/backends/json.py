@@ -1181,7 +1181,7 @@ def _resolve_container(tree: _JsonDocument, container_path: str) -> _JsonObject 
     if isinstance(node, _JsonMember) and isinstance(node.value, _JsonObject | _JsonArray):
         return node.value
     raise ValueError(
-        f"path {container_path!r} does not resolve to a JSON object or array",
+        f"path '{container_path}' does not resolve to a JSON object or array",
     )
 
 
@@ -1200,21 +1200,21 @@ def _resolve_node_by_path(tree: _JsonDocument, path: str) -> _JsonNode:
         if segment.startswith("[") and segment[-1:] == "]":
             # array index segment
             if not isinstance(node, _JsonArray):
-                raise ValueError(f"segment {segment!r} expects an array, got {_value_kind(node)!r}")
+                raise ValueError(f"segment '{segment}' expects an array, got {_value_kind(node)!r}")
             try:
                 idx = int(segment[1:-1])
             except ValueError as err:
-                raise ValueError(f"segment {segment!r} is not a valid array index") from err
+                raise ValueError(f"segment '{segment}' is not a valid array index") from err
             if idx < 0 or idx >= len(node.items):
-                raise ValueError(f"array index {idx} out of range for segment {segment!r}")
+                raise ValueError(f"array index {idx} out of range for segment '{segment}'")
             node = node.items[idx]
         else:
             # object key segment
             if not isinstance(node, _JsonObject):
-                raise ValueError(f"segment {segment!r} expects an object, got {_value_kind(node)!r}")
+                raise ValueError(f"segment '{segment}' expects an object, got {_value_kind(node)!r}")
             match = next((m for m in node.members if _decode_key(m) == segment), None)
             if match is None:
-                raise ValueError(f"object has no member with key {segment!r}")
+                raise ValueError(f"object has no member with key '{segment}'")
             node = match.value
     return node
 

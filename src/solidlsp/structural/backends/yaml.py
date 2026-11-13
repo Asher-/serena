@@ -941,7 +941,7 @@ class YamlStructuralLanguage(StructuralLanguage):
             key_str, value = _parse_yaml_member(source)
             existing_keys = [_stringify_key(k) for k in container]
             if key_str in existing_keys:
-                raise DeclarationError("pair", f"duplicate key {key_str!r} in mapping")
+                raise DeclarationError("pair", f"duplicate key '{key_str}' in mapping")
             _mapping_insert_yaml_in_place(container, key_str, value, anchor_segment, position)
         elif isinstance(container, CommentedSeq | list):
             anchor_index: int | None = None
@@ -951,7 +951,7 @@ class YamlStructuralLanguage(StructuralLanguage):
             _sequence_insert_yaml_in_place(container, value, anchor_index, position)
         else:
             raise ValueError(
-                f"container at {container_path!r} is not a mapping or sequence",
+                f"container at '{container_path}' is not a mapping or sequence",
             )
 
         return self.parse(_dump(cloned_root, tree.style))
@@ -971,7 +971,7 @@ class YamlStructuralLanguage(StructuralLanguage):
             _sequence_remove_yaml_in_place(container, idx)
         else:
             raise ValueError(
-                f"container at {parent_path!r} is not a mapping or sequence",
+                f"container at '{parent_path}' is not a mapping or sequence",
             )
 
         return self.parse(_dump(cloned_root, tree.style))
@@ -992,7 +992,7 @@ class YamlStructuralLanguage(StructuralLanguage):
             _sequence_replace_yaml_in_place(container, idx, new_value)
         else:
             raise ValueError(
-                f"container at {parent_path!r} is not a mapping or sequence",
+                f"container at '{parent_path}' is not a mapping or sequence",
             )
 
         return self.parse(_dump(cloned_root, tree.style))
@@ -1179,11 +1179,11 @@ def _parse_sequence_index_segment_yaml(segment: str) -> int:
         is not a valid integer.
     """
     if not (segment.startswith("[") and segment.endswith("]")):
-        raise ValueError(f"sequence segment must be [N], got {segment!r}")
+        raise ValueError(f"sequence segment must be [N], got '{segment}'")
     try:
         return int(segment[1:-1])
     except ValueError as err:
-        raise ValueError(f"invalid sequence index in segment {segment!r}") from err
+        raise ValueError(f"invalid sequence index in segment '{segment}'") from err
 
 
 def _resolve_node_by_path_yaml(root: Any, path: str) -> Any:
@@ -1204,19 +1204,19 @@ def _resolve_node_by_path_yaml(root: Any, path: str) -> Any:
             # sequence-index descent
             if not isinstance(node, CommentedSeq | list):
                 raise ValueError(
-                    f"segment {segment!r} expects a sequence, got {type(node).__name__}",
+                    f"segment '{segment}' expects a sequence, got {type(node).__name__}",
                 )
             idx = _parse_sequence_index_segment_yaml(segment)
             if idx < 0 or idx >= len(node):
                 raise ValueError(
-                    f"sequence index {idx} out of range for segment {segment!r}",
+                    f"sequence index {idx} out of range for segment '{segment}'",
                 )
             node = node[idx]
         else:
             # mapping-key descent
             if not isinstance(node, CommentedMap | dict):
                 raise ValueError(
-                    f"segment {segment!r} expects a mapping, got {type(node).__name__}",
+                    f"segment '{segment}' expects a mapping, got {type(node).__name__}",
                 )
             match_key = None
             for k in node:
@@ -1224,7 +1224,7 @@ def _resolve_node_by_path_yaml(root: Any, path: str) -> Any:
                     match_key = k
                     break
             if match_key is None:
-                raise ValueError(f"mapping has no key {segment!r}")
+                raise ValueError(f"mapping has no key '{segment}'")
             node = node[match_key]
     return node
 
@@ -1242,7 +1242,7 @@ def _resolve_container_yaml(root: Any, container_path: str) -> Any:
     if isinstance(node, CommentedMap | dict | CommentedSeq | list):
         return node
     raise ValueError(
-        f"path {container_path!r} does not resolve to a YAML container",
+        f"path '{container_path}' does not resolve to a YAML container",
     )
 
 

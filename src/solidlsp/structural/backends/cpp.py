@@ -1039,11 +1039,11 @@ class CppStructuralLanguage(StructuralLanguage):
         # nested-into-symbol cases: anchor is a compound symbol whose body_range we insert into
         if position == "start":
             if anchor.body_range is None:
-                raise ValueError(f"anchor {anchor.name_path!r} has no body to insert into")
+                raise ValueError(f"anchor '{anchor.name_path}' has no body to insert into")
             return anchor.body_range[0]
         if position == "end":
             if anchor.body_range is None:
-                raise ValueError(f"anchor {anchor.name_path!r} has no body to insert into")
+                raise ValueError(f"anchor '{anchor.name_path}' has no body to insert into")
             return anchor.body_range[1]
 
         # before / after: adjacent to the anchor declaration

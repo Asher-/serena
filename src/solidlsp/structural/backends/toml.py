@@ -890,7 +890,7 @@ class TomlStructuralLanguage(StructuralLanguage):
             key_str, value = _parse_toml_member(source)
             existing_keys = [_stringify_key(k) for k in container.keys()]
             if key_str in existing_keys:
-                raise DeclarationError("pair", f"duplicate key {key_str!r} in mapping")
+                raise DeclarationError("pair", f"duplicate key '{key_str}' in mapping")
             _mapping_insert_in_place(container, key_str, value, anchor_segment, position)
         elif isinstance(container, AoT | Array):
             anchor_index: int | None = None
@@ -900,7 +900,7 @@ class TomlStructuralLanguage(StructuralLanguage):
             _sequence_insert_in_place(container, value, anchor_index, position)
         else:
             raise ValueError(
-                f"container at {container_path!r} is not a mapping or sequence",
+                f"container at '{container_path}' is not a mapping or sequence",
             )
 
         return self.parse(_dump(cloned_root))
@@ -920,7 +920,7 @@ class TomlStructuralLanguage(StructuralLanguage):
             _sequence_remove_in_place(container, idx)
         else:
             raise ValueError(
-                f"container at {parent_path!r} is not a mapping or sequence",
+                f"container at '{parent_path}' is not a mapping or sequence",
             )
 
         return self.parse(_dump(cloned_root))
@@ -941,7 +941,7 @@ class TomlStructuralLanguage(StructuralLanguage):
             _sequence_replace_in_place(container, idx, new_value)
         else:
             raise ValueError(
-                f"container at {parent_path!r} is not a mapping or sequence",
+                f"container at '{parent_path}' is not a mapping or sequence",
             )
 
         return self.parse(_dump(cloned_root))
@@ -1132,11 +1132,11 @@ def _parse_sequence_index_segment(segment: str) -> int:
         is not a valid integer.
     """
     if not (segment.startswith("[") and segment.endswith("]")):
-        raise ValueError(f"sequence segment must be [N], got {segment!r}")
+        raise ValueError(f"sequence segment must be [N], got '{segment}'")
     try:
         return int(segment[1:-1])
     except ValueError as err:
-        raise ValueError(f"invalid sequence index in segment {segment!r}") from err
+        raise ValueError(f"invalid sequence index in segment '{segment}'") from err
 
 
 def _resolve_node_by_path_toml(root: Any, path: str) -> Any:
@@ -1157,19 +1157,19 @@ def _resolve_node_by_path_toml(root: Any, path: str) -> Any:
             # sequence-index descent
             if not isinstance(node, AoT | Array):
                 raise ValueError(
-                    f"segment {segment!r} expects AoT/Array, got {type(node).__name__}",
+                    f"segment '{segment}' expects AoT/Array, got {type(node).__name__}",
                 )
             idx = _parse_sequence_index_segment(segment)
             if idx < 0 or idx >= len(node):
                 raise ValueError(
-                    f"sequence index {idx} out of range for segment {segment!r}",
+                    f"sequence index {idx} out of range for segment '{segment}'",
                 )
             node = node[idx]
         else:
             # mapping-key descent
             if not _is_mapping_like(node):
                 raise ValueError(
-                    f"segment {segment!r} expects a mapping, got {type(node).__name__}",
+                    f"segment '{segment}' expects a mapping, got {type(node).__name__}",
                 )
             match_key = None
             for k in node.keys():
@@ -1177,7 +1177,7 @@ def _resolve_node_by_path_toml(root: Any, path: str) -> Any:
                     match_key = k
                     break
             if match_key is None:
-                raise ValueError(f"mapping has no key {segment!r}")
+                raise ValueError(f"mapping has no key '{segment}'")
             node = node[match_key]
     return node
 
@@ -1196,7 +1196,7 @@ def _resolve_container_toml(root: Any, container_path: str) -> Any:
     if _is_mapping_like(node) or isinstance(node, AoT | Array):
         return node
     raise ValueError(
-        f"path {container_path!r} does not resolve to a TOML container",
+        f"path '{container_path}' does not resolve to a TOML container",
     )
 
 

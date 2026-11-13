@@ -772,11 +772,11 @@ def _split_member_path(member_path: str) -> tuple[str, str]:
     last = member_path[slash_idx + 1 :] if slash_idx >= 0 else member_path
     if not _is_bracketed_segment(last):
         raise ValueError(
-            f"member path {member_path!r} does not end in a bracketed segment; cannot split into container path + member segment",
+            f"member path '{member_path}' does not end in a bracketed segment; cannot split into container path + member segment",
         )
     if slash_idx < 0:
         raise ValueError(
-            f"member path {member_path!r} has no container-path prefix",
+            f"member path '{member_path}' has no container-path prefix",
         )
     return member_path[:slash_idx], last
 
@@ -848,14 +848,14 @@ def _find_dict_element_index(container: cst.Dict, segment: str) -> int:
     for idx, element in enumerate(container.elements):
         if isinstance(element, cst.DictElement) and _dict_key_segment(element.key) == segment:
             return idx
-    raise ValueError(f"no dict member with segment {segment!r}")
+    raise ValueError(f"no dict member with segment '{segment}'")
 
 
 def _find_list_element_index(container: cst.List, segment: str) -> int:
     """Locate the List element whose index matches ``segment``; raise on miss."""
     idx = _list_index_from_segment(segment)
     if idx is None:
-        raise ValueError(f"segment {segment!r} is not a list index")
+        raise ValueError(f"segment '{segment}' is not a list index")
     addressable_idx = 0
     for i, element in enumerate(container.elements):
         if not isinstance(element, cst.Element):
@@ -1404,15 +1404,15 @@ class PythonStructuralLanguage(StructuralLanguage):
             if kind in {"assignment", "class", "function", "method", "import", "decorator"}:
                 if not isinstance(node, cst.SimpleStatementLine):
                     raise ValueError(
-                        f"path {container_path!r} resolves to a non-assignment {kind!r} node which cannot be used as a container",
+                        f"path '{container_path}' resolves to a non-assignment {kind!r} node which cannot be used as a container",
                     )
                 inner = node.body[0] if node.body else None
                 if not isinstance(inner, cst.Assign | cst.AnnAssign):
-                    raise ValueError(f"path {container_path!r} is not an assignment")
+                    raise ValueError(f"path '{container_path}' is not an assignment")
                 rhs = _assignment_rhs(inner)
                 if not isinstance(rhs, cst.Dict | cst.List):
                     raise ValueError(
-                        f"path {container_path!r} does not bind a dict or list literal",
+                        f"path '{container_path}' does not bind a dict or list literal",
                     )
                 return rhs
             # container / container_member rows: the node IS the container or a member
@@ -1422,9 +1422,9 @@ class PythonStructuralLanguage(StructuralLanguage):
                 if isinstance(node.value, cst.Dict | cst.List):
                     return node.value
                 raise ValueError(
-                    f"path {container_path!r} addresses a container member whose value is not itself a dict or list",
+                    f"path '{container_path}' addresses a container member whose value is not itself a dict or list",
                 )
-        raise ValueError(f"no addressable node at path {container_path!r}")
+        raise ValueError(f"no addressable node at path '{container_path}'")
 
     # ---- pattern matching & rewriting --------------------------------------
 
