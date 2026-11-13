@@ -227,7 +227,7 @@ def search_text(
     # Convert a glob-like pattern to a regular expression
     if is_glob:
         if not isinstance(pattern, str):
-            raise ValueError(f"A glob is given as text, not as the compiled regular expression {pattern.pattern!r}")
+            raise ValueError(f"A glob is given as text, not as the compiled regular expression '{pattern.pattern}'")
         pattern = glob_to_regex(pattern)
 
     # precompute line start offsets once so that each match's coordinates can be resolved via binary search
@@ -320,6 +320,7 @@ class GlobMatcher(ToStringMixin):
         For example, "**/*.{js,jsx,ts,tsx}" becomes ["**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx"].
         Handles multiple brace sets as well.
         """
+
         # braces inside a [...] character class are literal characters, not brace expressions
         def outside_classes(p: str) -> str:
             return re.sub(r"\[[^\]]*\]", lambda m: "_" * len(m.group()), p)

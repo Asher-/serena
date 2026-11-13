@@ -1,5 +1,6 @@
 """Tests that the REPL's enclosing-symbol search credits each match to its own enclosing symbol."""
 
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from serena.agent import SerenaAgent
 from serena.repl.api.fs_api import FsApi
 
 _MODULE = "attribution_sandbox.py"
+_LINKED_DIRECTORY = "attribution_link_sandbox"
 
 
 @pytest.fixture
@@ -86,3 +88,28 @@ def test_a_match_outside_any_symbol_renders_as_a_file_block(python_serena_agent:
     assert "(use cursor_overview to navigate)" in full
     assert f"@ {module_level_match} [{module_level_match}] - 1 matches (use cursor_overview to navigate)" in hits.render_symbol_list()
     assert hits.render_summary() == "Found 1 matches across 0 symbols in 1 files."
+
+
+@pytest.fixture
+def linked_directory(python_serena_agent: SerenaAgent) -> Iterator[str]:
+    """
+    :return: the project-relative path of a directory holding a module that contains ``needle`` and ``loop``, a
+        symbolic link to the directory itself
+    """
+    directory = Path(python_serena_agent.get_active_project_or_raise().project_root) / _LINKED_DIRECTORY
+    directory.mkdir()
+    (directory / "module.py").write_text("def holder():\n    return 'needle'\n", encoding="utf-8")
+    link = directory / "loop"
+    os.symlink(directory, link, target_is_directory=True)
+    try:
+        yield _LINKED_DIRECTORY
+    finally:
+        link.unlink()
+        (directory / "module.py").unlink()
+        directory.rmdir()
+
+
+def test_the_summary_names_a_directory_link_the_search_did_not_enter(python_serena_agent: SerenaAgent, linked_directory: str) -> None:
+    hits = FsApi(python_serena_agent).search_by_enclosing_symbol("needle", relative_path=linked_directory)
+
+    assert hits.render_summary().endswith(f" Symbolic links to directories not entered: {linked_directory}/loop.")
