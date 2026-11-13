@@ -12,6 +12,7 @@ from serena.config.serena_config import SerenaConfig
 from serena.project import Project
 from serena.repl.api.fs_api import FsApi
 from serena.repl.facade import ApiScope, Facade
+from serena.tools import FindFileTool
 
 
 @pytest.fixture
@@ -69,6 +70,17 @@ def test_list_dir_and_find_file(api: FsApi) -> None:
         api.list_dir("missing", recursive=False)
 
     assert [f.replace("\\", "/") for f in api.find_file("*.py", ".")] == ["src/a.py"]
+
+
+def test_find_file_tool_echoes_a_backslash_pattern_verbatim(project: Project) -> None:
+    (Path(project.project_root) / "a\\b.txt").write_text("x", encoding="utf-8")
+    agent = MagicMock()
+    agent.get_active_project_or_raise.return_value = project
+    agent.serena_config.default_max_tool_answer_chars = 10000
+
+    result = FindFileTool(agent).apply("a\\b")
+
+    assert result.splitlines()[0] == "1 file(s) match 'a\\b' under .:"
 
 
 def test_search_for_pattern(api: FsApi) -> None:

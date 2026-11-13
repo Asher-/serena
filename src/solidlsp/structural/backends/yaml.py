@@ -19,6 +19,7 @@ Public entry points:
 from __future__ import annotations
 
 import copy
+import itertools
 import re
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -671,11 +672,25 @@ class YamlStructuralLanguage(StructuralLanguage):
             raise ParseError(
                 language_key="yaml",
                 source_preview=source[:240],
-                detail=(
-                    f"source does not round-trip through ruamel.yaml round-trip mode; re-dump differs. expected={source!r} got={dumped!r}"
-                ),
+                detail=f"source does not round-trip through ruamel.yaml round-trip mode; {self._first_difference(source, dumped)}",
             )
         return _YamlTree(source=source, data=data, style=style)
+
+    @staticmethod
+    def _first_difference(source: str, dumped: str) -> str:
+        """
+        :param source: the source that failed to round-trip
+        :param dumped: the re-dump of the source's parse
+        :return: a description naming the first line at which the re-dump differs from the source, with both versions of it
+        """
+        source_lines = source.splitlines(keepends=True)
+        dumped_lines = dumped.splitlines(keepends=True)
+        for index, (source_line, dumped_line) in enumerate(itertools.zip_longest(source_lines, dumped_lines)):
+            if source_line != dumped_line:
+                shown_source = "<end of source>" if source_line is None else repr(source_line)
+                shown_dumped = "<end of re-dump>" if dumped_line is None else repr(dumped_line)
+                return f"re-dump differs at line {index + 1}: source has {shown_source}, re-dump has {shown_dumped}"
+        return "re-dump differs"
 
     def serialize(self, tree: Any) -> str:
         if isinstance(tree, _YamlTree):

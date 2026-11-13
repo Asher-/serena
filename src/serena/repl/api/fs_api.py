@@ -183,16 +183,16 @@ class EnclosingSymbolHits:
         :param skipped_links: the symbolic links to directories the search did not enter
         """
         self._skipped_links = skipped_links
-        self._grouped: dict[EnclosingSymbolHits.Group, list[str]] = {}
+        self._grouped: dict[EnclosingSymbolHits.Group, list[MatchedConsecutiveLines]] = {}
         self._group_order: list[EnclosingSymbolHits.Group] = []
         self._file_order: list[str] = []
 
-    def add(self, rel: str, name_path: str | None, kind: str | None, hit: str) -> None:
+    def add(self, rel: str, name_path: str | None, kind: str | None, block: MatchedConsecutiveLines) -> None:
         """
         :param rel: the file of the match
         :param name_path: the name path of the enclosing symbol, if any
         :param kind: the kind of the enclosing symbol, if any
-        :param hit: the display string of the match
+        :param block: the block of consecutive lines holding one or more matched lines
         """
         if rel not in self._file_order:
             self._file_order.append(rel)
@@ -200,13 +200,18 @@ class EnclosingSymbolHits:
         if key not in self._grouped:
             self._grouped[key] = []
             self._group_order.append(key)
-        self._grouped[key].append(hit)
+        self._grouped[key].append(block)
+
+    @staticmethod
+    def _count_matches(blocks: list[MatchedConsecutiveLines]) -> int:
+        # a match is a matched line, however many of them one block holds
+        return sum(block.num_matched_lines for block in blocks)
 
     def render_summary(self) -> str:
         """
-        :return: the header, counting the matches, the symbol-resident groups and the touched files
+        :return: the header, counting the matched lines, the symbol-resident groups and the touched files
         """
-        n_matches = sum(len(v) for v in self._grouped.values())
+        n_matches = sum(self._count_matches(blocks) for blocks in self._grouped.values())
         n_symbols = sum(1 for k in self._grouped if k[1] is not None)
         header = f"Found {n_matches} matches across {n_symbols} symbols in {len(self._file_order)} files."
         if self._skipped_links:
@@ -214,9 +219,9 @@ class EnclosingSymbolHits:
         return header
 
     @staticmethod
-    def _render_hit(hit: str) -> list[str]:
+    def _render_hit(hit: MatchedConsecutiveLines) -> list[str]:
         # indent every line of the hit so multi-line context blocks stay readable
-        return [f"    {sub}" for sub in hit.splitlines()] or ["    "]
+        return [f"    {sub}" for sub in hit.to_display_string().splitlines()] or ["    "]
 
     def render_full(self) -> str:
         """
@@ -250,7 +255,7 @@ class EnclosingSymbolHits:
         for rel in self._file_order:
             for key in [k for k in self._group_order if k[0] == rel]:
                 _, name_path, kind = key
-                count = len(self._grouped[key])
+                count = self._count_matches(self._grouped[key])
                 if name_path is not None:
                     lines.append(f"@ {name_path} ({kind}) [{rel}] - {count} matches")
                 else:
@@ -263,8 +268,8 @@ class EnclosingSymbolHits:
         """
         lines = [self.render_summary(), ""]
         per_file: dict[str, int] = {}
-        for (rel, _, _), hits in self._grouped.items():
-            per_file[rel] = per_file.get(rel, 0) + len(hits)
+        for (rel, _, _), blocks in self._grouped.items():
+            per_file[rel] = per_file.get(rel, 0) + self._count_matches(blocks)
         for rel in self._file_order:
             lines.append(f"{rel}: {per_file[rel]} matches")
         return "\n".join(lines)
@@ -496,5 +501,5 @@ class FsApi(FacadeApi):
         hits = EnclosingSymbolHits(skipped_links)
         for (rel, name_path, kind), symbol_matches in matches_by_symbol.items():
             for block in MatchedConsecutiveLines.merge_overlapping(symbol_matches):
-                hits.add(rel, name_path, kind, block.to_display_string())
+                hits.add(rel, name_path, kind, block)
         return hits

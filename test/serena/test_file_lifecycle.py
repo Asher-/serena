@@ -187,6 +187,26 @@ class TestFindFile:
         (tmp_path / "a.py").write_text("x")
         assert "search_for_pattern" not in _fs(tmp_path).find_file("*.py").render()
 
+    def test_render_echoes_a_backslash_pattern_verbatim(self, tmp_path: Path) -> None:
+        (tmp_path / "a\\b.txt").write_text("x")
+
+        assert _fs(tmp_path).find_file("a\\b").render().splitlines()[0] == "1 file(s) match 'a\\b' under .:"
+
+    def test_render_of_no_match_names_the_pattern_and_directory(self, tmp_path: Path) -> None:
+        (tmp_path / "a.py").write_text("x")
+
+        assert _fs(tmp_path).find_file("*.rs").render() == "No files match '*.rs' under .."
+
+    def test_render_of_a_truncated_result_lists_the_kept_matches_and_declares_the_truncation(self, tmp_path: Path) -> None:
+        for i in range(3):
+            (tmp_path / f"f{i}.py").write_text("x")
+
+        lines = _fs(tmp_path).find_file("*.py", max_results=2).render().splitlines()
+
+        assert lines[0] == "2 file(s) match '*.py' under .:"
+        assert len(lines) == 4
+        assert lines[3] == "  ... (truncated; raise max_results or tighten the pattern)"
+
 
 # --- stat: kind/size/eol/trailing-newline/permission/version (spec-v2 §5.4/§5.9) ---
 

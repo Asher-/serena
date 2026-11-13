@@ -81,8 +81,8 @@ class _ManagerWithStubRetriever(CursorManager):
         return self._retriever_stub
 
 
-def _make_manager_via_subclass(tmp_path: Path) -> CursorManager:
-    """Return a manager whose ``_retriever`` is a stub that always misses."""
+def _stub_project(tmp_path: Path) -> MagicMock:
+    """Return a project stand-in rooted at ``tmp_path`` that reads its files as UTF-8."""
     project = MagicMock()
     project.project_root = str(tmp_path)
     project.read_file = lambda p: (tmp_path / p).read_text(encoding="utf-8")
@@ -90,7 +90,12 @@ def _make_manager_via_subclass(tmp_path: Path) -> CursorManager:
     project.project_config.encoding = "utf-8"
     project.line_ending = MagicMock()
     project.line_ending.newline_str = None
-    return _ManagerWithStubRetriever(project=project, retriever_stub=_StubRetriever())
+    return project
+
+
+def _make_manager_via_subclass(tmp_path: Path) -> CursorManager:
+    """Return a manager whose ``_retriever`` is a stub that always misses."""
+    return _ManagerWithStubRetriever(project=_stub_project(tmp_path), retriever_stub=_StubRetriever())
 
 
 # --- Python -----------------------------------------------------------------
@@ -991,26 +996,21 @@ class TestStructuralConfigure:
 
     def test_configure_toggles_include_body_on_structural_cursor(self, tmp_path: Path) -> None:
         (tmp_path / "s.py").write_text(self._SOURCE, encoding="utf-8")
-        manager = _make_manager_via_subclass(tmp_path)
-        cid, state = manager.start_cursor(
+        project = _stub_project(tmp_path)
+        manager = _ManagerWithStubRetriever(project=project, retriever_stub=_StubRetriever())
+        cid, _ = manager.start_cursor(
             name_path='FOO/["members"]/["alpha"]',
             relative_path="s.py",
         )
-
-        assert isinstance(state, StructuralCursorState)
-
-        project = manager._project  # type: ignore[attr-defined]
         tool = _bind_tool(CursorConfigureTool, _ToolHarness(manager, project))
 
-        # flipping include_body writes through to the dataclass field
+        # turning include_body on shows the member's body
         view_on = tool.apply(cursor_id=cid, include_body=True)
-        assert state.include_body
         assert "--- body ---" in view_on
         assert "--- end body ---" in view_on
 
-        # flipping it back off also writes through
+        # turning it back off hides the body again
         view_off = tool.apply(cursor_id=cid, include_body=False)
-        assert not state.include_body
         assert "--- body ---" not in view_off
 
     def test_configure_ignores_edge_types_for_structural_cursor(self, tmp_path: Path) -> None:

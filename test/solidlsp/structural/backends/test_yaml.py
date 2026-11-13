@@ -90,6 +90,20 @@ class TestStructuralParseSerialize:
         with pytest.raises(ParseError):
             backend.parse("items:   one\n")
 
+    def test_refusal_names_the_first_differing_line_without_echoing_the_source(self) -> None:
+        # a source longer than the refusal's preview, whose only non-round-tripping line comes last
+        source = "".join(f"key{i}: value{i}\n" for i in range(40)) + "items:   one\n"
+        backend = YamlStructuralLanguage()
+
+        with pytest.raises(ParseError) as refusal:
+            backend.parse(source)
+
+        message = str(refusal.value)
+        assert "line 41" in message
+        assert repr("items:   one\n") in message
+        assert source not in message
+        assert repr(source) not in message
+
     def test_serialize_rejects_non_handle(self) -> None:
         backend = YamlStructuralLanguage()
         with pytest.raises(TypeError):
