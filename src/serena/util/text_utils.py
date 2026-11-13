@@ -320,13 +320,17 @@ class GlobMatcher(ToStringMixin):
         For example, "**/*.{js,jsx,ts,tsx}" becomes ["**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx"].
         Handles multiple brace sets as well.
         """
+        # braces inside a [...] character class are literal characters, not brace expressions
+        def outside_classes(p: str) -> str:
+            return re.sub(r"\[[^\]]*\]", lambda m: "_" * len(m.group()), p)
+
         patterns = [pattern]
-        while any("{" in p or "}" in p for p in patterns):
+        while any("{" in outside_classes(p) or "}" in outside_classes(p) for p in patterns):
             new_patterns = []
             for p in patterns:
-                match = re.search(r"\{([^{}]*)\}", p)
+                match = re.search(r"\{([^{}]*)\}", outside_classes(p))
                 if match:
-                    options_expr = match.group(1)
+                    options_expr = p[match.start(1) : match.end(1)]
                     if not options_expr:
                         raise ValueError(f"Invalid glob brace expression in '{pattern}': empty braces are not allowed")
 
@@ -335,8 +339,10 @@ class GlobMatcher(ToStringMixin):
                     options = options_expr.split(",")
                     for option in options:
                         new_patterns.append(f"{prefix}{option}{suffix}")
-                else:
+                elif "{" in outside_classes(p) or "}" in outside_classes(p):
                     raise ValueError(f"Invalid glob brace expression in '{pattern}': unmatched brace")
+                else:
+                    new_patterns.append(p)
             patterns = new_patterns
         return patterns
 

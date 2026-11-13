@@ -173,3 +173,23 @@ class TestMissingPath:
             _grep(python_serena_agent, substring_pattern="needle", relative_path="it's_missing")
 
         assert "Relative path 'it's_missing' does not exist." in str(refusal.value)
+
+
+class TestBraceNamedDirectoryScope:
+    @pytest.mark.parametrize("directory", ["{{slug}}", "notes{draft"])
+    def test_a_glob_under_a_directory_whose_name_holds_braces_finds_its_file(
+        self, python_serena_agent: SerenaAgent, sandbox: Path, directory: str
+    ) -> None:
+        (sandbox / directory).mkdir()
+        (sandbox / directory / "g.md").write_text("needle\n", encoding="utf-8")
+
+        result = _grep(
+            python_serena_agent,
+            substring_pattern="needle",
+            relative_path=f"{_SANDBOX}/{directory}",
+            restrict_to_code_files=False,
+            paths_include_glob="*.md",
+        )
+
+        assert "g.md" in result
+        assert "No matches" not in result

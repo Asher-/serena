@@ -7,6 +7,7 @@ Provides a stateful cursor that can be positioned on a symbol and moved along LS
 
 import logging
 import os
+import re
 import time
 from collections.abc import Sequence
 from contextlib import ExitStack
@@ -2049,7 +2050,9 @@ class CursorManager:
         scope = os.path.normpath(relative_path).replace(os.sep, "/") if relative_path else "."
         if scope == "." or not os.path.isdir(abs_path):
             return glob
-        return f"{scope}/{glob.lstrip('/')}"
+        # the directory name is literal: each of its glob metacharacters becomes a one-character class
+        literal_scope = re.sub(r"[][{}*?]", lambda m: f"[{m.group()}]", scope)
+        return f"{literal_scope}/{glob.lstrip('/')}"
 
     def _top_level_symbol_covering_line(self, relative_path: str, line_0idx: int) -> LanguageServerSymbol | None:
         """Recover the top-level symbol whose extent covers a 0-based line.
