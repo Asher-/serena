@@ -262,8 +262,6 @@ class PipeListener:
         # close the listener first so no new connections can race against the
         # connection cleanup below
         self._server.close()
-        await self._server.wait_closed()
-        self._server = None
 
         # close every tracked pipe-connection writer; the per-connection
         # forwarder detects the closed transport on its next read and exits
@@ -272,6 +270,11 @@ class PipeListener:
             connection.writer.close()
             with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                 await connection.writer.wait_closed()
+
+        # await the server only once its connections are closed: the server
+        # waits on every connection it accepted
+        await self._server.wait_closed()
+        self._server = None
 
         # await every per-connection handler task so the loop's teardown does
         # not race with a still-running forwarder; cancelling first guarantees

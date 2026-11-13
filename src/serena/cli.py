@@ -1058,7 +1058,7 @@ class ProjectCommands(AutoRegisteringGroup):
         click.echo(f"Indexing symbols in {proj} …")
         ls_mgr = proj.create_language_server_manager()
         try:
-            log_file = os.path.join(proj.project_root, ".serena", "logs", "indexing.txt")
+            log_file = os.path.join(proj.path_to_serena_data_folder(), "logs", "indexing.txt")
 
             files = proj.gather_source_files()
 
@@ -1191,7 +1191,7 @@ class ProjectCommands(AutoRegisteringGroup):
 
         # Create log file with timestamp
         timestamp = datetime_tag()
-        log_dir = os.path.join(project_path, ".serena", "logs", "health-checks")
+        log_dir = os.path.join(proj.path_to_serena_data_folder(), "logs", "health-checks")
         os.makedirs(log_dir, exist_ok=True)
         log_file = os.path.join(log_dir, f"health_check_{timestamp}.log")
 

@@ -11,7 +11,7 @@ from click import Command, Option
 from click.testing import CliRunner
 
 from serena.cli import ProjectCommands, TopLevelCommands, find_project_root
-from serena.config.serena_config import ProjectConfig
+from serena.config.serena_config import ProjectConfig, SerenaConfig
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 
@@ -262,6 +262,43 @@ class TestProjectIndex:
         log_file = os.path.join(temp_project_dir, ".serena", "logs", "indexing.txt")
         with open(log_file, encoding="utf-8") as f:
             assert "数据.py" in f.read()
+
+
+class TestProjectCommandLogLocation:
+    """Tests for where the 'project index' and 'project health-check' commands write their logs."""
+
+    @pytest.fixture
+    def data_root(self, tmp_path, monkeypatch) -> Path:
+        """Root under which every project's data folder is configured to live, outside the project directory."""
+        root = tmp_path / "project-data"
+        load_config = SerenaConfig.from_config_file
+
+        def load_config_with_external_data_folder(*args, **kwargs):
+            config = load_config(*args, **kwargs)
+            config.project_serena_folder_location = str(root / "$projectFolderName")
+            return config
+
+        monkeypatch.setattr(SerenaConfig, "from_config_file", staticmethod(load_config_with_external_data_folder))
+        return root
+
+    def test_index_writes_its_failure_log_to_the_data_folder(self, cli_runner, temp_project_dir_with_python_file, data_root, monkeypatch):
+        from solidlsp.ls import SolidLanguageServer
+
+        def fail(self, relative_file_path, file_buffer=None):
+            raise RuntimeError(f"cannot index {relative_file_path}")
+
+        monkeypatch.setattr(SolidLanguageServer, "request_document_symbols", fail)
+        result = cli_runner.invoke(ProjectCommands.index, [temp_project_dir_with_python_file, "--log-level", "ERROR", "--timeout", "5"])
+
+        assert result.exit_code == 0, f"Command failed: {result.output}"
+        assert os.listdir(temp_project_dir_with_python_file) == ["test.py"]
+        assert (data_root / Path(temp_project_dir_with_python_file).name / "logs" / "indexing.txt").is_file()
+
+    def test_health_check_writes_its_log_to_the_data_folder(self, cli_runner, temp_project_dir_with_python_file, data_root):
+        cli_runner.invoke(ProjectCommands.health_check, [temp_project_dir_with_python_file])
+
+        assert os.listdir(temp_project_dir_with_python_file) == ["test.py"]
+        assert list((data_root / Path(temp_project_dir_with_python_file).name / "logs" / "health-checks").glob("health_check_*.log"))
 
 
 class TestProjectCreateHelper:
