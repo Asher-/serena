@@ -1879,13 +1879,13 @@ class CursorManager:
         rel = relative_path or ""
         abs_path = os.path.join(self._project.project_root, rel)
         if not os.path.exists(abs_path):
-            raise FileNotFoundError(f"Relative path {rel!r} does not exist.")
+            raise FileNotFoundError(f"Relative path '{rel}' does not exist.")
         if (
             restrict_to_code_files
             and os.path.isfile(abs_path)
             and not self._project.gather_project_files(relative_path=rel, code_files_only=True, skip_ignored_files=True)
         ):
-            raise ValueError(f"{rel!r} is not a code file of this project; set restrict_to_code_files=False to search it.")
+            raise ValueError(f"'{rel}' is not a code file of this project; set restrict_to_code_files=False to search it.")
 
         # globs are written relative to a directory scope; the search machinery matches project-relative paths
         include_glob = self._scope_glob(rel, abs_path, paths_include_glob.strip())
@@ -1940,7 +1940,7 @@ class CursorManager:
             )
             if other_groups or other_unsymboled:
                 raise ValueError(
-                    f"'{substring_pattern}' matches only files under {rel!r} that are not code files of this project; "
+                    f"'{substring_pattern}' matches only files under '{rel}' that are not code files of this project; "
                     "set restrict_to_code_files=False to search them."
                 )
 

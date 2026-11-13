@@ -129,3 +129,47 @@ class TestHitBlocks:
         assert "2 hit(s)" in result
         assert "line2" in result and "line5" in result
         assert "line3" not in result and "line4" not in result
+
+    def test_a_deferred_symbol_counts_its_matched_lines(self, python_serena_agent: SerenaAgent, sandbox: Path) -> None:
+        # both functions hold two matches on adjacent lines; with one cursor allowed, one of them is deferred
+        (sandbox / "e.py").write_text(
+            "def first():\n    print('needle')\n    print('needle')\n\n\ndef second():\n    print('needle')\n    print('needle')\n",
+            encoding="utf-8",
+        )
+
+        result = _grep(
+            python_serena_agent,
+            substring_pattern="needle",
+            relative_path=f"{_SANDBOX}/e.py",
+            context_lines_before=1,
+            context_lines_after=1,
+            max_matches=1,
+        )
+
+        deferred = result.split("-- Deferred", 1)[1].strip().splitlines()[1:]
+        assert len(deferred) == 1
+        assert deferred[0].endswith("2 hit(s)")
+
+
+class TestMalformedGlob:
+    def test_a_malformed_include_glob_is_refused_naming_it_as_sent(self, python_serena_agent: SerenaAgent, sandbox: Path) -> None:
+        (sandbox / "f.md").write_text("needle\n", encoding="utf-8")
+
+        with pytest.raises(ValueError) as refusal:
+            _grep(
+                python_serena_agent,
+                substring_pattern="needle",
+                relative_path=_SANDBOX,
+                restrict_to_code_files=False,
+                paths_include_glob="it's/{a",
+            )
+
+        assert f"Invalid glob brace expression in '{_SANDBOX}/it's/{{a': unmatched brace" in str(refusal.value)
+
+
+class TestMissingPath:
+    def test_a_missing_relative_path_is_named_as_sent(self, python_serena_agent: SerenaAgent) -> None:
+        with pytest.raises(FileNotFoundError) as refusal:
+            _grep(python_serena_agent, substring_pattern="needle", relative_path="it's_missing")
+
+        assert "Relative path 'it's_missing' does not exist." in str(refusal.value)

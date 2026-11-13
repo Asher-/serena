@@ -104,6 +104,15 @@ class TestStructuralParseSerialize:
         assert source not in message
         assert repr(source) not in message
 
+    def test_refusal_of_a_source_whose_re_dump_ends_first_shows_the_re_dump_line_as_empty(self) -> None:
+        # a comment-only source parses to nothing, whose re-dump is empty
+        backend = YamlStructuralLanguage()
+
+        with pytest.raises(ParseError) as refusal:
+            backend.parse("# comment only\n")
+
+        assert "re-dump differs at line 1: source has '# comment only\\n', re-dump has ''" in str(refusal.value)
+
     def test_serialize_rejects_non_handle(self) -> None:
         backend = YamlStructuralLanguage()
         with pytest.raises(TypeError):

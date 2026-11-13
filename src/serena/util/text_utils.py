@@ -328,7 +328,7 @@ class GlobMatcher(ToStringMixin):
                 if match:
                     options_expr = match.group(1)
                     if not options_expr:
-                        raise ValueError(f"Invalid glob brace expression in {pattern!r}: empty braces are not allowed")
+                        raise ValueError(f"Invalid glob brace expression in '{pattern}': empty braces are not allowed")
 
                     prefix = p[: match.start()]
                     suffix = p[match.end() :]
@@ -336,7 +336,7 @@ class GlobMatcher(ToStringMixin):
                     for option in options:
                         new_patterns.append(f"{prefix}{option}{suffix}")
                 else:
-                    raise ValueError(f"Invalid glob brace expression in {pattern!r}: unmatched brace")
+                    raise ValueError(f"Invalid glob brace expression in '{pattern}': unmatched brace")
             patterns = new_patterns
         return patterns
 
@@ -405,23 +405,9 @@ def expand_braces(pattern: str) -> list[str]:
     """
     Expands brace patterns in a glob string.
     For example, "**/*.{js,jsx,ts,tsx}" becomes ["**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx"].
-    Handles multiple brace sets as well.
+    Handles multiple brace sets as well; a malformed brace expression raises ValueError naming the glob.
     """
-    patterns = [pattern]
-    while any("{" in p for p in patterns):
-        new_patterns = []
-        for p in patterns:
-            match = re.search(r"\{([^{}]+)\}", p)
-            if match:
-                prefix = p[: match.start()]
-                suffix = p[match.end() :]
-                options = match.group(1).split(",")
-                for option in options:
-                    new_patterns.append(f"{prefix}{option}{suffix}")
-            else:
-                new_patterns.append(p)
-        patterns = new_patterns
-    return patterns
+    return GlobMatcher._expand_braces(pattern)
 
 
 def glob_match(pattern: str, path: str) -> bool:

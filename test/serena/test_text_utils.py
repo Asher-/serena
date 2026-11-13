@@ -846,6 +846,12 @@ class TestExpandBraces:
         with pytest.raises(ValueError, match="Invalid glob brace expression"):
             GlobMatcher._expand_braces(pattern)
 
+    def test_a_malformed_brace_glob_is_reported_as_sent(self):
+        with pytest.raises(ValueError) as refusal:
+            GlobMatcher("it's/{a")
+
+        assert "Invalid glob brace expression in 'it's/{a': unmatched brace" in str(refusal.value)
+
 
 class MockFileProxy(FileProxy):
     def __init__(self, relative_path: str, mock_reader: Callable[[str], str] = mock_reader_always_match):

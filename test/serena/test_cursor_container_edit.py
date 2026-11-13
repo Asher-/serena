@@ -360,6 +360,21 @@ class TestYamlSourceLayout:
 
         assert (tmp_path / "play.yml").read_text(encoding="utf-8") == source.replace("hosts: control", "hosts: edge")
 
+    def test_a_layout_no_dump_reproduces_is_refused_naming_its_first_differing_line(self, tmp_path: Path) -> None:
+        (tmp_path / "play.yml").write_text("name: Configure\nhosts:   control\n", encoding="utf-8")
+        project = _stub_project(tmp_path)
+        manager = _ManagerWithStubRetriever(project=project, retriever_stub=_StubRetriever())
+
+        from serena.tools.cursor_tools import CursorStartTool
+        from solidlsp.structural.errors import ParseError
+
+        with pytest.raises(ParseError) as refusal:
+            _bind_tool(CursorStartTool, _ToolHarness(manager, project)).apply(
+                name_path="hosts", relative_path="play.yml", because="test fixture: exercising the tool behaviour"
+            )
+
+        assert "re-dump differs at line 2: source has 'hosts:   control\\n', re-dump has 'hosts: control\\n'" in str(refusal.value)
+
 
 # --- tool dispatch ----------------------------------------------------------
 

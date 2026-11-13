@@ -2,6 +2,7 @@
 Tests for the file system facade API.
 """
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -92,6 +93,22 @@ def test_search_for_pattern(api: FsApi) -> None:
     code_matches = api.search_for_pattern("foo", restrict_search_to_code_files=True)
     assert all(m.source_file_path.endswith("a.py") for m in code_matches.matches)  # type: ignore
     assert "foo(1)" in code_matches.represent()
+
+
+def test_search_for_pattern_counts_a_line_holding_two_matches_once(project: Project, api: FsApi) -> None:
+    # every line holds two matches, "foo" and "(1"; the limit leaves room for the per-file counts and no longer view
+    (Path(project.project_root) / "many.py").write_text("foo(1)\n" * 50, encoding="utf-8")
+
+    answer = api.search_for_pattern("foo|\\(1", relative_path="many.py", max_answer_chars=200).represent()
+
+    assert json.loads(answer.split("Match counts per file:\n", 1)[1]) == {"many.py": 50}
+
+
+def test_search_for_pattern_too_long_for_every_view_answers_only_that_it_is_too_long(api: FsApi) -> None:
+    answer = api.search_for_pattern("foo", relative_path="src", max_answer_chars=20).represent()
+
+    assert answer.startswith("The answer is too long (")
+    assert "foo" not in answer
 
 
 def test_search_by_enclosing_symbol_refuses_a_missing_root(api: FsApi) -> None:

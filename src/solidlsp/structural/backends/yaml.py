@@ -680,17 +680,14 @@ class YamlStructuralLanguage(StructuralLanguage):
     def _first_difference(source: str, dumped: str) -> str:
         """
         :param source: the source that failed to round-trip
-        :param dumped: the re-dump of the source's parse
-        :return: a description naming the first line at which the re-dump differs from the source, with both versions of it
+        :param dumped: the re-dump of the source's parse, which differs from ``source``
+        :return: a description naming the first line at which the re-dump differs from the source, with both versions of
+            it; a text that ends before that line shows its version as ``''``
         """
-        source_lines = source.splitlines(keepends=True)
-        dumped_lines = dumped.splitlines(keepends=True)
-        for index, (source_line, dumped_line) in enumerate(itertools.zip_longest(source_lines, dumped_lines)):
-            if source_line != dumped_line:
-                shown_source = "<end of source>" if source_line is None else repr(source_line)
-                shown_dumped = "<end of re-dump>" if dumped_line is None else repr(dumped_line)
-                return f"re-dump differs at line {index + 1}: source has {shown_source}, re-dump has {shown_dumped}"
-        return "re-dump differs"
+        # pair the lines of both texts, padding the shorter with empty strings, which no line of either text equals
+        line_pairs = itertools.zip_longest(source.splitlines(keepends=True), dumped.splitlines(keepends=True), fillvalue="")
+        index, (source_line, dumped_line) = next((i, pair) for i, pair in enumerate(line_pairs) if pair[0] != pair[1])
+        return f"re-dump differs at line {index + 1}: source has {source_line!r}, re-dump has {dumped_line!r}"
 
     def serialize(self, tree: Any) -> str:
         if isinstance(tree, _YamlTree):

@@ -107,15 +107,13 @@ class PatternMatchesRenderer(Renderer[PatternMatches]):
 
     def render(self, obj: PatternMatches) -> str:
         matches_by_file = obj.matches_by_file_()
-        file_to_matches = {
-            path: [m.to_display_string() for m in MatchedConsecutiveLines.merge_overlapping(matches)]
-            for path, matches in matches_by_file.items()
-        }
+        blocks_by_file = {path: MatchedConsecutiveLines.merge_overlapping(matches) for path, matches in matches_by_file.items()}
+        file_to_matches = {path: [block.to_display_string() for block in blocks] for path, blocks in blocks_by_file.items()}
 
-        # capture lightweight match data for shortening before serialization
+        # capture lightweight match data for shortening before serialization: each matched line once, however many matches it holds
         match_lines_by_file = {
-            path: [{"line": m.matched_lines[0].line_number, "text": m.matched_lines[0].line_content.strip()} for m in matches]
-            for path, matches in matches_by_file.items()
+            path: [{"line": line.line_number, "text": line.line_content.strip()} for block in blocks for line in block.matched_lines]
+            for path, blocks in blocks_by_file.items()
         }
 
         # shortened result closures, from least to most aggressive shortening
@@ -155,7 +153,8 @@ class PatternMatchesRenderer(Renderer[PatternMatches]):
             return f"Match counts per file:\n{self._to_json(counts)}"
 
         def make_summary() -> str:
-            return f"Found {len(obj)} matches in {len(match_lines_by_file)} files."
+            n_matches = sum(len(lines) for lines in match_lines_by_file.values())
+            return f"Found {n_matches} matches in {len(match_lines_by_file)} files."
 
         return self._limit_length(
             self._to_json(file_to_matches),

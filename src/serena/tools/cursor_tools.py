@@ -750,7 +750,9 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoot):
             lines.append("-- Deferred (no cursor opened; tighten the pattern or raise max_matches) --")
             for sym, hits in deferred:
                 rel = sym.location.relative_path or "?"
-                lines.append(f"  @ {sym.get_name_path()} :{sym.symbol_kind_name}@{rel}    {len(hits)} hit(s)")
+                lines.append(
+                    f"  @ {sym.get_name_path()} :{sym.symbol_kind_name}@{rel}    {sum(hit.num_matched_lines for hit in hits)} hit(s)"
+                )
 
         return self._limit_length("\n".join(lines).rstrip() + "\n", max_answer_chars)
 
