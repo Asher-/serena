@@ -58,6 +58,16 @@ def test_solargraph_setup_fails_where_ruby_fails(stand_ins: StandIns, project: P
     assert_started_through_brain_supervise(ruby)
 
 
+def test_solargraph_setup_fails_with_what_a_failing_ruby_wrote(stand_ins: StandIns, project: Path) -> None:
+    # a ruby that writes to stderr and fails, run in text mode
+    ruby = stand_ins.add("ruby", "echo 'ruby: broken interpreter' >&2; exit 1")
+
+    with pytest.raises(RuntimeError) as caught:
+        Solargraph._setup_runtime_dependencies(LanguageServerConfig(ls_id=LanguageServerId.RUBY), str(project))
+    assert "Error checking Ruby installation: ruby: broken interpreter" in str(caught.value)
+    assert_started_through_brain_supervise(ruby)
+
+
 def test_solargraph_setup_fails_where_ruby_is_not_installed(stand_ins: StandIns, project: Path) -> None:
     with pytest.raises(RuntimeError) as caught:
         Solargraph._setup_runtime_dependencies(LanguageServerConfig(ls_id=LanguageServerId.RUBY), str(project))
@@ -81,3 +91,40 @@ def test_solargraph_setup_fails_with_what_a_failing_gem_install_wrote(stand_ins:
         Solargraph._setup_runtime_dependencies(LanguageServerConfig(ls_id=LanguageServerId.RUBY), str(project))
     assert "Failed to check or install Solargraph: ERROR:  Could not find a valid gem solargraph" in str(caught.value)
     assert_started_through_brain_supervise(ruby, gem)
+
+
+def _setup_solargraph(project: Path) -> str:
+    return Solargraph._setup_runtime_dependencies(LanguageServerConfig(ls_id=LanguageServerId.RUBY), str(project))
+
+
+def test_solargraph_setup_fails_in_a_bundler_project_without_bundle(stand_ins: StandIns, project: Path) -> None:
+    stand_ins.answering("ruby", stdout=_RUBY_VERSION)
+    (project / "Gemfile").write_text("source 'https://rubygems.org'\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Bundler project detected but 'bundle' command not found"):
+        _setup_solargraph(project)
+
+
+def test_solargraph_runs_through_bundle_where_the_lockfile_holds_it(stand_ins: StandIns, project: Path) -> None:
+    stand_ins.answering("ruby", stdout=_RUBY_VERSION)
+    bundle = stand_ins.answering("bundle")
+    (project / "Gemfile").write_text("gem 'solargraph'\n", encoding="utf-8")
+    (project / "Gemfile.lock").write_text("GEM\n  specs:\n    solargraph (0.51.1)\n", encoding="utf-8")
+
+    assert _setup_solargraph(project) == f"{bundle.path} exec solargraph"
+
+
+def test_solargraph_setup_fails_in_a_bundler_project_whose_lockfile_lacks_it(stand_ins: StandIns, project: Path) -> None:
+    stand_ins.answering("ruby", stdout=_RUBY_VERSION)
+    stand_ins.answering("bundle")
+    (project / "Gemfile").write_text("source 'https://rubygems.org'\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="This appears to be a Bundler project, but solargraph is not available"):
+        _setup_solargraph(project)
+
+
+def test_solargraph_found_on_path_is_run_directly(stand_ins: StandIns, project: Path) -> None:
+    stand_ins.answering("ruby", stdout=_RUBY_VERSION)
+    solargraph = stand_ins.answering("solargraph")
+
+    assert _setup_solargraph(project) == str(solargraph.path)

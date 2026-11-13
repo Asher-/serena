@@ -85,7 +85,7 @@ class Solargraph(SolidLanguageServer):
                     log.warning(f"Warning: Ruby {major}.{minor}.{patch} detected. Solargraph works best with Ruby 2.6+")
 
         except subprocess.CalledProcessError as e:
-            error_msg = e.stderr.decode() if e.stderr else "Unknown error"
+            error_msg = e.stderr.strip() if e.stderr else "Unknown error"
             raise RuntimeError(
                 f"Error checking Ruby installation: {error_msg}. Please ensure Ruby is properly installed and in PATH."
             ) from e
