@@ -271,8 +271,8 @@ class PipeListener:
             with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                 await connection.writer.wait_closed()
 
-        # await the server only once its connections are closed: the server
-        # waits on every connection it accepted
+        # await the server only once its connections are closed: since CPython 3.12.1 the server waits on every
+        # connection it accepted
         await self._server.wait_closed()
         self._server = None
 
