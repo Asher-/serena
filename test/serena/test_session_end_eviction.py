@@ -500,6 +500,47 @@ class TestSessionEndRouteForAClaudeSession:
 
         assert answer == project.project_root
 
+    def test_ending_a_claude_session_leaves_no_cursor_its_calls_opened_under_any_forwarded_id(
+        self, agent: SerenaAgent, listener: FastMCP, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """
+        Session S opens a cursor in a call under forwarded session id F1 and another under F2, and its agent A1 opens a third.
+        After a session end naming S, calls of S and of A1 under F3 find none of them.
+        """
+        from test.serena.test_session_agent_separation import _activatable_project_at, _RecordingActivationTool
+        from test.serena.test_streamable_http_cc_session_key import _CursorFindingTool, _CursorPlantingTool
+
+        session = {SESSION_ID_ARGUMENT: _CLAUDE_SESSION}
+        of_agent = {SESSION_ID_ARGUMENT: _CLAUDE_SESSION, AGENT_ID_ARGUMENT: "A1"}
+
+        def call(tool: Tool, forwarded: str, **arguments: str) -> str:
+            monkeypatch.setattr(tool, "is_active", lambda: True)
+            return tool.apply_ex(log_call=False, mcp_ctx=_forwarded_call_context(forwarded), **arguments)
+
+        # session S and its agent A1 activate a project holding data.json and open cursors under F1 and F2
+        (tmp_path / "data.json").write_text('{"key": 1}\n')
+        project = _activatable_project_at(tmp_path, tmp_path.name)
+        for caller in (session, of_agent):
+            assert call(_RecordingActivationTool(agent, project), "F1", **caller) == "activated"
+
+        # re-activating the recorded root yields the test's project, so no language server is started
+        def activate(root: str, **kwargs: object) -> bool:
+            return agent._activate_project({project.project_root: project}[root], update_active_modes=False, update_active_tools=False, record_explicit=False)
+
+        monkeypatch.setattr(agent, "activate_project_from_path_or_name", activate)
+        monkeypatch.setattr(agent, "record_tool_usage", lambda *args, **kwargs: None)
+        opened = (("k1", "F1", session), ("k2", "F2", session), ("k3", "F2", of_agent))
+        for cursor_id, forwarded, caller in opened:
+            assert call(_CursorPlantingTool(agent), forwarded, cursor_id=cursor_id, **caller) == "planted"
+        assert call(_CursorFindingTool(agent), "F2", cursor_id="k1", **session) == "found"
+
+        response = _client(listener).post(_SESSION_END_PATH, json={"claude_session_id": _CLAUDE_SESSION})
+        assert response.status_code == 200, response.text
+
+        for cursor_id, _forwarded, caller in opened:
+            answer = call(_CursorFindingTool(agent), "F3", cursor_id=cursor_id, **caller)
+            assert f"No cursor with id '{cursor_id}'" in answer, f"cursor {cursor_id} outlived the end of its session: {answer!r}"
+
     def test_a_body_naming_both_a_forwarded_and_a_claude_session_is_refused_and_evicts_nothing(
         self, agent: SerenaAgent, listener: FastMCP, make_go_project: Callable[[str], Project]
     ) -> None:

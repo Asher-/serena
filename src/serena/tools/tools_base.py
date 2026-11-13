@@ -506,7 +506,10 @@ class Tool(Component):
                                     self.agent.activate_project_from_path_or_name(explicit_root, record_explicit=False)
                                     healed = self.agent.get_active_project() is not None
                                 except Exception as e:
-                                    log.error(f"Self-heal restore of explicitly-activated project root {explicit_root!r} failed: {e}.")
+                                    log.error(
+                                        f"Self-heal restore of explicitly-activated project root "
+                                        f"{explicit_root!r} failed: {e}."
+                                    )
                                 if not healed:
                                     # fail loud: never fall through to the forwarded origin here.
                                     raise ToolCallError(

@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from serena.agent import _SESSION_KEY_VAR, SerenaAgent
+from serena.agent import SerenaAgent
 from serena.config.serena_config import SerenaConfig
 from serena.mcp import SerenaMCPFactory
 from serena.util.session_project_roots import ExplicitProjectRootStore
@@ -44,7 +44,8 @@ from test.serena.test_session_project_binding import (
 from test.serena.test_session_project_binding import (
     agent as _agent_fixture,
 )
-from test.serena.test_streamable_http_cc_session_key import _make_mcp_ctx, _RequiresProjectTool
+from test.serena.test_session_end_eviction import _ActiveProjectRootTool
+from test.serena.test_streamable_http_cc_session_key import _make_mcp_ctx
 
 agent = _agent_fixture
 """the fixture of the binding tests, bound here under its own name so pytest serves it to this module's tests"""
@@ -319,15 +320,12 @@ class TestSessionRootSurvivesDaemonRestart:
             restarted._explicit_project_root_store = ExplicitProjectRootStore(store_path)
             assert restarted._explicit_project_roots_by_session == {}, "a restarted daemon starts with no in-memory record"
 
-            restored: list[tuple[str, str | int | None]] = []
-
             def restore(root: str, **kwargs: Any) -> bool:
-                restored.append((root, _SESSION_KEY_VAR.get(None)))
                 restarted._active_project = _project_at(root, f"restored-{Path(root).name}")
                 return True
 
             monkeypatch.setattr(restarted, "activate_project_from_path_or_name", restore)
-            tool = _active(_RequiresProjectTool(restarted), monkeypatch)
+            tool = _active(_ActiveProjectRootTool(restarted), monkeypatch)
 
             # a caller without identifiers and session S2 call first, then session S1
             results: dict[str, str] = {}
@@ -342,5 +340,4 @@ class TestSessionRootSurvivesDaemonRestart:
 
         for caller in ("the caller without identifiers", "session S2"):
             assert "No active project" in results[caller], f"{caller}'s call after the restart answered {results[caller]!r}"
-        assert results["session S1"] == _RequiresProjectTool.RAN, f"session S1's call after the restart answered {results['session S1']!r}"
-        assert restored == [(str(root_1), "session/S1")], f"the restarted daemon restored {restored!r}"
+        assert results["session S1"] == str(root_1), f"session S1's call after the restart answered {results['session S1']!r}"

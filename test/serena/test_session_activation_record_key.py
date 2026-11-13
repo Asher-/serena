@@ -232,8 +232,10 @@ class TestRecordsOfDistinctCallersStayApart:
     def test_one_session_identifier_and_an_agent_identifier_restore_neither_others_root(
         self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, store_path: str
     ) -> None:
-        """Session S1 activates P1 and, carrying the agent identifier A1, activates P2 under F1. Under F2 each call is answered
-        from its own root."""
+        """
+        Session S1 activates P1 and, carrying the agent identifier A1, activates P2 under F1. Under F2 each call is answered
+        from its own root.
+        """
         root_1, root_2 = _make_roots(tmp_path, "P1", "P2")
         _activate(agent, monkeypatch, root_1, _FIRST_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1"})
         _activate(agent, monkeypatch, root_2, _FIRST_CONNECTION, **{_SESSION_ID_ARGUMENT: "S1", _AGENT_ID_ARGUMENT: "A1"})

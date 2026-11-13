@@ -174,7 +174,9 @@ class TestForwardedHeaderTier:
     session id when the multiplexer forwards it.
     """
 
-    def test_header_via_request_context_path_yields_str_session_key(self, agent: SerenaAgent, tool: _NoOpProbeTool) -> None:
+    def test_header_via_request_context_path_yields_str_session_key(
+        self, agent: SerenaAgent, tool: _NoOpProbeTool
+    ) -> None:
         """Case (a)+(e): X-Forwarded-Mcp-Session-Id present via
         ``mcp_ctx.request_context.request.headers`` -> session_key equals
         the header value AND is a ``str`` (NOT an ``int`` like the
@@ -195,7 +197,8 @@ class TestForwardedHeaderTier:
 
             # tier-2 binds the session key to the header value (a str)
             assert tool.observed_session_keys == [cc_session_id], (
-                f"tier-2 did not bind the str session key {cc_session_id!r}; observed: {tool.observed_session_keys!r}"
+                f"tier-2 did not bind the str session key {cc_session_id!r}; "
+                f"observed: {tool.observed_session_keys!r}"
             )
             assert isinstance(cc_session_id, str)
             # tier-2 does NOT register a weakref.finalize -- decoupling tier-2
@@ -206,14 +209,17 @@ class TestForwardedHeaderTier:
             )
             # the int-keyed legacy slot must NOT have been touched
             assert not any(isinstance(k, int) for k in agent._session_finalizers), (
-                f"unexpected int-keyed finalizer registered alongside str key: {list(agent._session_finalizers.keys())!r}"
+                f"unexpected int-keyed finalizer registered alongside str key: "
+                f"{list(agent._session_finalizers.keys())!r}"
             )
             # no missing-header warning was emitted
             assert agent._warned_missing_forwarded_session_keys == set()
         finally:
             _PIPE_SESSION_ID_VAR.reset(token)
 
-    def test_header_via_request_path_yields_str_session_key(self, agent: SerenaAgent, tool: _NoOpProbeTool) -> None:
+    def test_header_via_request_path_yields_str_session_key(
+        self, agent: SerenaAgent, tool: _NoOpProbeTool
+    ) -> None:
         """Case (a)+(e) alternate attribute path: header reached via
         ``mcp_ctx.request.headers`` when ``request_context`` is unavailable.
         This path is the second probe in apply_ex's header-extraction loop;
@@ -229,14 +235,19 @@ class TestForwardedHeaderTier:
             )
             tool.apply_ex(mcp_ctx=ctx, log_call=False)
             assert tool.observed_session_keys == [cc_session_id], (
-                f"fallback header probe via mcp_ctx.request.headers must bind the str session key; observed: {tool.observed_session_keys!r}"
+                "fallback header probe via mcp_ctx.request.headers must bind the str session key; "
+                f"observed: {tool.observed_session_keys!r}"
             )
-            assert cc_session_id not in agent._session_finalizers, "tier-2 must not register a transport-tied finalizer"
+            assert cc_session_id not in agent._session_finalizers, (
+                "tier-2 must not register a transport-tied finalizer"
+            )
             assert agent._warned_missing_forwarded_session_keys == set()
         finally:
             _PIPE_SESSION_ID_VAR.reset(token)
 
-    def test_two_distinct_headers_on_same_session_register_distinct_last_touched(self, agent: SerenaAgent, tool: _NoOpProbeTool) -> None:
+    def test_two_distinct_headers_on_same_session_register_distinct_last_touched(
+        self, agent: SerenaAgent, tool: _NoOpProbeTool
+    ) -> None:
         """Case (c): the multiplexer multiplexes many CC sessions onto a
         single persistent ``mcp_ctx.session``. apply_ex must derive a
         distinct session key for each X-Forwarded value seen on the same
@@ -294,7 +305,8 @@ class TestLegacyIdFallbackTier:
 
             # session_key was the id(), tracked in the warning set
             assert expected_key in agent._warned_missing_forwarded_session_keys, (
-                f"expected id({shared_session!r})={expected_key} in warned-key set; got {agent._warned_missing_forwarded_session_keys!r}"
+                f"expected id({shared_session!r})={expected_key} in warned-key set; "
+                f"got {agent._warned_missing_forwarded_session_keys!r}"
             )
             assert expected_key in agent._session_finalizers, (
                 "the id() session_key must have a finalizer registered just like any other tier"
@@ -302,7 +314,10 @@ class TestLegacyIdFallbackTier:
 
             # exactly ONE warning emitted across the three calls
             warning_msgs = [
-                r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and "X-Forwarded-Mcp-Session-Id" in r.getMessage()
+                r.getMessage()
+                for r in caplog.records
+                if r.levelno == logging.WARNING
+                and "X-Forwarded-Mcp-Session-Id" in r.getMessage()
             ]
             assert len(warning_msgs) == 1, (
                 f"expected exactly one missing-header warning across 3 apply_ex calls on the same session; "
@@ -311,7 +326,9 @@ class TestLegacyIdFallbackTier:
         finally:
             _PIPE_SESSION_ID_VAR.reset(token)
 
-    def test_per_request_sessions_of_one_connection_share_the_connections_key(self, agent: SerenaAgent, tool: _NoOpProbeTool) -> None:
+    def test_per_request_sessions_of_one_connection_share_the_connections_key(
+        self, agent: SerenaAgent, tool: _NoOpProbeTool
+    ) -> None:
         """The mcp 2.2.0 SDK builds a session per request around the client's connection: the calls of one MCP session reach one
         session key, the connection's, with one finalizer on the connection, and not a key per request.
         """
@@ -340,7 +357,9 @@ class TestPipeSessionIdPrecedence:
     valid tier, not the legacy fallback).
     """
 
-    def test_pipe_var_set_ignores_forwarded_header_and_skips_finalizer(self, agent: SerenaAgent, tool: _NoOpProbeTool) -> None:
+    def test_pipe_var_set_ignores_forwarded_header_and_skips_finalizer(
+        self, agent: SerenaAgent, tool: _NoOpProbeTool
+    ) -> None:
         """Case (d): pipe wins. Even if the multiplexer happens to also set
         the X-Forwarded header on a request whose context already carries a
         pipe-asserted project_root, apply_ex must use the pipe value as
@@ -359,7 +378,8 @@ class TestPipeSessionIdPrecedence:
             # the pipe value won, and the pipe tier does NOT register an mcp_ctx
             # finalizer (eviction is socket-disconnect driven for the pipe path).
             assert header_value not in agent._session_finalizers, (
-                f"header value should be ignored when pipe var is set; got finalizers keyed at: {list(agent._session_finalizers.keys())!r}"
+                f"header value should be ignored when pipe var is set; "
+                f"got finalizers keyed at: {list(agent._session_finalizers.keys())!r}"
             )
             assert id(ctx.session) not in agent._session_finalizers, (
                 "pipe tier must NOT fall through to id(mcp_ctx.session) finalizer registration"
@@ -410,7 +430,9 @@ class TestActiveProjectSelfHeal:
         monkeypatch.setattr(agent, "record_tool_usage", lambda *a, **kw: None)
         return t
 
-    def test_missing_slot_with_forwarded_root_fails_and_never_binds_it(self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_missing_slot_with_forwarded_root_fails_and_never_binds_it(
+        self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """No record + ``X-Forwarded-Project-Dir`` present -> apply_ex FAILS and
         activates nothing. Serena does not pick a project root on the caller's
         behalf; the forwarded cwd is offered in the error, not bound.
@@ -441,16 +463,21 @@ class TestActiveProjectSelfHeal:
             result = tool.apply_ex(mcp_ctx=ctx, log_call=False)
 
             assert activated_with == [], (
-                f"a session with no activation record must NOT be bound to the forwarded cwd; observed activations: {activated_with!r}"
+                "a session with no activation record must NOT be bound to the forwarded cwd; "
+                f"observed activations: {activated_with!r}"
             )
             assert "No active project" in result, f"the caller must be told, not silently rebound; got: {result!r}"
-            assert forwarded_root in result, "the forwarded cwd should still be offered as a suggestion the caller can pass deliberately"
+            assert forwarded_root in result, (
+                "the forwarded cwd should still be offered as a suggestion the caller can pass deliberately"
+            )
             assert agent._active_projects_by_session.get(cc_session_id) is None
             assert agent._legacy_active_project is None
         finally:
             _PIPE_SESSION_ID_VAR.reset(token)
 
-    def test_missing_slot_without_forwarded_root_still_errors(self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_missing_slot_without_forwarded_root_still_errors(
+        self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Missing slot + NO ``X-Forwarded-Project-Dir`` -> the genuine
         'No active project' error still fires and no activation is attempted.
         """
@@ -472,8 +499,12 @@ class TestActiveProjectSelfHeal:
 
             result = tool.apply_ex(mcp_ctx=ctx, log_call=False)
 
-            assert "No active project" in result, f"without a forwarded root the no-project error must fire; got: {result!r}"
-            assert activated_with == [], "no self-heal activation may be attempted when no project root was forwarded"
+            assert "No active project" in result, (
+                f"without a forwarded root the no-project error must fire; got: {result!r}"
+            )
+            assert activated_with == [], (
+                "no self-heal activation may be attempted when no project root was forwarded"
+            )
         finally:
             _PIPE_SESSION_ID_VAR.reset(token)
 
@@ -527,7 +558,9 @@ class TestActiveProjectSelfHeal:
     # forwarded origin cwd O. The forwarded self-reclaim survives only for sessions
     # with NO explicit record (genuinely stranded / never-activated).
 
-    def test_missing_slot_restores_explicit_root_not_forwarded(self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_missing_slot_restores_explicit_root_not_forwarded(
+        self, agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Explicit root W recorded + slot emptied + forwarded root O (≠ W) ->
         apply_ex restores W and never activates O. This is the mis-root
         guarantee: an explicitly-activated session is never silently switched to
@@ -778,7 +811,9 @@ class TestExplicitRootSurvivesDaemonRestart:
                 "after a daemon restart the session must be restored to the root it explicitly "
                 f"activated, not rebound to the forwarded origin; observed activations: {activated_with!r}"
             )
-            assert forwarded_root not in activated_with, "a restart must never silently switch a session to the Claude Code client's cwd"
+            assert forwarded_root not in activated_with, (
+                "a restart must never silently switch a session to the Claude Code client's cwd"
+            )
             assert result == _RequiresProjectTool.RAN
             assert restarted._active_projects_by_session.get(cc_session_id) is healed_project
         finally:
@@ -861,9 +896,7 @@ class TestSessionKeyOverStreamableHttp:
         server._tool_manager._tools[tool.get_name()] = SerenaMCPFactory.make_mcp_tool(tool)
         with TestClient(server.streamable_http_app(), base_url="http://127.0.0.1:8000") as client:
             initialize = {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}}
-            response = client.post(
-                "/mcp", json={"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": initialize}, headers=self._HEADERS
-            )
+            response = client.post("/mcp", json={"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": initialize}, headers=self._HEADERS)
             assert response.status_code == 200, response.text
             headers = {**self._HEADERS, "Mcp-Session-Id": response.headers["mcp-session-id"], "X-Forwarded-Mcp-Session-Id": "cc-forwarded"}
             client.post("/mcp", json={"jsonrpc": "2.0", "method": "notifications/initialized"}, headers=headers)
