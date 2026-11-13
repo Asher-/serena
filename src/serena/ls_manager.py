@@ -167,7 +167,7 @@ class LanguageServerManager:
                 super().__init__(target=self._start_language_server, name="StartLS:" + ls_id.get_key())
                 self.ls_id = ls_id
                 self.language_server: SolidLanguageServer | None = None
-                self.exception: Exception | None = None
+                self.exception: BaseException | None = None
 
             def _start_language_server(self) -> None:
                 try:
@@ -176,7 +176,7 @@ class LanguageServerManager:
                         self.language_server.start()
                         if not self.language_server.is_running():
                             raise RuntimeError(f"Failed to start the language server {self.ls_id.get_key()}")
-                except Exception as e:
+                except BaseException as e:
                     log.error(f"Error starting language server {self.ls_id.get_key()}: {e}", exc_info=e)
                     self.exception = e
 
@@ -189,7 +189,7 @@ class LanguageServerManager:
 
         # collect successfully-started servers and per-language startup exceptions
         language_servers: dict[LanguageServerIdLike, SolidLanguageServer] = {}
-        unavailable: dict[LanguageServerIdLike, Exception] = {}
+        unavailable: dict[LanguageServerIdLike, BaseException] = {}
         for thread in threads:
             thread.join()
             if thread.exception is not None:
