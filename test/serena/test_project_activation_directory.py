@@ -169,7 +169,7 @@ def test_activating_a_directory_without_project_yml_writes_nothing_inside_it(wor
 
 
 def test_activating_a_directory_with_a_data_folder_but_no_project_yml_writes_nothing_inside_it(work_dir: Path, agent: SerenaAgent) -> None:
-    # a repository that tracks .serena/memories and holds no .serena/project.yml
+    # a directory that holds .serena/memories and no .serena/project.yml
     tracked = work_dir / "tracked"
     (tracked / ".serena" / "memories").mkdir(parents=True)
     (tracked / ".serena" / "memories" / "note.md").write_text("note\n")
@@ -186,7 +186,8 @@ def test_activating_a_directory_with_a_data_folder_but_no_project_yml_writes_not
 def test_a_configured_location_outside_the_directory_takes_the_data_of_a_data_folder_without_project_yml(
     work_dir: Path, agent: SerenaAgent
 ) -> None:
-    # a configured data folder location outside the project, and a directory that tracks .serena/memories only
+    # a configured data folder location outside the project, and a directory that holds .serena/memories and no
+    # .serena/project.yml
     metadata = work_dir / "metadata"
     agent.serena_config.project_serena_folder_location = str(metadata) + "/$projectFolderName/.serena"
     tracked = work_dir / "tracked"
