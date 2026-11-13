@@ -476,6 +476,24 @@ class TestSymlinkContainment:
         assert result.ok is False
         assert not (outside / "new.txt").exists()
 
+    def test_overwriting_through_a_link_to_a_file_outside_is_refused(self, tmp_path: Path) -> None:
+        root, outside = self._tree(tmp_path)
+        (root / "secret.txt").symlink_to(outside / "x.txt")
+
+        result = _fs(root).create("secret.txt", "x", overwrite=True)
+
+        assert result.ok is False
+        assert (outside / "x.txt").read_text() == "outside\n"
+
+    def test_creating_through_a_dangling_link_outside_is_refused(self, tmp_path: Path) -> None:
+        root, outside = self._tree(tmp_path)
+        (root / "dangling.txt").symlink_to(outside / "missing" / "new.txt")
+
+        result = _fs(root).create("dangling.txt", "x", overwrite=True)
+
+        assert result.ok is False
+        assert not (outside / "missing").exists()
+
     def test_stat_through_a_linked_directory_is_refused(self, tmp_path: Path) -> None:
         root, _ = self._tree(tmp_path)
         assert _fs(root).stat("linkdir/x.txt").error == "path escapes the project root"

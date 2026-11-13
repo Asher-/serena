@@ -630,7 +630,7 @@ class FilesystemLifecycle:
         Pass ``expect_version`` (from ``stat``) for a safe compare-and-swap overwrite; omit it to
         overwrite unconditionally. The write is atomic (temp + ``os.replace``).
         """
-        abs_path = self._abs(relative_path)
+        abs_path = self._abs(relative_path, follow_final=True)
         if abs_path is None:
             return MutationResult(False, f"Refused: {relative_path} escapes the project root.")
 
