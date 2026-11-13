@@ -84,3 +84,5 @@ def test_a_match_outside_any_symbol_renders_as_a_file_block(python_serena_agent:
     assert f"@ {module_level_match} [{module_level_match}]" in full
     assert "# needle" in full
     assert "(use cursor_overview to navigate)" in full
+    assert f"@ {module_level_match} [{module_level_match}] - 1 matches (use cursor_overview to navigate)" in hits.render_symbol_list()
+    assert hits.render_summary() == "Found 1 matches across 0 symbols in 1 files."
