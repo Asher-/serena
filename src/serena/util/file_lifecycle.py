@@ -14,8 +14,8 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import os
+import secrets
 import stat as stat_module
-import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -246,12 +246,6 @@ class AtomicFileWriter:
     TEMP_FILE_PREFIX = ".serena-tmp-"
     """the name prefix of the temporary file a write creates beside its target"""
 
-    _UMASK = os.umask(0o022)
-    os.umask(_UMASK)
-    _NEW_FILE_MODE = 0o666 & ~_UMASK
-    """the mode a plain open() gives a new file under the umask the process had when this module was imported; read once,
-    because reading the umask means setting it, which is not safe once other threads run"""
-
     def write_bytes(self, abs_path: str, data: bytes, precondition: WritePrecondition | None = None) -> None:
         """
         Replace the bytes of the file at ``abs_path`` with ``data``, creating the file and its parent directories when absent.
@@ -264,8 +258,7 @@ class AtomicFileWriter:
         :raises OSError: when the temporary file cannot be created, written or renamed over the target; the target then
             holds the bytes it held before the call.
         """
-        # capture the target's prior mode on an OVERWRITE: mkstemp creates the temp at 0o600, so
-        # replacing an existing file would silently strip its permission bits (notably +x)
+        # capture the target's prior mode on an OVERWRITE, which the replacing file takes on
         parent = os.path.dirname(abs_path)
         prior_mode = self._prior_mode(abs_path)
 
@@ -273,7 +266,7 @@ class AtomicFileWriter:
         # without a directory lies in the working directory
         if parent:
             os.makedirs(parent, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(dir=parent or os.curdir, prefix=self.TEMP_FILE_PREFIX)
+        fd, tmp_path = self._create_temporary_file(parent or os.curdir)
 
         # write, flush and sync the new bytes, then swap them in; any failure removes the temporary file
         try:
@@ -281,9 +274,9 @@ class AtomicFileWriter:
                 handle.write(data)
                 handle.flush()
                 os.fsync(handle.fileno())
-            # give the file the overwritten file's mode, or for a brand-new file the mode a plain open()
-            # would give it, since mkstemp created the temporary file at 0o600
-            os.chmod(tmp_path, prior_mode if prior_mode is not None else self._NEW_FILE_MODE)
+            # an overwritten file's mode is kept
+            if prior_mode is not None:
+                os.chmod(tmp_path, prior_mode)
             # the precondition, evaluated as close to the swap as the write allows
             if precondition is not None:
                 stale = precondition.check()
@@ -296,6 +289,17 @@ class AtomicFileWriter:
             except OSError:
                 pass
             raise
+
+    def _create_temporary_file(self, directory: str) -> tuple[int, str]:
+        # an exclusively created, uniquely named file in ``directory``, opened for writing; requesting mode 0o666 lets
+        # the process's umask at this moment give it the mode a plain open() gives a new file
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        while True:
+            tmp_path = os.path.join(directory, self.TEMP_FILE_PREFIX + secrets.token_hex(8))
+            try:
+                return os.open(tmp_path, flags, 0o666), tmp_path
+            except FileExistsError:
+                continue
 
     def write_text(
         self, abs_path: str, contents: str, encoding: str, newline: str | None, precondition: WritePrecondition | None = None

@@ -349,6 +349,16 @@ class TestCreate:
         assert result.ok is True
         assert os.stat(tmp_path / "new.txt").st_mode & 0o777 == 0o666 & ~umask
 
+    def test_a_new_file_gets_the_mode_open_gives_under_a_umask_set_later(self, tmp_path: Path) -> None:
+        previous = os.umask(0o077)
+        try:
+            result = _fs(tmp_path).create("new.txt", "hello")
+        finally:
+            os.umask(previous)
+
+        assert result.ok is True
+        assert os.stat(tmp_path / "new.txt").st_mode & 0o777 == 0o600
+
     def test_overwriting_through_a_symlink_writes_its_target(self, tmp_path: Path) -> None:
         target = tmp_path / "real.txt"
         target.write_text("OLD")
