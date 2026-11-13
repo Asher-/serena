@@ -333,16 +333,17 @@ class TestYamlSourceLayout:
     """A YAML file whose block layout differs from the conventional one opens a structural cursor and keeps its layout."""
 
     @pytest.mark.parametrize(
-        "source",
+        ("source", "member"),
         [
-            "---\n- name: Configure\n  hosts: control\n  become: true\n- name: Second\n  hosts: workers\n",
-            "plays:\n- name: Configure\n  hosts: control\n- name: Second\n  hosts: workers\n",
+            ("---\n- name: Configure\n  hosts: control\n  become: true\n- name: Second\n  hosts: workers\n", "[0]/hosts"),
+            ("plays:\n- name: Configure\n  hosts: control\n- name: Second\n  hosts: workers\n", "plays/[0]/hosts"),
+            ("plays:\n   - name: Configure\n     hosts: control\n   - name: Second\n     hosts: workers\n", "plays/[0]/hosts"),
+            ("play:\n   name: Configure\n   hosts: control\n", "play/hosts"),
         ],
     )
-    def test_edit_of_one_member_changes_only_its_lines(self, tmp_path: Path, source: str) -> None:
+    def test_edit_of_one_member_changes_only_its_lines(self, tmp_path: Path, source: str, member: str) -> None:
         (tmp_path / "play.yml").write_text(source, encoding="utf-8")
         manager = _make_manager_via_subclass(tmp_path)
-        member = "[0]/hosts" if source.startswith("---") else "plays/[0]/hosts"
 
         from serena.tools.cursor_tools import CursorReplaceBodyTool, CursorStartTool
 

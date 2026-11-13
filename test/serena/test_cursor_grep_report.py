@@ -86,6 +86,17 @@ class TestDirectoryScopedGlobs:
         assert f"{_SANDBOX}/a.md" in result
         assert f"{_SANDBOX}/sub/b.md" not in result
 
+    def test_include_glob_of_a_file_scope_is_project_relative(self, python_serena_agent: SerenaAgent, markdown_tree: Path) -> None:
+        result = _grep(
+            python_serena_agent,
+            substring_pattern="needle",
+            relative_path=f"{_SANDBOX}/a.md",
+            paths_include_glob=f"{_SANDBOX}/*.md",
+            restrict_to_code_files=False,
+        )
+
+        assert f"{_SANDBOX}/a.md" in result
+
 
 class TestHitBlocks:
     def test_two_matches_on_one_line_render_that_line_once(self, python_serena_agent: SerenaAgent, sandbox: Path) -> None:
@@ -102,3 +113,19 @@ class TestHitBlocks:
 
         assert result.count("alpha beta") == 1
         assert "1 hit(s)" in result
+
+    def test_matches_whose_windows_share_no_line_render_as_separate_blocks(self, python_serena_agent: SerenaAgent, sandbox: Path) -> None:
+        (sandbox / "d.md").write_text("alpha\nline2\nline3\nline4\nline5\nbeta\n", encoding="utf-8")
+
+        result = _grep(
+            python_serena_agent,
+            substring_pattern="alpha|beta",
+            relative_path=f"{_SANDBOX}/d.md",
+            restrict_to_code_files=False,
+            context_lines_before=1,
+            context_lines_after=1,
+        )
+
+        assert "2 hit(s)" in result
+        assert "line2" in result and "line5" in result
+        assert "line3" not in result and "line4" not in result

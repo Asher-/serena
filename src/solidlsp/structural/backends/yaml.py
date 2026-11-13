@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import copy
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
@@ -128,31 +128,54 @@ def _make_yaml_engine(style: _YamlStyle) -> YAML:
 
 
 _DEFAULT_STYLE = _YamlStyle()
-# the layouts a source is matched against, the conventional one (``items:\n  - one``) first
-_STYLES = (
-    _DEFAULT_STYLE,
-    *(
-        _YamlStyle(mapping=mapping, offset=offset, explicit_start=explicit_start)
-        for explicit_start in (False, True)
-        for mapping in (2, 4)
-        for offset in (2, 0, 4)
-        if _YamlStyle(mapping=mapping, offset=offset, explicit_start=explicit_start) != _DEFAULT_STYLE
-    ),
-)
-_ENGINES = {style: _make_yaml_engine(style) for style in _STYLES}
-_ENGINE = _ENGINES[_DEFAULT_STYLE]
+_ENGINES: dict[_YamlStyle, YAML] = {}
+
+
+def _engine(style: _YamlStyle) -> YAML:
+    """Return the engine that dumps in ``style``, building it on first use."""
+    engine = _ENGINES.get(style)
+    if engine is None:
+        engine = _ENGINES[style] = _make_yaml_engine(style)
+    return engine
+
+
+def _candidate_styles(source: str) -> Iterator[_YamlStyle]:
+    """Yield the layouts ``source`` may be written in, the conventional one (``items:\\n  - one``) first.
+
+    A mapping indent or a sequence dash offset that reproduces ``source`` is one of the indentation steps between its
+    nested lines, so only layouts built from those steps (and the conventional 2, 4 and 0) are yielded.
+    """
+    steps = {0, 2, 4}
+    enclosing_indent = 0
+    for line in source.splitlines():
+        content = line.lstrip(" ")
+        if not content or content.startswith("#"):
+            continue
+        indent = len(line) - len(content)
+        if indent > enclosing_indent:
+            steps.add(indent - enclosing_indent)
+        # a sequence item's content sits past its dash and the space after it
+        enclosing_indent = indent + 2 if content.startswith("- ") else indent
+
+    yield _DEFAULT_STYLE
+    for explicit_start in (False, True):
+        for mapping in sorted(step for step in steps if step > 0):
+            for offset in sorted(steps):
+                style = _YamlStyle(mapping=mapping, offset=offset, explicit_start=explicit_start)
+                if style != _DEFAULT_STYLE:
+                    yield style
 
 
 def _dump(data: Any, style: _YamlStyle = _DEFAULT_STYLE) -> str:
     """Dump ``data`` in ``style``, returning the string output."""
     buf = StringIO()
-    _ENGINES[style].dump(data, buf)
+    _engine(style).dump(data, buf)
     return buf.getvalue()
 
 
 def _load(source: str) -> Any:
     """Load ``source`` via the shared ruamel engine."""
-    return _ENGINE.load(source)
+    return _engine(_DEFAULT_STYLE).load(source)
 
 
 # --------------------------------------------------------------------------- #
@@ -642,7 +665,7 @@ class YamlStructuralLanguage(StructuralLanguage):
         # enforce the round-trip invariant: the source must equal its re-dump in one of the known layouts, which
         # every later dump of the tree reproduces, so the backend only accepts sources for which
         # serialize(parse(s)) == s holds
-        style = None if data is None else next((s for s in _STYLES if _dump(data, s) == source), None)
+        style = None if data is None else next((s for s in _candidate_styles(source) if _dump(data, s) == source), None)
         if style is None:
             dumped = _dump(data) if data is not None else ""
             raise ParseError(

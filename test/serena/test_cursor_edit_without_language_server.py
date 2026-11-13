@@ -1,5 +1,6 @@
 """Tests that the line-range and container edit tools edit files of a project that runs no language server."""
 
+import json
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -95,10 +96,25 @@ def test_replace_between_edits_the_file(markdown_project: tuple[SerenaAgent, Pat
     assert (root / "notes.md").read_text(encoding="utf-8") == "# Title\n\ngamma\n\n## Second\n\nbeta\n"
 
 
+def test_replace_between_an_absent_anchor_leaves_the_file_unchanged(markdown_project: tuple[SerenaAgent, Path]) -> None:
+    agent, root = markdown_project
+
+    with pytest.raises(Exception):
+        _apply(
+            agent,
+            CursorReplaceBetweenTool,
+            relative_path="notes.md",
+            before_symbol="Title",
+            after_symbol="Title/Missing",
+            body="\ngamma\n\n",
+            expect_version="*",
+        )
+
+    assert (root / "notes.md").read_text(encoding="utf-8") == _NOTES
+
+
 @pytest.mark.parametrize(("tool_class", "expected_items"), [(CursorInsertAtStartTool, [1, 2]), (CursorInsertAtEndTool, [2, 3])])
 def test_container_insert_edits_the_file(markdown_project: tuple[SerenaAgent, Path], tool_class: type, expected_items: list[int]) -> None:
-    import json
-
     agent, root = markdown_project
     _apply(
         agent,
