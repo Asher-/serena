@@ -716,7 +716,7 @@ class StdioLanguageServer(LanguageServerInterface):
             exception = e
         except (BrokenPipeError, ConnectionResetError) as e:
             exception = LanguageServerTerminatedException("Language server process terminated while reading stdout", self.ls_id, cause=e)
-        except Exception as e:
+        except BaseException as e:
             exception = LanguageServerTerminatedException(
                 "Unexpected error while reading stdout from language server process", self.ls_id, cause=e
             )
