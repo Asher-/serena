@@ -479,7 +479,7 @@ class CodeEditor(Generic[TSymbol], ABC):
         """
         # validate the range; start > end is a programmer error
         if start_line < 0 or end_line < start_line:
-            raise ValueError(f"Invalid replace_lines range [{start_line}, {end_line}] for {relative_path!r}")
+            raise ValueError(f"Invalid replace_lines range [{start_line}, {end_line}] for '{relative_path}'")
 
         # normalise the body to line-oriented form so the line that previously
         # followed ``end_line`` cannot be fused onto ``content``'s final line --

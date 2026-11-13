@@ -841,7 +841,7 @@ class CursorReplaceBodyTool(Tool, ToolMarkerSymbolicEdit):
         tolerated_removal = extent_lines + 5
         if removed > tolerated_removal and removed > extent_lines * 2:
             raise ValueError(
-                f"cursor_replace_body on {name_path!r} in {relative_path!r} produced a "
+                f"cursor_replace_body on '{name_path}' in '{relative_path}' produced a "
                 f"suspicious diff (-{removed}/+{added} lines) for a symbol whose extent "
                 f"spans {extent_lines} lines with a replacement body of {body_lines} lines. "
                 f"This typically indicates that the symbol's extent had silently expanded to "
@@ -1212,7 +1212,7 @@ class CursorReplaceRangeTool(Tool, ToolMarkerSymbolicEdit):
         # validate input before any filesystem work so callers see a clean error message
         if start_line < 1 or end_line < start_line:
             raise ValueError(
-                f"cursor_replace_range: invalid range [{start_line}, {end_line}] in {relative_path!r}; require 1 <= start_line <= end_line."
+                f"cursor_replace_range: invalid range [{start_line}, {end_line}] in '{relative_path}'; require 1 <= start_line <= end_line."
             )
 
         stale = _refuse_if_stale(self, relative_path, expect_version)
@@ -1297,7 +1297,7 @@ class CursorReplaceRangeVerifiedTool(Tool, ToolMarkerSymbolicEdit):
         if start_line < 1 or end_line < start_line:
             raise ValueError(
                 f"cursor_replace_range_verified: invalid range [{start_line}, {end_line}] "
-                f"in {relative_path!r}; require 1 <= start_line <= end_line."
+                f"in '{relative_path}'; require 1 <= start_line <= end_line."
             )
 
         stale = _refuse_if_stale(self, relative_path, expect_version)
@@ -1358,7 +1358,7 @@ class CursorReplaceRangeVerifiedTool(Tool, ToolMarkerSymbolicEdit):
         if start_line >= len(all_lines):
             raise ValueError(
                 f"cursor_replace_range_verified: start_line={to_display_line(start_line)} is beyond the "
-                f"file's line count ({len(all_lines)}) in {relative_path!r}."
+                f"file's line count ({len(all_lines)}) in '{relative_path}'."
             )
         actual_slice = all_lines[start_line : end_line + 1]
         actual_content = "".join(actual_slice)
@@ -1462,11 +1462,11 @@ class CursorReplaceBetweenTool(Tool, ToolMarkerSymbolicEdit):
         if start_line > end_line:
             raise ValueError(
                 f"cursor_replace_between: no interstitial lines between "
-                f"{before_symbol!r} (body ends at line {to_display_line(before_end)}) and "
-                f"{after_symbol!r} (body starts at line {to_display_line(after_start)}); "
+                f"'{before_symbol}' (body ends at line {to_display_line(before_end)}) and "
+                f"'{after_symbol}' (body starts at line {to_display_line(after_start)}); "
                 f"computed range [{to_display_line(start_line)}, {to_display_line(end_line)}] is empty. "
-                f"Use cursor_insert_after {before_symbol!r} or "
-                f"cursor_insert_before {after_symbol!r} for adjacent symbols."
+                f"Use cursor_insert_after '{before_symbol}' or "
+                f"cursor_insert_before '{after_symbol}' for adjacent symbols."
             )
 
         # snapshot and optionally drift-check before mutating
@@ -1490,7 +1490,7 @@ class CursorReplaceBetweenTool(Tool, ToolMarkerSymbolicEdit):
         post_content = self.project.read_file(relative_path)
         removed, added = CursorReplaceBodyTool._count_diff_lines(pre_content, post_content)
         diff_summary = f"Diff: -{removed} / +{added} lines{landed_note}"
-        return f"{SUCCESS_RESULT}\n{diff_summary}\n(replaced lines [{to_display_line(start_line)}, {to_display_line(end_line)}] between {before_symbol!r} and {after_symbol!r})"
+        return f"{SUCCESS_RESULT}\n{diff_summary}\n(replaced lines [{to_display_line(start_line)}, {to_display_line(end_line)}] between '{before_symbol}' and '{after_symbol}')"
 
     def _resolve_anchor_lines(self, role: str, name_path: str, relative_path: str) -> tuple[int, int]:
         """
@@ -1510,8 +1510,8 @@ class CursorReplaceBetweenTool(Tool, ToolMarkerSymbolicEdit):
         symbols = manager.find_symbols(name_path, relative_path=relative_path)
         if len(symbols) > 1:
             raise ValueError(
-                f"cursor_replace_between: {role} {name_path!r} is ambiguous in "
-                f"{relative_path!r} ({len(symbols)} matches). Disambiguate by using a "
+                f"cursor_replace_between: {role} '{name_path}' is ambiguous in "
+                f"'{relative_path}' ({len(symbols)} matches). Disambiguate by using a "
                 f"more specific name path."
             )
         if symbols:
@@ -1519,8 +1519,8 @@ class CursorReplaceBetweenTool(Tool, ToolMarkerSymbolicEdit):
         line_range = manager.structural_line_range(relative_path, name_path)
         if line_range is None:
             raise ValueError(
-                f"cursor_replace_between: {role} {name_path!r} did not resolve to any "
-                f"symbol in {relative_path!r}. Verify the name path with cursor_overview."
+                f"cursor_replace_between: {role} '{name_path}' did not resolve to any "
+                f"symbol in '{relative_path}'. Verify the name path with cursor_overview."
             )
         return line_range
 

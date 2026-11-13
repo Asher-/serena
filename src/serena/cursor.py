@@ -546,7 +546,7 @@ class CursorManager:
             )
         raise TypeError(
             f"Cursor '{cursor_id}' is a structural cursor at "
-            f"{state.relative_path}:{state.name_path!r}; this operation requires an LSP cursor",
+            f"{state.relative_path}:'{state.name_path}'; this operation requires an LSP cursor",
         )
 
     def list_cursors(self) -> list[str]:
@@ -2335,7 +2335,7 @@ class CursorManager:
         backend = self._structural_registry.structural_backend_for(state.relative_path)
         if backend is None:
             raise ValueError(
-                f"No structural backend registered for {state.relative_path!r}; "
+                f"No structural backend registered for '{state.relative_path}'; "
                 f"structural cursor '{cursor_id}' cannot dispatch a container edit.",
             )
 
@@ -2419,7 +2419,7 @@ class CursorManager:
             resolution = self.resolve_structural_name_path(resolved_path, resolved_name)
             if resolution is None:
                 raise ValueError(
-                    f"Structural cursor '{cursor_id}' cannot re-anchor: path {resolved_name!r} no longer resolves in {resolved_path!r}",
+                    f"Structural cursor '{cursor_id}' cannot re-anchor: path '{resolved_name}' no longer resolves in '{resolved_path}'",
                 )
             state.relative_path = resolved_path
             state.name_path = resolution.name_path
