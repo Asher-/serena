@@ -3,6 +3,8 @@ A language server whose start raises a BaseException that is not an Exception is
 that raises an Exception is.
 """
 
+import pytest
+
 from serena.ls_manager import LanguageServerManager
 from solidlsp.ls_config import LanguageServerId
 
@@ -46,3 +48,13 @@ def test_a_start_raising_a_base_exception_reports_the_language_unavailable_and_s
 
     assert isinstance(manager.get_unavailable_languages()[LanguageServerId.PYTHON], _StartAborted)
     assert [server.stopped for server in factory.created] == [True]
+
+
+def test_a_restart_whose_start_raises_a_base_exception_stops_the_server() -> None:
+    factory = _AbortingFactory()
+    manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON], factory, project=None)  # type: ignore[arg-type]
+
+    with pytest.raises(_StartAborted):
+        manager.restart_language_server(LanguageServerId.PYTHON)
+
+    assert [server.stopped for server in factory.created] == [True, True]

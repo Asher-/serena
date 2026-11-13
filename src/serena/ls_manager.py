@@ -263,7 +263,7 @@ class LanguageServerManager:
         language_server = self._language_server_factory.create_language_server(ls_id)
         try:
             language_server.start()
-        except Exception:
+        except BaseException:
             # stop a server whose start failed, so a partly started process is not left running
             language_server.stop()
             raise
