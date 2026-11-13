@@ -63,7 +63,7 @@ class LanguageServerTerminatedException(Exception):
     Exception raised when the language server process has terminated unexpectedly.
     """
 
-    def __init__(self, message: str, ls_id: LanguageServerIdLike, cause: Exception | None = None) -> None:
+    def __init__(self, message: str, ls_id: LanguageServerIdLike, cause: BaseException | None = None) -> None:
         super().__init__(message)
         self.message = message
         self.ls_id = ls_id

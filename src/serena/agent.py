@@ -2724,7 +2724,7 @@ class SerenaAgent:
             return []
         return ls_manager.get_active_language_server_ids()
 
-    def get_unavailable_lsp_languages(self) -> dict[LanguageServerIdLike, Exception]:
+    def get_unavailable_lsp_languages(self) -> dict[LanguageServerIdLike, BaseException]:
         """
         :return: a mapping from language to the captured startup exception for each language whose
             server failed to start (or failed a subsequent restart). Empty if no active project, no

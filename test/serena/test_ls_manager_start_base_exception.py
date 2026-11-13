@@ -5,7 +5,7 @@ that raises an Exception is.
 
 import pytest
 
-from serena.ls_manager import LanguageServerManager
+from serena.ls_manager import LanguageServerManager, LanguageUnavailableError
 from solidlsp.ls_config import LanguageServerId
 
 
@@ -50,11 +50,13 @@ def test_a_start_raising_a_base_exception_reports_the_language_unavailable_and_s
     assert [server.stopped for server in factory.created] == [True]
 
 
-def test_a_restart_whose_start_raises_a_base_exception_stops_the_server() -> None:
+def test_a_restart_whose_start_raises_a_base_exception_reports_the_language_unavailable_and_stops_the_server() -> None:
     factory = _AbortingFactory()
     manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON], factory, project=None)  # type: ignore[arg-type]
 
-    with pytest.raises(_StartAborted):
+    with pytest.raises(LanguageUnavailableError) as raised:
         manager.restart_language_server(LanguageServerId.PYTHON)
 
+    assert isinstance(raised.value.cause, _StartAborted)
+    assert raised.value.cause is manager.get_unavailable_languages()[LanguageServerId.PYTHON]
     assert [server.stopped for server in factory.created] == [True, True]

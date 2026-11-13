@@ -36,8 +36,8 @@ class LanguageUnavailableError(Exception):
         self,
         message: str,
         language: "LanguageServerIdLike | None" = None,
-        cause: Exception | None = None,
-        unavailable_languages: "dict[LanguageServerIdLike, Exception] | None" = None,
+        cause: BaseException | None = None,
+        unavailable_languages: "dict[LanguageServerIdLike, BaseException] | None" = None,
     ) -> None:
         super().__init__(message)
         self.message = message
@@ -103,7 +103,7 @@ class LanguageServerManager:
         language_servers: dict[LanguageServerIdLike, SolidLanguageServer],
         language_server_factory: LanguageServerFactory | None = None,
         project: "Project | None" = None,
-        unavailable_languages: dict[LanguageServerIdLike, Exception] | None = None,
+        unavailable_languages: dict[LanguageServerIdLike, BaseException] | None = None,
     ) -> None:
         """
         :param language_servers: a mapping from language to language server; the servers are assumed to be already started.
@@ -118,7 +118,7 @@ class LanguageServerManager:
         self._language_servers = language_servers
         self._language_server_factory = language_server_factory
         self._file_change_notifier = LanguageServerFileChangeNotifier(project, self) if project is not None else None
-        self._unavailable_languages: dict[LanguageServerIdLike, Exception] = dict(unavailable_languages or {})
+        self._unavailable_languages: dict[LanguageServerIdLike, BaseException] = dict(unavailable_languages or {})
         self._restart_locks: dict[LanguageServerIdLike, threading.RLock] = {}
         self._restart_locks_guard = threading.Lock()
 
@@ -289,7 +289,7 @@ class LanguageServerManager:
             replaced = self._language_servers.get(ls_id)
             try:
                 ls = self._create_and_start_language_server(ls_id)
-            except Exception as e:
+            except BaseException as e:
                 self._unavailable_languages[ls_id] = e
                 raise LanguageUnavailableError(
                     f"Failed to (re)start language server for {ls_id.get_key()}: {e}",
@@ -335,7 +335,7 @@ class LanguageServerManager:
         """
         return list(self._language_servers.keys())
 
-    def get_unavailable_languages(self) -> dict[LanguageServerIdLike, Exception]:
+    def get_unavailable_languages(self) -> dict[LanguageServerIdLike, BaseException]:
         """
         :return: a copy of the languages whose servers are currently not running, mapped to the
             exception captured when their startup (or last restart attempt) failed
