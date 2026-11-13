@@ -164,7 +164,7 @@ class TestMalformedGlob:
                 paths_include_glob="it's/{a",
             )
 
-        assert f"Invalid glob brace expression in '{_SANDBOX}/it's/{{a': unmatched brace" in str(refusal.value)
+        assert "Invalid glob brace expression in 'it's/{a': unmatched brace" in str(refusal.value)
 
 
 class TestMissingPath:

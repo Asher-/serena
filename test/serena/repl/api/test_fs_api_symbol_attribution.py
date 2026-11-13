@@ -52,3 +52,35 @@ def test_matches_on_adjacent_lines_of_one_symbol_are_each_counted(python_serena_
     symbols = hits.render_symbol_list()
     assert "@ counted " in symbols
     assert " - 2 matches" in symbols
+
+
+def test_full_and_per_file_views_show_and_count_the_matched_lines_of_a_symbol(
+    python_serena_agent: SerenaAgent, adjacent_matches: str
+) -> None:
+    hits = FsApi(python_serena_agent).search_by_enclosing_symbol(
+        "needle", relative_path=adjacent_matches, context_lines_before=1, context_lines_after=1
+    )
+
+    full = hits.render_full()
+    assert "@ counted " in full
+    assert "a = 'needle'" in full and "b = 'needle'" in full
+    assert hits.render_per_file_counts().splitlines()[-1] == f"{adjacent_matches}: 2 matches"
+
+
+@pytest.fixture
+def module_level_match(python_serena_agent: SerenaAgent) -> Iterator[str]:
+    path = Path(python_serena_agent.get_active_project_or_raise().project_root) / _MODULE
+    path.write_text("# needle\n\n\ndef unrelated():\n    return 1\n", encoding="utf-8")
+    try:
+        yield _MODULE
+    finally:
+        path.unlink()
+
+
+def test_a_match_outside_any_symbol_renders_as_a_file_block(python_serena_agent: SerenaAgent, module_level_match: str) -> None:
+    hits = FsApi(python_serena_agent).search_by_enclosing_symbol("needle", relative_path=module_level_match)
+
+    full = hits.render_full()
+    assert f"@ {module_level_match} [{module_level_match}]" in full
+    assert "# needle" in full
+    assert "(use cursor_overview to navigate)" in full

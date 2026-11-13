@@ -19,7 +19,7 @@ from serena.symbol import LanguageServerSymbol, LanguageServerSymbolLocation, La
 from serena.util.file_lifecycle import AtomicFileWriter, WritePrecondition
 from serena.util.line_numbers import format_line_range, to_display_line, to_internal_line
 from serena.util.staleness import check_stale, read_file_version
-from serena.util.text_utils import MatchedConsecutiveLines
+from serena.util.text_utils import MatchedConsecutiveLines, expand_braces
 from serena.util.windowing import InvalidContinuation, WindowRequest, decode_continuation, window_body
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_utils import PathUtils
@@ -1886,6 +1886,11 @@ class CursorManager:
             and not self._project.gather_project_files(relative_path=rel, code_files_only=True, skip_ignored_files=True)
         ):
             raise ValueError(f"'{rel}' is not a code file of this project; set restrict_to_code_files=False to search it.")
+
+        # a malformed glob is refused naming it as the caller sent it, before it is rewritten below
+        for sent_glob in (paths_include_glob.strip(), paths_exclude_glob.strip()):
+            if sent_glob:
+                expand_braces(sent_glob)
 
         # globs are written relative to a directory scope; the search machinery matches project-relative paths
         include_glob = self._scope_glob(rel, abs_path, paths_include_glob.strip())
