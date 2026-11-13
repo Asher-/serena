@@ -21,7 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from serena.util.file_lifecycle import EntryKind, FilesystemLifecycle, content_version
+from serena.util import file_lifecycle
+from serena.util.file_lifecycle import AtomicFileWriter, EntryKind, FilesystemLifecycle, content_version
 
 
 def _fs(root: Path) -> FilesystemLifecycle:
@@ -358,6 +359,18 @@ class TestCreate:
 
         assert result.ok is True
         assert os.stat(tmp_path / "new.txt").st_mode & 0o777 == 0o600
+
+    def test_a_temporary_name_another_file_holds_is_passed_over(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        names = iter(["taken", "free"])
+        monkeypatch.setattr(file_lifecycle.secrets, "token_hex", lambda _nbytes: next(names))
+        taken = tmp_path / (AtomicFileWriter.TEMP_FILE_PREFIX + "taken")
+        taken.write_text("held by another writer")
+
+        result = _fs(tmp_path).create("new.txt", "hello")
+
+        assert result.ok is True
+        assert (tmp_path / "new.txt").read_text() == "hello"
+        assert taken.read_text() == "held by another writer"
 
     def test_overwriting_through_a_symlink_writes_its_target(self, tmp_path: Path) -> None:
         target = tmp_path / "real.txt"
