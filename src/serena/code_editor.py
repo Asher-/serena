@@ -10,6 +10,7 @@ from types import TracebackType
 from typing import Any, Generic, Self, TypeVar, cast
 
 from serena.jetbrains.jetbrains_plugin_client import JetBrainsPluginClient
+from serena.ls_manager import LanguageUnavailableError
 from serena.symbol import JetBrainsSymbol, LanguageServerSymbol, LanguageServerSymbolRetriever, PositionInFile, Symbol
 from serena.util.file_lifecycle import AtomicFileWriter, WritePrecondition
 from solidlsp import SolidLanguageServer, ls_types
@@ -101,6 +102,28 @@ class CodeEditor(Generic[TSymbol], ABC):
             start_idx = TextUtils.get_index_from_line_col(contents, start_pos.line, start_pos.col)
             end_idx = TextUtils.get_index_from_line_col(contents, end_pos.line, end_pos.col)
             return contents[start_idx:end_idx]
+
+    class PlainEditedFile(EditedFile):
+        """An edited file whose contents are read from disk and edited as plain text, with no language server involved."""
+
+        def __init__(self, relative_path: str, project: Project):
+            super().__init__(relative_path)
+            log.info("Editing file: %s", os.path.join(project.project_root, relative_path))
+            self._content = FileProxy.from_project_relative_path(project, relative_path).get_contents()
+
+        def get_contents(self) -> str:
+            return self._content
+
+        def set_contents(self, contents: str) -> None:
+            self._content = contents
+
+        def delete_text_between_positions(self, start_pos: PositionInFile, end_pos: PositionInFile) -> None:
+            self._content, _ = TextUtils.delete_text_between_positions(
+                self._content, start_pos.line, start_pos.col, end_pos.line, end_pos.col
+            )
+
+        def insert_text_at_position(self, pos: PositionInFile, text: str) -> None:
+            self._content, _, _ = TextUtils.insert_text_at_position(self._content, pos.line, pos.col, text)
 
     @contextmanager
     def _open_file_context(self, relative_path: str) -> Iterator["CodeEditor.EditedFile"]:
@@ -551,7 +574,12 @@ class LanguageServerCodeEditor(CodeEditor[LanguageServerSymbol]):
 
     @contextmanager
     def _open_file_context(self, relative_path: str) -> Iterator["CodeEditor.EditedFile"]:
-        lang_server = self._get_language_server(relative_path)
+        try:
+            lang_server = self._get_language_server(relative_path)
+        except LanguageUnavailableError:
+            # a file no running language server can hold is edited as plain text
+            yield self.PlainEditedFile(relative_path, self.project)
+            return
         with lang_server.open_file(relative_path) as file_buffer:
             yield self.EditedFile(lang_server, relative_path, file_buffer)
 
@@ -687,30 +715,9 @@ class JetBrainsCodeEditor(CodeEditor[JetBrainsSymbol]):
         self._project = project
         super().__init__(project, write_precondition)
 
-    class EditedFile(CodeEditor.EditedFile):
-        def __init__(self, relative_path: str, project: Project):
-            super().__init__(relative_path)
-            path = os.path.join(project.project_root, relative_path)
-            log.info("Editing file: %s", path)
-            self._content = FileProxy.from_project_relative_path(project, relative_path).get_contents()
-
-        def get_contents(self) -> str:
-            return self._content
-
-        def set_contents(self, contents: str) -> None:
-            self._content = contents
-
-        def delete_text_between_positions(self, start_pos: PositionInFile, end_pos: PositionInFile) -> None:
-            self._content, _ = TextUtils.delete_text_between_positions(
-                self._content, start_pos.line, start_pos.col, end_pos.line, end_pos.col
-            )
-
-        def insert_text_at_position(self, pos: PositionInFile, text: str) -> None:
-            self._content, _, _ = TextUtils.insert_text_at_position(self._content, pos.line, pos.col, text)
-
     @contextmanager
     def _open_file_context(self, relative_path: str) -> Iterator["CodeEditor.EditedFile"]:
-        yield self.EditedFile(relative_path, self._project)
+        yield self.PlainEditedFile(relative_path, self._project)
 
     def _save_edited_file(self, edited_file: "CodeEditor.EditedFile") -> None:
         super()._save_edited_file(edited_file)

@@ -46,6 +46,20 @@ from solidlsp.structural.patterns import AstPattern, PatternMatch
 # --------------------------------------------------------------------------- #
 
 
+@dataclass(frozen=True)
+class _YamlStyle:
+    """The block layout of a yaml document, which a dump of the document reproduces.
+
+    :ivar mapping: the indentation of a nested mapping's keys relative to their parent.
+    :ivar offset: the indentation of a sequence item's dash relative to its parent.
+    :ivar explicit_start: whether the document opens with a ``---`` marker.
+    """
+
+    mapping: int = 2
+    offset: int = 2
+    explicit_start: bool = False
+
+
 @dataclass
 class _YamlTree:
     """Opaque parse handle for a yaml document.
@@ -57,10 +71,12 @@ class _YamlTree:
         at :meth:`~YamlStructuralLanguage.parse` time).
     :ivar data: the ruamel round-trip representation (``CommentedMap``,
         ``CommentedSeq``, or a scalar). Used for navigation and mutation.
+    :ivar style: the block layout of ``source``, in which edits of the tree are dumped.
     """
 
     source: str
     data: Any
+    style: _YamlStyle = _YamlStyle()
 
 
 @dataclass
@@ -92,8 +108,8 @@ class _YamlDeclaration:
 # --------------------------------------------------------------------------- #
 
 
-def _make_yaml_engine() -> YAML:
-    """Build the round-trip yaml engine used for both parse and dump.
+def _make_yaml_engine(style: _YamlStyle) -> YAML:
+    """Build a round-trip yaml engine that dumps in ``style``.
 
     ruamel's ``YAML()`` in round-trip mode preserves comments, quotes and
     ordering. ``preserve_quotes=True`` keeps scalar quoting styles verbatim
@@ -102,24 +118,35 @@ def _make_yaml_engine() -> YAML:
     engine = YAML(typ="rt")
     engine.preserve_quotes = True
     engine.allow_duplicate_keys = False
-    # indent(mapping=2, sequence=4, offset=2) matches the conventional yaml
-    # style where sequence items under a mapping are indented two spaces from
-    # the mapping key (``items:\n  - one``). ruamel's zero-defaults produce
-    # unindented items which fail round-trip for that common input shape.
-    engine.indent(mapping=2, sequence=4, offset=2)
+    # a sequence item's content sits two columns (the dash and a space) past its dash
+    engine.indent(mapping=style.mapping, sequence=style.offset + 2, offset=style.offset)
+    engine.explicit_start = style.explicit_start
     # ruamel's default width truncates at 80 cols when re-dumping; widen it so
     # our dumps do not silently fold long scalars the agent has just written.
     engine.width = 10**9
     return engine
 
 
-_ENGINE = _make_yaml_engine()
+_DEFAULT_STYLE = _YamlStyle()
+# the layouts a source is matched against, the conventional one (``items:\n  - one``) first
+_STYLES = (
+    _DEFAULT_STYLE,
+    *(
+        _YamlStyle(mapping=mapping, offset=offset, explicit_start=explicit_start)
+        for explicit_start in (False, True)
+        for mapping in (2, 4)
+        for offset in (2, 0, 4)
+        if _YamlStyle(mapping=mapping, offset=offset, explicit_start=explicit_start) != _DEFAULT_STYLE
+    ),
+)
+_ENGINES = {style: _make_yaml_engine(style) for style in _STYLES}
+_ENGINE = _ENGINES[_DEFAULT_STYLE]
 
 
-def _dump(data: Any) -> str:
-    """Dump ``data`` via the shared ruamel engine, returning the string output."""
+def _dump(data: Any, style: _YamlStyle = _DEFAULT_STYLE) -> str:
+    """Dump ``data`` in ``style``, returning the string output."""
     buf = StringIO()
-    _ENGINE.dump(data, buf)
+    _ENGINES[style].dump(data, buf)
     return buf.getvalue()
 
 
@@ -601,10 +628,6 @@ class YamlStructuralLanguage(StructuralLanguage):
         except YAMLError as err:
             raise ParseError(language_key="yaml", source_preview=source[:240], detail=str(err)) from err
 
-        # enforce the round-trip invariant by re-dumping and comparing; inputs
-        # whose formatting doesn't survive a dump are rejected so the backend
-        # only accepts sources for which serialize(parse(s)) == s holds
-        dumped = _dump(data) if data is not None else ""
         # empty source: ruamel dumps None as "null\n...\n"; accept it only when
         # the input is empty or whitespace and store the empty source verbatim
         if source.strip() == "":
@@ -616,7 +639,12 @@ class YamlStructuralLanguage(StructuralLanguage):
                 )
             return _YamlTree(source=source, data=None)
 
-        if dumped != source:
+        # enforce the round-trip invariant: the source must equal its re-dump in one of the known layouts, which
+        # every later dump of the tree reproduces, so the backend only accepts sources for which
+        # serialize(parse(s)) == s holds
+        style = None if data is None else next((s for s in _STYLES if _dump(data, s) == source), None)
+        if style is None:
+            dumped = _dump(data) if data is not None else ""
             raise ParseError(
                 language_key="yaml",
                 source_preview=source[:240],
@@ -624,14 +652,14 @@ class YamlStructuralLanguage(StructuralLanguage):
                     f"source does not round-trip through ruamel.yaml round-trip mode; re-dump differs. expected={source!r} got={dumped!r}"
                 ),
             )
-        return _YamlTree(source=source, data=data)
+        return _YamlTree(source=source, data=data, style=style)
 
     def serialize(self, tree: Any) -> str:
         if isinstance(tree, _YamlTree):
             return tree.source
         if isinstance(tree, _YamlDeclaration):
             # declarations are fragments; render their data via ruamel
-            return _dump(tree.data) if tree.data is not None else ""
+            return _dump(tree.data, tree.style) if tree.data is not None else ""
         raise TypeError(f"cannot serialize handle of type {type(tree).__name__}")
 
     def render_node_source(self, node: Any) -> str:
@@ -742,13 +770,13 @@ class YamlStructuralLanguage(StructuralLanguage):
             if child.key in root:
                 raise DeclarationError(child.kind, f"duplicate key {child.key!r} in mapping")
             new_root = _mapping_with_inserted(root, child.key, child.data, anchor, position)
-            return self.parse(_dump(new_root))
+            return self.parse(_dump(new_root, parent.style))
 
         if isinstance(root, CommentedSeq | list):
             if child.kind == "pair":
                 raise TypeError("inserting into sequence requires a value declaration, not a pair")
             new_root = _sequence_with_inserted(root, child.data, anchor, position)
-            return self.parse(_dump(new_root))
+            return self.parse(_dump(new_root, parent.style))
 
         raise ValueError(f"cannot insert into scalar root of kind {_value_kind(root)!r}")
 
@@ -759,10 +787,10 @@ class YamlStructuralLanguage(StructuralLanguage):
         new_root: Any
         if isinstance(root, CommentedMap | dict):
             new_root = _mapping_without(root, child)
-            return self.parse(_dump(new_root))
+            return self.parse(_dump(new_root, parent.style))
         if isinstance(root, CommentedSeq | list):
             new_root = _sequence_without(root, child)
-            return self.parse(_dump(new_root))
+            return self.parse(_dump(new_root, parent.style))
         raise ValueError(f"cannot remove from scalar root of kind {_value_kind(root)!r}")
 
     # ---- pattern matching & rewriting --------------------------------------
@@ -838,8 +866,8 @@ class YamlStructuralLanguage(StructuralLanguage):
             raise ValueError("match.node was not found in tree")
         if new_root is target:
             # replacement at root
-            return self.parse(_dump(replacement.data))
-        return self.parse(_dump(new_root))
+            return self.parse(_dump(replacement.data, tree.style))
+        return self.parse(_dump(new_root, tree.style))
 
     # ---- new-source construction ------------------------------------------
 
@@ -891,7 +919,7 @@ class YamlStructuralLanguage(StructuralLanguage):
                 f"container at {container_path!r} is not a mapping or sequence",
             )
 
-        return self.parse(_dump(cloned_root))
+        return self.parse(_dump(cloned_root, tree.style))
 
     def container_remove_member(self, tree: Any, member_path: str) -> _YamlTree:
         if not isinstance(tree, _YamlTree):
@@ -911,7 +939,7 @@ class YamlStructuralLanguage(StructuralLanguage):
                 f"container at {parent_path!r} is not a mapping or sequence",
             )
 
-        return self.parse(_dump(cloned_root))
+        return self.parse(_dump(cloned_root, tree.style))
 
     def container_replace_member(self, tree: Any, member_path: str, source: str) -> _YamlTree:
         if not isinstance(tree, _YamlTree):
@@ -932,7 +960,7 @@ class YamlStructuralLanguage(StructuralLanguage):
                 f"container at {parent_path!r} is not a mapping or sequence",
             )
 
-        return self.parse(_dump(cloned_root))
+        return self.parse(_dump(cloned_root, tree.style))
 
 
 # --------------------------------------------------------------------------- #

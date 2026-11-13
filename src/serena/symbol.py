@@ -21,7 +21,7 @@ from solidlsp.ls import ReferenceInSymbol as LSPReferenceInSymbol
 from solidlsp.ls_types import Position, SymbolKind, UnifiedSymbolInformation
 from solidlsp.ls_utils import TextUtils
 
-from .ls_manager import LanguageServerManager
+from .ls_manager import LanguageServerManager, LanguageUnavailableError
 from .project import Project
 
 log = logging.getLogger(__name__)
@@ -753,7 +753,13 @@ class LanguageServerSymbolRetriever:
             (consistent with get_symbol_overview). This ensures e.g. PHP files are served by the
             PHP language server rather than being rejected by all LSes via is_ignored_path.
             """
-            lang_servers: Iterable[SolidLanguageServer] = [self._ls_manager.get_language_server(within_relative_path)]
+            try:
+                lang_servers: Iterable[SolidLanguageServer] = [self._ls_manager.get_language_server(within_relative_path)]
+            except LanguageUnavailableError as e:
+                # a project that requests no language server has no symbols; a requested server that failed is an error
+                if e.unavailable_languages:
+                    raise
+                lang_servers = []
         else:
             lang_servers = self._ls_manager.iter_language_servers()
         for lang_server in lang_servers:

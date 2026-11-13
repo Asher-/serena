@@ -19,6 +19,7 @@ from serena.symbol import LanguageServerSymbol, LanguageServerSymbolLocation, La
 from serena.util.file_lifecycle import AtomicFileWriter, WritePrecondition
 from serena.util.line_numbers import format_line_range, to_display_line, to_internal_line
 from serena.util.staleness import check_stale, read_file_version
+from serena.util.text_utils import MatchedConsecutiveLines
 from serena.util.windowing import InvalidContinuation, WindowRequest, decode_continuation, window_body
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_utils import PathUtils
@@ -1827,7 +1828,7 @@ class CursorManager:
         context_lines_before: int = 0,
         context_lines_after: int = 0,
         skipped_links: list[str] | None = None,
-    ) -> tuple[list[tuple[LanguageServerSymbol, list[str]]], list[tuple[str, list[str]]]]:
+    ) -> tuple[list[tuple[LanguageServerSymbol, list[MatchedConsecutiveLines]]], list[tuple[str, list[MatchedConsecutiveLines]]]]:
         """Find regex matches grouped by their enclosing LSP symbol.
 
         Each match is associated with the smallest LSP symbol that contains
@@ -1843,10 +1844,13 @@ class CursorManager:
             semantics.
         :param relative_path: search root relative to the project. ``None``
             (the default) searches every non-ignored file.
-        :param paths_include_glob: glob pattern restricting the file set.
-            Empty disables include filtering.
-        :param paths_exclude_glob: glob pattern excluding files; takes
-            precedence over ``paths_include_glob``. Empty disables exclude.
+        :param paths_include_glob: glob pattern restricting the file set,
+            matched against each file's path relative to ``relative_path``
+            when that is a directory, and relative to the project root
+            otherwise. Empty disables include filtering.
+        :param paths_exclude_glob: glob pattern excluding files, matched like
+            ``paths_include_glob``; takes precedence over it. Empty disables
+            exclude.
         :param restrict_to_code_files: when ``True`` (the default), the
             search is confined to files an analyser can address
             symbolically -- the only files where enclosing-symbol grouping
@@ -1859,21 +1863,33 @@ class CursorManager:
             every symbolic link to a directory the search did not enter is
             appended.
         :return: a 2-tuple ``(groups, unsymboled)``. ``groups`` is a list
-            of ``(enclosing_symbol, hit_display_strings)`` tuples in
-            discovery order -- one tuple per unique enclosing symbol (each
-            anchors a cursor). ``unsymboled`` is a list of
-            ``(relative_path, hit_display_strings)`` tuples in discovery
-            order -- one per file with matches outside any addressable LSP
-            symbol; their matched lines are surfaced verbatim rather than
-            reduced to a count.
+            of ``(enclosing_symbol, hit_blocks)`` tuples in discovery order --
+            one tuple per unique enclosing symbol (each anchors a cursor).
+            ``unsymboled`` is a list of ``(relative_path, hit_blocks)`` tuples
+            in discovery order -- one per file with matches outside any
+            addressable LSP symbol; their matched lines are surfaced verbatim
+            rather than reduced to a count. Within a tuple, matches whose
+            context windows share a line form one hit block.
         :raises FileNotFoundError: when ``relative_path`` does not exist
             on disk.
+        :raises ValueError: when ``restrict_to_code_files`` is set and
+            ``relative_path`` names a file that is not a code file.
         """
         # locate and validate the search scope
         rel = relative_path or ""
         abs_path = os.path.join(self._project.project_root, rel)
         if not os.path.exists(abs_path):
             raise FileNotFoundError(f"Relative path {rel!r} does not exist.")
+        if (
+            restrict_to_code_files
+            and os.path.isfile(abs_path)
+            and not self._project.gather_project_files(relative_path=rel, code_files_only=True, skip_ignored_files=True)
+        ):
+            raise ValueError(f"{rel!r} is not a code file of this project; set restrict_to_code_files=False to search it.")
+
+        # globs are written relative to a directory scope; the search machinery matches project-relative paths
+        include_glob = self._scope_glob(rel, abs_path, paths_include_glob.strip())
+        exclude_glob = self._scope_glob(rel, abs_path, paths_exclude_glob.strip())
 
         # delegate the regex pass to the project search machinery so the
         # result set matches what SearchForPatternTool would surface
@@ -1883,8 +1899,8 @@ class CursorManager:
                 relative_path=rel,
                 context_lines_before=context_lines_before,
                 context_lines_after=context_lines_after,
-                paths_include_glob=paths_include_glob.strip() or None,
-                paths_exclude_glob=paths_exclude_glob.strip() or None,
+                paths_include_glob=include_glob,
+                paths_exclude_glob=exclude_glob,
                 skipped_links=skipped_links,
             )
         else:
@@ -1909,8 +1925,8 @@ class CursorManager:
                 context_lines_after=context_lines_after,
                 file_reader=self._project.read_file,
                 root_path=self._project.project_root,
-                paths_include_glob=paths_include_glob or None,
-                paths_exclude_glob=paths_exclude_glob or None,
+                paths_include_glob=include_glob,
+                paths_exclude_glob=exclude_glob,
             )
 
         # resolve enclosing LSP symbol per match; first occurrence per
@@ -1918,20 +1934,20 @@ class CursorManager:
         # caller can register a cursor at it
         retriever = self._retriever
         groups: dict[tuple[str, str], LanguageServerSymbol] = {}
-        hits_per_group: dict[tuple[str, str], list[str]] = {}
+        hits_per_group: dict[tuple[str, str], list[MatchedConsecutiveLines]] = {}
         group_order: list[tuple[str, str]] = []
         # non-symbol hits are SURFACED as file-level blocks rather than dropped
         # (spec-v2 §5.1/§5.3): a hit in a non-LSP file (yaml/LICENSE/...) or in a
         # genuine non-symbol region (comment/import/blank) of an LSP file keeps
         # its matched line+number+context instead of being reduced to a count.
-        unsymboled: dict[str, list[str]] = {}
+        unsymboled: dict[str, list[MatchedConsecutiveLines]] = {}
         unsymboled_order: list[str] = []
 
-        def _record_unsymboled(path: str, display: str) -> None:
+        def _record_unsymboled(path: str, hit: MatchedConsecutiveLines) -> None:
             if path not in unsymboled:
                 unsymboled[path] = []
                 unsymboled_order.append(path)
-            unsymboled[path].append(display)
+            unsymboled[path].append(hit)
 
         # the language server's open document of the file whose matches are being resolved, held across all of
         # that file's matches: each resolution opens the file, and a file nothing else holds open would be sent to
@@ -1956,7 +1972,7 @@ class CursorManager:
                 # anchor a hit to an enclosing symbol. A structural/plaintext file
                 # still surfaces its matched line as a file-level hit (spec §5.1/§5.3).
                 if self.resolve_read_rung(rel_path, retriever=retriever) is not ReadRung.LSP:
-                    _record_unsymboled(rel_path, match.to_display_string())
+                    _record_unsymboled(rel_path, match)
                     continue
                 try:
                     ls = retriever.get_language_server(rel_path)
@@ -1981,7 +1997,7 @@ class CursorManager:
                     if sym is None:
                         # genuine non-symbol region inside an LSP file (comment,
                         # import, blank line): surface the matched line, don't drop it
-                        _record_unsymboled(rel_path, match.to_display_string())
+                        _record_unsymboled(rel_path, match)
                         continue
                 else:
                     sym = LanguageServerSymbol(sym_dict)
@@ -1991,14 +2007,29 @@ class CursorManager:
                     groups[key] = sym
                     hits_per_group[key] = []
                     group_order.append(key)
-                hits_per_group[key].append(match.to_display_string())
+                hits_per_group[key].append(match)
 
         # build the ordered results preserving discovery order for both the
         # symbol-anchored groups and the file-level non-symbol blocks
         return (
-            [(groups[k], hits_per_group[k]) for k in group_order],
-            [(p, unsymboled[p]) for p in unsymboled_order],
+            [(groups[k], MatchedConsecutiveLines.merge_overlapping(hits_per_group[k])) for k in group_order],
+            [(p, MatchedConsecutiveLines.merge_overlapping(unsymboled[p])) for p in unsymboled_order],
         )
+
+    @staticmethod
+    def _scope_glob(relative_path: str, abs_path: str, glob: str) -> str | None:
+        """Return a caller's glob as a glob over project-relative paths, or ``None`` for an empty glob.
+
+        :param relative_path: the search scope, relative to the project root.
+        :param abs_path: the absolute path of the search scope.
+        :param glob: a glob relative to the scope when the scope is a directory, relative to the project root otherwise.
+        """
+        if not glob:
+            return None
+        scope = os.path.normpath(relative_path).replace(os.sep, "/") if relative_path else "."
+        if scope == "." or not os.path.isdir(abs_path):
+            return glob
+        return f"{scope}/{glob.lstrip('/')}"
 
     def _top_level_symbol_covering_line(self, relative_path: str, line_0idx: int) -> LanguageServerSymbol | None:
         """Recover the top-level symbol whose extent covers a 0-based line.
@@ -2107,6 +2138,19 @@ class CursorManager:
             return None
         kind, node = match
         return StructuralResolution(name_path=name_path, kind=kind, node=node)
+
+    def structural_line_range(self, relative_path: str, name_path: str) -> tuple[int, int] | None:
+        """Return the 0-based inclusive line span of the structural node at ``name_path``, or ``None``.
+
+        :param relative_path: POSIX-style path relative to the project root.
+        :param name_path: full name path of the node, as for :meth:`resolve_structural_name_path`.
+        :return: the span; ``None`` when the path addresses no structural node or its backend does not locate nodes by line.
+        """
+        backend = self._structural_registry.structural_backend_for(relative_path)
+        resolution = self.resolve_structural_name_path(relative_path, name_path)
+        if backend is None or resolution is None:
+            return None
+        return backend.node_line_range(resolution.node)
 
     def _structural_cache_entry(
         self,

@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, Self
@@ -109,6 +109,32 @@ class MatchedConsecutiveLines:
 
     def to_display_string(self, include_line_numbers: bool = True) -> str:
         return "\n".join([line.format_line(include_line_numbers) for line in self.lines])
+
+    @staticmethod
+    def merge_overlapping(matches: Sequence["MatchedConsecutiveLines"]) -> list["MatchedConsecutiveLines"]:
+        """
+        Merge the matches of one source file whose line windows share a line.
+
+        A merged block spans the union of its windows' lines, and a line in it is a matched line when any
+        of the merged windows matched it.
+
+        :param matches: matches found in a single source file
+        :return: the merged blocks, ordered by their first line
+        """
+        merged: list[MatchedConsecutiveLines] = []
+        for match in sorted(matches, key=lambda m: m.start_line):
+            if merged and match.start_line <= merged[-1].end_line:
+                merged[-1] = merged[-1]._union(match)
+            else:
+                merged.append(match)
+        return merged
+
+    def _union(self, other: "MatchedConsecutiveLines") -> "MatchedConsecutiveLines":
+        lines_by_number = {line.line_number: line for line in self.lines}
+        for line in other.lines:
+            if line.line_number not in lines_by_number or line.match_type == LineType.MATCH:
+                lines_by_number[line.line_number] = line
+        return MatchedConsecutiveLines(lines=[lines_by_number[n] for n in sorted(lines_by_number)], source_file_path=self.source_file_path)
 
     @classmethod
     def from_file_contents(

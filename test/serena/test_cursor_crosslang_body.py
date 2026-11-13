@@ -24,7 +24,7 @@ import pytest
 from serena.agent import SerenaAgent
 from serena.config.serena_config import ProjectConfig, RegisteredProject, SerenaConfig
 from serena.project import Project
-from serena.tools.cursor_tools import CursorConfigureTool, CursorStartTool
+from serena.tools.cursor_tools import CursorConfigureTool, CursorFindTool, CursorGrepTool, CursorLookTool, CursorStartTool
 from solidlsp.ls_config import LanguageServerId
 from test.conftest import get_repo_path, language_tests_enabled
 
@@ -200,6 +200,54 @@ def test_go_method_body_window_renders(go_serena_agent: SerenaAgent) -> None:
         view = configure_tool.apply(cursor_id="go-method-body", include_body=True)
         assert "--- body ---" in view, f"Go method cursor rendered anchor-only (no body window):\n{view}"
         assert "return y" in view, f"method body line missing from body window:\n{view}"
+    finally:
+        if abs_path.exists():
+            abs_path.unlink()
+        try:
+            go_serena_agent.reset_language_server_manager()
+        except Exception:
+            pass
+
+
+def _body_block(view: str) -> str:
+    """Return the ``--- body ---`` block of a cursor view, delimiters included."""
+    assert "--- body ---" in view, f"cursor rendered no body block:\n{view}"
+    return view[view.index("--- body ---") : view.index("--- end body ---") + len("--- end body ---")]
+
+
+@pytest.mark.go
+def test_go_method_body_is_the_same_for_every_cursor_creator(go_serena_agent: SerenaAgent) -> None:
+    """A Go method's body block under ``include_body`` does not depend on which tool opened the cursor."""
+    start_tool = go_serena_agent.get_tool(CursorStartTool)
+    grep_tool = go_serena_agent.get_tool(CursorGrepTool)
+    find_tool = go_serena_agent.get_tool(CursorFindTool)
+    configure_tool = go_serena_agent.get_tool(CursorConfigureTool)
+    look_tool = go_serena_agent.get_tool(CursorLookTool)
+
+    project_root = Path(go_serena_agent.get_active_project_or_raise().project_root)
+    rel_path = "cursor_go_body_creator_sandbox.go"
+    abs_path = project_root / rel_path
+    abs_path.write_text(
+        "package main\n\ntype counter struct {\n\tn int\n}\n\nfunc (c *counter) Bump(x int) int {\n\tc.n += x\n\treturn c.n\n}\n"
+    )
+
+    try:
+        go_serena_agent.reset_language_server_manager()
+        because = "test fixture: exercising the tool behaviour"
+
+        # one cursor per creator, all on the same method
+        start_tool.apply(because=because, name_path="Bump", relative_path=rel_path, cursor_id="go-bump-start")
+        grep_report = grep_tool.apply(substring_pattern=r"c\.n \+= x", because=because, relative_path=rel_path)
+        grep_cursor = grep_report.split("[", 1)[1].split("]", 1)[0]
+        find_view = find_tool.apply(name_path_pattern="Bump", because=because, relative_path=rel_path, include_body=True)
+
+        start_view = configure_tool.apply(cursor_id="go-bump-start", include_body=True)
+        grep_view = configure_tool.apply(cursor_id=grep_cursor, include_body=True)
+        expected = _body_block(find_view)
+        assert "return c.n" in expected
+        assert _body_block(start_view) == expected
+        assert _body_block(grep_view) == expected
+        assert _body_block(look_tool.apply(cursor_id=grep_cursor, max_lines=50)) == expected
     finally:
         if abs_path.exists():
             abs_path.unlink()

@@ -374,6 +374,8 @@ class _MdSymbolRef:
     :ivar body_range: for container nodes (heading scope, quote_block), the
         byte range of the body exclusive of its opening syntax. ``None`` for
         leaf nodes with no body.
+    :ivar line_range: the 0-based inclusive line span of the node's
+        declaration, or ``None`` when it is not known.
     """
 
     kind: KindName
@@ -381,6 +383,7 @@ class _MdSymbolRef:
     extent_offset: int
     extent_length: int
     body_range: tuple[int, int] | None
+    line_range: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -506,6 +509,9 @@ class MarkdownStructuralLanguage(StructuralLanguage):
         if not isinstance(tree, _MdTree):
             raise TypeError(f"walk_symbols expects a _MdTree, got {type(tree).__name__}")
         return list(_walk_headings(tree))
+
+    def node_line_range(self, node: Any) -> tuple[int, int] | None:
+        return node.line_range if isinstance(node, _MdSymbolRef) else None
 
     # ---- declaration -------------------------------------------------------
 
@@ -833,6 +839,7 @@ def _walk_headings(tree: _MdTree) -> Iterator[tuple[str, KindName, _MdSymbolRef]
             extent_offset=extent_offset,
             extent_length=extent_length,
             body_range=body_range,
+            line_range=(start_line, max(start_line, end_line - 1)),
         )
         yield full_path, "heading", ref
 

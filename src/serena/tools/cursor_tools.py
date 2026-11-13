@@ -21,6 +21,7 @@ from serena.tools.tools_base import Tool, ToolMarkerNamesProjectRoot, ToolMarker
 from serena.util.file_lifecycle import StaleWriteError
 from serena.util.line_numbers import to_display_line, to_internal_line
 from serena.util.staleness import UNCONDITIONAL, ExpectedVersion, check_stale, read_file_version
+from serena.util.text_utils import MatchedConsecutiveLines
 from solidlsp.ls_types import SymbolKind
 
 
@@ -648,9 +649,12 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoot):
             project root) are searched. Pointing at a single file restricts
             the search to that file. Must exist.
         :param paths_include_glob: glob pattern restricting which files to
-            include in the search. Empty disables include filtering.
-        :param paths_exclude_glob: glob pattern excluding files; takes
-            precedence over ``paths_include_glob``. Empty disables exclude.
+            include in the search, matched against each file's path relative
+            to ``relative_path`` when that is a directory, and relative to the
+            project root otherwise. Empty disables include filtering.
+        :param paths_exclude_glob: glob pattern excluding files, matched like
+            ``paths_include_glob``; takes precedence over it. Empty disables
+            exclude.
         :param restrict_to_code_files: when ``True`` (the default), the
             search is confined to files an analyser can address symbolically
             -- the only files where enclosing-symbol grouping is meaningful.
@@ -681,14 +685,14 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoot):
             skipped_links=skipped_links,
         )
 
-        n_symboled = sum(len(hits) for _, hits in groups)
-        n_unsymboled = sum(len(hits) for _, hits in unsymboled)
+        n_symboled = sum(hit.num_matched_lines for _, hits in groups for hit in hits)
+        n_unsymboled = sum(hit.num_matched_lines for _, hits in unsymboled for hit in hits)
         # the walk enters no symbolic link to a directory; name each one so the agent knows what was not searched
         links_note = f"Symbolic links to directories not entered: {', '.join(skipped_links)}." if skipped_links else ""
 
-        # no hits at all -- clean message rather than an empty header
+        # no hits at all -- clean message rather than an empty header; the pattern is shown exactly as sent
         if not groups and not unsymboled:
-            return f"why: {because}\n\nNo matches for {substring_pattern!r}." + (f" {links_note}" if links_note else "")
+            return f"why: {because}\n\nNo matches for '{substring_pattern}'." + (f" {links_note}" if links_note else "")
 
         # cap cursor creation at max_matches; the remainder are listed
         # without cursors so the agent can decide whether to widen
@@ -699,14 +703,14 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoot):
             opened_groups = groups[:max_matches]
             deferred = groups[max_matches:]
 
-        opened_cursors: list[tuple[str, LanguageServerSymbol, list[str]]] = []
+        opened_cursors: list[tuple[str, LanguageServerSymbol, list[MatchedConsecutiveLines]]] = []
         for sym, hits in opened_groups:
             cid, state = manager.register_cursor_at_symbol(sym)
             # record the agent's stated goal on every opened cursor
             state.last_reasoning = because
             opened_cursors.append((cid, sym, hits))
 
-        # header: total hits split into symbol-anchored vs file-level, plus how
+        # header: total matched lines split into symbol-anchored vs file-level, plus how
         # many cursors opened. Non-symbol hits are SURFACED below (with their
         # matched lines), never routed to another tool (spec-v2 §5.1/§5.3).
         header_parts = [
@@ -717,14 +721,14 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoot):
             header_parts.append(links_note)
         lines: list[str] = [f"why: {because}", "", " ".join(header_parts), ""]
 
-        # per-cursor anchor + indented hit display strings
+        # per-cursor anchor + indented hit blocks
         for cid, _sym, hits in opened_cursors:
             view_lines = manager.format_cursor_view(cid).splitlines()
             # skip past the ``why: ...`` line to the actual ``@ ...`` anchor
             anchor = next((line for line in view_lines if line.startswith("@ ")), view_lines[0])
-            lines.append(f"[{cid}]  {anchor}    {len(hits)} hit(s)")
+            lines.append(f"[{cid}]  {anchor}    {sum(hit.num_matched_lines for hit in hits)} hit(s)")
             for hit in hits:
-                for hit_line in hit.splitlines():
+                for hit_line in hit.to_display_string().splitlines():
                     lines.append(f"    {hit_line}")
             lines.append("")
 
@@ -734,9 +738,9 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoot):
         if unsymboled:
             lines.append("-- non-symbol hits (no enclosing symbol; matched lines shown) --")
             for rel_path, hits in unsymboled:
-                lines.append(f"  {rel_path}    {len(hits)} hit(s)")
+                lines.append(f"  {rel_path}    {sum(hit.num_matched_lines for hit in hits)} hit(s)")
                 for hit in hits:
-                    for hit_line in hit.splitlines():
+                    for hit_line in hit.to_display_string().splitlines():
                         lines.append(f"    {hit_line}")
             lines.append("")
 
@@ -1418,11 +1422,13 @@ class CursorReplaceBetweenTool(Tool, ToolMarkerSymbolicEdit):
         (exclusive) with ``body``.
 
         :param relative_path: relative path to the file both anchors live in.
-        :param before_symbol: LSP name path of the anchor that precedes the
-            interstitial region (e.g. ``"MyClass/firstMethod"``).
-        :param after_symbol: LSP name path of the anchor that follows the
-            interstitial region. Must resolve to a symbol that starts strictly
-            after ``before_symbol`` ends.
+        :param before_symbol: name path of the anchor that precedes the
+            interstitial region (e.g. ``"MyClass/firstMethod"``): an LSP symbol,
+            or, when no symbol matches, a structural node of the file (e.g. a
+            markdown heading).
+        :param after_symbol: name path of the anchor that follows the
+            interstitial region, resolved like ``before_symbol``. Must resolve to
+            an anchor that starts strictly after ``before_symbol`` ends.
         :param body: the replacement text. The edit is line-oriented: when ``body``
             does not already end with a newline, the file's existing line terminator
             (``\\r\\n`` for CRLF files, ``\\n`` otherwise) is appended automatically
@@ -1443,12 +1449,10 @@ class CursorReplaceBetweenTool(Tool, ToolMarkerSymbolicEdit):
             return stale
 
         # resolve both anchors on every call so drift is structurally eliminated
-        before = self._resolve_unique_anchor("before_symbol", before_symbol, relative_path)
-        after = self._resolve_unique_anchor("after_symbol", after_symbol, relative_path)
+        _before_start, before_end = self._resolve_anchor_lines("before_symbol", before_symbol, relative_path)
+        after_start, _after_end = self._resolve_anchor_lines("after_symbol", after_symbol, relative_path)
 
         # compute the inter-symbol line range from the fresh positions
-        before_end = before.get_body_end_position_or_raise().line
-        after_start = after.get_body_start_position_or_raise().line
         start_line = before_end + 1
         end_line = after_start - 1
 
@@ -1486,31 +1490,37 @@ class CursorReplaceBetweenTool(Tool, ToolMarkerSymbolicEdit):
         diff_summary = f"Diff: -{removed} / +{added} lines{landed_note}"
         return f"{SUCCESS_RESULT}\n{diff_summary}\n(replaced lines [{to_display_line(start_line)}, {to_display_line(end_line)}] between {before_symbol!r} and {after_symbol!r})"
 
-    def _resolve_unique_anchor(self, role: str, name_path: str, relative_path: str) -> "LanguageServerSymbol":
+    def _resolve_anchor_lines(self, role: str, name_path: str, relative_path: str) -> tuple[int, int]:
         """
-        Look up ``name_path`` on the language server and return the unique match.
+        Resolve ``name_path`` to the unique anchor it names and return the anchor's line span.
+
+        The anchor is looked up on the language server first; when no symbol matches, it is looked up among the
+        file's structural nodes.
 
         :param role: which anchor role is being resolved (for error messages:
             ``"before_symbol"`` or ``"after_symbol"``).
-        :param name_path: the LSP name path to resolve.
+        :param name_path: the name path to resolve.
         :param relative_path: the file to restrict the lookup to.
-        :return: the single matched ``LanguageServerSymbol``.
+        :return: the anchor's 0-based inclusive ``(start_line, end_line)``.
         :raises ValueError: when the anchor fails to resolve uniquely.
         """
         manager = self.agent.get_cursor_manager()
         symbols = manager.find_symbols(name_path, relative_path=relative_path)
-        if not symbols:
-            raise ValueError(
-                f"cursor_replace_between: {role} {name_path!r} did not resolve to any "
-                f"symbol in {relative_path!r}. Verify the name path with cursor_overview."
-            )
         if len(symbols) > 1:
             raise ValueError(
                 f"cursor_replace_between: {role} {name_path!r} is ambiguous in "
                 f"{relative_path!r} ({len(symbols)} matches). Disambiguate by using a "
                 f"more specific name path."
             )
-        return symbols[0]
+        if symbols:
+            return symbols[0].get_body_start_position_or_raise().line, symbols[0].get_body_end_position_or_raise().line
+        line_range = manager.structural_line_range(relative_path, name_path)
+        if line_range is None:
+            raise ValueError(
+                f"cursor_replace_between: {role} {name_path!r} did not resolve to any "
+                f"symbol in {relative_path!r}. Verify the name path with cursor_overview."
+            )
+        return line_range
 
 
 class CursorRenameTool(Tool, ToolMarkerSymbolicEdit):

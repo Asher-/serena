@@ -329,6 +329,29 @@ class TestYamlContainerEdit:
         assert new_field_line == existing_line + 1
 
 
+class TestYamlSourceLayout:
+    """A YAML file whose block layout differs from the conventional one opens a structural cursor and keeps its layout."""
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "---\n- name: Configure\n  hosts: control\n  become: true\n- name: Second\n  hosts: workers\n",
+            "plays:\n- name: Configure\n  hosts: control\n- name: Second\n  hosts: workers\n",
+        ],
+    )
+    def test_edit_of_one_member_changes_only_its_lines(self, tmp_path: Path, source: str) -> None:
+        (tmp_path / "play.yml").write_text(source, encoding="utf-8")
+        manager = _make_manager_via_subclass(tmp_path)
+        member = "[0]/hosts" if source.startswith("---") else "plays/[0]/hosts"
+
+        cid, state = manager.start_cursor(name_path=member, relative_path="play.yml")
+        _before, after = manager.apply_container_edit(cid, "replace", "edge")
+
+        assert isinstance(state, StructuralCursorState)
+        assert after == source.replace("hosts: control", "hosts: edge")
+        assert (tmp_path / "play.yml").read_text(encoding="utf-8") == after
+
+
 # --- tool dispatch ----------------------------------------------------------
 
 

@@ -84,13 +84,11 @@ class TestStructuralParseSerialize:
         with pytest.raises(ParseError):
             backend.parse("# comment only\n")
 
-    def test_non_round_tripping_indentation_rejected(self) -> None:
-        # ruamel's default indent(mapping=2, sequence=4, offset=2) produces
-        # ``items:\n  - x\n``; the variant with zero offset must round-trip
-        # through that engine and therefore be rejected.
+    def test_non_round_tripping_source_rejected(self) -> None:
+        # no dump layout reproduces the padding after the colon
         backend = YamlStructuralLanguage()
         with pytest.raises(ParseError):
-            backend.parse("items:\n- one\n- two\n")
+            backend.parse("items:   one\n")
 
     def test_serialize_rejects_non_handle(self) -> None:
         backend = YamlStructuralLanguage()

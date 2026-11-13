@@ -1188,6 +1188,18 @@ class PythonStructuralLanguage(StructuralLanguage):
             return cst.Module(body=()).code_for_node(tree)
         raise TypeError(f"cannot serialize handle of type {type(tree).__name__}")
 
+    def render_node_source(self, node: Any) -> str:
+        """Render a walked libcst node as standalone source.
+
+        A container member (a dict element or a list element) renders as its value, matching the
+        structural backends; every other node renders as its own code.
+        """
+        if isinstance(node, cst.DictElement | cst.Element):
+            node = node.value
+        if isinstance(node, cst.CSTNode):
+            return self.serialize(node)
+        return super().render_node_source(node)
+
     # ---- symbol-tree introspection ----------------------------------------
 
     def root_kind(self, tree: Any) -> KindName:

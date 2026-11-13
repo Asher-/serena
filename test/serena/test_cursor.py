@@ -1080,8 +1080,14 @@ class TestCursorGrepSurfacesNonSymbolHits:
         tool.agent = agent
         return tool, manager
 
+    @staticmethod
+    def _hit(display_line: int, content: str):
+        from serena.util.text_utils import LineType, MatchedConsecutiveLines, TextLine
+
+        return MatchedConsecutiveLines(lines=[TextLine(line_number=display_line - 1, line_content=content, match_type=LineType.MATCH)])
+
     def test_only_non_symbol_hits_surface_with_content(self):
-        tool, _ = self._make_tool(groups=[], unsymboled=[("m.go", ["  65: rfaStart := compute()"])])
+        tool, _ = self._make_tool(groups=[], unsymboled=[("m.go", [self._hit(65, " rfaStart := compute()")])])
         out = tool.apply(
             substring_pattern="rfaStart", because="x", relative_path="m.go", max_answer_chars=1000000
         )
@@ -1104,8 +1110,8 @@ class TestCursorGrepSurfacesNonSymbolHits:
         sym = _make_symbol(name="Foo", kind_name="Function", rel_path="m.go", line=1)
         state = CursorState(cursor_id="c1", current_symbol=sym, current_location=sym.location)
         tool, manager = self._make_tool(
-            groups=[(sym, ["  1: Foo()"])],
-            unsymboled=[("conf.yaml", ["  3: name: Foo", "  9: alias: Foo"])],
+            groups=[(sym, [self._hit(1, " Foo()")])],
+            unsymboled=[("conf.yaml", [self._hit(3, " name: Foo"), self._hit(9, " alias: Foo")])],
         )
         manager.register_cursor_at_symbol.return_value = ("c1", state)
         manager.format_cursor_view.return_value = "@ Foo :Function@m.go:1:"

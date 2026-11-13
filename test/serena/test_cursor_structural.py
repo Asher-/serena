@@ -455,4 +455,4 @@ class TestFindPatternSurfacesNonSymbolHits:
         assert len(unsymboled) == 1
         path, displays = unsymboled[0]
         assert path == "compose.yaml"
-        assert any("serena:latest" in d for d in displays), displays
+        assert any("serena:latest" in d.to_display_string() for d in displays), displays
