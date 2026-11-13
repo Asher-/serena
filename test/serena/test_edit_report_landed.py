@@ -10,6 +10,7 @@ The module builds on the language-server fixture of test_edit_report_reanchor.py
 its tests of new behaviour are observed failing against the branch's src before the change.
 """
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -52,9 +53,9 @@ REPLACED_INTERSTITIAL = "# the lines between, replaced exactly once\n"
 
 class _ReleaseFailureAfterSave:
     """
-    A terminated language server, as closing the edited file's buffer meets it: the first close of the edited file's buffer
-    once the file on disk holds an edit's marker raises BrokenPipeError, as writing the didClose notification to a dead
-    server's stdin does.
+    A terminated language server, as releasing the edited file's buffer meets it: the first release of the edited file's
+    last reference once the file on disk holds an edit's marker raises BrokenPipeError, as writing the didClose
+    notification to a dead server's stdin does.
     """
 
     def __init__(self, path: Path, marker: str) -> None:
@@ -68,19 +69,19 @@ class _ReleaseFailureAfterSave:
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """
-        Make the first close of the edited file's buffer after the save fail.
+        Make the first release of the edited file's buffer after the save fail.
 
-        :param monkeypatch: the fixture through which the buffer's close is wrapped.
+        :param monkeypatch: the fixture through which the buffer's release is wrapped.
         """
-        original = LSPFileBuffer.close
+        original = LSPFileBuffer.close_if_unreferenced
 
-        def close(buffer: LSPFileBuffer) -> None:
+        def close_if_unreferenced(buffer: LSPFileBuffer, ref_count_lock: threading.Lock) -> bool:
             if not self.raised and Path(buffer.abs_path) == self._path and self._marker in self._path.read_text(encoding="utf-8"):
                 self.raised = True
                 raise BrokenPipeError(RELEASE_FAILURE_MESSAGE)
-            original(buffer)
+            return original(buffer, ref_count_lock)
 
-        monkeypatch.setattr(LSPFileBuffer, "close", close)
+        monkeypatch.setattr(LSPFileBuffer, "close_if_unreferenced", close_if_unreferenced)
 
 
 @pytest.mark.python
