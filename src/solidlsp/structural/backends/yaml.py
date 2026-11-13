@@ -659,7 +659,7 @@ class YamlStructuralLanguage(StructuralLanguage):
             return tree.source
         if isinstance(tree, _YamlDeclaration):
             # declarations are fragments; render their data via ruamel
-            return _dump(tree.data, tree.style) if tree.data is not None else ""
+            return _dump(tree.data) if tree.data is not None else ""
         raise TypeError(f"cannot serialize handle of type {type(tree).__name__}")
 
     def render_node_source(self, node: Any) -> str:

@@ -344,12 +344,15 @@ class TestYamlSourceLayout:
         manager = _make_manager_via_subclass(tmp_path)
         member = "[0]/hosts" if source.startswith("---") else "plays/[0]/hosts"
 
-        cid, state = manager.start_cursor(name_path=member, relative_path="play.yml")
-        _before, after = manager.apply_container_edit(cid, "replace", "edge")
+        from serena.tools.cursor_tools import CursorReplaceBodyTool, CursorStartTool
 
-        assert isinstance(state, StructuralCursorState)
-        assert after == source.replace("hosts: control", "hosts: edge")
-        assert (tmp_path / "play.yml").read_text(encoding="utf-8") == after
+        harness = _ToolHarness(manager, manager._project)  # type: ignore[attr-defined]
+        _bind_tool(CursorStartTool, harness).apply(
+            name_path=member, relative_path="play.yml", because="test fixture: exercising the tool behaviour", cursor_id="hosts"
+        )
+        _bind_tool(CursorReplaceBodyTool, harness).apply(cursor_id="hosts", body="edge", expect_version="*")
+
+        assert (tmp_path / "play.yml").read_text(encoding="utf-8") == source.replace("hosts: control", "hosts: edge")
 
 
 # --- tool dispatch ----------------------------------------------------------

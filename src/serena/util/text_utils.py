@@ -555,7 +555,7 @@ def search_files(
     try:
         re.compile(pattern, (re.MULTILINE | re.DOTALL) if multiline else 0)
     except re.error as e:
-        raise ValueError(f"Invalid regular expression {pattern!r}: {e}") from e
+        raise ValueError(f"Invalid regular expression '{pattern}': {e}") from e
 
     # apply glob filter
     file_collection = _filter_glob(file_collection, paths_include_glob, paths_exclude_glob)

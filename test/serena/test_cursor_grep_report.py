@@ -43,6 +43,14 @@ class TestNoMatchAnswer:
         with pytest.raises(ValueError, match="restrict_to_code_files"):
             _grep(python_serena_agent, substring_pattern="needle", relative_path=f"{_SANDBOX}/notes.md")
 
+    def test_a_directory_whose_matches_lie_outside_the_code_files_names_the_reason(
+        self, python_serena_agent: SerenaAgent, sandbox: Path
+    ) -> None:
+        (sandbox / "notes.md").write_text("needle\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="restrict_to_code_files"):
+            _grep(python_serena_agent, substring_pattern="needle", relative_path=_SANDBOX)
+
 
 class TestDirectoryScopedGlobs:
     @pytest.fixture

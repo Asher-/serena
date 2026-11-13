@@ -622,3 +622,13 @@ class TestRenderNodeSourceDefault:
     def test_raises_node_render_error_for_unrenderable_node(self, backend: PythonStructuralLanguage) -> None:
         with pytest.raises(NodeRenderError):
             backend.render_node_source(object())
+
+
+class TestRenderNodeSource:
+    """A walked node that is not a container member renders as its own code."""
+
+    def test_function_renders_its_own_code(self, backend: PythonStructuralLanguage) -> None:
+        source = "def f():\n    return 1\n"
+        nodes = {path: node for path, _kind, node in backend.walk_symbols(backend.parse(source))}
+
+        assert backend.render_node_source(nodes["f"]) == source

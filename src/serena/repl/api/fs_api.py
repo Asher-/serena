@@ -107,7 +107,10 @@ class PatternMatchesRenderer(Renderer[PatternMatches]):
 
     def render(self, obj: PatternMatches) -> str:
         matches_by_file = obj.matches_by_file_()
-        file_to_matches = {path: [m.to_display_string() for m in matches] for path, matches in matches_by_file.items()}
+        file_to_matches = {
+            path: [m.to_display_string() for m in MatchedConsecutiveLines.merge_overlapping(matches)]
+            for path, matches in matches_by_file.items()
+        }
 
         # capture lightweight match data for shortening before serialization
         match_lines_by_file = {
@@ -469,9 +472,15 @@ class FsApi(FacadeApi):
         # opt into the LSP retriever only when the project's backend supports it
         retriever = LanguageServerSymbolRetriever(project) if self._agent.get_language_backend().is_lsp() else None
 
+        # one block per file region whose match windows share a line
+        matches_by_file: dict[str | None, list[MatchedConsecutiveLines]] = {}
+        for found in matches:
+            matches_by_file.setdefault(found.source_file_path, []).append(found)
+        blocks = [block for file_matches in matches_by_file.values() for block in MatchedConsecutiveLines.merge_overlapping(file_matches)]
+
         # for each hit, ask the LSP for the enclosing symbol
         hits = EnclosingSymbolHits(skipped_links)
-        for match in matches:
+        for match in blocks:
             assert match.source_file_path is not None
             rel = match.source_file_path
             line = match.matched_lines[0].line_number

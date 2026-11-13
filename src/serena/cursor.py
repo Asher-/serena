@@ -1929,6 +1929,21 @@ class CursorManager:
                 paths_exclude_glob=exclude_glob,
             )
 
+        # a miss among the code files of a directory that its other files would answer names the restriction
+        if restrict_to_code_files and not matches and os.path.isdir(abs_path):
+            other_groups, other_unsymboled = self.find_pattern_with_enclosing_symbols(
+                substring_pattern=substring_pattern,
+                relative_path=relative_path,
+                paths_include_glob=paths_include_glob,
+                paths_exclude_glob=paths_exclude_glob,
+                restrict_to_code_files=False,
+            )
+            if other_groups or other_unsymboled:
+                raise ValueError(
+                    f"'{substring_pattern}' matches only files under {rel!r} that are not code files of this project; "
+                    "set restrict_to_code_files=False to search them."
+                )
+
         # resolve enclosing LSP symbol per match; first occurrence per
         # (rel_path, name_path) becomes the group's anchor symbol so the
         # caller can register a cursor at it
