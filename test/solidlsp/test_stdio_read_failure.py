@@ -28,3 +28,18 @@ def test_a_read_raising_a_base_exception_fails_the_pending_request_with_terminat
     assert result.is_error()
     assert isinstance(result.error, LanguageServerTerminatedException)
     assert isinstance(result.error.cause, _ReadAborted)
+
+
+def test_a_process_that_ended_fails_the_pending_request_with_terminated() -> None:
+    server = _server()
+    process = MagicMock()
+    process.poll.return_value = 1
+    server._process = process
+    request = Request(request_id=1, method="textDocument/hover")
+    server._pending_requests[1] = request
+
+    server._read_ls_process_stdout()
+
+    result = request.get_result(timeout=10)
+    assert result.is_error()
+    assert isinstance(result.error, LanguageServerTerminatedException)
