@@ -472,15 +472,9 @@ class FsApi(FacadeApi):
         # opt into the LSP retriever only when the project's backend supports it
         retriever = LanguageServerSymbolRetriever(project) if self._agent.get_language_backend().is_lsp() else None
 
-        # one block per file region whose match windows share a line
-        matches_by_file: dict[str | None, list[MatchedConsecutiveLines]] = {}
-        for found in matches:
-            matches_by_file.setdefault(found.source_file_path, []).append(found)
-        blocks = [block for file_matches in matches_by_file.values() for block in MatchedConsecutiveLines.merge_overlapping(file_matches)]
-
-        # for each hit, ask the LSP for the enclosing symbol
-        hits = EnclosingSymbolHits(skipped_links)
-        for match in blocks:
+        # for each match, ask the LSP for the enclosing symbol
+        matches_by_symbol: dict[tuple[str, str | None, str | None], list[MatchedConsecutiveLines]] = {}
+        for match in matches:
             assert match.source_file_path is not None
             rel = match.source_file_path
             line = match.matched_lines[0].line_number
@@ -496,5 +490,11 @@ class FsApi(FacadeApi):
                         kind = sym.symbol_kind_name
                 except Exception:
                     pass
-            hits.add(rel, name_path, kind, match.to_display_string())
+            matches_by_symbol.setdefault((rel, name_path, kind), []).append(match)
+
+        # one block per symbol region whose match windows share a line
+        hits = EnclosingSymbolHits(skipped_links)
+        for (rel, name_path, kind), symbol_matches in matches_by_symbol.items():
+            for block in MatchedConsecutiveLines.merge_overlapping(symbol_matches):
+                hits.add(rel, name_path, kind, block.to_display_string())
         return hits

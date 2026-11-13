@@ -111,7 +111,7 @@ class FileMatches:
         """Render the agent-facing match list; never routes to the deleted content-search tool."""
         if not self.matches:
             return f"No files match '{self.pattern}' under {self.relative_path}."
-        lines = [f"{len(self.matches)} file(s) match {self.pattern!r} under {self.relative_path}:"]
+        lines = [f"{len(self.matches)} file(s) match '{self.pattern}' under {self.relative_path}:"]
         lines.extend(f"  {match}" for match in self.matches)
         if self.truncated:
             lines.append("  ... (truncated; raise max_results or tighten the pattern)")
