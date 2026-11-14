@@ -30,6 +30,9 @@ class _DummyAgent:
         self._active_lsp_languages = list(active_lsp_languages or [])
         self._unavailable_lsp_languages = dict(unavailable_lsp_languages or {})
 
+    def get_configured_lsp_languages(self) -> list[LanguageServerId]:
+        return list(self._active_lsp_languages) + list(self._unavailable_lsp_languages)
+
     def get_active_language_server_ids(self) -> list[LanguageServerId]:
         return list(self._active_lsp_languages)
 
@@ -55,7 +58,7 @@ def test_get_language_server_status_returns_empty_when_no_manager_state() -> Non
 
     payload = json.loads(tool.apply())
 
-    assert payload == {"active": [], "unavailable": {}}
+    assert payload == {"configured": [], "active": [], "unavailable": {}}
 
 
 def test_get_language_server_status_reports_active_and_unavailable() -> None:
@@ -71,6 +74,7 @@ def test_get_language_server_status_reports_active_and_unavailable() -> None:
     payload = json.loads(tool.apply())
 
     assert payload == {
+        "configured": sorted([LanguageServerId.PYTHON.value, LanguageServerId.SCALA.value]),
         "active": [LanguageServerId.PYTHON.value],
         "unavailable": {LanguageServerId.SCALA.value: "Metals crashed on startup"},
     }

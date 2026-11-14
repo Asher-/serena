@@ -2726,14 +2726,23 @@ class SerenaAgent:
 
     def get_unavailable_lsp_languages(self) -> dict[LanguageServerIdLike, BaseException]:
         """
-        :return: a mapping from language to the captured startup exception for each language whose
-            server failed to start (or failed a subsequent restart). Empty if no active project, no
-            manager yet, or all requested languages are running.
+        :return: the active project's configured languages whose servers are not running, each mapped to the exception
+            that keeps it from running (see :meth:`Project.get_unavailable_languages`). Empty if no project is active,
+            the manager is still being constructed, or all configured languages are running.
         """
-        ls_manager = self.get_language_server_manager()
-        if ls_manager is None:
+        project = self.get_active_project()
+        if project is None:
             return {}
-        return ls_manager.get_unavailable_languages()
+        return project.get_unavailable_languages()
+
+    def get_configured_lsp_languages(self) -> list[LanguageServerIdLike]:
+        """
+        :return: the languages the active project is configured to serve with language servers; empty if no project is active
+        """
+        project = self.get_active_project()
+        if project is None:
+            return []
+        return list(project.project_config.language_servers)
 
     @contextmanager
     def active_project_context(self, project: Project) -> Iterator[None]:

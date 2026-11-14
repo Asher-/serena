@@ -891,6 +891,24 @@ class Project(ToStringMixin):
         else:
             return "ready"
 
+    def get_unavailable_languages(self) -> dict[LanguageServerIdLike, BaseException]:
+        """
+        :return: the configured languages whose servers are not running, each mapped to the exception that keeps it
+            from running: the failure of its own (re)start, or else the failure to construct the language server manager
+        """
+        manager = self.language_server_manager
+        unavailable = manager.get_unavailable_languages() if manager is not None else {}
+
+        # languages left without a server by a failed manager construction
+        init_error = self._language_server_manager_init_error
+        if init_error is not None:
+            active = manager.get_active_language_server_ids() if manager is not None else []
+            for language in self.project_config.language_servers:
+                if language not in active and language not in unavailable:
+                    unavailable[language] = init_error
+
+        return unavailable
+
     def get_language_server_manager_or_raise(self) -> LanguageServerManager:
         # block on the in-flight construction signalled by :meth:`create_language_server_manager`.
         # The ready event is set in that method's ``finally`` so we wake regardless of success

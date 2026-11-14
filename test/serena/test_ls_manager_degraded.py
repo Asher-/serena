@@ -9,6 +9,7 @@ an unavailable language receive a typed :class:`LanguageUnavailableError`.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import threading
 import time
@@ -28,6 +29,7 @@ from serena.config.serena_config import (
 from serena.language_backend import BuiltinLanguageBackend
 from serena.ls_manager import LanguageServerFactory, LanguageServerManager, LanguageUnavailableError
 from serena.project import Project
+from serena.tools.config_tools import GetLanguageServerStatusTool
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
 
@@ -458,3 +460,99 @@ class TestGetLanguageServerManagerOrRaiseBlocksOnReadiness:
         finally:
             init_gate.set()
             bg.join(timeout=5.0)
+
+
+class TestLanguageServerStatus:
+    """
+    Covers the report of configured languages that have no running server, through the status tool and
+    through the project that owns the language-server manager.
+    """
+
+    _PYTHON_REPO = str(Path(__file__).parent.parent / "resources" / "repos" / "python" / "test_repo")
+
+    def test_status_reports_each_configured_language_with_the_construction_failure(self) -> None:
+        # a tool timeout below the minimum makes the manager's construction fail before any server starts
+        config = SerenaConfig(
+            gui_log_window=False,
+            web_dashboard=False,
+            log_level=logging.ERROR,
+            language_backend=BuiltinLanguageBackend.LSP.get_instance(),
+        )
+        config.tool_timeout = 5
+        project = Project(
+            project_root=self._PYTHON_REPO,
+            project_config=ProjectConfig(
+                project_name="status_test",
+                language_servers=[LanguageServerId.PYTHON],
+                language_backend=BuiltinLanguageBackend.LSP.get_instance(),
+            ),
+            serena_config=config,
+        )
+        config.projects = [RegisteredProject.from_project_instance(project)]
+        agent = SerenaAgent(project=None, serena_config=config)
+
+        try:
+            agent._activate_project(project)
+            agent.get_project_activation_message(agent.get_calling_session_id())
+            payload = json.loads(GetLanguageServerStatusTool(agent=agent).apply())
+        finally:
+            agent.on_shutdown(timeout=5)
+
+        python = LanguageServerId.PYTHON.get_key()
+        assert payload["configured"] == [python]
+        assert payload["active"] == []
+        assert "Tool timeout must be at least 10 seconds" in payload["unavailable"].get(python, "")
+
+    def test_status_without_an_active_project_is_empty(self) -> None:
+        config = SerenaConfig(gui_log_window=False, web_dashboard=False, log_level=logging.ERROR)
+        agent = SerenaAgent(project=None, serena_config=config)
+
+        try:
+            payload = json.loads(GetLanguageServerStatusTool(agent=agent).apply())
+        finally:
+            agent.on_shutdown(timeout=5)
+
+        assert payload == {"configured": [], "active": [], "unavailable": {}}
+
+    def _project(self, languages: list[LanguageServerId]) -> Project:
+        config = SerenaConfig(
+            gui_log_window=False,
+            web_dashboard=False,
+            log_level=logging.ERROR,
+            language_backend=BuiltinLanguageBackend.LSP.get_instance(),
+        )
+        return Project(
+            project_root=self._PYTHON_REPO,
+            project_config=ProjectConfig(
+                project_name="status_test",
+                language_servers=languages,
+                language_backend=BuiltinLanguageBackend.LSP.get_instance(),
+            ),
+            serena_config=config,
+        )
+
+    def test_project_reports_the_start_failures_of_its_manager(self) -> None:
+        project = self._project([LanguageServerId.PYTHON, LanguageServerId.SCALA])
+        factory = _ScriptedLanguageServerFactory(failures={LanguageServerId.SCALA: RuntimeError("metals crashed")})
+        project.language_server_manager = LanguageServerManager.from_languages(
+            [LanguageServerId.PYTHON, LanguageServerId.SCALA], factory, project=None
+        )
+
+        unavailable = project.get_unavailable_languages()
+
+        assert {language: str(cause) for language, cause in unavailable.items()} == {LanguageServerId.SCALA: "metals crashed"}
+
+    def test_failed_reconstruction_leaves_the_previous_managers_languages_as_they_were(self) -> None:
+        # python runs and scala failed under the previous manager; a forced reconstruction then fails
+        project = self._project([LanguageServerId.PYTHON, LanguageServerId.SCALA])
+        factory = _ScriptedLanguageServerFactory(failures={LanguageServerId.SCALA: RuntimeError("metals crashed")})
+        project.language_server_manager = LanguageServerManager.from_languages(
+            [LanguageServerId.PYTHON, LanguageServerId.SCALA], factory, project=None
+        )
+        project.serena_config.tool_timeout = 5
+        with pytest.raises(ValueError):
+            project.create_language_server_manager(force_recreate=True)
+
+        unavailable = project.get_unavailable_languages()
+
+        assert {language: str(cause) for language, cause in unavailable.items()} == {LanguageServerId.SCALA: "metals crashed"}

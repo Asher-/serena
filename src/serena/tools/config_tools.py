@@ -32,18 +32,20 @@ class GetLanguageServerStatusTool(Tool, ToolMarkerOptional, ToolMarkerDoesNotReq
 
     def apply(self) -> str:
         """
-        Returns a JSON object with two keys:
+        Returns a JSON object with three keys:
+          * ``configured``: sorted list of language servers (by key) the active project is configured to use.
           * ``active``: sorted list of language servers (by key) whose servers
             are currently running in the manager for the active project.
           * ``unavailable``: mapping from language server key to a short textual description of the
-            exception captured when that language's server failed to start or restart.
+            exception that keeps that configured language's server from running: the failure of its
+            start or restart, or the failure to construct the language-server manager.
 
-        Both collections are empty when there is no active project or no language-server manager
-        has been constructed yet.
+        All collections are empty when there is no active project.
         """
+        configured = sorted(ls_id.get_key() for ls_id in self.agent.get_configured_lsp_languages())
         active = sorted(ls_id.get_key() for ls_id in self.agent.get_active_language_server_ids())
         unavailable = {ls_id.get_key(): str(exc) for ls_id, exc in self.agent.get_unavailable_lsp_languages().items()}
-        return self._to_json({"active": active, "unavailable": unavailable})
+        return self._to_json({"configured": configured, "active": active, "unavailable": unavailable})
 
 
 class OpenDashboardTool(Tool, ToolMarkerOptional, ToolMarkerDoesNotRequireActiveProject, ConfigApiMixin):
