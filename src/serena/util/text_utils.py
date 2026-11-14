@@ -6,11 +6,13 @@ import json
 import logging
 import os
 import re
-from collections.abc import Callable, Sequence
+import time
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, Self
 
+import regex
 from bs4 import BeautifulSoup
 from joblib import Parallel, delayed
 from sensai.util.string import ToStringMixin
@@ -177,6 +179,101 @@ def glob_to_regex(glob_pat: str) -> str:
     return "".join(regex_parts)
 
 
+class PatternTimeoutError(ValueError):
+    """
+    The refusal of a search whose regular expression did not finish matching one text within its time budget.
+
+    :ivar pattern: the pattern exactly as the caller sent it.
+    :ivar budget_seconds: the time, in seconds, matching one text was allowed.
+    """
+
+    def __init__(self, pattern: str, budget_seconds: float) -> None:
+        self.pattern = pattern
+        self.budget_seconds = budget_seconds
+        super().__init__(
+            f"the pattern '{pattern}' did not finish matching within its budget of {budget_seconds:g} s per file: "
+            "it backtracks too much on this text; bound its repetitions or replace '.*' with a narrower class"
+        )
+
+
+class BoundedPattern:
+    """
+    A regular expression whose matching lets the process's other threads run and ends after a time budget.
+
+    Matching one text that exceeds the budget is abandoned with :class:`PatternTimeoutError`.
+    """
+
+    DEFAULT_BUDGET_SECONDS: float = 5.0
+    """the default time matching one text may take"""
+
+    _FLAG_TRANSLATION: tuple[tuple[re.RegexFlag, int], ...] = (
+        (re.IGNORECASE, regex.IGNORECASE),
+        (re.MULTILINE, regex.MULTILINE),
+        (re.DOTALL, regex.DOTALL),
+        (re.VERBOSE, regex.VERBOSE),
+        (re.ASCII, regex.ASCII),
+    )
+
+    def __init__(self, pattern: "str | re.Pattern[str]", flags: int = 0, budget_seconds: float = DEFAULT_BUDGET_SECONDS) -> None:
+        """
+        :param pattern: the pattern as sent, or a pattern compiled with :mod:`re`, whose flags are kept
+        :param flags: the :mod:`re` flags to apply in addition to the pattern's own
+        :param budget_seconds: the time, in seconds, matching one text may take
+        :raises ValueError: if the pattern is not a valid regular expression
+        """
+        if isinstance(pattern, re.Pattern):
+            self._source = pattern.pattern
+            re_flags = pattern.flags | flags
+        else:
+            self._source = pattern
+            re_flags = flags
+        self._budget_seconds = budget_seconds
+        try:
+            self._compiled = regex.compile(self._source, self._translate_flags(re_flags))
+        except regex.error as e:
+            raise ValueError(f"Invalid regular expression '{self._source}': {e}") from e
+
+    @classmethod
+    def _translate_flags(cls, re_flags: int) -> int:
+        return sum(regex_flag for re_flag, regex_flag in cls._FLAG_TRANSLATION if re_flags & re_flag)
+
+    def finditer(self, text: str) -> Iterator[Any]:
+        """
+        :param text: the text to match
+        :return: the non-overlapping matches in ``text``, left to right, as :mod:`regex` match objects (which offer
+            the interface of :class:`re.Match`)
+        :raises PatternTimeoutError: if one match attempt exceeds the budget, or matches remain to be sought once the
+            budget is spent
+        """
+        deadline = time.monotonic() + self._budget_seconds
+        try:
+            for match in self._compiled.finditer(text, concurrent=True, timeout=self._budget_seconds):
+                yield match
+                if time.monotonic() > deadline:
+                    raise TimeoutError
+        except TimeoutError as e:
+            raise PatternTimeoutError(self._source, self._budget_seconds) from e
+
+    def matching_line_indices(self, lines: Sequence[str]) -> list[int]:
+        """
+        :param lines: the lines to match, each on its own
+        :return: the indices of the lines containing a match, ascending
+        :raises PatternTimeoutError: if matching all of ``lines`` exceeds the budget
+        """
+        deadline = time.monotonic() + self._budget_seconds
+        matched: list[int] = []
+        try:
+            for index, line in enumerate(lines):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                if self._compiled.search(line, concurrent=True, timeout=remaining):
+                    matched.append(index)
+        except TimeoutError as e:
+            raise PatternTimeoutError(self._source, self._budget_seconds) from e
+        return matched
+
+
 def search_text(
     pattern: "str | re.Pattern[str]",
     content: str | None = None,
@@ -196,6 +293,8 @@ def search_text(
     :meth:`MatchedConsecutiveLines.from_file_contents`, the LSP layer, and every
     other line-oriented surface in the codebase.
 
+    The pattern is matched as a :class:`BoundedPattern` with its default budget.
+
     :param pattern: Pattern to search for (regex or glob-like pattern)
     :param content: The text content to search. May be None if source_file_path is provided.
     :param source_file_path: Optional path to the source file. If content is None,
@@ -211,6 +310,7 @@ def search_text(
 
     :return: List of `TextSearchMatch` objects
     :raises: ValueError if the pattern is not valid
+    :raises PatternTimeoutError: if matching ``content`` exceeds the pattern's time budget
     """
     # read the file when only the path was supplied
     if source_file_path and content is None:
@@ -240,17 +340,16 @@ def search_text(
     elif is_glob:
         # a glob matches within a line, as main's line-by-line glob search did: without DOTALL, '*' stops at a line break
         multiline = False
-    flags = (re.MULTILINE | re.DOTALL) if multiline else 0
     if isinstance(pattern, re.Pattern):
         # a pattern compiled by the caller keeps its own flags; '^' and '$' still anchor at each line, as they did in
         # main's line-by-line search
-        compiled_pattern = re.compile(pattern.pattern, pattern.flags | re.MULTILINE) if multiline else pattern
+        bounded_pattern = BoundedPattern(pattern, re.MULTILINE if multiline else 0)
     else:
-        compiled_pattern = re.compile(pattern, flags)
+        bounded_pattern = BoundedPattern(pattern, (re.MULTILINE | re.DOTALL) if multiline else 0)
     matched_line_spans: list[tuple[int, int]] = []
     if multiline:
         # Search across the entire content as a single string
-        for match in compiled_pattern.finditer(content):
+        for match in bounded_pattern.finditer(content):
             # Find the line numbers for the start and end positions
             start_loc = coordinates.compute_coordinates(match.start())
             end_loc = coordinates.compute_coordinates(match.end())
@@ -263,7 +362,7 @@ def search_text(
     else:
         # without multi-line matching each line is searched on its own, as main's line-by-line search did: '^' and '$'
         # anchor at the line, no match spans two lines, and a line is reported once
-        matched_line_spans = [(line_num, line_num) for line_num, line in enumerate(lines) if compiled_pattern.search(line)]
+        matched_line_spans = [(line_num, line_num) for line_num in bounded_pattern.matching_line_indices(lines)]
 
     for start_line_num, end_line_num in matched_line_spans:
         # Calculate the range of lines to include in the context
@@ -537,6 +636,7 @@ def search_files(
     :param file_reader: the function reading a file of ``relative_file_paths``; a file it cannot read is skipped
     :return: list of MatchedConsecutiveLines objects
     :raises ValueError: if the pattern is not a valid regular expression
+    :raises PatternTimeoutError: if matching any one file exceeds the pattern's time budget
     """
     if file_collection is None:
         file_collection = FileCollection([_ReadFileProxy(path, root_path, file_reader) for path in relative_file_paths or []])
@@ -545,10 +645,7 @@ def search_files(
     # compile is a defect in the request, not a per-file read failure, so it must not be turned
     # into the empty result that reads like "the pattern occurs nowhere" (see `search_text`,
     # which documents this error, and the replacement tools, which let it surface).
-    try:
-        re.compile(pattern, (re.MULTILINE | re.DOTALL) if multiline else 0)
-    except re.error as e:
-        raise ValueError(f"Invalid regular expression '{pattern}': {e}") from e
+    BoundedPattern(pattern, (re.MULTILINE | re.DOTALL) if multiline else 0)
 
     # apply glob filter
     file_collection = _filter_glob(file_collection, paths_include_glob, paths_exclude_glob)
@@ -570,6 +667,9 @@ def search_files(
             if len(search_results) > 0:
                 log.debug(f"Found {len(search_results)} matches in {relative_path}")
             return {"path": relative_path, "results": search_results, "error": None}
+        except PatternTimeoutError:
+            # an over-budget pattern is a defect in the request, refused to the caller rather than skipped as unreadable
+            raise
         except Exception as e:
             log.debug(f"Error processing {relative_path}: {e}")
             return {"path": relative_path, "results": [], "error": str(e)}
