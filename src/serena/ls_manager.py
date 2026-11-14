@@ -246,14 +246,39 @@ class LanguageServerManager:
                 return candidate
         return None
 
+    def _raise_if_language_of_file_unavailable(self, relative_path: str) -> None:
+        """
+        :param relative_path: relative path to a file
+        :raises LanguageUnavailableError: if the file is a source file of a language whose server is unavailable
+            and no running server serves the file
+        """
+        unavailable = dict(self._unavailable_languages)
+        for language, cause in unavailable.items():
+            if not language.get_source_fn_matcher().is_relevant_filename(relative_path):
+                continue
+            if self._get_suitable_language_server(relative_path) is not None:
+                return
+            raise LanguageUnavailableError(
+                f"The language server for {language.get_key()}, the language of {relative_path}, is unavailable: {cause}",
+                language=language,
+                cause=cause,
+                unavailable_languages=unavailable,
+            )
+
     def get_language_server(self, relative_path: str) -> SolidLanguageServer:
-        """:param relative_path: relative path to a file"""
+        """
+        :param relative_path: relative path to a file
+        :return: the running server suitable for the file, or the default server if none is
+        :raises LanguageUnavailableError: if the file is a source file of a language whose server is unavailable and
+            no running server serves it, or if no server is running at all
+        """
         ls: SolidLanguageServer | None = None
         if len(self._language_servers) > 1:
             if os.path.isdir(relative_path):
                 raise ValueError(f"Expected a file path, but got a directory: {relative_path}")
             ls = self._get_suitable_language_server(relative_path)
         if ls is None:
+            self._raise_if_language_of_file_unavailable(relative_path)
             ls = self._default_language_server
         return self._ensure_functional_ls(ls)
 

@@ -112,6 +112,70 @@ class TestDegradedStartup:
         assert manager.get_active_language_server_ids() == [LanguageServerId.PYTHON, LanguageServerId.TYPESCRIPT]
         assert manager.get_unavailable_languages() == {}
 
+    def test_file_of_unavailable_language_raises_naming_that_language(self) -> None:
+        # python runs and go failed: a go file is not answered by the python server
+        go_failure = RuntimeError("gopls missing")
+        factory = _ScriptedLanguageServerFactory(failures={LanguageServerId.GO: go_failure})
+        manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON, LanguageServerId.GO], factory, project=None)
+
+        with pytest.raises(LanguageUnavailableError) as exc_info:
+            manager.get_language_server("cmd/main.go")
+
+        assert exc_info.value.language == LanguageServerId.GO
+        assert LanguageServerId.GO.get_key() in str(exc_info.value)
+        assert "gopls missing" in str(exc_info.value)
+
+
+def _server_serving(language: LanguageServerId, suffix: str) -> SolidLanguageServer:
+    # a running server that serves exactly the files ending in ``suffix``
+    server = MagicMock(spec=SolidLanguageServer)
+    server.ls_id = language
+    server.is_running.return_value = True
+    server.is_ignored_path.side_effect = lambda path, ignore_unsupported_files=False: not path.endswith(suffix)
+    return server
+
+
+class TestFileRouting:
+    """verifies which server answers a file, and when the manager refuses to answer it."""
+
+    def test_file_is_answered_by_the_running_server_that_serves_it(self) -> None:
+        python = _server_serving(LanguageServerId.PYTHON, ".py")
+        typescript = _server_serving(LanguageServerId.TYPESCRIPT, ".ts")
+        manager = LanguageServerManager({LanguageServerId.PYTHON: python, LanguageServerId.TYPESCRIPT: typescript})
+
+        assert manager.get_language_server("web/app.ts") is typescript
+
+    def test_directory_is_refused_when_several_servers_run(self, tmp_path: Path) -> None:
+        python = _server_serving(LanguageServerId.PYTHON, ".py")
+        typescript = _server_serving(LanguageServerId.TYPESCRIPT, ".ts")
+        manager = LanguageServerManager({LanguageServerId.PYTHON: python, LanguageServerId.TYPESCRIPT: typescript})
+
+        with pytest.raises(ValueError):
+            manager.get_language_server(str(tmp_path))
+
+    def test_file_of_no_unavailable_language_is_answered_by_the_running_server(self) -> None:
+        python = _server_serving(LanguageServerId.PYTHON, ".py")
+        manager = LanguageServerManager(
+            {LanguageServerId.PYTHON: python}, unavailable_languages={LanguageServerId.GO: RuntimeError("gopls missing")}
+        )
+
+        assert manager.get_language_server("pkg/module.py") is python
+
+    def test_file_a_running_server_serves_is_answered_even_if_an_unavailable_language_claims_it(self) -> None:
+        # vue also claims .ts files; its server is down, typescript's runs and serves them
+        typescript = _server_serving(LanguageServerId.TYPESCRIPT, ".ts")
+        manager = LanguageServerManager(
+            {LanguageServerId.TYPESCRIPT: typescript}, unavailable_languages={LanguageServerId.VUE: RuntimeError("vue server missing")}
+        )
+
+        assert manager.get_language_server("web/app.ts") is typescript
+
+    def test_manager_with_no_language_raises(self) -> None:
+        manager = LanguageServerManager({})
+
+        with pytest.raises(LanguageUnavailableError):
+            manager.get_language_server("pkg/module.py")
+
 
 class TestRestartRecoversUnavailableLanguage:
     """verifies that restart_language_server can promote a previously-failed language back to running."""
