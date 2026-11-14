@@ -200,8 +200,9 @@ class BoundedPattern:
     A regular expression whose matching lets the process's other threads run and whose every match attempt ends
     after a time budget.
 
-    The pattern is read by the :mod:`regex` engine's version-0 syntax. A match attempt that exceeds the budget is
-    abandoned with :class:`PatternTimeoutError`.
+    The pattern is read by the :mod:`regex` engine's version-0 syntax, which agrees with :mod:`re` except that it
+    reads POSIX character classes (``[[:alpha:]]``) and fuzzy-matching constraints (``{e<=1}``) as such. A match
+    attempt that exceeds the budget is abandoned with :class:`PatternTimeoutError`.
     """
 
     DEFAULT_BUDGET_SECONDS: float = 5.0
