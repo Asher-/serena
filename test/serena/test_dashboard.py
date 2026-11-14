@@ -40,6 +40,9 @@ class _DummyAgent:
     def get_active_project(self):
         return self._project
 
+    def get_configured_lsp_languages(self) -> list[LanguageServerId]:
+        return list(self._project.project_config.language_servers) if self._project is not None else []
+
     def get_active_language_server_ids(self) -> list[LanguageServerId]:
         return list(self._active_lsp_languages)
 
@@ -99,6 +102,7 @@ def test_language_server_status_reports_active_and_unavailable():
         unavailable_lsp_languages={LanguageServerId.SCALA: boom},
     )
     response = dashboard._get_language_server_status()
+    assert response.configured == [LanguageServerId.PYTHON.value, LanguageServerId.SCALA.value]
     assert response.active == [LanguageServerId.PYTHON.value]
     assert response.unavailable == {LanguageServerId.SCALA.value: "Metals crashed on startup"}
 

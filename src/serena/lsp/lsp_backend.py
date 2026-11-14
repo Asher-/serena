@@ -60,6 +60,14 @@ class LSPLanguageBackend(LanguageBackend):
             project._lsm_ready_event.wait(timeout=wait_timeout)
             ls_manager = project.language_server_manager
         if ls_manager is None:
+            # a manager whose construction failed is reported with that failure for each configured language
+            construction_failures = project.get_unavailable_languages()
+            if construction_failures:
+                failures = "; ".join(f"{ls_id.get_key()}: {exc}" for ls_id, exc in construction_failures.items())
+                return statement + (
+                    f"Language servers could not be started: {failures}. Tools that target these languages will raise a "
+                    "LanguageUnavailableError until the servers are restarted (use restart_language_server).\n"
+                )
             waited = f"{wait_timeout:g}s" if wait_timeout is not None else "the unbounded activation budget"
             return statement + (
                 f"Language servers ({language_servers_str}) had not finished starting within {waited} "

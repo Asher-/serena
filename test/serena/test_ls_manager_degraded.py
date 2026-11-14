@@ -26,6 +26,7 @@ from serena.config.serena_config import (
     RegisteredProject,
     SerenaConfig,
 )
+from serena.dashboard.dashboard_api import SerenaDashboardAPI
 from serena.language_backend import BuiltinLanguageBackend
 from serena.ls_manager import LanguageServerFactory, LanguageServerManager, LanguageUnavailableError
 from serena.project import Project
@@ -470,7 +471,7 @@ class TestLanguageServerStatus:
 
     _PYTHON_REPO = str(Path(__file__).parent.parent / "resources" / "repos" / "python" / "test_repo")
 
-    def test_status_reports_each_configured_language_with_the_construction_failure(self) -> None:
+    def _agent_whose_manager_construction_fails(self) -> tuple[SerenaAgent, Project]:
         # a tool timeout below the minimum makes the manager's construction fail before any server starts
         config = SerenaConfig(
             gui_log_window=False,
@@ -489,7 +490,10 @@ class TestLanguageServerStatus:
             serena_config=config,
         )
         config.projects = [RegisteredProject.from_project_instance(project)]
-        agent = SerenaAgent(project=None, serena_config=config)
+        return SerenaAgent(project=None, serena_config=config), project
+
+    def test_status_reports_each_configured_language_with_the_construction_failure(self) -> None:
+        agent, project = self._agent_whose_manager_construction_fails()
 
         try:
             agent._activate_project(project)
@@ -502,6 +506,32 @@ class TestLanguageServerStatus:
         assert payload["configured"] == [python]
         assert payload["active"] == []
         assert "Tool timeout must be at least 10 seconds" in payload["unavailable"].get(python, "")
+
+    def test_activation_statement_reports_each_configured_language_with_the_construction_failure(self) -> None:
+        agent, project = self._agent_whose_manager_construction_fails()
+
+        try:
+            agent._activate_project(project)
+            message = agent.get_project_activation_message(agent.get_calling_session_id())
+        finally:
+            agent.on_shutdown(timeout=5)
+
+        assert f"{LanguageServerId.PYTHON.get_key()}: Tool timeout must be at least 10 seconds" in message
+
+    def test_dashboard_status_reports_each_configured_language_with_the_construction_failure(self) -> None:
+        agent, project = self._agent_whose_manager_construction_fails()
+
+        try:
+            agent._activate_project(project)
+            agent.get_project_activation_message(agent.get_calling_session_id())
+            dashboard = SerenaDashboardAPI(memory_log_handler=MagicMock(), tool_names=[], agent=agent)
+            response = dashboard._get_language_server_status()
+        finally:
+            agent.on_shutdown(timeout=5)
+
+        python = LanguageServerId.PYTHON.get_key()
+        assert response.configured == [python]
+        assert "Tool timeout must be at least 10 seconds" in response.unavailable.get(python, "")
 
     def test_status_without_an_active_project_is_empty(self) -> None:
         config = SerenaConfig(gui_log_window=False, web_dashboard=False, log_level=logging.ERROR)

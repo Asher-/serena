@@ -91,6 +91,7 @@ class ResponseAvailableLanguages(BaseModel):
 
 
 class ResponseLanguageServerStatus(BaseModel):
+    configured: list[str]
     active: list[str]
     unavailable: dict[str, str]
 
@@ -718,16 +719,18 @@ class SerenaDashboardAPI:
     def _get_language_server_status(self) -> ResponseLanguageServerStatus:
         """
         :return: a snapshot of per-language language-server state for the active project.
+            ``configured`` lists the languages the project is configured to use;
             ``active`` lists the languages whose servers are currently running;
-            ``unavailable`` maps each language whose server failed to start (or is not yet
-            available) to a short description of the captured exception.
-            Both are empty when there is no active project or no language-server manager yet.
+            ``unavailable`` maps each configured language whose server is not running to a short
+            description of the failure of its start or of the language-server manager's construction.
+            All are empty when there is no active project.
         """
 
         def run() -> ResponseLanguageServerStatus:
+            configured = sorted(ls_id.get_key() for ls_id in self._agent.get_configured_lsp_languages())
             active = sorted(ls_id.get_key() for ls_id in self._agent.get_active_language_server_ids())
             unavailable = {ls_id.get_key(): str(exc) for ls_id, exc in self._agent.get_unavailable_lsp_languages().items()}
-            return ResponseLanguageServerStatus(active=active, unavailable=unavailable)
+            return ResponseLanguageServerStatus(configured=configured, active=active, unavailable=unavailable)
 
         return self._agent.execute_task(run, logged=False)
 
