@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import shutil
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -30,9 +31,10 @@ from serena.agent import _PIPE_SESSION_ID_VAR, _SESSION_KEY_VAR, ProjectNotFound
 from serena.config.serena_config import ProjectConfig, SerenaConfig
 from serena.constants import SERENA_MANAGED_DIR_NAME
 from serena.ls_manager import LanguageServerFactory, LanguageServerManager
-from serena.project import Project
+from serena.project import Project, UnconfiguredLanguageServersError
 from serena.tools.tools_base import Tool
 from solidlsp.ls_config import LanguageServerId
+from test.conftest import get_repo_path
 from test.serena.test_session_project_binding import _HANG_GUARD_SECONDS, _Gate
 from test.serena.test_streamable_http_cc_session_key import _make_mcp_ctx
 
@@ -555,6 +557,76 @@ class TestCreatingAnExistingManager:
 
         assert sessions.held(_SESSION_1).create_language_server_manager() is built.manager
         assert len(managers._built_for(root)) == 1, "a second language-server manager was built for an instance that had one"
+
+
+class TestReloadToNoLanguageServerOverSourceFiles:
+    """sg://serena/agent/fn/activate/project/language/server/verification, route lsp"""
+
+    @staticmethod
+    def _refuse_reload(agent: SerenaAgent, tmp_path: Path) -> tuple[_Sessions, Path, Project | None]:
+        """
+        Lets sessions 1 and 2 hold R, whose tree holds Python sources, changes R's project.yml to configure no language
+        server, and lets session 1 activate R, which is refused.
+
+        :return: the sessions, R's root and the instance both sessions held before the change
+        """
+        root = tmp_path / "R"
+        shutil.copytree(get_repo_path(LanguageServerId.PYTHON), root, ignore=shutil.ignore_patterns(SERENA_MANAGED_DIR_NAME))
+        root = _write_project(root)
+        sessions = _Sessions(agent)
+        sessions.activate(_SESSION_1, root)
+        sessions.activate(_SESSION_2, root)
+        held_before = sessions.run(_SESSION_2, agent.get_active_project)
+        _change_project_yml(agent, root, language_servers=[])
+
+        with pytest.raises(UnconfiguredLanguageServersError):
+            sessions.activate(_SESSION_1, root)
+
+        return sessions, root, held_before
+
+    def test_reload_is_refused_and_leaves_every_session_on_the_replaced_instance(
+        self, agent: SerenaAgent, managers: _ManagerFactory, tmp_path: Path
+    ) -> None:
+        """
+        Sessions 1 and 2 hold R, whose tree holds Python sources; R's project.yml changes to configure no language server
+        and session 1 activates R: the activation is refused, and both sessions still hold the instance they held before.
+        """
+        sessions, _, held_before = self._refuse_reload(agent, tmp_path)
+
+        assert sessions.run(_SESSION_1, agent.get_active_project) is held_before
+        assert sessions.run(_SESSION_2, agent.get_active_project) is held_before
+
+    def test_restoring_the_language_servers_after_a_refused_reload_keeps_every_session_on_the_instance_it_held(
+        self, agent: SerenaAgent, managers: _ManagerFactory, tmp_path: Path
+    ) -> None:
+        """
+        After a refused reload of R, R's project.yml is restored to Python and session 1 activates R: both sessions hold
+        the instance they held before the refused change.
+        """
+        sessions, root, held_before = self._refuse_reload(agent, tmp_path)
+        _change_project_yml(agent, root, language_servers=[LanguageServerId.PYTHON])
+
+        sessions.activate(_SESSION_1, root)
+
+        assert sessions.run(_SESSION_1, agent.get_active_project) is held_before
+        assert sessions.run(_SESSION_2, agent.get_active_project) is held_before
+
+    def test_changing_the_language_servers_after_a_refused_reload_moves_every_session_onto_a_running_instance(
+        self, agent: SerenaAgent, managers: _ManagerFactory, tmp_path: Path
+    ) -> None:
+        """
+        After a refused reload of R, R's project.yml is changed to other language servers and session 1 activates R: both
+        sessions hold the new instance, and that instance builds its language-server manager.
+        """
+        sessions, root, held_before = self._refuse_reload(agent, tmp_path)
+        _change_project_yml(agent, root, language_servers=[LanguageServerId.PYTHON, LanguageServerId.MARKDOWN])
+
+        sessions.activate(_SESSION_1, root)
+
+        held_after = sessions.run(_SESSION_1, agent.get_active_project)
+        assert held_after is not held_before
+        assert sessions.run(_SESSION_2, agent.get_active_project) is held_after
+        managers.await_managers(root, 2)
 
 
 class TestActivatingAnUnknownProject:

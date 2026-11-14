@@ -21,6 +21,7 @@ from serena.ls_manager import LanguageServerFactory, LanguageServerManager
 from serena.memories.memory_manager import MemoryManager
 from serena.util.file_proxy import FileCollection, FileProxy
 from serena.util.file_system import GitignoreParser, ScanResult, dir_entry_from_path, match_path, walk_dir_entries
+from serena.util.inspection import compute_language_server_support_composition
 from serena.util.text_utils import MatchedConsecutiveLines, search_files
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerIdLike
@@ -57,6 +58,12 @@ def merge_ls_specific_settings(global_settings: dict, project_settings: dict) ->
                 )
         merged_settings[ls_key] = project_ls_settings
     return merged_settings
+
+
+class UnconfiguredLanguageServersError(Exception):
+    """
+    Error raised for a project that is configured for no language server while its tree contains recognised source files.
+    """
 
 
 class Project(ToStringMixin):
@@ -714,6 +721,32 @@ class Project(ToStringMixin):
             context_lines_before=context_lines_before,
             context_lines_after=context_lines_after,
             source_file_path=relative_file_path,
+        )
+
+    def verify_language_servers_configured(self) -> None:
+        """
+        Verifies that the project is configured for at least one language server, unless its tree contains no recognised
+        source file (as determined by :func:`compute_language_server_support_composition` for its default languages).
+
+        :raises UnconfiguredLanguageServersError: if the project is configured for no language server while its tree
+            contains recognised source files
+        """
+        self.project_config.await_asynchronous_completion()
+        if self.project_config.language_servers:
+            return
+
+        # the languages of the recognised source files, the most frequent first
+        composition = compute_language_server_support_composition(self.project_root)
+        if not composition:
+            return
+        detected_keys = [ls_id.get_key() for ls_id, _ in sorted(composition.items(), key=lambda item: item[1], reverse=True)]
+
+        project_yml_path = self.serena_config.get_project_yml_location(self.project_root)
+        raise UnconfiguredLanguageServersError(
+            f"Cannot activate project '{self.project_name}': it is configured for no language server "
+            f"(language_servers: [], legacy key: languages), but its tree contains source files of: {', '.join(detected_keys)}. "
+            f"Every symbolic tool would fail for this project. Set the languages in {project_yml_path}, "
+            f"e.g. language_servers: [{', '.join(detected_keys)}], and activate the project again."
         )
 
     def create_language_server_manager(self, force_recreate: bool = False) -> LanguageServerManager:

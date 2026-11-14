@@ -893,6 +893,22 @@ class RegisteredProject(ToStringMixin):
             self._project_instance = None
             return True
 
+    def reinstate_replaced_instance(self, refused_instance: "Project") -> None:
+        """
+        Reinstates the instance that the given instance was built to replace, together with that instance's configuration,
+        as the memoized instance of this project, so that a refused configuration change leaves the project as it was before.
+        A later :meth:`reload_if_changed` compares the on-disk configuration with the reinstated one.
+
+        :param refused_instance: the memoized instance built from the refused configuration; if it is not the memoized
+            instance or replaces no instance, nothing is reinstated
+        """
+        with self._instance_lock:
+            replaced_instance = refused_instance.replaced_project
+            if self._project_instance is not refused_instance or replaced_instance is None:
+                return
+            self._project_instance = replaced_instance
+            self.project_config = replaced_instance.project_config
+
 
 @dataclass(kw_only=True)
 class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
