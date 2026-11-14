@@ -1,3 +1,4 @@
+import re
 import threading
 import time
 from pathlib import Path
@@ -6,10 +7,14 @@ import pytest
 
 from serena.config.serena_config import DEFAULT_TOOL_TIMEOUT
 from serena.util import text_utils
-from serena.util.text_utils import search_files
+from serena.util.text_utils import search_files, search_text
 
 # the pattern whose match stalled the whole daemon on 2026-11-13 (bug://serena/cursor/grep/regex/backtracking/daemon/stall)
 STALLING_PATTERN = r"for p in .*:\n(.*\n){0,12}?.*content\(name\)"
+
+# the stalling pattern's single-line form, and a line on which one match attempt runs far past a fraction of a second
+STALLING_LINE_PATTERN = r"for p in .*:(.*;){0,12}?.*content\(name\)"
+STALLING_LINE = "".join(f"for p in items_{i}: value = p.name; total += value; " for i in range(16))
 
 
 class _Ticker:
@@ -56,7 +61,8 @@ class TestRegexBudget:
         assert isinstance(refusal.value, text_utils.PatternTimeoutError)
         assert refusal.value.pattern == STALLING_PATTERN
         assert STALLING_PATTERN in str(refusal.value)
-        assert elapsed < DEFAULT_TOOL_TIMEOUT
+        # the regex engine notices an expired budget only between steps of its search, so the refusal lags the budget
+        assert elapsed < DEFAULT_TOOL_TIMEOUT / 4
         # a thread starved of the interpreter for the whole search would not have ticked at all
         assert ticker.ticks >= 0.25 * elapsed / _Ticker.INTERVAL_SECONDS
 
@@ -74,6 +80,15 @@ class TestRegexBudget:
 
         assert [line.line_number for match in matches for line in match.matched_lines] == [1, 2]
 
+    def test_a_compiled_pattern_is_matched_with_its_own_flags(self) -> None:
+        content = "un chat\nthé CAT\nthe CAT"
+
+        ascii_matches = search_text(re.compile(r"\w+ cat", re.IGNORECASE | re.ASCII), content=content)
+        unicode_matches = search_text(re.compile(r"\w+ cat", re.IGNORECASE), content=content)
+
+        assert [match.start_line for match in ascii_matches] == [2]
+        assert [match.start_line for match in unicode_matches] == [1, 2]
+
 
 class TestBoundedPattern:
     def test_matches_found_within_the_budget_are_returned_in_order(self) -> None:
@@ -81,30 +96,52 @@ class TestBoundedPattern:
 
         assert [match.group() for match in pattern.finditer("x-xx-xxx")] == ["x", "xx", "xxx"]
 
-    def test_matches_still_sought_once_the_budget_is_spent_are_refused(self) -> None:
-        pattern = text_utils.BoundedPattern("x", budget_seconds=0.05)
-        matches = pattern.finditer("xxx")
-
-        next(matches)
-        time.sleep(0.1)
+    def test_a_match_attempt_past_the_budget_is_refused_naming_the_pattern_as_sent(self) -> None:
+        pattern = text_utils.BoundedPattern(STALLING_LINE_PATTERN, budget_seconds=0.2, sent_pattern="for p in *content(name)")
 
         with pytest.raises(text_utils.PatternTimeoutError) as refusal:
-            next(matches)
-        assert refusal.value.pattern == "x"
-        assert refusal.value.budget_seconds == 0.05
+            list(pattern.finditer(STALLING_LINE))
+        assert refusal.value.pattern == "for p in *content(name)"
+        assert refusal.value.budget_seconds == 0.2
 
     def test_the_lines_containing_a_match_are_returned(self) -> None:
         pattern = text_utils.BoundedPattern("b")
 
         assert pattern.matching_line_indices(["a", "b", "ab", "c"]) == [1, 2]
 
-    def test_lines_left_to_match_once_the_budget_is_spent_are_refused(self) -> None:
-        pattern = text_utils.BoundedPattern("b", budget_seconds=0)
+    def test_a_line_whose_match_attempt_passes_the_budget_is_refused(self) -> None:
+        pattern = text_utils.BoundedPattern(STALLING_LINE_PATTERN, budget_seconds=0.2)
 
         with pytest.raises(text_utils.PatternTimeoutError) as refusal:
-            pattern.matching_line_indices(["a", "b"])
-        assert refusal.value.pattern == "b"
+            pattern.matching_line_indices(["for p in items: print(content(name))", STALLING_LINE])
+        assert refusal.value.pattern == STALLING_LINE_PATTERN
+
+    def test_a_text_pattern_is_matched_with_the_given_flags(self) -> None:
+        pattern = text_utils.BoundedPattern("^b.", re.MULTILINE | re.DOTALL)
+
+        assert [match.group() for match in pattern.finditer("a\nb\nc")] == ["b\n"]
+
+    def test_a_compiled_pattern_keeps_its_flags(self) -> None:
+        pattern = text_utils.BoundedPattern(re.compile(r"a b  # spaced", re.VERBOSE | re.IGNORECASE))
+
+        assert [match.group() for match in pattern.finditer("xAB ab")] == ["AB", "ab"]
+
+    def test_an_ascii_flag_confines_word_characters_to_ascii(self) -> None:
+        ascii_pattern = text_utils.BoundedPattern(re.compile(r"\w+", re.ASCII))
+        unicode_pattern = text_utils.BoundedPattern(re.compile(r"\w+"))
+
+        assert [match.group() for match in ascii_pattern.finditer("thé")] == ["th"]
+        assert [match.group() for match in unicode_pattern.finditer("thé")] == ["thé"]
 
     def test_an_invalid_pattern_is_refused_naming_it(self) -> None:
         with pytest.raises(ValueError, match=r"Invalid regular expression 'a\(b'"):
             text_utils.BoundedPattern("a(b")
+
+
+class TestPatternTimeoutError:
+    def test_the_refusal_names_the_pattern_and_the_budget(self) -> None:
+        refusal = text_utils.PatternTimeoutError("a.*b", 2.5)
+
+        assert (refusal.pattern, refusal.budget_seconds) == ("a.*b", 2.5)
+        assert "'a.*b'" in str(refusal)
+        assert "2.5 s" in str(refusal)
