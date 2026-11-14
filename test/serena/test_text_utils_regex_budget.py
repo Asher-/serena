@@ -12,7 +12,7 @@ from serena.util.text_utils import search_files, search_text
 # the pattern whose match stalled the whole daemon on 2026-11-13 (bug://serena/cursor/grep/regex/backtracking/daemon/stall)
 STALLING_PATTERN = r"for p in .*:\n(.*\n){0,12}?.*content\(name\)"
 
-# the stalling pattern's single-line form, and a line on which one match attempt runs far past a fraction of a second
+# the stalling pattern's single-line form, and a line whose matching runs far past a fraction of a second
 STALLING_LINE_PATTERN = r"for p in .*:(.*;){0,12}?.*content\(name\)"
 STALLING_LINE = "".join(f"for p in items_{i}: value = p.name; total += value; " for i in range(16))
 
@@ -61,10 +61,19 @@ class TestRegexBudget:
         assert isinstance(refusal.value, text_utils.PatternTimeoutError)
         assert refusal.value.pattern == STALLING_PATTERN
         assert STALLING_PATTERN in str(refusal.value)
-        # the regex engine notices an expired budget only between steps of its search, so the refusal lags the budget
+        # the refusal can arrive seconds after the budget expires (up to about 15 s was observed under load)
         assert elapsed < DEFAULT_TOOL_TIMEOUT / 4
         # a thread starved of the interpreter for the whole search would not have ticked at all
         assert ticker.ticks >= 0.25 * elapsed / _Ticker.INTERVAL_SECONDS
+
+    def test_a_glob_past_the_budget_is_refused_naming_the_glob_as_sent(self) -> None:
+        # a glob whose translated regex searches a long line in about quadratic time, finding no match
+        glob = "?*" * 13 + "c"
+
+        with pytest.raises(text_utils.PatternTimeoutError) as refusal:
+            search_text(glob, content="c" + "a" * 50_000, is_glob=True)
+
+        assert refusal.value.pattern == glob
 
     def test_the_stalling_pattern_still_finds_its_match(self, tmp_path: Path) -> None:
         (tmp_path / "loop.py").write_text("for p in items:\n    name = p.name\n    print(content(name))\n")
@@ -96,7 +105,7 @@ class TestBoundedPattern:
 
         assert [match.group() for match in pattern.finditer("x-xx-xxx")] == ["x", "xx", "xxx"]
 
-    def test_a_match_attempt_past_the_budget_is_refused_naming_the_pattern_as_sent(self) -> None:
+    def test_matching_past_the_budget_is_refused_naming_the_pattern_as_sent(self) -> None:
         pattern = text_utils.BoundedPattern(STALLING_LINE_PATTERN, budget_seconds=0.2, sent_pattern="for p in *content(name)")
 
         with pytest.raises(text_utils.PatternTimeoutError) as refusal:
@@ -104,12 +113,27 @@ class TestBoundedPattern:
         assert refusal.value.pattern == "for p in *content(name)"
         assert refusal.value.budget_seconds == 0.2
 
+    def test_time_between_matches_is_not_charged_to_the_budget(self) -> None:
+        pattern = text_utils.BoundedPattern("x", budget_seconds=0.05)
+        matches = pattern.finditer("xxx")
+
+        first = next(matches)
+        time.sleep(0.1)
+
+        assert [first.group()] + [match.group() for match in matches] == ["x", "x", "x"]
+
+    def test_matching_time_summed_over_many_fast_matches_is_charged_to_the_budget(self) -> None:
+        pattern = text_utils.BoundedPattern("x", budget_seconds=0.05)
+
+        with pytest.raises(text_utils.PatternTimeoutError):
+            sum(1 for _ in pattern.finditer("x" * 2_000_000))
+
     def test_the_lines_containing_a_match_are_returned(self) -> None:
         pattern = text_utils.BoundedPattern("b")
 
         assert pattern.matching_line_indices(["a", "b", "ab", "c"]) == [1, 2]
 
-    def test_a_line_whose_match_attempt_passes_the_budget_is_refused(self) -> None:
+    def test_a_line_whose_matching_passes_the_budget_is_refused(self) -> None:
         pattern = text_utils.BoundedPattern(STALLING_LINE_PATTERN, budget_seconds=0.2)
 
         with pytest.raises(text_utils.PatternTimeoutError) as refusal:

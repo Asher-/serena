@@ -180,33 +180,34 @@ def glob_to_regex(glob_pat: str) -> str:
 
 class PatternTimeoutError(ValueError):
     """
-    The refusal of a search in which one match attempt of its regular expression did not finish within the time budget.
+    The refusal of a search whose regular expression did not finish matching one text within the time budget.
 
     :ivar pattern: the pattern exactly as the caller sent it.
-    :ivar budget_seconds: the time, in seconds, one match attempt was allowed.
+    :ivar budget_seconds: the regex engine's time, in seconds, matching one text was allowed.
     """
 
     def __init__(self, pattern: str, budget_seconds: float) -> None:
         self.pattern = pattern
         self.budget_seconds = budget_seconds
         super().__init__(
-            f"the pattern '{pattern}' did not finish a match attempt within its budget of {budget_seconds:g} s: "
+            f"the pattern '{pattern}' did not finish matching one text within its budget of {budget_seconds:g} s: "
             "it backtracks too much on this text; bound its repetitions or replace '.*' with a narrower class"
         )
 
 
 class BoundedPattern:
     """
-    A regular expression whose matching lets the process's other threads run and whose every match attempt ends
+    A regular expression whose matching lets the process's other threads run and whose matching of one text ends
     after a time budget.
 
     The pattern is read by the :mod:`regex` engine's version-0 syntax, which agrees with :mod:`re` except that it
-    reads POSIX character classes (``[[:alpha:]]``) and fuzzy-matching constraints (``{e<=1}``) as such. A match
-    attempt that exceeds the budget is abandoned with :class:`PatternTimeoutError`.
+    reads POSIX character classes (``[[:alpha:]]``) and fuzzy-matching constraints (``{e<=1}``) as such. The budget
+    bounds the time the engine spends matching one text, summed over all its matches and excluding the time between
+    them; matching that exceeds it is abandoned with :class:`PatternTimeoutError`.
     """
 
     DEFAULT_BUDGET_SECONDS: float = 5.0
-    """the default time one match attempt may take"""
+    """the default time the engine may spend matching one text"""
 
     _FLAG_TRANSLATION: tuple[tuple[re.RegexFlag, int], ...] = (
         (re.IGNORECASE, regex.IGNORECASE),
@@ -226,7 +227,7 @@ class BoundedPattern:
         """
         :param pattern: the regular expression, as text or compiled with :mod:`re`, whose flags are then kept
         :param flags: the :mod:`re` flags to apply in addition to the pattern's own
-        :param budget_seconds: the time, in seconds, one match attempt may take
+        :param budget_seconds: the time, in seconds, the engine may spend matching one text
         :param sent_pattern: the pattern as the caller sent it, when ``pattern`` was derived from it (e.g. from a glob);
             None when ``pattern`` is what was sent. Refusals name it.
         :raises ValueError: if the pattern is not a valid regular expression
@@ -260,7 +261,7 @@ class BoundedPattern:
         :param text: the text to match
         :return: the non-overlapping matches in ``text``, left to right, as :mod:`regex` match objects (which offer
             the interface of :class:`re.Match`)
-        :raises PatternTimeoutError: if one match attempt exceeds the budget
+        :raises PatternTimeoutError: if matching ``text`` exceeds the budget
         """
         try:
             yield from self._compiled.finditer(text, concurrent=True, timeout=self._budget_seconds)
@@ -271,7 +272,7 @@ class BoundedPattern:
         """
         :param lines: the lines to match, each on its own
         :return: the indices of the lines containing a match, ascending
-        :raises PatternTimeoutError: if the match attempt on one line exceeds the budget
+        :raises PatternTimeoutError: if matching one line exceeds the budget
         """
         try:
             return [index for index, line in enumerate(lines) if self._compiled.search(line, concurrent=True, timeout=self._budget_seconds)]
@@ -315,7 +316,8 @@ def search_text(
 
     :return: List of `TextSearchMatch` objects
     :raises: ValueError if the pattern is not valid
-    :raises PatternTimeoutError: if one match attempt in ``content`` exceeds the pattern's time budget
+    :raises PatternTimeoutError: if matching ``content``, or one of its lines in line-by-line matching, exceeds the
+        pattern's time budget
     """
     # read the file when only the path was supplied
     if source_file_path and content is None:
@@ -643,7 +645,7 @@ def search_files(
     :param file_reader: the function reading a file of ``relative_file_paths``; a file it cannot read is skipped
     :return: list of MatchedConsecutiveLines objects
     :raises ValueError: if the pattern is not a valid regular expression
-    :raises PatternTimeoutError: if one match attempt in any file exceeds the pattern's time budget
+    :raises PatternTimeoutError: if matching any one file exceeds the pattern's time budget
     """
     if file_collection is None:
         file_collection = FileCollection([_ReadFileProxy(path, root_path, file_reader) for path in relative_file_paths or []])
