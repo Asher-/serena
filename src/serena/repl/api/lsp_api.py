@@ -434,6 +434,9 @@ class LspApi(FacadeApi):
         if os.path.isdir(file_path):
             raise ValueError(f"Expected a file path, but got a directory path: {relative_path}. ")
         if not symbol_retriever.can_analyze_file(relative_path):
+            unavailability = symbol_retriever.get_unavailability_of_file(relative_path)
+            if unavailability is not None:
+                raise unavailability
             raise ValueError(
                 f"Cannot extract symbols from file {relative_path}. "
                 f"Active language servers: {[l.get_key() for l in self._agent.get_active_language_server_ids()]}"

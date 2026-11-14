@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from serena.ls_manager import LanguageUnavailableError
 from serena.project import Project
 from serena.symbol import LanguageServerSymbol, LanguageServerSymbolLocation, LanguageServerSymbolRetriever
 from serena.util.file_lifecycle import AtomicFileWriter, WritePrecondition
@@ -1786,6 +1787,18 @@ class CursorManager:
         if self._structural_registry.structural_backend_for(relative_path) is not None:
             return ReadRung.STRUCTURAL
         return ReadRung.PLAINTEXT
+
+    def get_unavailability_of_file(
+        self, relative_path: str, retriever: LanguageServerSymbolRetriever | None = None
+    ) -> LanguageUnavailableError | None:
+        """
+        :param relative_path: project-relative path of a file.
+        :param retriever: optional retriever to reuse; defaults to a fresh :attr:`_retriever`.
+        :return: the error naming the unavailable language whose source file this is, with its startup failure as
+            cause, if no running language server serves the file; None otherwise.
+        """
+        retriever = retriever if retriever is not None else self._retriever
+        return retriever.get_unavailability_of_file(relative_path)
 
     def structural_overview(self, relative_path: str) -> list[tuple[str, KindName]]:
         """Return the file's TOP-LEVEL structural nodes as ``(name_path, kind)``.

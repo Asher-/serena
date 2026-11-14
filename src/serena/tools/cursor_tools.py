@@ -690,6 +690,20 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoot):
         # the walk enters no symbolic link to a directory; name each one so the agent knows what was not searched
         links_note = f"Symbolic links to directories not entered: {', '.join(skipped_links)}." if skipped_links else ""
 
+        # a file whose language server is unavailable has its hits on non-symbol lines; name each such language
+        unavailable: dict[str, str] = {}
+        for rel_path, _hits in unsymboled:
+            unavailability = manager.get_unavailability_of_file(rel_path)
+            if unavailability is not None and unavailability.language is not None:
+                unavailable[unavailability.language.get_key()] = str(unavailability.cause)
+        unavailable_note = (
+            "Language servers unavailable, so hits in their files are shown on non-symbol lines: "
+            + "; ".join(f"{language}: {cause}" for language, cause in unavailable.items())
+            + "."
+            if unavailable
+            else ""
+        )
+
         # no hits at all -- clean message rather than an empty header; the pattern is shown exactly as sent
         if not groups and not unsymboled:
             return f"why: {because}\n\nNo matches for '{substring_pattern}'." + (f" {links_note}" if links_note else "")
@@ -719,6 +733,8 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoot):
         ]
         if links_note:
             header_parts.append(links_note)
+        if unavailable_note:
+            header_parts.append(unavailable_note)
         lines: list[str] = [f"why: {because}", "", " ".join(header_parts), ""]
 
         # per-cursor anchor + indented hit blocks
@@ -1617,6 +1633,12 @@ class CursorOverviewTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoo
 
         manager = self.agent.get_cursor_manager()
         rung = manager.resolve_read_rung(relative_path)
+
+        # a file whose language server is unavailable is read on a lower rung, and the answer says why
+        if rung is not ReadRung.LSP:
+            unavailability = manager.get_unavailability_of_file(relative_path)
+            if unavailability is not None:
+                why = f"{why}\n{unavailability} Showing the {rung.value} view."
 
         # Rung 1 -- LSP: the language server's top-level symbols (unchanged).
         if rung is ReadRung.LSP:

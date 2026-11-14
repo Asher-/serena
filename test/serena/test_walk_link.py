@@ -88,6 +88,9 @@ class _NoLanguageServerManager:
     def has_suitable_ls_for_file(self, relative_file_path: str) -> bool:
         return False
 
+    def get_unavailability_of_file(self, relative_file_path: str) -> None:
+        return None
+
 
 class _CursorAgentStub(_AgentStub):
     """the agent surface :class:`CursorGrepTool` reads: a cursor manager over the project, and the answer bound."""

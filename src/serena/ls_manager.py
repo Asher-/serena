@@ -246,24 +246,26 @@ class LanguageServerManager:
                 return candidate
         return None
 
-    def _raise_if_language_of_file_unavailable(self, relative_path: str) -> None:
+    def get_unavailability_of_file(self, relative_path: str) -> LanguageUnavailableError | None:
         """
         :param relative_path: relative path to a file
-        :raises LanguageUnavailableError: if the file is a source file of a language whose server is unavailable
-            and no running server serves the file
+        :return: the error naming the unavailable language whose source file this is, with its startup failure as
+            cause, if no running server serves the file; None if the file belongs to no unavailable language or a
+            running server serves it
         """
         unavailable = dict(self._unavailable_languages)
         for language, cause in unavailable.items():
             if not language.get_source_fn_matcher().is_relevant_filename(relative_path):
                 continue
             if self._get_suitable_language_server(relative_path) is not None:
-                return
-            raise LanguageUnavailableError(
+                return None
+            return LanguageUnavailableError(
                 f"The language server for {language.get_key()}, the language of {relative_path}, is unavailable: {cause}",
                 language=language,
                 cause=cause,
                 unavailable_languages=unavailable,
             )
+        return None
 
     def get_language_server(self, relative_path: str) -> SolidLanguageServer:
         """
@@ -278,7 +280,9 @@ class LanguageServerManager:
                 raise ValueError(f"Expected a file path, but got a directory: {relative_path}")
             ls = self._get_suitable_language_server(relative_path)
         if ls is None:
-            self._raise_if_language_of_file_unavailable(relative_path)
+            unavailability = self.get_unavailability_of_file(relative_path)
+            if unavailability is not None:
+                raise unavailability
             ls = self._default_language_server
         return self._ensure_functional_ls(ls)
 

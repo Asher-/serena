@@ -730,6 +730,14 @@ class LanguageServerSymbolRetriever:
     def can_analyze_file(self, relative_file_path: str) -> bool:
         return self._ls_manager.has_suitable_ls_for_file(relative_file_path)
 
+    def get_unavailability_of_file(self, relative_file_path: str) -> LanguageUnavailableError | None:
+        """
+        :param relative_file_path: relative path to a file
+        :return: the error naming the unavailable language whose source file this is, if no running server serves it;
+            None otherwise
+        """
+        return self._ls_manager.get_unavailability_of_file(relative_file_path)
+
     def get_language_server(self, relative_path: str) -> SolidLanguageServer:
         """:param relative_path: relative path to a file"""
         return self._ls_manager.get_language_server(relative_path)

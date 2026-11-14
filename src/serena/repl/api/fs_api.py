@@ -177,11 +177,14 @@ class EnclosingSymbolHits:
     Group = tuple[str, str | None, str | None]
     """the file, the name path and the kind of a group; the latter two are None for a match outside any symbol"""
 
-    def __init__(self, skipped_links: list[str]) -> None:
+    def __init__(self, skipped_links: list[str], unavailable_languages: dict[str, str]) -> None:
         """
         :param skipped_links: the symbolic links to directories the search did not enter
+        :param unavailable_languages: the languages whose servers are unavailable and whose files hold matches, by key,
+            mapped to their startup failures; those files' matches have no enclosing symbol
         """
         self._skipped_links = skipped_links
+        self._unavailable_languages = unavailable_languages
         self._grouped: dict[EnclosingSymbolHits.Group, list[MatchedConsecutiveLines]] = {}
         self._group_order: list[EnclosingSymbolHits.Group] = []
         self._file_order: list[str] = []
@@ -215,6 +218,9 @@ class EnclosingSymbolHits:
         header = f"Found {n_matches} matches across {n_symbols} symbols in {len(self._file_order)} files."
         if self._skipped_links:
             header += f" Symbolic links to directories not entered: {', '.join(self._skipped_links)}."
+        if self._unavailable_languages:
+            failures = "; ".join(f"{language}: {cause}" for language, cause in self._unavailable_languages.items())
+            header += f" Language servers unavailable, so matches in their files have no enclosing symbol: {failures}."
         return header
 
     @staticmethod
@@ -478,6 +484,7 @@ class FsApi(FacadeApi):
 
         # for each match, ask the LSP for the enclosing symbol
         matches_by_symbol: dict[tuple[str, str | None, str | None], list[MatchedConsecutiveLines]] = {}
+        unavailable_languages: dict[str, str] = {}
         for match in matches:
             assert match.source_file_path is not None
             rel = match.source_file_path
@@ -494,10 +501,14 @@ class FsApi(FacadeApi):
                         kind = sym.symbol_kind_name
                 except Exception:
                     pass
+            elif retriever is not None:
+                unavailability = retriever.get_unavailability_of_file(rel)
+                if unavailability is not None and unavailability.language is not None:
+                    unavailable_languages[unavailability.language.get_key()] = str(unavailability.cause)
             matches_by_symbol.setdefault((rel, name_path, kind), []).append(match)
 
         # one block per symbol region whose match windows share a line
-        hits = EnclosingSymbolHits(skipped_links)
+        hits = EnclosingSymbolHits(skipped_links, unavailable_languages)
         for (rel, name_path, kind), symbol_matches in matches_by_symbol.items():
             for block in MatchedConsecutiveLines.merge_overlapping(symbol_matches):
                 hits.add(rel, name_path, kind, block)
