@@ -533,6 +533,9 @@ class Tool(Component):
                                 "ends up operating on the wrong checkout." + suggestion
                             )
 
+                # refuse a path that no root line could name, before the tool reads or writes it
+                self._refuse_relative_path_outside_root(kwargs)
+
                 # construct apply kwargs, adding session_id if the tool is session-aware
                 apply_kwargs = dict(kwargs)
 
@@ -696,6 +699,25 @@ class Tool(Component):
             # read in the task's context: this thread holds none of the call's bindings, so it could name another project
             return self._with_project_root(timeout.render(), task_exec.run_in_context(self.agent.get_active_project))
         return timeout.render()
+
+    def _refuse_relative_path_outside_root(self, arguments: dict[str, Any]) -> None:
+        """
+        Refuses a call of a tool whose result names the project root when the call's ``relative_path`` lies outside the
+        active project's root: no root line can name a tree that root does not contain. Containment is the project's
+        :meth:`Project.validate_relative_path`.
+
+        :param arguments: the arguments of the call
+        :raises ToolCallError: if the relative path escapes the active project's root
+        """
+        relative_path = arguments.get("relative_path")
+        project = self.agent.get_active_project()
+        if not isinstance(self, ToolMarkerNamesProjectRoot) or not relative_path or project is None:
+            return
+
+        try:
+            project.validate_relative_path(relative_path)
+        except ValueError as e:
+            raise ToolCallError(f"Error: path escapes the project root: {relative_path} lies outside {project.project_root}.") from e
 
     @staticmethod
     def _with_project_root(result: str, project: Project | None) -> str:

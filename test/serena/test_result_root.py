@@ -335,3 +335,59 @@ class TestActivationMovesTheRoot:
         second_view = session.call(CursorOverviewTool, relative_path=_EDITED_FILE, because=_BECAUSE)
 
         assert _root_named_by(second_view) == session.second_root, f"the next view does not name the second root: {second_view}"
+
+
+_ESCAPES = "path escapes the project root"
+"""the words of the refusal a root-naming call is answered with when its path lies outside the active root"""
+
+
+class TestAPathOutsideTheRootIsRefused:
+    """a root-naming call whose path lies outside the active root is refused, naming the root it was refused under"""
+
+    def test_readers_and_a_writer_refuse_an_absolute_path_of_another_tree(self, session: _Session) -> None:
+        """
+        The second project holds the named file while the first is active. No root line can name a tree that the active root
+        does not contain, so each reader and the writer is refused, and the second project's file is left as it was.
+        """
+        session.activate(session.first_root)
+        outside = str(Path(session.second_root, _EDITED_FILE))
+
+        answers = {
+            "cursor_start": session.call(CursorStartTool, name_path="Greeter", relative_path=outside, because=_BECAUSE),
+            "cursor_find": session.call(CursorFindTool, name_path_pattern="Greeter", relative_path=outside, because=_BECAUSE),
+            "cursor_grep": session.call(CursorGrepTool, substring_pattern="hello", relative_path=outside, because=_BECAUSE),
+            "cursor_overview": session.call(CursorOverviewTool, relative_path=outside, because=_BECAUSE),
+            "cursor_replace_range_verified": session.call(
+                CursorReplaceRangeVerifiedTool,
+                relative_path=outside,
+                start_line=3,
+                end_line=3,
+                expected_content=_REPLACED_LINE,
+                body="        return 'replaced'",
+                expect_version="*",
+            ),
+        }
+
+        for tool_name, answer in answers.items():
+            assert _ESCAPES in answer, f"{tool_name} did not refuse a path outside the active root: {answer}"
+            assert session.first_root in answer, f"the refusal of {tool_name} does not name the active root: {answer}"
+        assert Path(session.second_root, _EDITED_FILE).read_text(encoding="utf-8") == _SOURCE, "a write landed in the other tree"
+
+    def test_a_path_climbing_out_of_the_root_is_refused(self, session: _Session) -> None:
+        """A relative path whose '..' segments leave the active root reaches another tree, and is refused as an absolute one is."""
+        session.activate(session.first_root)
+        climbing = f"../{Path(session.second_root).name}/{_EDITED_FILE}"
+
+        answer = session.call(CursorOverviewTool, relative_path=climbing, because=_BECAUSE)
+
+        assert _ESCAPES in answer, f"a path climbing out of the active root was not refused: {answer}"
+
+    def test_an_absolute_path_inside_the_root_is_answered_under_that_root(self, session: _Session) -> None:
+        """An absolute path is admitted when the active root contains it, and the view names that root."""
+        session.activate(session.first_root)
+        inside = str(Path(session.first_root, _EDITED_FILE))
+
+        view = session.call(CursorOverviewTool, relative_path=inside, because=_BECAUSE)
+
+        assert "Greeter" in view, f"the file inside the active root was not read: {view}"
+        assert _root_named_by(view) == session.first_root, f"the view does not name the active root: {view}"
