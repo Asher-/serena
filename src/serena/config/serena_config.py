@@ -943,6 +943,11 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
     """
     timeout for tool calls in seconds; if a tool takes longer than this, it is aborted and an error is returned.
     """
+    language_server_idle_timeout: float = 1800.0
+    """
+    seconds without a tool call on a project after which its language servers are stopped; they restart on the next call
+    that needs them. A value of 0 or less stops no language server for idleness.
+    """
 
     token_count_estimator: str = RegisteredTokenCountEstimator.CHAR_COUNT.name
     """Only relevant if `record_tool_usage` is True; the name of the token count estimator to use for tool usage statistics.

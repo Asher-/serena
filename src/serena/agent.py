@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import weakref
 from collections import defaultdict
 from collections.abc import Callable, Iterator, Sequence
@@ -152,6 +153,110 @@ class _CallHold:
         :param project: the project the call holds, or None while its session holds none
         """
         self.project = project
+
+
+class _LanguageServerIdleStop:
+    """
+    The stop of the language servers of each project a session holds on which no tool call has run for the idle timeout
+    and no call is in flight. The project keeps its language server manager and its sessions keep holding it, so the next
+    call that asks the manager for a server gets that server restarted.
+    """
+
+    def __init__(self, agent: "SerenaAgent", idle_timeout: float) -> None:
+        """
+        :param agent: the agent whose held projects are watched
+        :param idle_timeout: the seconds without a tool call after which a project's language servers are stopped; a value
+            of 0 or less stops none
+        """
+        self._agent = agent
+        self._idle_timeout = idle_timeout
+        self._lock = threading.Lock()
+        # the monotonic time each watched project instance was last in use, keyed by the instance's identity
+        self._last_use: dict[int, float] = {}
+        # the identities of the watched projects whose servers were stopped since their last use
+        self._stopped: set[int] = set()
+        self._shutdown = threading.Event()
+        self._thread: threading.Thread | None = None
+        if idle_timeout > 0:
+            self._thread = threading.Thread(target=self._run, name="LanguageServerIdleStop", daemon=True)
+            self._thread.start()
+
+    def record_use(self, project: Project) -> None:
+        """
+        Records that a project is in use now: a session bound it, or a tool call on it ended.
+
+        :param project: the project in use
+        """
+        with self._lock:
+            self._last_use[id(project)] = time.monotonic()
+            self._stopped.discard(id(project))
+
+    def shutdown(self) -> None:
+        """
+        Ends the thread that stops idle projects' language servers.
+        """
+        self._shutdown.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+
+    def _run(self) -> None:
+        interval = min(60.0, self._idle_timeout / 4)
+        while not self._shutdown.wait(interval):
+            try:
+                for project in self._idle_projects(time.monotonic()):
+                    self._stop(project)
+            except Exception as exception:
+                log.error(f"Error stopping the language servers of idle projects: {exception}", exc_info=exception)
+
+    def _idle_projects(self, now: float) -> list[Project]:
+        """
+        :param now: the current monotonic time
+        :return: the projects a session's slot or the legacy slot holds, on which no tool call is in flight, whose servers
+            have not been stopped since their last use, and whose last use was at least the idle timeout before ``now``
+        """
+        agent = self._agent
+
+        # the projects held by a slot, each once, and those a call in flight holds
+        with agent._project_holders_lock:
+            held: dict[int, Project] = {}
+            for project in [*agent._active_projects_by_session.values(), agent._legacy_active_project]:
+                if project is not None:
+                    held[id(project)] = project
+            in_flight = {id(call_hold.project) for call_hold in agent._projects_held_by_calls if call_hold.project is not None}
+
+        # the held projects idle for the timeout, forgetting those no slot holds any longer
+        idle: list[Project] = []
+        with self._lock:
+            for key in [key for key in self._last_use if key not in held]:
+                del self._last_use[key]
+            self._stopped &= held.keys()
+            for key, project in held.items():
+                last_use = self._last_use.setdefault(key, now)
+                if key not in in_flight and key not in self._stopped and now - last_use >= self._idle_timeout:
+                    idle.append(project)
+        return idle
+
+    def _stop(self, project: Project) -> None:
+        """
+        Stops the language servers of an idle project, unless a tool call took it up in the meantime, leaving its language
+        server manager attached.
+
+        :param project: the idle project
+        """
+        agent = self._agent
+        with project.language_server_manager_lock():
+            with agent._project_holders_lock:
+                if any(call_hold.project is project for call_hold in agent._projects_held_by_calls):
+                    return
+                manager = project.language_server_manager
+            if manager is not None:
+                log.info(f"No tool call has used project '{project.project_name}' for {self._idle_timeout:g} s; stopping its language servers ...")
+                try:
+                    manager.stop_all(save_cache=True)
+                except Exception as exception:
+                    log.warning(f"Error stopping the language servers of project '{project.project_name}': {exception}", exc_info=exception)
+        with self._lock:
+            self._stopped.add(id(project))
 
 
 class ProjectNotFoundError(Exception):
@@ -796,6 +901,7 @@ class SerenaAgent:
 
         # obtain serena configuration using the decoupled factory function
         self.serena_config = serena_config or SerenaConfig.from_config_file()
+        self._language_server_idle_stop = _LanguageServerIdleStop(self, self.serena_config.language_server_idle_timeout)
 
         # propagate configuration to other components
         self.serena_config.propagate_settings()
@@ -1366,6 +1472,7 @@ class SerenaAgent:
                     self._active_projects_by_session.pop(session_key, None)
                 else:
                     self._active_projects_by_session[session_key] = project
+                    self._language_server_idle_stop.record_use(project)
             else:
                 self._legacy_active_project = project
             # the calling tool call holds the project it binds, not the one it held before, so it cannot keep the latter
@@ -1454,6 +1561,8 @@ class SerenaAgent:
                     break
             project = call_hold.project
             release = project is not None and not self._is_project_held(project)
+        if project is not None:
+            self._language_server_idle_stop.record_use(project)
         if release:
             self._release_project_if_unheld(project)
 
@@ -2682,6 +2791,7 @@ class SerenaAgent:
         slot), deduplicating in case multiple sessions share the same Project instance.
         """
         log.info("SerenaAgent is shutting down ...")
+        self._language_server_idle_stop.shutdown()
         # apply shutdown depending on allocated resources, handling quick ones first (dashboard manager & GUI viewer)
         if self._gui_log_viewer:
             log.info("Stopping the GUI log window ...")
