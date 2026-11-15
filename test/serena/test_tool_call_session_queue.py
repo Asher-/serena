@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import errno
+import os
+import signal
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -897,3 +899,25 @@ def test_a_call_failing_with_another_os_error_is_answered_as_before_and_leaves_t
 
     assert result == f"Error executing tool: OSError - {raised}"
     assert shutdown.calls == 0
+
+
+def test_a_call_failing_for_want_of_file_descriptors_tears_down_held_projects_and_signals_the_daemon_to_end(
+    agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """
+    A call whose tool fails with descriptor exhaustion runs the agent's real shutdown: every project a session holds is
+    shut down, and the daemon's own process is sent SIGTERM, so its supervisor starts a fresh one.
+    """
+    agent.serena_config.tool_timeout = 10.0
+    project = _bind_project(agent, "session-a", tmp_path)
+    shutdown_timeouts: list[float] = []
+    monkeypatch.setattr(project, "shutdown", lambda timeout=2.0: shutdown_timeouts.append(timeout))
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "kill", lambda pid, sig: signals.append((pid, sig)))
+    probe = _activated(_RaisingProbeTool(agent, OSError(errno.EMFILE, "Too many open files")), monkeypatch)
+
+    result = probe.apply_ex()
+
+    assert "ran out of file descriptors" in result, result
+    assert len(shutdown_timeouts) == 1
+    assert signals == [(os.getpid(), signal.SIGTERM)]

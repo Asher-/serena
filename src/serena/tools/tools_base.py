@@ -2,6 +2,7 @@
 
 import asyncio
 import contextvars
+import errno
 import inspect
 import json
 from abc import ABC
@@ -341,6 +342,24 @@ class Tool(Component):
         """
         return {}
 
+    @staticmethod
+    def _is_descriptor_exhaustion(exception: BaseException) -> bool:
+        """
+        Whether a failure stems from the process or the system running out of file descriptors.
+
+        :param exception: the exception a tool call failed with
+        :return: whether the exception, or any exception in its chain of causes and contexts, is an OS error with
+            errno EMFILE or ENFILE
+        """
+        visited: set[int] = set()
+        current: BaseException | None = exception
+        while current is not None and id(current) not in visited:
+            if isinstance(current, OSError) and current.errno in (errno.EMFILE, errno.ENFILE):
+                return True
+            visited.add(id(current))
+            current = current.__cause__ if current.__cause__ is not None else current.__context__
+        return False
+
     def _issue_call(self, log_call: bool, catch_exceptions: bool, mcp_ctx: Context | None, **kwargs) -> "TaskExecutor.Task[str]":  # type: ignore
         """
         Issues a call of the tool, with logging and exception handling, as a task on the executor of the calling session.
@@ -567,11 +586,20 @@ class Tool(Component):
                 if not catch_exceptions:
                     raise
                 return str(e)
-            except Exception as e:
+            except Exception as exception:
+                # a daemon out of file descriptors fails every call it answers; ending it lets its supervisor start a
+                # fresh one
+                if self._is_descriptor_exhaustion(exception):
+                    log.critical(f"Serena ran out of file descriptors while executing tool: {exception}", exc_info=exception)
+                    self.agent.shutdown()
+                    if not catch_exceptions:
+                        raise
+                    return "Error: serena ran out of file descriptors and is restarting; retry the call once it is back."
+
                 if not catch_exceptions:
                     raise
-                msg = f"Error executing tool: {e.__class__.__name__} - {e}"
-                log.error(f"Error executing tool: {e}", exc_info=e)
+                msg = f"Error executing tool: {exception.__class__.__name__} - {exception}"
+                log.error(f"Error executing tool: {exception}", exc_info=exception)
                 result = msg
 
             if isinstance(self, ToolMarkerNamesProjectRoot):
