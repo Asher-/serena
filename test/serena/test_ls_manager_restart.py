@@ -204,6 +204,21 @@ class TestStopAllStartsNoServer:
         running.stop.assert_called_once()
         stopped.stop.assert_called_once()
 
+    def test_stop_all_whose_cache_save_raises_still_stops_that_server_and_raises(self) -> None:
+        # the held server's cache save raises
+        factory = _GatedLanguageServerFactory()
+        manager = _python_manager(factory)
+        held = factory.created[0]
+        failure = OSError(24, "Too many open files")
+        held.save_cache.side_effect = failure
+
+        with pytest.raises(OSError) as raised:
+            manager.stop_all(save_cache=True)
+
+        # the server was stopped all the same, and the failure was raised
+        held.stop.assert_called_once()
+        assert raised.value is failure
+
     def test_save_all_caches_of_a_server_found_not_running_starts_no_replacement(self) -> None:
         # the held server reports not running
         factory = _GatedLanguageServerFactory()

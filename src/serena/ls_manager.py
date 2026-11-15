@@ -402,9 +402,16 @@ class LanguageServerManager:
         """
         failure: Exception | None = None
         for ls in list(self._language_servers.values()):
+            # a cache save that fails does not keep the server from being stopped
+            if save_cache:
+                try:
+                    if ls.is_running():
+                        ls.save_cache()
+                except Exception as e:
+                    log.error(f"Failed to save the cache of the language server for language {ls.ls_id}: {e}", exc_info=e)
+                    if failure is None:
+                        failure = e
             try:
-                if save_cache and ls.is_running():
-                    ls.save_cache()
                 log.info(f"Stopping language server for language {ls.ls_id} ...")
                 ls.stop(shutdown_timeout=timeout)
             except Exception as e:

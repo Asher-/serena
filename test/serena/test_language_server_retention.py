@@ -21,8 +21,9 @@ import pytest
 from serena.agent import _SESSION_KEY_VAR, SerenaAgent
 from serena.config.serena_config import ProjectConfig, SerenaConfig
 from serena.language_backend import BuiltinLanguageBackend
-from serena.ls_manager import LanguageServerManager
+from serena.ls_manager import LanguageServerFactory, LanguageServerManager
 from serena.project import Project
+from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
 
 _GATE_TIMEOUT = 10.0
@@ -187,3 +188,41 @@ class TestBackgroundReleaseOfAProject:
             agent._release_project_if_unheld_in_background(None)
 
         thread_cls.assert_not_called()
+
+
+class _CountingLanguageServerFactory(LanguageServerFactory):
+    """A factory double that records each server it creates; each server is a mock that reports running."""
+
+    def __init__(self) -> None:
+        # the base constructor is deliberately not invoked: it validates paths, which a mock server never reads
+        self.created: list[MagicMock] = []
+
+    def create_language_server(self, language: LanguageServerId) -> SolidLanguageServer:  # type: ignore[override]
+        server = MagicMock(spec=SolidLanguageServer)
+        server.ls_id = language
+        server.is_running.return_value = True
+        self.created.append(server)
+        return server
+
+
+def test_a_project_left_by_its_only_session_has_every_server_of_its_real_manager_stopped(
+    agent: SerenaAgent, project_a: _HeldProject, project_b: _HeldProject
+) -> None:
+    """
+    The release of a project no session holds stops it through its real language-server manager: a server found not
+    running is stopped and not replaced, and a server whose cache save fails is stopped all the same.
+    """
+    factory = _CountingLanguageServerFactory()
+    manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON, LanguageServerId.TYPESCRIPT], factory, project=None)
+    dead, failing = factory.created
+    dead.is_running.return_value = False
+    failing.save_cache.side_effect = OSError(24, "Too many open files")
+    project_a.project.language_server_manager = manager
+    _activate(agent, "session-1", project_a)
+
+    # session 1, the only session holding A, moves to B
+    _activate(agent, "session-1", project_b)
+
+    assert factory.created == [dead, failing]
+    dead.stop.assert_called_once()
+    failing.stop.assert_called_once()

@@ -23,8 +23,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from serena.agent import _SESSION_KEY_VAR, SerenaAgent
-from serena.ls_manager import LanguageServerFactory, LanguageServerManager
 from serena.config.serena_config import ProjectConfig, SerenaConfig
+from serena.ls_manager import LanguageServerFactory, LanguageServerManager
 from serena.mcp import SerenaMCPFactory
 from serena.project import Project
 from serena.task_executor import TaskExecutor
