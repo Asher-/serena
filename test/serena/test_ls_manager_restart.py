@@ -219,6 +219,22 @@ class TestStopAllStartsNoServer:
         held.stop.assert_called_once()
         assert raised.value is failure
 
+    def test_stop_all_whose_cache_save_and_later_stop_raise_raises_the_stop_failure(self) -> None:
+        # the first held server's cache save raises, and the second server's stop raises
+        factory = _GatedLanguageServerFactory()
+        manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON, LanguageServerId.TYPESCRIPT], factory, project=None)
+        first, second = factory.created
+        first.save_cache.side_effect = OSError(24, "Too many open files")
+        stop_failure = RuntimeError("stop failed")
+        second.stop.side_effect = stop_failure
+
+        with pytest.raises(RuntimeError) as raised:
+            manager.stop_all(save_cache=True)
+
+        # the stop's failure was raised, after both servers' stops were attempted
+        assert raised.value is stop_failure
+        first.stop.assert_called_once()
+
     def test_save_all_caches_of_a_server_found_not_running_starts_no_replacement(self) -> None:
         # the held server reports not running
         factory = _GatedLanguageServerFactory()

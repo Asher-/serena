@@ -395,29 +395,34 @@ class LanguageServerManager:
         """
         Stops every managed language server, running or not, and starts none: a server that is not running is
         stopped as well, so whatever of it is left is released. A stop that raises does not keep the servers after it
-        from being stopped; the first such exception is raised once every server's stop has been attempted.
+        from being stopped; the first such exception is raised once every server's stop has been attempted. A cache
+        save that raises does not keep its server from being stopped; when no stop raised, the first such exception
+        is raised instead.
 
         :param save_cache: whether to save the cache of each running server before stopping it
         :param timeout: timeout for shutdown of each language server
         """
-        failure: Exception | None = None
+        save_failure: Exception | None = None
+        stop_failure: Exception | None = None
         for ls in list(self._language_servers.values()):
-            # a cache save that fails does not keep the server from being stopped
             if save_cache:
                 try:
                     if ls.is_running():
                         ls.save_cache()
-                except Exception as e:
-                    log.error(f"Failed to save the cache of the language server for language {ls.ls_id}: {e}", exc_info=e)
-                    if failure is None:
-                        failure = e
+                except Exception as exception:
+                    log.error(f"Failed to save the cache of the language server for language {ls.ls_id}: {exception}", exc_info=exception)
+                    if save_failure is None:
+                        save_failure = exception
             try:
                 log.info(f"Stopping language server for language {ls.ls_id} ...")
                 ls.stop(shutdown_timeout=timeout)
-            except Exception as e:
-                log.error(f"Failed to stop the language server for language {ls.ls_id}: {e}", exc_info=e)
-                if failure is None:
-                    failure = e
+            except Exception as exception:
+                log.error(f"Failed to stop the language server for language {ls.ls_id}: {exception}", exc_info=exception)
+                if stop_failure is None:
+                    stop_failure = exception
+
+        # a failed stop is reported in preference to a failed cache save
+        failure = stop_failure if stop_failure is not None else save_failure
         if failure is not None:
             raise failure
 
