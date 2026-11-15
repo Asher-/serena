@@ -38,7 +38,7 @@ class _RunningStateLanguageServerFactory(LanguageServerFactory):
     """A factory double that records each server it creates; each server is a mock that runs until it is stopped."""
 
     def __init__(self) -> None:
-        # the base constructor is deliberately not invoked: it validates paths, which a mock server never reads
+        # the base constructor is not invoked: a factory that creates mock servers needs none of its fields
         self.created: list[MagicMock] = []
 
     def create_language_server(self, language: LanguageServerId) -> SolidLanguageServer:  # type: ignore[override]
@@ -46,7 +46,7 @@ class _RunningStateLanguageServerFactory(LanguageServerFactory):
         server.ls_id = language
         server.is_running.return_value = True
         server.is_ignored_path.return_value = False
-        server.stop.side_effect = lambda *args, **kwargs: setattr(server.is_running, "return_value", False)
+        server.stop.side_effect = lambda *arguments, **keyword_arguments: setattr(server.is_running, "return_value", False)
         self.created.append(server)
         return server
 

@@ -175,6 +175,9 @@ class _LanguageServerIdleStop:
         self._last_use: dict[int, float] = {}
         # the identities of the watched projects whose servers were stopped since their last use
         self._stopped: set[int] = set()
+        # the identities of the watched projects whose servers are being stopped; a call taking one up waits on the condition
+        self._stopping: set[int] = set()
+        self._condition = threading.Condition(self._lock)
         self._shutdown = threading.Event()
         self._thread: threading.Thread | None = None
         if idle_timeout > 0:
@@ -236,27 +239,49 @@ class _LanguageServerIdleStop:
                     idle.append(project)
         return idle
 
+    def wait_for_stop(self, project: Project) -> None:
+        """
+        Waits until a stop of the project's language servers that is under way has finished.
+
+        :param project: the project a tool call has just taken up
+        """
+        with self._condition:
+            while id(project) in self._stopping:
+                self._condition.wait()
+
     def _stop(self, project: Project) -> None:
         """
-        Stops the language servers of an idle project, unless a tool call took it up in the meantime, leaving its language
-        server manager attached.
+        Stops the language servers of an idle project, unless a tool call took it up or used it in the meantime, leaving its
+        language server manager attached. A call that takes the project up while the stop is under way waits for it to
+        finish (see :meth:`wait_for_stop`).
 
         :param project: the idle project
         """
         agent = self._agent
+        key = id(project)
         with project.language_server_manager_lock():
+            # the decision, taken under the lock a call takes the project up and records its use under
             with agent._project_holders_lock:
-                if any(call_hold.project is project for call_hold in agent._projects_held_by_calls):
-                    return
+                with self._lock:
+                    in_flight = any(call_hold.project is project for call_hold in agent._projects_held_by_calls)
+                    idle = time.monotonic() - self._last_use.get(key, time.monotonic()) >= self._idle_timeout
+                    if in_flight or not idle:
+                        return
+                    self._stopping.add(key)
                 manager = project.language_server_manager
-            if manager is not None:
-                log.info(f"No tool call has used project '{project.project_name}' for {self._idle_timeout:g} s; stopping its language servers ...")
-                try:
-                    manager.stop_all(save_cache=True)
-                except Exception as exception:
-                    log.warning(f"Error stopping the language servers of project '{project.project_name}': {exception}", exc_info=exception)
-        with self._lock:
-            self._stopped.add(id(project))
+
+            try:
+                if manager is not None:
+                    log.info(f"No tool call has used project '{project.project_name}' for {self._idle_timeout:g} s; stopping its language servers ...")
+                    try:
+                        manager.stop_all(save_cache=True)
+                    except Exception as exception:
+                        log.warning(f"Error stopping the language servers of project '{project.project_name}': {exception}", exc_info=exception)
+            finally:
+                with self._condition:
+                    self._stopping.discard(key)
+                    self._stopped.add(key)
+                    self._condition.notify_all()
 
 
 class ProjectNotFoundError(Exception):
@@ -1545,6 +1570,8 @@ class SerenaAgent:
         with self._project_holders_lock:
             call_hold = _CallHold(self._active_projects_by_session.get(session_key))
             self._projects_held_by_calls.append(call_hold)
+        if call_hold.project is not None:
+            self._language_server_idle_stop.wait_for_stop(call_hold.project)
         return call_hold
 
     def _unpin_project_for_call(self, call_hold: _CallHold) -> None:
@@ -1561,8 +1588,8 @@ class SerenaAgent:
                     break
             project = call_hold.project
             release = project is not None and not self._is_project_held(project)
-        if project is not None:
-            self._language_server_idle_stop.record_use(project)
+            if project is not None:
+                self._language_server_idle_stop.record_use(project)
         if release:
             self._release_project_if_unheld(project)
 
