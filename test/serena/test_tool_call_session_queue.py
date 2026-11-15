@@ -853,14 +853,25 @@ def _exhaustion_cause() -> RuntimeError:
     except OSError as cause:
         try:
             raise RuntimeError("could not start the language server") from cause
-        except RuntimeError as e:
-            return e
+        except RuntimeError as failure:
+            return failure
+
+
+def _exhaustion_context() -> RuntimeError:
+    """A failure raised, with an unrelated cause, while handling the process running out of file descriptors."""
+    try:
+        raise OSError(errno.EMFILE, "Too many open files")
+    except OSError:
+        try:
+            raise RuntimeError("could not read the file") from ValueError("unreadable")
+        except RuntimeError as failure:
+            return failure
 
 
 @pytest.mark.parametrize(
     "raised",
-    [OSError(errno.EMFILE, "Too many open files"), _exhaustion_cause()],
-    ids=["emfile", "enfile-as-cause"],
+    [OSError(errno.EMFILE, "Too many open files"), _exhaustion_cause(), _exhaustion_context()],
+    ids=["emfile", "enfile-as-cause", "emfile-as-context-beside-a-cause"],
 )
 def test_a_call_failing_for_want_of_file_descriptors_is_answered_naming_it_and_shuts_the_daemon_down(
     agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, raised: Exception
@@ -913,7 +924,7 @@ def test_a_call_failing_for_want_of_file_descriptors_tears_down_held_projects_an
     shutdown_timeouts: list[float] = []
     monkeypatch.setattr(project, "shutdown", lambda timeout=2.0: shutdown_timeouts.append(timeout))
     signals: list[tuple[int, int]] = []
-    monkeypatch.setattr(os, "kill", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(os, "kill", lambda process_id, signal_number: signals.append((process_id, signal_number)))
     probe = _activated(_RaisingProbeTool(agent, OSError(errno.EMFILE, "Too many open files")), monkeypatch)
 
     result = probe.apply_ex()

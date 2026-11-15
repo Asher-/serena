@@ -348,16 +348,21 @@ class Tool(Component):
         Whether a failure stems from the process or the system running out of file descriptors.
 
         :param exception: the exception a tool call failed with
-        :return: whether the exception, or any exception in its chain of causes and contexts, is an OS error with
-            errno EMFILE or ENFILE
+        :return: whether the exception, or any exception reachable from it through causes and contexts, is an OS error
+            with errno EMFILE or ENFILE
         """
         visited: set[int] = set()
-        current: BaseException | None = exception
-        while current is not None and id(current) not in visited:
+        pending: list[BaseException] = [exception]
+        while pending:
+            current = pending.pop()
+            if id(current) in visited:
+                continue
+            visited.add(id(current))
             if isinstance(current, OSError) and current.errno in (errno.EMFILE, errno.ENFILE):
                 return True
-            visited.add(id(current))
-            current = current.__cause__ if current.__cause__ is not None else current.__context__
+            for linked in (current.__cause__, current.__context__):
+                if linked is not None:
+                    pending.append(linked)
         return False
 
     def _issue_call(self, log_call: bool, catch_exceptions: bool, mcp_ctx: Context | None, **kwargs) -> "TaskExecutor.Task[str]":  # type: ignore
@@ -598,9 +603,8 @@ class Tool(Component):
 
                 if not catch_exceptions:
                     raise
-                msg = f"Error executing tool: {exception.__class__.__name__} - {exception}"
                 log.error(f"Error executing tool: {exception}", exc_info=exception)
-                result = msg
+                result = f"Error executing tool: {exception.__class__.__name__} - {exception}"
 
             if isinstance(self, ToolMarkerNamesProjectRoot):
                 result = self._with_project_root(result, self.agent.get_active_project())
