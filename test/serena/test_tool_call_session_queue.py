@@ -18,10 +18,12 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar
+from unittest.mock import MagicMock
 
 import pytest
 
 from serena.agent import _SESSION_KEY_VAR, SerenaAgent
+from serena.ls_manager import LanguageServerFactory, LanguageServerManager
 from serena.config.serena_config import ProjectConfig, SerenaConfig
 from serena.mcp import SerenaMCPFactory
 from serena.project import Project
@@ -29,6 +31,7 @@ from serena.task_executor import TaskExecutor
 from serena.tools.cursor_tools import CursorFindTool
 from serena.tools.file_tools import StatTool
 from serena.tools.tools_base import Tool, ToolMarkerDoesNotRequireActiveProject
+from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
 
 TTool = TypeVar("TTool", bound=Tool)
@@ -524,6 +527,42 @@ def test_a_call_outside_any_session_is_issued_on_the_daemon_wide_queue(agent: Se
 
     assert result.endswith(":_DaemonWideQueueProbeTool"), result
     assert agent._task_executors_by_session == {}
+
+
+class _CountingLanguageServerFactory(LanguageServerFactory):
+    """A factory double that records each server it creates; each server is a mock that reports running."""
+
+    def __init__(self) -> None:
+        # the base constructor is deliberately not invoked: it validates paths, which a mock server never reads
+        self.created: list[MagicMock] = []
+
+    def create_language_server(self, language: LanguageServerId) -> SolidLanguageServer:  # type: ignore[override]
+        server = MagicMock(spec=SolidLanguageServer)
+        server.ls_id = language
+        server.is_running.return_value = True
+        self.created.append(server)
+        return server
+
+
+def test_the_cache_save_after_a_call_starts_no_server_in_place_of_one_found_not_running(
+    agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    After every call, the tool saves the caches of the active language-server manager. A server of that manager found
+    not running is skipped by that save, not replaced, so a call does not start a language server.
+    """
+    agent.serena_config.tool_timeout = 10.0
+    factory = _CountingLanguageServerFactory()
+    manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON], factory, project=None)
+    held = factory.created[0]
+    held.is_running.return_value = False
+    monkeypatch.setattr(agent, "get_language_server_manager", lambda: manager)
+    probe = _activated(_DaemonWideQueueProbeTool(agent), monkeypatch)
+
+    probe.apply_ex()
+
+    assert factory.created == [held]
+    held.save_cache.assert_not_called()
 
 
 def test_a_queued_call_of_an_evicted_session_is_answered_with_the_cancellation(

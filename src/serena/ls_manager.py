@@ -393,19 +393,32 @@ class LanguageServerManager:
 
     def stop_all(self, save_cache: bool = False, timeout: float = 2.0) -> None:
         """
-        Stops all managed language servers.
+        Stops every managed language server, running or not, and starts none: a server that is not running is
+        stopped as well, so whatever of it is left is released. A stop that raises does not keep the servers after it
+        from being stopped; the first such exception is raised once every server's stop has been attempted.
 
-        :param save_cache: whether to save the cache before stopping
+        :param save_cache: whether to save the cache of each running server before stopping it
         :param timeout: timeout for shutdown of each language server
         """
-        for ls in self.iter_language_servers():
-            self._stop_language_server(ls, save_cache=save_cache, timeout=timeout)
+        failure: Exception | None = None
+        for ls in list(self._language_servers.values()):
+            try:
+                if save_cache and ls.is_running():
+                    ls.save_cache()
+                log.info(f"Stopping language server for language {ls.ls_id} ...")
+                ls.stop(shutdown_timeout=timeout)
+            except Exception as e:
+                log.error(f"Failed to stop the language server for language {ls.ls_id}: {e}", exc_info=e)
+                if failure is None:
+                    failure = e
+        if failure is not None:
+            raise failure
 
     def save_all_caches(self) -> None:
         """
-        Saves the caches of all managed language servers.
+        Saves the caches of all running managed language servers, and starts none.
         """
-        for ls in self.iter_language_servers():
+        for ls in list(self._language_servers.values()):
             if ls.is_running():
                 ls.save_cache()
 

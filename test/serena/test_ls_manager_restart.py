@@ -156,3 +156,75 @@ class TestRestartStopsReplacedServer:
         # the replacement that failed to start was stopped
         assert len(factory.created) == 2
         factory.created[1].stop.assert_called_once()
+
+
+class TestStopAllStartsNoServer:
+    """verifies that stopping a manager, or saving its caches, starts no server and stops every server it holds."""
+
+    def test_stop_all_of_a_server_found_not_running_starts_no_replacement_and_stops_it(self) -> None:
+        # the held server reports not running
+        factory = _GatedLanguageServerFactory()
+        manager = _python_manager(factory)
+        held = factory.created[0]
+        held.is_running.return_value = False
+
+        manager.stop_all()
+
+        # no replacement was created and the held server was stopped
+        assert factory.created == [held]
+        held.stop.assert_called_once()
+
+    def test_stop_all_whose_first_stop_raises_stops_every_other_server_and_raises(self) -> None:
+        # the first held server's stop raises
+        factory = _GatedLanguageServerFactory()
+        manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON, LanguageServerId.TYPESCRIPT], factory, project=None)
+        first, second = factory.created
+        failure = OSError(24, "Too many open files")
+        first.stop.side_effect = failure
+
+        with pytest.raises(OSError) as raised:
+            manager.stop_all()
+
+        # that failure was raised once the other server had been stopped
+        assert raised.value is failure
+        second.stop.assert_called_once()
+
+    def test_stop_all_saving_caches_saves_the_running_server_s_cache_and_not_the_stopped_one_s(self) -> None:
+        # one held server runs, the other reports not running
+        factory = _GatedLanguageServerFactory()
+        manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON, LanguageServerId.TYPESCRIPT], factory, project=None)
+        running, stopped = factory.created
+        stopped.is_running.return_value = False
+
+        manager.stop_all(save_cache=True)
+
+        # the running server's cache was saved and both were stopped
+        running.save_cache.assert_called_once()
+        stopped.save_cache.assert_not_called()
+        running.stop.assert_called_once()
+        stopped.stop.assert_called_once()
+
+    def test_save_all_caches_of_a_server_found_not_running_starts_no_replacement(self) -> None:
+        # the held server reports not running
+        factory = _GatedLanguageServerFactory()
+        manager = _python_manager(factory)
+        held = factory.created[0]
+        held.is_running.return_value = False
+
+        manager.save_all_caches()
+
+        # no replacement was created and no cache was saved
+        assert factory.created == [held]
+        held.save_cache.assert_not_called()
+
+    def test_save_all_caches_of_a_running_server_saves_its_cache(self) -> None:
+        # the held server runs
+        factory = _GatedLanguageServerFactory()
+        manager = _python_manager(factory)
+        held = factory.created[0]
+
+        manager.save_all_caches()
+
+        # its cache was saved and no replacement was created
+        held.save_cache.assert_called_once()
+        assert factory.created == [held]
