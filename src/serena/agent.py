@@ -1500,6 +1500,8 @@ class SerenaAgent:
                     self._language_server_idle_stop.record_use(project)
             else:
                 self._legacy_active_project = project
+                if project is not None:
+                    self._language_server_idle_stop.record_use(project)
             # the calling tool call holds the project it binds, not the one it held before, so it cannot keep the latter
             # from being released (pg://serena/session/project/instance/shutdown)
             if call_hold is not None and call_hold.project is not project:
@@ -1556,7 +1558,7 @@ class SerenaAgent:
         holders.extend(call_hold.project for call_hold in self._projects_held_by_calls)
         return any(holder is project for holder in holders)
 
-    def _pin_session_project_for_call(self, session_key: str | int) -> _CallHold:
+    def _pin_session_project_for_call(self, session_key: str | int | None) -> _CallHold:
         """
         Creates the hold of a tool call of a session as the call starts, on the project the session holds, and counts the
         call as a holder of that project until :meth:`_unpin_project_for_call`, so that no release stops the project's
@@ -1568,7 +1570,8 @@ class SerenaAgent:
         :return: the call's hold, on the project the session holds, or on none if it holds none
         """
         with self._project_holders_lock:
-            call_hold = _CallHold(self._active_projects_by_session.get(session_key))
+            held_project = self._active_projects_by_session.get(session_key) if session_key is not None else self._legacy_active_project
+            call_hold = _CallHold(held_project)
             self._projects_held_by_calls.append(call_hold)
         if call_hold.project is not None:
             self._language_server_idle_stop.wait_for_stop(call_hold.project)

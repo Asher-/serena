@@ -628,7 +628,7 @@ class Tool(Component):
             # of the active project inside the call sees that one project (pg://serena/session/project/order). The call
             # holds that project until it ends, so no release stops its language servers under the call
             # (pg://serena/session/project/instance/shutdown)
-            call_hold = self.agent._pin_session_project_for_call(session_key) if session_key is not None else None
+            call_hold = self.agent._pin_session_project_for_call(session_key)
             if call_hold is not None:
                 _CALL_HOLD_VAR.set(call_hold)
                 if call_hold.project is not None:
