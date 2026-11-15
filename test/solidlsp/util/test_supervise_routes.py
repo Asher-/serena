@@ -157,6 +157,17 @@ def test_a_release_of_an_ended_process_removes_its_record() -> None:
     assert not process.record.exists()
 
 
+def test_a_release_whose_record_is_already_gone_removes_its_streams() -> None:
+    process = supervise.Popen(["/bin/sh", "-c", "exit 0"], stdout=subprocess.PIPE, keep=True)
+    assert process.wait() == 0
+    stdout = process.record.with_suffix(".out")
+    process.record.unlink()
+
+    process.release()
+
+    assert not stdout.exists()
+
+
 def test_a_signal_to_a_process_that_has_ended_is_not_sent() -> None:
     process = supervise.Popen(["/bin/sh", "-c", "exit 5"], keep=True)
     assert process.wait() == 5
