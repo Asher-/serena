@@ -137,12 +137,24 @@ def test_an_adopter_waits_for_a_reader_of_the_fifo_while_the_process_runs_and_no
     adopted[0].release()
 
 
-def test_a_released_record_leaves_a_running_process_unknown_to_poll() -> None:
+def test_a_release_of_a_running_process_ends_it_and_its_supervisor_before_removing_its_record() -> None:
     process = supervise.Popen(["/bin/sleep", "300"], keep=True)
+    fields = json.loads(process.record.read_text())
+
     process.release()
 
-    assert process.poll() is None
-    os.kill(process.pid, signal.SIGKILL)
+    assert not supervise.alive(fields["pid"], fields["start"])
+    assert not supervise.alive(fields["supervisor_pid"], fields["supervisor_start"])
+    assert not process.record.exists()
+
+
+def test_a_release_of_an_ended_process_removes_its_record() -> None:
+    process = supervise.Popen(["/bin/sh", "-c", "exit 3"], keep=True)
+    assert process.wait() == 3
+
+    process.release()
+
+    assert not process.record.exists()
 
 
 def test_a_signal_to_a_process_that_has_ended_is_not_sent() -> None:

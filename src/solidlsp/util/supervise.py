@@ -902,7 +902,16 @@ class Popen:
             reclaim(self._stdout_path, consumed)
 
     def release(self) -> None:
-        """Removes a kept record and its streams: nothing will read them again."""
+        """
+        Removes a kept record and its streams: nothing will read them again. A process that has not ended is stopped first,
+        so no supervisor runs on without the record that is the only way any instance can reach it.
+        """
+        try:
+            record = Record.load(self.record)
+        except FileNotFoundError:
+            record = None
+        if record is not None and not record.outcome().ended:
+            record.stop()
         self._kept = False
         self._discard()
 
