@@ -157,9 +157,9 @@ class _CallHold:
 
 class _LanguageServerIdleStop:
     """
-    The stop of the language servers of each project a session holds on which no tool call has run for the idle timeout
-    and no call is in flight. The project keeps its language server manager and its sessions keep holding it, so the next
-    call that asks the manager for a server gets that server restarted.
+    The stop of the language servers of each project a session's slot or the legacy slot holds on which no tool call has
+    run for the idle timeout and no call is in flight. The project keeps its language server manager and its slots keep
+    holding it, so the next call that asks the manager for a server gets that server restarted.
     """
 
     def __init__(self, agent: "SerenaAgent", idle_timeout: float) -> None:
@@ -272,11 +272,15 @@ class _LanguageServerIdleStop:
 
             try:
                 if manager is not None:
-                    log.info(f"No tool call has used project '{project.project_name}' for {self._idle_timeout:g} s; stopping its language servers ...")
+                    log.info(
+                        f"No tool call has used project '{project.project_name}' for {self._idle_timeout:g} s; stopping its language servers ..."
+                    )
                     try:
                         manager.stop_all(save_cache=True)
                     except Exception as exception:
-                        log.warning(f"Error stopping the language servers of project '{project.project_name}': {exception}", exc_info=exception)
+                        log.warning(
+                            f"Error stopping the language servers of project '{project.project_name}': {exception}", exc_info=exception
+                        )
             finally:
                 with self._condition:
                     self._stopping.discard(key)
@@ -1486,11 +1490,13 @@ class SerenaAgent:
         Within a session-bound call (Tool.apply_ex sets _SESSION_KEY_VAR), the per-session dict is updated;
         outside any session, the legacy fallback slot is updated. The in-flight ContextVar is also updated
         so any reads within the current call observe the new project immediately. Within a tool call, the call's hold
-        moves onto the new project, and the project it leaves is released if nothing else holds it.
+        moves onto the new project, and the project it leaves is released if nothing else holds it; a stop of the new
+        project's language servers for idleness that is under way finishes before the call goes on.
         """
         session_key = _SESSION_KEY_VAR.get(None)
         call_hold = _CALL_HOLD_VAR.get()
         left_project: Project | None = None
+        hold_moved = False
         with self._project_holders_lock:
             if session_key is not None:
                 if project is None:
@@ -1507,7 +1513,10 @@ class SerenaAgent:
             if call_hold is not None and call_hold.project is not project:
                 left_project = call_hold.project
                 call_hold.project = project
+                hold_moved = True
         self._release_project_if_unheld(left_project)
+        if hold_moved and project is not None:
+            self._language_server_idle_stop.wait_for_stop(project)
         # update the in-flight var only if it has been set on this call's context; otherwise leave the
         # default unset so callers without contextvar scoping (CLI/dashboard) keep falling through to
         # the per-session / legacy lookup in the getter.

@@ -82,6 +82,23 @@ class _ServerProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
         return "obtained"
 
 
+class _ActivatingServerProbeTool(_ServerProbeTool):
+    """A tool whose call activates a given project and then asks its language server manager for a server."""
+
+    def __init__(self, agent: SerenaAgent, project: Project) -> None:
+        super().__init__(agent)
+        self._project_to_activate = project
+
+    def apply(self) -> str:
+        """
+        Activates the project, then asks its manager for the server of a Python file.
+
+        :return: a fixed marker
+        """
+        self.agent._activate_project(self._project_to_activate, update_active_modes=False, update_active_tools=False)
+        return super().apply()
+
+
 def _agent(idle_timeout: float) -> SerenaAgent:
     """
     :param idle_timeout: the agent's language-server idle timeout, in seconds
@@ -157,18 +174,31 @@ def test_the_servers_of_a_project_no_call_has_used_for_the_idle_timeout_are_stop
 
 
 def test_a_call_in_flight_on_a_project_keeps_its_servers_running_past_the_idle_timeout(
-    idle_agent: SerenaAgent, factory: _RunningStateLanguageServerFactory, tmp_path: Path
+    factory: _RunningStateLanguageServerFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    project = _bind_project(idle_agent, tmp_path / "project", factory)
-    (server,) = factory.created
-
-    call_hold = idle_agent._pin_session_project_for_call("session-1")
+    # an idle timeout long enough that the call takes the project up before it passes, even on a loaded machine
+    idle_timeout = 1.0
+    agent = _agent(idle_timeout)
+    gate = _Gate()
+    call: threading.Thread | None = None
     try:
-        time.sleep(_QUIET)
+        _bind_project(agent, tmp_path / "project", factory)
+        (server,) = factory.created
+        held = _activated(_GatedProbeTool(agent, gate), monkeypatch)
+        results: list[str] = []
+        call = threading.Thread(target=lambda: results.append(held.apply_ex(mcp_ctx=_ForwardedMcpContext.for_session("session-1"))))
+        call.start()
+        assert gate.entered.wait(_WAIT)
+
+        time.sleep(2 * idle_timeout)
+
         server.stop.assert_not_called()
     finally:
-        idle_agent._unpin_project_for_call(call_hold)
-    assert project.language_server_manager is not None
+        gate.release.set()
+        if call is not None:
+            call.join(_WAIT)
+        agent.on_shutdown(timeout=0.1)
+    assert results == ["released"]
 
 
 def test_a_call_after_an_idle_stop_gets_a_restarted_server(
@@ -213,6 +243,45 @@ def test_a_call_taking_up_a_project_during_its_idle_stop_gets_a_running_server(
     assert results == ["obtained"]
     (obtained,) = probe.obtained
     assert obtained.is_running()
+
+
+def test_a_call_activating_a_project_during_its_idle_stop_gets_a_running_server(
+    idle_agent: SerenaAgent, factory: _RunningStateLanguageServerFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A call of another session that activates the project while the idle stop is stopping its server gets a server that
+    is still running once the stop has finished.
+    """
+    stop_gate = _Gate()
+    factory.stop_gate = stop_gate
+    project = _bind_project(idle_agent, tmp_path / "project", factory)
+    probe = _activated(_ActivatingServerProbeTool(idle_agent, project), monkeypatch)
+    results: list[str] = []
+    call = threading.Thread(target=lambda: results.append(probe.apply_ex(mcp_ctx=_ForwardedMcpContext.for_session("session-2"))))
+    try:
+        assert stop_gate.entered.wait(_WAIT)
+        call.start()
+        time.sleep(_IDLE_TIMEOUT)
+    finally:
+        stop_gate.release.set()
+    call.join(_WAIT)
+    stopped = factory.created[0]
+    assert _eventually(lambda: not stopped.is_running())
+
+    assert results == ["obtained"]
+    (obtained,) = probe.obtained
+    assert obtained.is_running()
+
+
+def test_on_shutdown_ends_the_idle_stop_thread() -> None:
+    threads_before = set(threading.enumerate())
+    agent = _agent(_IDLE_TIMEOUT)
+    started = [thread for thread in threading.enumerate() if thread not in threads_before and thread.name == "LanguageServerIdleStop"]
+
+    agent.on_shutdown(timeout=0.1)
+
+    assert len(started) == 1
+    assert not started[0].is_alive()
 
 
 def test_a_call_outside_any_session_keeps_the_servers_of_the_legacy_slots_project_running_past_the_idle_timeout(
