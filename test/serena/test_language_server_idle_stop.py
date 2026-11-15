@@ -26,7 +26,7 @@ from serena.project import Project
 from serena.tools.tools_base import Tool, ToolMarkerDoesNotRequireActiveProject
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
-from test.serena.test_tool_call_session_queue import _activated, _ForwardedMcpContext, _Gate, _GatedProbeTool
+from test.serena.test_tool_call_session_queue import _activated, _ForwardedMcpContext, _Gate
 
 _IDLE_TIMEOUT = 0.2
 """the idle timeout, in seconds, of the agents whose idle stop the tests observe"""
@@ -99,6 +99,25 @@ class _ActivatingServerProbeTool(_ServerProbeTool):
         return super().apply()
 
 
+class _ActivatingGatedProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
+    """A tool whose call activates a given project and then holds on a gate until the test releases it."""
+
+    def __init__(self, agent: SerenaAgent, project: Project, gate: _Gate) -> None:
+        super().__init__(agent)
+        self._project_to_activate = project
+        self._gate = gate
+
+    def apply(self) -> str:
+        """
+        Activates the project, then holds on the gate.
+
+        :return: a fixed marker, once released
+        """
+        self.agent._activate_project(self._project_to_activate, update_active_modes=False, update_active_tools=False)
+        self._gate.hold()
+        return "released"
+
+
 def _agent(idle_timeout: float) -> SerenaAgent:
     """
     :param idle_timeout: the agent's language-server idle timeout, in seconds
@@ -123,6 +142,19 @@ def factory() -> _RunningStateLanguageServerFactory:
     return _RunningStateLanguageServerFactory()
 
 
+def _project(agent: SerenaAgent, root: Path, factory: LanguageServerFactory) -> Project:
+    """
+    :return: a project over ``root``, bound to no slot, with a real language-server manager over ``factory``
+    """
+    root.mkdir()
+    project_config = ProjectConfig(
+        project_name=root.name, language_servers=[LanguageServerId.PYTHON], language_backend=BuiltinLanguageBackend.LSP.get_instance()
+    )
+    project = Project(project_root=str(root), project_config=project_config, serena_config=agent.serena_config)
+    project.language_server_manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON], factory, project=None)
+    return project
+
+
 def _bind_project(agent: SerenaAgent, root: Path, factory: LanguageServerFactory, session_key: str | None = "session-1") -> Project:
     """
     Binds a project over ``root``, with a real language-server manager over ``factory``, as the active project of a
@@ -132,12 +164,7 @@ def _bind_project(agent: SerenaAgent, root: Path, factory: LanguageServerFactory
         activation outside any session does
     :return: the bound project
     """
-    root.mkdir()
-    project_config = ProjectConfig(
-        project_name=root.name, language_servers=[LanguageServerId.PYTHON], language_backend=BuiltinLanguageBackend.LSP.get_instance()
-    )
-    project = Project(project_root=str(root), project_config=project_config, serena_config=agent.serena_config)
-    project.language_server_manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON], factory, project=None)
+    project = _project(agent, root, factory)
 
     def run() -> None:
         if session_key is not None:
@@ -173,32 +200,41 @@ def test_the_servers_of_a_project_no_call_has_used_for_the_idle_timeout_are_stop
     assert idle_agent._active_projects_by_session["session-1"] is project
 
 
-def test_a_call_in_flight_on_a_project_keeps_its_servers_running_past_the_idle_timeout(
-    factory: _RunningStateLanguageServerFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def _assert_a_held_call_activating_a_project_keeps_its_servers_running(
+    agent: SerenaAgent, factory: _RunningStateLanguageServerFactory, root: Path, monkeypatch: pytest.MonkeyPatch, mcp_ctx: Any
 ) -> None:
-    # an idle timeout long enough that the call takes the project up before it passes, even on a loaded machine
-    idle_timeout = 1.0
-    agent = _agent(idle_timeout)
+    """
+    Asserts that a call which activates a project and is then held for :data:`_QUIET` seconds, past the idle timeout,
+    leaves the project's server running. The call binds the project itself, so it holds the project from the instant
+    the project is bound.
+
+    :param mcp_ctx: the context the call is issued with; None issues it outside any session
+    """
+    project = _project(agent, root, factory)
+    (server,) = factory.created
     gate = _Gate()
-    call: threading.Thread | None = None
+    held = _activated(_ActivatingGatedProbeTool(agent, project, gate), monkeypatch)
+    results: list[str] = []
+    call = threading.Thread(target=lambda: results.append(held.apply_ex(mcp_ctx=mcp_ctx)))
+    call.start()
     try:
-        _bind_project(agent, tmp_path / "project", factory)
-        (server,) = factory.created
-        held = _activated(_GatedProbeTool(agent, gate), monkeypatch)
-        results: list[str] = []
-        call = threading.Thread(target=lambda: results.append(held.apply_ex(mcp_ctx=_ForwardedMcpContext.for_session("session-1"))))
-        call.start()
         assert gate.entered.wait(_WAIT)
 
-        time.sleep(2 * idle_timeout)
+        time.sleep(_QUIET)
 
         server.stop.assert_not_called()
     finally:
         gate.release.set()
-        if call is not None:
-            call.join(_WAIT)
-        agent.on_shutdown(timeout=0.1)
+        call.join(_WAIT)
     assert results == ["released"]
+
+
+def test_a_call_in_flight_on_a_project_keeps_its_servers_running_past_the_idle_timeout(
+    idle_agent: SerenaAgent, factory: _RunningStateLanguageServerFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _assert_a_held_call_activating_a_project_keeps_its_servers_running(
+        idle_agent, factory, tmp_path / "project", monkeypatch, _ForwardedMcpContext.for_session("session-1")
+    )
 
 
 def test_a_call_after_an_idle_stop_gets_a_restarted_server(
@@ -287,21 +323,7 @@ def test_on_shutdown_ends_the_idle_stop_thread() -> None:
 def test_a_call_outside_any_session_keeps_the_servers_of_the_legacy_slots_project_running_past_the_idle_timeout(
     idle_agent: SerenaAgent, factory: _RunningStateLanguageServerFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _bind_project(idle_agent, tmp_path / "project", factory, session_key=None)
-    (server,) = factory.created
-    gate = _Gate()
-    held = _activated(_GatedProbeTool(idle_agent, gate), monkeypatch)
-    results: list[str] = []
-    call = threading.Thread(target=lambda: results.append(held.apply_ex()))
-    call.start()
-    try:
-        assert gate.entered.wait(_WAIT)
-        time.sleep(_QUIET)
-        server.stop.assert_not_called()
-    finally:
-        gate.release.set()
-        call.join(_WAIT)
-    assert results == ["released"]
+    _assert_a_held_call_activating_a_project_keeps_its_servers_running(idle_agent, factory, tmp_path / "project", monkeypatch, None)
 
 
 def test_an_idle_timeout_of_zero_stops_no_server(factory: _RunningStateLanguageServerFactory, tmp_path: Path) -> None:

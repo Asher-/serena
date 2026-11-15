@@ -908,7 +908,7 @@ def test_a_call_failing_with_another_os_error_is_answered_as_before_and_leaves_t
 
     result = probe.apply_ex()
 
-    assert result == f"Error executing tool: OSError - {raised}"
+    assert result == f"Error executing tool: {type(raised).__name__} - {raised}"
     assert shutdown.calls == 0
 
 
