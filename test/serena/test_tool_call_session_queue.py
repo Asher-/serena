@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import errno
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -811,3 +812,88 @@ def test_the_report_of_the_last_executed_task_names_none_while_no_queue_has_reco
 
     assert list(agent._task_executors_by_session) == [1001]
     assert agent.get_last_executed_task() is None
+
+
+class _RaisingProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
+    """A tool whose call raises the exception it was given."""
+
+    def __init__(self, agent: SerenaAgent, raised: Exception) -> None:
+        """
+        :param agent: the agent the tool belongs to
+        :param raised: the exception every call of the tool raises
+        """
+        super().__init__(agent)
+        self._raised = raised
+
+    def apply(self) -> str:
+        """
+        Raises the given exception at once.
+
+        :return: nothing; the call raises the exception the tool was given
+        """
+        raise self._raised
+
+
+class _ShutdownRecorder:
+    """A stand-in for ``SerenaAgent.shutdown`` that counts its calls instead of ending the process."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self) -> None:
+        self.calls += 1
+
+
+def _exhaustion_cause() -> RuntimeError:
+    """A failure whose cause is the system file table being full."""
+    try:
+        raise OSError(errno.ENFILE, "Too many open files in system")
+    except OSError as cause:
+        try:
+            raise RuntimeError("could not start the language server") from cause
+        except RuntimeError as e:
+            return e
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [OSError(errno.EMFILE, "Too many open files"), _exhaustion_cause()],
+    ids=["emfile", "enfile-as-cause"],
+)
+def test_a_call_failing_for_want_of_file_descriptors_is_answered_naming_it_and_shuts_the_daemon_down(
+    agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch, raised: Exception
+) -> None:
+    """
+    A call whose tool fails with descriptor exhaustion, raised directly or anywhere in the failure's cause chain, is
+    answered with an error stating that serena ran out of file descriptors and is restarting, and shuts the daemon
+    down once, so its supervisor starts a fresh one.
+    """
+    agent.serena_config.tool_timeout = 10.0
+    shutdown = _ShutdownRecorder()
+    monkeypatch.setattr(agent, "shutdown", shutdown)
+    probe = _activated(_RaisingProbeTool(agent, raised), monkeypatch)
+
+    result = probe.apply_ex()
+
+    assert "ran out of file descriptors" in result, result
+    assert "restarting" in result, result
+    assert shutdown.calls == 1
+
+
+def test_a_call_failing_with_another_os_error_is_answered_as_before_and_leaves_the_daemon_running(
+    agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A call whose tool fails with an OS error other than descriptor exhaustion is answered with the tool's error and
+    does not shut the daemon down.
+    """
+    agent.serena_config.tool_timeout = 10.0
+    shutdown = _ShutdownRecorder()
+    monkeypatch.setattr(agent, "shutdown", shutdown)
+    raised = OSError(errno.ENOENT, "No such file or directory")
+    probe = _activated(_RaisingProbeTool(agent, raised), monkeypatch)
+
+    result = probe.apply_ex()
+
+    assert result == f"Error executing tool: OSError - {raised}"
+    assert shutdown.calls == 0
