@@ -3,7 +3,6 @@ Descriptor exhaustion the daemon meets outside a tool's body ends the daemon thr
 """
 
 import errno
-import gc
 import io
 import json
 import logging
@@ -65,29 +64,16 @@ def ending(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Ending]:
 @contextmanager
 def _descriptors_exhausted() -> Iterator[None]:
     """
-    The process's descriptor table held full: the soft limit is lowered to just above the lowest free descriptor and every
-    descriptor below it is held open, so the next descriptor the process opens fails with EMFILE. The collector is paused,
-    so that no finalizer frees a descriptor while the block runs; all of it is restored when the block ends.
+    The process out of file descriptors: the soft limit is lowered to zero, so every descriptor the process opens fails
+    with EMFILE, whichever descriptors another thread frees meanwhile; the descriptors already open stay usable. The limit
+    is restored when the block ends.
     """
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    gc.collect()
-    gc.disable()
-    held: list[int] = []
+    resource.setrlimit(resource.RLIMIT_NOFILE, (0, hard))
     try:
-        lowest_free = os.open(os.devnull, os.O_RDONLY)
-        held.append(lowest_free)
-        resource.setrlimit(resource.RLIMIT_NOFILE, (lowest_free + 1, hard))
-        try:
-            while True:
-                held.append(os.open(os.devnull, os.O_RDONLY))
-        except OSError as e:
-            assert e.errno == errno.EMFILE, e
         yield
     finally:
-        for descriptor in held:
-            os.close(descriptor)
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
-        gc.enable()
 
 
 def _assert_ended(ending: _Ending) -> None:
