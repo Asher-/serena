@@ -2902,13 +2902,15 @@ class SerenaAgent:
 
     def shutdown(self) -> None:
         """
-        Triggers a hard shutdown of the agent, freeing resources and signalling the process to terminate
+        Triggers a hard shutdown of the agent, freeing resources and signalling the process to terminate. The process is
+        signalled even when freeing the resources fails.
         """
         # perform clean-up right away, because kill does not result in normal deletion of the object
-        self.on_shutdown()
-
-        # signal process termination
-        os.kill(os.getpid(), signal.SIGTERM)
+        try:
+            self.on_shutdown()
+        finally:
+            # signal process termination
+            os.kill(os.getpid(), signal.SIGTERM)
 
     def get_tool_by_name(self, tool_name: str) -> Tool:
         tool_class = ToolRegistry().get_tool_class_by_name(tool_name)

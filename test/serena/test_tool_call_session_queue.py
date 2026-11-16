@@ -917,11 +917,12 @@ def test_a_refusal_caused_by_running_out_of_file_descriptors_is_answered_naming_
 ) -> None:
     """
     A call refused with a ToolCallError whose cause is descriptor exhaustion is answered with an error stating that serena
-    ran out of file descriptors and is restarting, and shuts the daemon down once.
+    ran out of file descriptors and is restarting, and runs the agent's real shutdown, which sends the daemon's own process
+    SIGTERM, so its supervisor starts a fresh one.
     """
     agent.serena_config.tool_timeout = 10.0
-    shutdown = _ShutdownRecorder()
-    monkeypatch.setattr(agent, "shutdown", shutdown)
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "kill", lambda process_id, signal_number: signals.append((process_id, signal_number)))
     refusal = ToolCallError("Error: could not read the file")
     refusal.__cause__ = OSError(errno.EMFILE, "Too many open files")
     probe = _activated(_RaisingProbeTool(agent, refusal), monkeypatch)
@@ -930,7 +931,7 @@ def test_a_refusal_caused_by_running_out_of_file_descriptors_is_answered_naming_
 
     assert "ran out of file descriptors" in result, result
     assert "restarting" in result, result
-    assert shutdown.calls == 1
+    assert signals == [(os.getpid(), signal.SIGTERM)]
 
 
 def test_a_call_failing_for_want_of_file_descriptors_tears_down_held_projects_and_signals_the_daemon_to_end(
