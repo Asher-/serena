@@ -119,6 +119,20 @@ def test_a_call_the_journal_finishes_with_no_descriptor_left_ends_the_daemon(end
     _assert_ended(ending)
 
 
+def test_a_call_the_journal_resumes_with_no_descriptor_left_ends_the_daemon(ending: _Ending) -> None:
+    """A call whose journal entry cannot be read to resume it for want of file descriptors fails, and the daemon is ended."""
+    journal = CallJournal()
+    journal.receive("call-1", "probe", {})
+    journal.finish("call-1", CallResult("found"))
+
+    with _descriptors_exhausted(), pytest.raises(OSError) as raised:
+        journal.resume("call-1")
+    journal.close()
+
+    assert raised.value.errno == errno.EMFILE
+    _assert_ended(ending)
+
+
 def test_a_call_the_journal_cannot_record_for_another_os_error_leaves_the_daemon_running(ending: _Ending, root: Path) -> None:
     """A call whose journal entry cannot be written for a reason other than descriptor exhaustion does not end the daemon."""
     journal = CallJournal()

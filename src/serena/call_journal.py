@@ -242,7 +242,7 @@ class CallJournal:
             restart, journaled as the call's answer.
         :raises NoCallError: when the journal holds no such call.
         """
-        with self._lock:
+        with self._lock, DescriptorExhaustion.watched("the call journal's record of a resumed call"):
             while True:
                 try:
                     entry = json.loads(self._path(call_id).read_text())
