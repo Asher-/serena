@@ -333,3 +333,22 @@ class TestConcurrentRemove:
 
         with pytest.raises(ValueError):
             manager.remove_language_server(LanguageServerId.TYPESCRIPT)
+
+
+class TestIterationDuringSlotChange:
+    """verifies that iterating the held servers survives a slot change made meanwhile."""
+
+    def test_removing_a_language_while_iterating_the_servers_raises_nothing(self) -> None:
+        # a manager holding running Python and TypeScript servers
+        factory = _GatedLanguageServerFactory()
+        manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON, LanguageServerId.TYPESCRIPT], factory, project=None)
+
+        # each server is visited, and TypeScript is removed during the first visit
+        visited = []
+        for server in manager.iter_language_servers():
+            visited.append(server)
+            if len(visited) == 1:
+                manager.remove_language_server(LanguageServerId.TYPESCRIPT)
+
+        # both servers held when the iteration started were visited
+        assert visited == factory.created
