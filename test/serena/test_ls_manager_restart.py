@@ -297,3 +297,39 @@ class TestConcurrentAdd:
         assert len(held) == 2
         for server in factory.created:
             assert server in held or server.stop.called
+
+
+class TestConcurrentRemove:
+    """verifies that a language removed while its server is being restarted stays removed."""
+
+    def test_language_removed_during_its_restart_holds_no_server_and_every_created_server_is_stopped(self) -> None:
+        # a manager holding Python, whose next server start is held
+        factory = _GatedLanguageServerFactory()
+        manager = _python_manager(factory)
+        factory.hold_starts()
+
+        # a restart of Python holds in its replacement's start; Python is removed meanwhile
+        restart = threading.Thread(target=manager.restart_language_server, args=(LanguageServerId.PYTHON,), daemon=True)
+        restart.start()
+        assert factory.start_entered.wait(timeout=_GATE_TIMEOUT)
+        remove = threading.Thread(target=manager.remove_language_server, args=(LanguageServerId.PYTHON,), daemon=True)
+        remove.start()
+        remove.join(timeout=0.5)
+
+        # release the start and let both callers return
+        factory.start_gate.set()
+        restart.join(timeout=_GATE_TIMEOUT)
+        remove.join(timeout=_GATE_TIMEOUT)
+        assert not restart.is_alive() and not remove.is_alive()
+
+        # the manager holds no Python server, and every server created for it was stopped
+        assert manager.get_active_language_server_ids() == []
+        assert len(factory.created) == 2
+        for server in factory.created:
+            server.stop.assert_called()
+
+    def test_removing_a_language_the_manager_does_not_hold_is_refused(self) -> None:
+        manager = _python_manager(_GatedLanguageServerFactory())
+
+        with pytest.raises(ValueError):
+            manager.remove_language_server(LanguageServerId.TYPESCRIPT)
