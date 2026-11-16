@@ -86,6 +86,7 @@ from solidlsp.ls_config import LanguageServerIdLike
 from solidlsp.ls_survival import LANGUAGE_SERVER_KIND, LanguageServerStates
 from solidlsp.structural.bridge_process import BRIDGE_KIND, BridgeStates
 from solidlsp.util import subprocess_util, supervise
+from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
 from solidlsp.util.subprocess_util import terminate_process_tree_with_kill_fallback
 
 if TYPE_CHECKING:
@@ -831,6 +832,24 @@ class DashboardManager:
                 SerenaDashboardTrayManager.update_project(port=self._port, project=project_name)
 
 
+class _ShutdownOnDescriptorExhaustion(DescriptorExhaustion.Responder):
+    """
+    The answer of an agent's process to running out of file descriptors: the agent's shutdown, which ends the process so
+    that its supervisor starts a fresh one. An agent that is gone ends nothing.
+    """
+
+    def __init__(self, agent: "SerenaAgent") -> None:
+        """
+        :param agent: the agent whose shutdown ends the process
+        """
+        self._agent = weakref.ref(agent)
+
+    def respond(self) -> None:
+        agent = self._agent()
+        if agent is not None:
+            agent.shutdown()
+
+
 class SerenaAgent:
     def __init__(
         self,
@@ -931,6 +950,8 @@ class SerenaAgent:
         # obtain serena configuration using the decoupled factory function
         self.serena_config = serena_config or SerenaConfig.from_config_file()
         self._language_server_idle_stop = _LanguageServerIdleStop(self, self.serena_config.language_server_idle_timeout)
+        # the process's answer to running out of file descriptors, installed once construction is complete
+        self._descriptor_exhaustion_responder = _ShutdownOnDescriptorExhaustion(self)
 
         # propagate configuration to other components
         self.serena_config.propagate_settings()
@@ -1106,6 +1127,8 @@ class SerenaAgent:
             # inform the GUI window (if any)
             if self._gui_log_viewer is not None:
                 self._gui_log_viewer.set_dashboard_url(self._dashboard_manager.url)
+
+        DescriptorExhaustion.install(self._descriptor_exhaustion_responder)
 
         self._send_usage_info()
 
@@ -2830,6 +2853,7 @@ class SerenaAgent:
         slot), deduplicating in case multiple sessions share the same Project instance.
         """
         log.info("SerenaAgent is shutting down ...")
+        DescriptorExhaustion.uninstall(self._descriptor_exhaustion_responder)
         self._language_server_idle_stop.shutdown()
         # apply shutdown depending on allocated resources, handling quick ones first (dashboard manager & GUI viewer)
         if self._gui_log_viewer:

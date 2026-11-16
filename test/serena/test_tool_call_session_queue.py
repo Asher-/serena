@@ -32,7 +32,7 @@ from serena.project import Project
 from serena.task_executor import TaskExecutor
 from serena.tools.cursor_tools import CursorFindTool
 from serena.tools.file_tools import StatTool
-from serena.tools.tools_base import Tool, ToolMarkerDoesNotRequireActiveProject
+from serena.tools.tools_base import Tool, ToolCallError, ToolMarkerDoesNotRequireActiveProject
 from solidlsp.ls_config import LanguageServerId
 from test.serena.test_language_server_retention import _CountingLanguageServerFactory
 
@@ -910,6 +910,27 @@ def test_a_call_failing_with_another_os_error_is_answered_as_before_and_leaves_t
 
     assert result == f"Error executing tool: {type(raised).__name__} - {raised}"
     assert shutdown.calls == 0
+
+
+def test_a_refusal_caused_by_running_out_of_file_descriptors_is_answered_naming_it_and_shuts_the_daemon_down(
+    agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A call refused with a ToolCallError whose cause is descriptor exhaustion is answered with an error stating that serena
+    ran out of file descriptors and is restarting, and shuts the daemon down once.
+    """
+    agent.serena_config.tool_timeout = 10.0
+    shutdown = _ShutdownRecorder()
+    monkeypatch.setattr(agent, "shutdown", shutdown)
+    refusal = ToolCallError("Error: could not read the file")
+    refusal.__cause__ = OSError(errno.EMFILE, "Too many open files")
+    probe = _activated(_RaisingProbeTool(agent, refusal), monkeypatch)
+
+    result = probe.apply_ex()
+
+    assert "ran out of file descriptors" in result, result
+    assert "restarting" in result, result
+    assert shutdown.calls == 1
 
 
 def test_a_call_failing_for_want_of_file_descriptors_tears_down_held_projects_and_signals_the_daemon_to_end(

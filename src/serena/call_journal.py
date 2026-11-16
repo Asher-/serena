@@ -24,6 +24,7 @@ from mcp.server import ServerRequestContext
 from mcp.types import CallToolRequestParams, CallToolResult, TextContent
 
 from solidlsp.util import supervise
+from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
 
 CALL_ID_HEADER = "X-Brain-Call-Id"
 """The header in which the hop before a server names a call."""
@@ -195,7 +196,7 @@ class CallJournal:
         :return: whether the call was recorded, and so is to be run.
         :raises NoCallError: when the call id cannot name an entry of the journal.
         """
-        with self._lock:
+        with self._lock, DescriptorExhaustion.watched("the call journal's record of a received call"):
             path = self._path(call_id)
             if call_id in self._open or path.exists():
                 return False
@@ -224,7 +225,7 @@ class CallJournal:
         :param call_id: the call.
         :param result: its answer.
         """
-        with self._lock:
+        with self._lock, DescriptorExhaustion.watched("the call journal's record of a call's answer"):
             entry = json.loads(self._path(call_id).read_text())
             if "result" not in entry:
                 entry["result"] = {"text": result.text, "is_error": result.is_error}

@@ -37,6 +37,7 @@ from solidlsp.lsp_protocol_handler.server import (
     make_response,
 )
 from solidlsp.util import subprocess_util, supervise
+from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
 
 log = logging.getLogger(__name__)
 
@@ -746,6 +747,7 @@ class StdioLanguageServer(LanguageServerInterface):
                 log.log(level, line_str)
         except Exception as e:
             log.error("Error while reading stderr from language server process: %s", e, exc_info=e)
+            DescriptorExhaustion.report(e, f"the stderr reader of language server {self.ls_id.get_key()}")
         if not self._is_stopping:
             log.error("Language server stderr reader thread terminated unexpectedly")
         else:

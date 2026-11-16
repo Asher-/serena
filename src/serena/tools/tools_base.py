@@ -2,7 +2,6 @@
 
 import asyncio
 import contextvars
-import errno
 import inspect
 import json
 from abc import ABC
@@ -29,6 +28,7 @@ from serena.util.class_decorators import singleton
 from serena.util.inspection import iter_subclasses
 from serena.util.text_utils import TextOutputUtils
 from solidlsp.ls_exceptions import SolidLSPException
+from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
 
 if TYPE_CHECKING:
     from serena.agent import SerenaAgent
@@ -342,29 +342,6 @@ class Tool(Component):
         """
         return {}
 
-    @staticmethod
-    def _is_descriptor_exhaustion(exception: BaseException) -> bool:
-        """
-        Whether a failure stems from the process or the system running out of file descriptors.
-
-        :param exception: the exception a tool call failed with
-        :return: whether the exception, or any exception reachable from it through causes and contexts, is an OS error
-            with errno EMFILE or ENFILE
-        """
-        visited: set[int] = set()
-        pending: list[BaseException] = [exception]
-        while pending:
-            current = pending.pop()
-            if id(current) in visited:
-                continue
-            visited.add(id(current))
-            if isinstance(current, OSError) and current.errno in (errno.EMFILE, errno.ENFILE):
-                return True
-            for linked in (current.__cause__, current.__context__):
-                if linked is not None:
-                    pending.append(linked)
-        return False
-
     def _issue_call(self, log_call: bool, catch_exceptions: bool, mcp_ctx: Context | None, **kwargs) -> "TaskExecutor.Task[str]":  # type: ignore
         """
         Issues a call of the tool, with logging and exception handling, as a task on the executor of the calling session.
@@ -586,20 +563,21 @@ class Tool(Component):
                 # record tool usage
                 self.agent.record_tool_usage(apply_kwargs, result, self)
 
-            except ToolCallError as e:
-                # a refusal is answered with its Error: text, as main answers it, unless the caller takes exceptions
-                if not catch_exceptions:
-                    raise
-                return str(e)
             except Exception as exception:
-                # a daemon out of file descriptors fails every call it answers; ending it lets its supervisor start a
-                # fresh one
-                if self._is_descriptor_exhaustion(exception):
+                # a daemon out of file descriptors fails every call it answers, a refusal among them; ending it lets its
+                # supervisor start a fresh one
+                if DescriptorExhaustion.is_exhaustion(exception):
                     log.critical(f"Serena ran out of file descriptors while executing tool: {exception}", exc_info=exception)
                     self.agent.shutdown()
                     if not catch_exceptions:
                         raise
                     return "Error: serena ran out of file descriptors and is restarting; retry the call once it is back."
+
+                # a refusal is answered with its Error: text, as main answers it, unless the caller takes exceptions
+                if isinstance(exception, ToolCallError):
+                    if not catch_exceptions:
+                        raise
+                    return str(exception)
 
                 if not catch_exceptions:
                     raise

@@ -39,6 +39,8 @@ from typing import IO, Any, Protocol
 
 import psutil
 
+from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
+
 log = logging.getLogger(__name__)
 
 OWNER = "serena"
@@ -428,16 +430,17 @@ def _forget(owner: Path, identifier: str) -> None:
     :param identifier: the removed record's id.
     """
     index = _live_index(owner)
-    index.parent.mkdir(parents=True, exist_ok=True)
-    with open(index.parent / "process.lock", "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        ids = _live_ids(owner)
-        if identifier not in ids:
-            return
-        kept = json.dumps([kept for kept in ids if kept != identifier], separators=(",", ":"))
-        with tempfile.NamedTemporaryFile("w", dir=index.parent, prefix=".process-", delete=False) as replacement:
-            replacement.write(kept)
-        os.replace(replacement.name, index)
+    with DescriptorExhaustion.watched("the restart journal's index of live records"):
+        index.parent.mkdir(parents=True, exist_ok=True)
+        with open(index.parent / "process.lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            ids = _live_ids(owner)
+            if identifier not in ids:
+                return
+            kept = json.dumps([kept for kept in ids if kept != identifier], separators=(",", ":"))
+            with tempfile.NamedTemporaryFile("w", dir=index.parent, prefix=".process-", delete=False) as replacement:
+                replacement.write(kept)
+            os.replace(replacement.name, index)
 
 
 def _discard(directory: Path, identifier: str) -> None:
