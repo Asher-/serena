@@ -61,3 +61,15 @@ def test_an_agent_ends_its_process_on_descriptor_exhaustion_until_it_has_shut_do
     DescriptorExhaustion.report(OSError(errno.EMFILE, "Too many open files"), "a site")
 
     assert signals == [(os.getpid(), signal.SIGTERM)]
+
+
+def test_descriptor_exhaustion_reported_after_the_agent_shut_down_ends_nothing(
+    agent: SerenaAgent, signals: list[tuple[int, int]]
+) -> None:
+    """Descriptor exhaustion reported once the agent has shut down ends nothing through it."""
+    from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
+
+    SerenaAgent.on_shutdown(agent, timeout=0.5)
+    DescriptorExhaustion.report(OSError(errno.EMFILE, "Too many open files"), "a site")
+
+    assert signals == []

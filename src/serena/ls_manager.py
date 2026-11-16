@@ -14,6 +14,7 @@ from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig, LanguageServerIdLike
 from solidlsp.lsp_protocol_handler.lsp_types import DidChangeWatchedFilesParams, FileChangeType, FileEvent
 from solidlsp.settings import SolidLSPSettings
+from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
 
 if TYPE_CHECKING:
     from .project import Project
@@ -179,6 +180,7 @@ class LanguageServerManager:
                 except BaseException as e:
                     log.error(f"Error starting language server {self.ls_id.get_key()}: {e}", exc_info=e)
                     self.exception = e
+                    DescriptorExhaustion.report(e, f"starting the language server {self.ls_id.get_key()}")
 
         # start language servers in parallel threads
         threads = []

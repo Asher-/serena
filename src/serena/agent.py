@@ -835,19 +835,17 @@ class DashboardManager:
 class _ShutdownOnDescriptorExhaustion(DescriptorExhaustion.Responder):
     """
     The answer of an agent's process to running out of file descriptors: the agent's shutdown, which ends the process so
-    that its supervisor starts a fresh one. An agent that is gone ends nothing.
+    that its supervisor starts a fresh one.
     """
 
     def __init__(self, agent: "SerenaAgent") -> None:
         """
         :param agent: the agent whose shutdown ends the process
         """
-        self._agent = weakref.ref(agent)
+        self._agent = agent
 
     def respond(self) -> None:
-        agent = self._agent()
-        if agent is not None:
-            agent.shutdown()
+        self._agent.shutdown()
 
 
 class SerenaAgent:

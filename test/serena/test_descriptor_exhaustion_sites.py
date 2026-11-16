@@ -21,6 +21,7 @@ import pytest
 from serena.agent import SerenaAgent
 from serena.call_journal import CallJournal, CallResult
 from serena.config.serena_config import SerenaConfig
+from serena.ls_manager import LanguageServerManager
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_process import StdioLanguageServer
 from solidlsp.util import supervise
@@ -178,5 +179,17 @@ def test_a_language_server_stderr_reader_failing_for_want_of_descriptors_ends_th
     server._is_stopping = True
 
     server._read_ls_process_stderr()
+
+    _assert_ended(ending)
+
+
+def test_a_language_server_failing_to_start_for_want_of_descriptors_ends_the_daemon(ending: _Ending) -> None:
+    """A language server whose start fails for want of file descriptors ends the daemon."""
+    language_server = MagicMock()
+    language_server.start.side_effect = OSError(errno.EMFILE, "Too many open files")
+    factory = MagicMock()
+    factory.create_language_server.return_value = language_server
+
+    LanguageServerManager.from_languages([LanguageServerId.CPP], factory, MagicMock())
 
     _assert_ended(ending)
