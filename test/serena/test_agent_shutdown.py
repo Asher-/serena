@@ -2,6 +2,7 @@
 The agent's shutdown frees its resources and signals its process to end, even when freeing them fails.
 """
 
+import errno
 import os
 import signal
 from collections.abc import Iterator
@@ -43,5 +44,20 @@ def test_shutdown_signals_the_process_to_end_even_when_teardown_raises(
 
     with pytest.raises(RuntimeError):
         agent.shutdown()
+
+    assert signals == [(os.getpid(), signal.SIGTERM)]
+
+
+def test_an_agent_ends_its_process_on_descriptor_exhaustion_until_it_has_shut_down(
+    agent: SerenaAgent, signals: list[tuple[int, int]]
+) -> None:
+    """
+    Descriptor exhaustion reported while the agent is live ends its process through the agent's shutdown; once the agent
+    has shut down, a further exhaustion ends nothing through it.
+    """
+    from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
+
+    DescriptorExhaustion.report(OSError(errno.EMFILE, "Too many open files"), "a site")
+    DescriptorExhaustion.report(OSError(errno.EMFILE, "Too many open files"), "a site")
 
     assert signals == [(os.getpid(), signal.SIGTERM)]
