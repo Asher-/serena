@@ -1645,14 +1645,47 @@ class SolidLanguageServer(ABC):
                 fb.reload_from_disk()
             yield fb
         finally:
-            # release the reference; the last holder closes the buffer and unregisters it unless it was taken again meanwhile
+            self._release_file_buffer(fb)
+
+    def _release_file_buffer(self, fb: LSPFileBuffer) -> None:
+        """
+        Releases one reference to a registered buffer. The holder releasing the last reference closes the buffer
+        in the language server and unregisters it, unless another holder took the buffer meanwhile.
+
+        :param fb: the buffer, registered in :attr:`open_file_buffers` and referenced by the caller
+        """
+        with self._open_file_buffers_lock:
+            fb.ref_count -= 1
+            is_unreferenced = fb.ref_count == 0
+        if is_unreferenced and fb.close_if_unreferenced(self._open_file_buffers_lock):
             with self._open_file_buffers_lock:
-                fb.ref_count -= 1
-                is_unreferenced = fb.ref_count == 0
-            if is_unreferenced and fb.close_if_unreferenced(self._open_file_buffers_lock):
-                with self._open_file_buffers_lock:
-                    if fb.ref_count == 0 and self.open_file_buffers.get(uri) is fb:
-                        del self.open_file_buffers[uri]
+                if fb.ref_count == 0 and self.open_file_buffers.get(fb.uri) is fb:
+                    del self.open_file_buffers[fb.uri]
+
+    def retain_open_file(self, relative_file_path: str) -> str:
+        """
+        Opens a file in the language server and keeps it open until :meth:`release_retained_file` is called with
+        the returned URI. Each call takes a reference of its own, shared with the holders of :meth:`open_file`.
+
+        :param relative_file_path: the relative path of the file to open
+        :return: the URI of the retained file
+        """
+        with self.open_file(relative_file_path) as fb:
+            with self._open_file_buffers_lock:
+                fb.ref_count += 1
+            return fb.uri
+
+    def release_retained_file(self, uri: str) -> None:
+        """
+        Releases one reference taken by :meth:`retain_open_file`. The file is closed in the language server once
+        no holder references it.
+
+        :param uri: the URI returned by :meth:`retain_open_file`
+        """
+        with self._open_file_buffers_lock:
+            fb = self.open_file_buffers.get(uri)
+        if fb is not None:
+            self._release_file_buffer(fb)
 
     @contextmanager
     def _open_file_context(

@@ -259,3 +259,42 @@ class TestStopAllStartsNoServer:
         # its cache was saved and no replacement was created
         held.save_cache.assert_called_once()
         assert factory.created == [held]
+
+class TestConcurrentAdd:
+    """verifies that callers adding one language at the same time leave one server for it running."""
+
+    def test_caller_adding_a_language_while_it_is_being_added_is_refused(self) -> None:
+        # a manager holding Python, whose next server start is held
+        factory = _GatedLanguageServerFactory()
+        manager = _python_manager(factory)
+        factory.hold_starts()
+        errors: dict[str, Exception] = {}
+
+        def add(caller: str) -> None:
+            try:
+                manager.add_language_server(LanguageServerId.TYPESCRIPT)
+            except Exception as e:
+                errors[caller] = e
+
+        # the first caller adds TypeScript and holds in its server's start; the second caller adds it meanwhile
+        first = threading.Thread(target=add, args=("first",), daemon=True)
+        first.start()
+        assert factory.start_entered.wait(timeout=_GATE_TIMEOUT)
+        second = threading.Thread(target=add, args=("second",), daemon=True)
+        second.start()
+        second.join(timeout=0.5)
+
+        # release the start and let both callers return
+        factory.start_gate.set()
+        first.join(timeout=_GATE_TIMEOUT)
+        second.join(timeout=_GATE_TIMEOUT)
+        assert not first.is_alive() and not second.is_alive()
+
+        # the second caller was refused, and every created server the manager does not hold was stopped
+        assert set(errors) == {"second"} and isinstance(errors["second"], ValueError)
+        held = list(manager.iter_language_servers())
+        assert len(held) == 2
+        for server in factory.created:
+            assert server in held or server.stop.called
+
+

@@ -139,3 +139,31 @@ def test_a_file_taken_again_while_its_last_holder_closes_it_is_reopened_after_th
     assert close_held_until_second_holder_entered == [True]
     assert second_holder_is_registered == [True]
     assert notifications_seen_by_second_holder == ["didOpen", "didClose", "didOpen"]
+
+
+@pytest.mark.parametrize("language_server", [LanguageServerId.PYTHON], indirect=True)
+def test_retained_file_stays_open_after_other_holders_leave_until_released(language_server: SolidLanguageServer) -> None:
+    # retain the file, then open and close it as another holder
+    uri = language_server.retain_open_file(_FILE)
+    with language_server.open_file(_FILE):
+        pass
+
+    # the file is still open until the retained reference is released
+    assert uri in language_server.open_file_buffers
+    language_server.release_retained_file(uri)
+    assert uri not in language_server.open_file_buffers
+
+
+@pytest.mark.parametrize("language_server", [LanguageServerId.PYTHON], indirect=True)
+def test_threads_retaining_opening_and_releasing_one_file_leave_it_closed(language_server: SolidLanguageServer) -> None:
+    def retain_open_and_release_repeatedly() -> None:
+        for _ in range(20):
+            uri = language_server.retain_open_file(_FILE)
+            with language_server.open_file(_FILE) as file_buffer:
+                assert file_buffer.contents
+            language_server.release_retained_file(uri)
+
+    errors = _run_in_threads(retain_open_and_release_repeatedly)
+
+    assert errors == []
+    assert not any(uri.endswith("variables.py") for uri in language_server.open_file_buffers)

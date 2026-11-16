@@ -352,9 +352,7 @@ class AstroLanguageServer(SolidLanguageServer):
         first_open_error: Exception | None = None
         for astro_file in astro_files:
             try:
-                with self._ts_server.open_file(astro_file) as file_buffer:
-                    file_buffer.ref_count += 1
-                    self._indexed_astro_file_uris.append(file_buffer.uri)
+                self._indexed_astro_file_uris.append(self._ts_server.retain_open_file(astro_file))
             except Exception as exc:
                 log.debug("Failed to open %s on companion TS server: %s", astro_file, exc)
                 if first_open_error is None:
@@ -389,12 +387,7 @@ class AstroLanguageServer(SolidLanguageServer):
         log.debug("Cleaning up %d indexed .astro files", len(self._indexed_astro_file_uris))
         for uri in self._indexed_astro_file_uris:
             try:
-                if uri in self._ts_server.open_file_buffers:
-                    file_buffer = self._ts_server.open_file_buffers[uri]
-                    file_buffer.ref_count -= 1
-                    if file_buffer.ref_count == 0:
-                        self._ts_server.server.notify.did_close_text_document({"textDocument": {"uri": uri}})
-                        del self._ts_server.open_file_buffers[uri]
+                self._ts_server.release_retained_file(uri)
             except Exception as exc:
                 log.debug("Error closing indexed astro file %s: %s", uri, exc)
         self._indexed_astro_file_uris.clear()

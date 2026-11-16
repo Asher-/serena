@@ -289,6 +289,10 @@ class LanguageServerManager:
         return self._ensure_functional_ls(ls)
 
     def _create_and_start_language_server(self, ls_id: LanguageServerIdLike) -> SolidLanguageServer:
+        """
+        :param ls_id: the language server id
+        :return: a newly created and started server for the language; the manager does not hold it yet
+        """
         if self._language_server_factory is None:
             raise ValueError(f"No language server factory available to create language server for {ls_id}")
         language_server = self._language_server_factory.create_language_server(ls_id)
@@ -298,7 +302,6 @@ class LanguageServerManager:
             # stop a server whose start failed, so a partly started process is not left running
             language_server.stop()
             raise
-        self._language_servers[ls_id] = language_server
         return language_server
 
     def restart_language_server(self, ls_id: LanguageServerIdLike) -> SolidLanguageServer:
@@ -328,6 +331,7 @@ class LanguageServerManager:
                     cause=e,
                     unavailable_languages=dict(self._unavailable_languages),
                 ) from e
+            self._language_servers[ls_id] = ls
             # successful startup clears any prior unavailability for the language
             self._unavailable_languages.pop(ls_id, None)
 
@@ -342,10 +346,14 @@ class LanguageServerManager:
 
         :param ls_id: the language server to add
         :return: the newly created language server
+        :raises ValueError: if the manager already holds a server for the language
         """
-        if ls_id in self._language_servers:
-            raise ValueError(f"Language server {ls_id.get_key()} already present")
-        return self._create_and_start_language_server(ls_id)
+        with self._restart_lock(ls_id):
+            if ls_id in self._language_servers:
+                raise ValueError(f"Language server {ls_id.get_key()} already present")
+            ls = self._create_and_start_language_server(ls_id)
+            self._language_servers[ls_id] = ls
+            return ls
 
     def remove_language_server(self, ls_id: LanguageServerIdLike, save_cache: bool = False) -> None:
         """
@@ -353,10 +361,11 @@ class LanguageServerManager:
 
         :param ls_id: the language
         """
-        if ls_id not in self._language_servers:
-            raise ValueError(f"No language server for language {ls_id.get_key()} present; cannot remove")
-        ls = self._language_servers.pop(ls_id)
-        self._stop_language_server(ls, save_cache=save_cache)
+        with self._restart_lock(ls_id):
+            if ls_id not in self._language_servers:
+                raise ValueError(f"No language server for language {ls_id.get_key()} present; cannot remove")
+            ls = self._language_servers.pop(ls_id)
+            self._stop_language_server(ls, save_cache=save_cache)
 
     def get_active_language_server_ids(self) -> list[LanguageServerIdLike]:
         """
@@ -390,7 +399,7 @@ class LanguageServerManager:
             ls.stop(shutdown_timeout=timeout)
 
     def iter_language_servers(self) -> Iterator[SolidLanguageServer]:
-        for ls in self._language_servers.values():
+        for ls in list(self._language_servers.values()):
             yield self._ensure_functional_ls(ls)
 
     def stop_all(self, save_cache: bool = False, timeout: float = 2.0) -> None:

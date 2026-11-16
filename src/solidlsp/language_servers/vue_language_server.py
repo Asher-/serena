@@ -286,9 +286,7 @@ class VueLanguageServer(SolidLanguageServer):
 
         for vue_file in vue_files:
             try:
-                with self._ts_server.open_file(vue_file) as file_buffer:
-                    file_buffer.ref_count += 1
-                    self._indexed_vue_file_uris.append(file_buffer.uri)
+                self._indexed_vue_file_uris.append(self._ts_server.retain_open_file(vue_file))
             except Exception as e:
                 log.debug(f"Failed to open {vue_file} on TS server: {e}")
 
@@ -721,14 +719,7 @@ class VueLanguageServer(SolidLanguageServer):
         log.debug(f"Cleaning up {len(self._indexed_vue_file_uris)} indexed Vue files")
         for uri in self._indexed_vue_file_uris:
             try:
-                if uri in self._ts_server.open_file_buffers:
-                    file_buffer = self._ts_server.open_file_buffers[uri]
-                    file_buffer.ref_count -= 1
-
-                    if file_buffer.ref_count == 0:
-                        self._ts_server.server.notify.did_close_text_document({"textDocument": {"uri": uri}})
-                        del self._ts_server.open_file_buffers[uri]
-                        log.debug(f"Closed indexed Vue file: {uri}")
+                self._ts_server.release_retained_file(uri)
             except Exception as e:
                 log.debug(f"Error closing indexed Vue file {uri}: {e}")
 
