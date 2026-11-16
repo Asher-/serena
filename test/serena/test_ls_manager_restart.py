@@ -260,6 +260,7 @@ class TestStopAllStartsNoServer:
         held.save_cache.assert_called_once()
         assert factory.created == [held]
 
+
 class TestConcurrentAdd:
     """verifies that callers adding one language at the same time leave one server for it running."""
 
@@ -296,5 +297,3 @@ class TestConcurrentAdd:
         assert len(held) == 2
         for server in factory.created:
             assert server in held or server.stop.called
-
-
