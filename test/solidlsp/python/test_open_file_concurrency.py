@@ -167,3 +167,14 @@ def test_threads_retaining_opening_and_releasing_one_file_leave_it_closed(langua
 
     assert errors == []
     assert not any(uri.endswith("variables.py") for uri in language_server.open_file_buffers)
+
+
+@pytest.mark.parametrize("language_server", [LanguageServerId.PYTHON], indirect=True)
+def test_releasing_a_retained_file_that_is_no_longer_open_does_nothing(language_server: SolidLanguageServer) -> None:
+    # a retained file released once, which closes it
+    uri = language_server.retain_open_file(_FILE)
+    language_server.release_retained_file(uri)
+
+    # a further release of it raises nothing and opens nothing
+    language_server.release_retained_file(uri)
+    assert uri not in language_server.open_file_buffers
