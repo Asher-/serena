@@ -557,6 +557,11 @@ class TopLevelCommands(AutoRegisteringGroup):
 
         start_wedge_watchdog()
 
+        # the daemon holds the pipes of many language servers at once, more than a launch's default limit admits
+        from serena.util.descriptor_limit import DescriptorLimit
+
+        DescriptorLimit.raise_soft_limit()
+
         mode_selection_def: ModeSelectionDefinition | None = None
         if default_modes or added_modes:
             mode_selection_def = ModeSelectionDefinitionWithAddedModes(default_modes=default_modes or None, added_modes=added_modes or None)
