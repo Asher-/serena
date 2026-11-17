@@ -9,6 +9,7 @@ from serena.util.text_utils import (
     GlobMatcher,
     LineType,
     MultiFileContentReplacer,
+    find_text_coordinates,
     glob_to_regex,
     search_files,
     search_text,
@@ -1059,3 +1060,51 @@ class TestBackreferenceExpansion:
         files = [("f.txt", "id=alpha\n")]
         with pytest.raises(ValueError, match="does not exist"):
             replacer.find_occurrences(files, r"id=(\w+)", r"[$!2]")
+
+
+class TestContentReplacer:
+    def test_a_needle_without_a_match_is_refused(self):
+        replacer = ContentReplacer(mode="literal", allow_multiple_occurrences=False)
+
+        with pytest.raises(ValueError, match="No matches"):
+            replacer.replace("alpha\n", "beta", "gamma")
+
+    def test_several_occurrences_are_refused_unless_allowed(self):
+        content = "a = 1\nb = 1\n"
+
+        with pytest.raises(ValueError, match="matches 2 occurrences"):
+            ContentReplacer(mode="literal", allow_multiple_occurrences=False).replace(content, "1", "2")
+        assert ContentReplacer(mode="literal", allow_multiple_occurrences=True).replace(content, "1", "2") == "a = 2\nb = 2\n"
+
+    def test_an_unknown_mode_is_refused(self):
+        replacer = ContentReplacer(mode="glob", allow_multiple_occurrences=False)
+
+        with pytest.raises(ValueError, match="Invalid mode"):
+            replacer.replace("alpha\n", "alpha", "beta")
+
+    def test_a_multiline_match_containing_another_match_is_refused_as_ambiguous(self):
+        replacer = ContentReplacer(mode="regex", allow_multiple_occurrences=False)
+
+        with pytest.raises(ValueError, match="ambiguous"):
+            replacer.replace("start A\nstart B\nend\n", r"start.*?end", "X")
+
+
+class TestFindTextCoordinates:
+    def test_the_coordinates_of_the_group_of_the_first_match_are_returned(self):
+        coords = find_text_coordinates("ab\ncd x = x\n", r"(x) =")
+
+        assert coords is not None
+        assert (coords.line, coords.col) == (1, 3)
+
+    def test_no_match_yields_none_unless_a_unique_match_is_required(self):
+        assert find_text_coordinates("ab\n", r"(x)") is None
+        with pytest.raises(ValueError, match="No match found"):
+            find_text_coordinates("ab\n", r"(x)", require_unique=True)
+
+    def test_several_matches_are_refused_when_a_unique_match_is_required(self):
+        with pytest.raises(ValueError, match="Match must be unique"):
+            find_text_coordinates("x\nx\n", r"(x)", require_unique=True)
+
+    def test_a_regex_without_exactly_one_group_is_refused(self):
+        with pytest.raises(ValueError, match="exactly one group"):
+            find_text_coordinates("x\n", r"x")

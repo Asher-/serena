@@ -268,6 +268,31 @@ class BoundedPattern:
         except TimeoutError as e:
             raise self._refusal() from e
 
+    def search(self, text: str) -> Any | None:
+        """
+        :param text: the text to match
+        :return: the leftmost match in ``text`` as a :mod:`regex` match object (which offers the interface of
+            :class:`re.Match`), or None if there is none
+        :raises PatternTimeoutError: if matching ``text`` exceeds the budget
+        """
+        try:
+            return self._compiled.search(text, concurrent=True, timeout=self._budget_seconds)
+        except TimeoutError as e:
+            raise self._refusal() from e
+
+    def subn(self, repl: Callable[[Any], str], text: str) -> tuple[str, int]:
+        """
+        :param repl: the function computing the replacement of a match from the match, a :mod:`regex` match object
+            (which offers the interface of :class:`re.Match`)
+        :param text: the text to match
+        :return: ``text`` with each of its non-overlapping matches replaced, and the number of matches replaced
+        :raises PatternTimeoutError: if matching ``text`` exceeds the budget
+        """
+        try:
+            return self._compiled.subn(repl, text, concurrent=True, timeout=self._budget_seconds)
+        except TimeoutError as e:
+            raise self._refusal() from e
+
     def matching_line_indices(self, lines: Sequence[str]) -> list[int]:
         """
         :param lines: the lines to match, each on its own
@@ -744,19 +769,17 @@ class ContentReplacer:
         self.regex_multiline = regex_multiline
 
     @staticmethod
-    def _create_replacement_function(
-        regex_pattern: str, repl_template: str, regex_flags: int, expand_backrefs: bool
-    ) -> Callable[[re.Match], str]:
+    def _create_replacement_function(pattern: BoundedPattern, repl_template: str, expand_backrefs: bool) -> Callable[[re.Match], str]:
         """
         Creates a replacement function that validates for ambiguity and handles backreferences.
 
-        :param regex_pattern: The regex pattern being used for matching
+        :param pattern: The pattern being used for matching
         :param repl_template: The replacement template; in regex mode, it may contain $!1, $!2, etc. for
             backreferences; in literal mode, it is used verbatim
-        :param regex_flags: The flags to use when searching (e.g., re.DOTALL | re.MULTILINE)
         :param expand_backrefs: Whether $!N backreferences are expanded in the template; false in literal mode,
             mirroring the mode gate in MultiFileContentReplacer.find_occurrences
-        :return: A function suitable for use with re.sub() or re.subn()
+        :return: A function suitable for use with BoundedPattern.subn()
+        :raises PatternTimeoutError: (from the returned function) if matching the matched text exceeds the pattern's budget
         """
 
         def validate_and_replace(match: re.Match) -> str:
@@ -770,7 +793,7 @@ class ContentReplacer:
             # this will match the entire span above, while only the suffix may have been intended.
             # (See test case for a practical example.)
             # To detect this, we check if the same pattern matches again within the matched text,
-            if "\n" in matched_text and re.search(regex_pattern, matched_text[1:], flags=regex_flags):
+            if "\n" in matched_text and pattern.search(matched_text[1:]):
                 raise ValueError(
                     "Match is ambiguous: the search pattern matches multiple overlapping occurrences. "
                     "Please revise the search pattern to be more specific to avoid ambiguity, "
@@ -812,6 +835,8 @@ class ContentReplacer:
         :param repl: the replacement string; in regex mode, it may contain backreferences in the form of $!1, $!2, etc.
             to refer to matched groups in the search expression; in literal mode, it is used verbatim
         :return: the updated content after performing the replacement
+        :raises PatternTimeoutError: if matching the content, or a match's text in the ambiguity check, exceeds the
+            budget of :class:`BoundedPattern`
         """
         if self.mode == "literal":
             regex = re.escape(needle)
@@ -821,12 +846,13 @@ class ContentReplacer:
             raise ValueError(f"Invalid mode: '{self.mode}', expected 'literal' or 'regex'.")
 
         regex_flags = (re.MULTILINE | re.DOTALL) if self.regex_multiline else 0
+        pattern = BoundedPattern(regex, regex_flags, sent_pattern=needle)
 
         # create replacement function with ambiguity validation and, in regex mode, backreference handling
-        repl_fn = self._create_replacement_function(regex, repl, regex_flags=regex_flags, expand_backrefs=self.mode == "regex")
+        repl_fn = self._create_replacement_function(pattern, repl, expand_backrefs=self.mode == "regex")
 
         # perform replacement
-        updated_content, n = re.subn(regex, repl_fn, content, flags=regex_flags)
+        updated_content, n = pattern.subn(repl_fn, content)
 
         if n == 0:
             raise ValueError("Error: No matches of search expression found.")
@@ -883,8 +909,8 @@ class MultiFileContentReplacer:
         self.mode = mode
         self._flags = (re.MULTILINE | re.DOTALL) if regex_multiline else 0
 
-    def _compile(self, needle: str) -> re.Pattern:
-        return re.compile(re.escape(needle) if self.mode == "literal" else needle, flags=self._flags)
+    def _compile(self, needle: str) -> BoundedPattern:
+        return BoundedPattern(re.escape(needle) if self.mode == "literal" else needle, self._flags, sent_pattern=needle)
 
     @classmethod
     def _digest(cls, text: str) -> str:
@@ -917,6 +943,8 @@ class MultiFileContentReplacer:
         :param needle: the search expression (literal string or regex, depending on the mode)
         :param repl: the replacement template (may contain $!N backreferences in regex mode)
         :return: occurrences in deterministic order (file order, then position within the file)
+        :raises PatternTimeoutError: if matching a file's content, or a match's text in the ambiguity check, exceeds the
+            budget of :class:`BoundedPattern`
         """
         pattern = self._compile(needle)
         occurrences: list[ReplacementOccurrence] = []
@@ -1285,8 +1313,9 @@ def find_text_coordinates(content: str, regex: str, require_unique: bool = False
     :param require_unique: if True, raises an error if not exactly one match is found;
         if False, returns None if no match is found, and returns the coordinates of the first match if multiple matches are found
     :return: the coordinates of the match or None
+    :raises PatternTimeoutError: if matching the content exceeds the budget of :class:`BoundedPattern`
     """
-    pattern = re.compile(regex, flags=re.MULTILINE | re.DOTALL)
+    pattern = BoundedPattern(regex, re.MULTILINE | re.DOTALL)
     matches = list(pattern.finditer(content))
     if len(matches) == 0:
         if require_unique:

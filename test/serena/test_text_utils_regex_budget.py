@@ -1,6 +1,7 @@
 import re
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -99,6 +100,67 @@ class TestRegexBudget:
         assert [match.start_line for match in unicode_matches] == [1, 2]
 
 
+class TestReplacementBudget:
+    """
+    The bound on caller patterns in the replacement and coordinate operations, each of which is sent a pattern that
+    backtracks past its budget on a text of stalling loops.
+    """
+
+    NUM_LOOPS = 10
+    """the number of loops in the matched text, which makes the stalling pattern match for longer than its budget"""
+
+    @classmethod
+    def _stalling_loops(cls) -> str:
+        """
+        :return: loops of the stalling pattern's shape that never call content(name)
+        """
+        return "".join(f"for p in items_{i}:\n    value = p.name\n    total += value\n" for i in range(cls.NUM_LOOPS))
+
+    @staticmethod
+    def _assert_refused_while_other_threads_run(call: Callable[[], object], pattern: str) -> None:
+        """
+        :param call: the operation matching the stalling text
+        :param pattern: the pattern as sent to the operation
+        """
+        with _Ticker() as ticker:
+            start = time.monotonic()
+            with pytest.raises(text_utils.PatternTimeoutError) as refusal:
+                call()
+            elapsed = time.monotonic() - start
+
+        assert refusal.value.pattern == pattern
+        assert elapsed < DEFAULT_TOOL_TIMEOUT / 4
+        # a thread starved of the interpreter for the whole match would not have ticked at all
+        assert ticker.ticks >= 0.25 * elapsed / _Ticker.INTERVAL_SECONDS
+
+    def test_a_backtracking_replacement_is_refused_while_other_threads_run(self) -> None:
+        replacer = text_utils.ContentReplacer(mode="regex", allow_multiple_occurrences=True)
+
+        self._assert_refused_while_other_threads_run(
+            lambda: replacer.replace(self._stalling_loops(), STALLING_PATTERN, "x"), STALLING_PATTERN
+        )
+
+    def test_a_backtracking_ambiguity_check_is_refused_while_other_threads_run(self) -> None:
+        # the first branch matches the whole text at once; checking that match for ambiguity searches the text
+        # behind its first character, where only the stalling branch can be tried
+        pattern = r"X\n.*|" + STALLING_PATTERN
+        replacer = text_utils.ContentReplacer(mode="regex", allow_multiple_occurrences=True)
+
+        self._assert_refused_while_other_threads_run(lambda: replacer.replace("X\n" + self._stalling_loops(), pattern, "x"), pattern)
+
+    def test_a_backtracking_multi_file_search_is_refused_while_other_threads_run(self) -> None:
+        replacer = text_utils.MultiFileContentReplacer(mode="regex")
+
+        self._assert_refused_while_other_threads_run(
+            lambda: replacer.find_occurrences([("loops.py", self._stalling_loops())], STALLING_PATTERN, "x"), STALLING_PATTERN
+        )
+
+    def test_a_backtracking_coordinate_search_is_refused_while_other_threads_run(self) -> None:
+        self._assert_refused_while_other_threads_run(
+            lambda: text_utils.find_text_coordinates(self._stalling_loops(), STALLING_PATTERN), STALLING_PATTERN
+        )
+
+
 class TestBoundedPattern:
     def test_matches_found_within_the_budget_are_returned_in_order(self) -> None:
         pattern = text_utils.BoundedPattern("x+")
@@ -138,6 +200,38 @@ class TestBoundedPattern:
 
         with pytest.raises(text_utils.PatternTimeoutError) as refusal:
             pattern.matching_line_indices(["for p in items: print(content(name))", STALLING_LINE])
+        assert refusal.value.pattern == STALLING_LINE_PATTERN
+
+    def test_a_search_returns_the_leftmost_match(self) -> None:
+        pattern = text_utils.BoundedPattern("x+")
+
+        match = pattern.search("a-xx-xxx")
+
+        assert match is not None
+        assert (match.start(), match.group()) == (2, "xx")
+
+    def test_a_search_without_a_match_returns_none(self) -> None:
+        pattern = text_utils.BoundedPattern("x+")
+
+        assert pattern.search("a-b") is None
+
+    def test_a_search_past_the_budget_is_refused(self) -> None:
+        pattern = text_utils.BoundedPattern(STALLING_LINE_PATTERN, budget_seconds=0.2)
+
+        with pytest.raises(text_utils.PatternTimeoutError) as refusal:
+            pattern.search(STALLING_LINE)
+        assert refusal.value.pattern == STALLING_LINE_PATTERN
+
+    def test_a_substitution_replaces_each_match_by_its_computed_replacement(self) -> None:
+        pattern = text_utils.BoundedPattern("x+")
+
+        assert pattern.subn(lambda match: str(len(match.group())), "x-xx-a") == ("1-2-a", 2)
+
+    def test_a_substitution_past_the_budget_is_refused(self) -> None:
+        pattern = text_utils.BoundedPattern(STALLING_LINE_PATTERN, budget_seconds=0.2)
+
+        with pytest.raises(text_utils.PatternTimeoutError) as refusal:
+            pattern.subn(lambda match: "", STALLING_LINE)
         assert refusal.value.pattern == STALLING_LINE_PATTERN
 
     def test_a_text_pattern_is_matched_with_the_given_flags(self) -> None:
