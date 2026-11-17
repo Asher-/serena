@@ -8,6 +8,7 @@ from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.ls_utils import SymbolUtils
 from solidlsp.settings import SolidLSPSettings
+from test.conftest import get_repos_dir
 from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name, request_all_symbols
 from test.solidlsp.util.diagnostics import assert_file_diagnostics
 
@@ -15,7 +16,7 @@ from test.solidlsp.util.diagnostics import assert_file_diagnostics
 @pytest.mark.groovy
 class TestGroovyLanguageServer:
     language_server: SolidLanguageServer | None = None
-    test_repo_path: Path = Path(__file__).parent.parent.parent / "resources" / "repos" / "groovy" / "test_repo"
+    test_repo_path: Path = get_repos_dir("groovy") / "test_repo"
 
     @classmethod
     def setup_class(cls):

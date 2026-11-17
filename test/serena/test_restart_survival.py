@@ -25,10 +25,11 @@ import pytest
 
 from serena.call_journal import CALL_ID_HEADER, RESUME_METHOD, daemon_owner
 from solidlsp.util import supervise
+from test.conftest import get_repos_dir
 
 pytestmark = pytest.mark.skipif(not os.environ.get(supervise.PROGRAM_ENV), reason="BRAIN_SUPERVISE names no program")
 
-_FIXTURE = Path(__file__).parents[1] / "resources" / "repos" / "python" / "test_repo"
+_FIXTURE = get_repos_dir("python") / "test_repo"
 _DOCUMENT = "test_repo/models.py"
 _START_SECONDS = 300.0
 _LANGUAGE_SERVER_KIND = "solidlsp.language_server"

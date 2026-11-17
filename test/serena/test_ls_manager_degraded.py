@@ -33,6 +33,7 @@ from serena.project import Project
 from serena.tools.config_tools import GetLanguageServerStatusTool
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
+from test.conftest import get_repos_dir
 
 
 class _ScriptedLanguageServerFactory(LanguageServerFactory):
@@ -235,7 +236,7 @@ class TestActivationMessageWaitsForLsInit:
     are surfaced in the message itself, not deferred to the next tool call.
     """
 
-    _PYTHON_REPO = str(Path(__file__).parent.parent / "resources" / "repos" / "python" / "test_repo")
+    _PYTHON_REPO = str(get_repos_dir("python") / "test_repo")
 
     def _build_agent(
         self,
@@ -349,7 +350,7 @@ class TestGetLanguageServerManagerOrRaiseBlocksOnReadiness:
     misleading "could not be constructed at all" exception.
     """
 
-    _PYTHON_REPO = str(Path(__file__).parent.parent / "resources" / "repos" / "python" / "test_repo")
+    _PYTHON_REPO = str(get_repos_dir("python") / "test_repo")
 
     def _build_project(
         self,
@@ -469,7 +470,7 @@ class TestLanguageServerStatus:
     through the project that owns the language-server manager.
     """
 
-    _PYTHON_REPO = str(Path(__file__).parent.parent / "resources" / "repos" / "python" / "test_repo")
+    _PYTHON_REPO = str(get_repos_dir("python") / "test_repo")
 
     def _agent_whose_manager_construction_fails(self) -> tuple[SerenaAgent, Project]:
         # a tool timeout below the minimum makes the manager's construction fail before any server starts

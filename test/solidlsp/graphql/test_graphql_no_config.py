@@ -13,12 +13,11 @@ that startup instead fails fast once that warning is observed.
 import json
 import shutil
 import time
-from pathlib import Path
 
 import pytest
 
 from solidlsp.ls_config import LanguageServerId
-from test.conftest import language_server_tests_enabled, start_ls_context
+from test.conftest import get_repos_dir, language_server_tests_enabled, start_ls_context
 
 pytestmark = [
     pytest.mark.graphql,
@@ -30,7 +29,7 @@ pytestmark = [
 # (legitimate) slow-cache-build case.
 _FAST_FAIL_BUDGET_SECONDS = 15.0
 
-_FIXTURE_REPO = Path(__file__).parent.parent.parent / "resources" / "repos" / "graphql_no_config" / "test_repo"
+_FIXTURE_REPO = get_repos_dir("graphql_no_config") / "test_repo"
 
 
 def test_startup_does_not_wait_out_the_full_timeout() -> None:

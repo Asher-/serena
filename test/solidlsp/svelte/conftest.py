@@ -4,14 +4,15 @@ import logging
 import os
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 from filelock import FileLock
 
+from test.conftest import get_repos_dir
+
 log = logging.getLogger(__name__)
 
-repo_path = Path(__file__).resolve().parents[2] / "resources" / "repos" / "svelte" / "test_repo"
+repo_path = get_repos_dir("svelte") / "test_repo"
 NODE_MODULES = repo_path / "node_modules"
 PACKAGE_LOCK = repo_path / "package-lock.json"
 SVELTE_MARKER = NODE_MODULES / "svelte" / "package.json"

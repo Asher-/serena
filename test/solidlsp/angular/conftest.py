@@ -22,14 +22,15 @@ import logging
 import os
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 from filelock import FileLock
 
+from test.conftest import get_repos_dir
+
 log = logging.getLogger(__name__)
 
-REPO_ROOT = Path(__file__).resolve().parents[2] / "resources" / "repos" / "angular" / "test_repo"
+REPO_ROOT = get_repos_dir("angular") / "test_repo"
 NODE_MODULES = REPO_ROOT / "node_modules"
 ANGULAR_CORE_MARKER = NODE_MODULES / "@angular" / "core" / "package.json"
 # Lock file lives inside the repo (covered by its .gitignore) so xdist workers

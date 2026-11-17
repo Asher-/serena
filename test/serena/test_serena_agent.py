@@ -908,7 +908,11 @@ def serena_agent(request: pytest.FixtureRequest, serena_config) -> Iterator[Sere
 
 
 class TestSerenaAgent:
-    @pytest.mark.parametrize("project", [None, str(get_repo_path(LanguageServerId.PYTHON)), "non_existent_path"])
+    @pytest.mark.parametrize(
+        "project",
+        [None, str(get_repo_path(LanguageServerId.PYTHON)), "non_existent_path"],
+        ids=["None", "python_test_repo", "non_existent_path"],
+    )
     def test_agent_instantiation(self, project: str | None):
         """
         Tests agent instantiation for cases where

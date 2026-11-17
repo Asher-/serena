@@ -5,6 +5,7 @@ import pytest
 from solidlsp.language_servers.scala_language_server import ScalaLanguageServer
 from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.settings import SolidLSPSettings
+from test.conftest import get_repos_dir
 from test.solidlsp.util.diagnostics import assert_file_diagnostics
 
 pytest.skip("Scala must be compiled for these tests to run through, which is a huge hassle", allow_module_level=True)
@@ -16,7 +17,7 @@ pytestmark = pytest.mark.scala
 
 @pytest.fixture(scope="module")
 def scala_ls():
-    repo_root = os.path.abspath("test/resources/repos/scala")
+    repo_root = str(get_repos_dir("scala"))
     config = LanguageServerConfig(ls_id=LanguageServerId.SCALA)
     solidlsp_settings = SolidLSPSettings()
     ls = ScalaLanguageServer(config, repo_root, solidlsp_settings)

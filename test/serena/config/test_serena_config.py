@@ -25,7 +25,7 @@ from serena.constants import PROJECT_TEMPLATE_FILE, SERENA_MANAGED_DIR_NAME
 from serena.language_backend import BuiltinLanguageBackend, LanguageBackend
 from serena.project import MemoryManager, Project
 from solidlsp.ls_config import LanguageServerId
-from test.conftest import create_default_serena_config
+from test.conftest import create_default_serena_config, get_repos_dir
 
 
 class TestProjectConfigAutogenerate:
@@ -274,7 +274,7 @@ def _make_config_with_project(
         language_backend=global_backend,
     )
     project = Project(
-        project_root=str(Path(__file__).parent.parent / "resources" / "repos" / "python" / "test_repo"),
+        project_root=str(get_repos_dir("python") / "test_repo"),
         project_config=ProjectConfig(
             project_name=project_name,
             language_servers=[LanguageServerId.PYTHON],
@@ -336,7 +336,7 @@ class TestEffectiveLanguageBackend:
 
         # Add a second project that requires JetBrains
         jb_project = Project(
-            project_root=str(Path(__file__).parent.parent / "resources" / "repos" / "java" / "test_repo"),
+            project_root=str(get_repos_dir("java") / "test_repo"),
             project_config=ProjectConfig(
                 project_name="jb_proj",
                 language_servers=[LanguageServerId.JAVA],
@@ -361,7 +361,7 @@ class TestEffectiveLanguageBackend:
 
         # Add a second project that also uses LSP
         lsp_project2 = Project(
-            project_root=str(Path(__file__).parent.parent / "resources" / "repos" / "python" / "test_repo"),
+            project_root=str(get_repos_dir("python") / "test_repo"),
             project_config=ProjectConfig(
                 project_name="lsp_proj2",
                 language_servers=[LanguageServerId.PYTHON],
@@ -386,7 +386,7 @@ class TestEffectiveLanguageBackend:
 
         # Add a second project with no backend override
         proj2 = Project(
-            project_root=str(Path(__file__).parent.parent / "resources" / "repos" / "python" / "test_repo"),
+            project_root=str(get_repos_dir("python") / "test_repo"),
             project_config=ProjectConfig(
                 project_name="proj2",
                 language_servers=[LanguageServerId.PYTHON],
@@ -410,7 +410,7 @@ class TestEffectiveLanguageBackend:
         )
         config.agent_interface = AgentInterface.REPL
         jb_project = Project(
-            project_root=str(Path(__file__).parent.parent / "resources" / "repos" / "java" / "test_repo"),
+            project_root=str(get_repos_dir("java") / "test_repo"),
             project_config=ProjectConfig(
                 project_name="jb_proj",
                 language_servers=[LanguageServerId.JAVA],

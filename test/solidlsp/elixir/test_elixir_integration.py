@@ -13,7 +13,7 @@ import pytest
 from serena.project import Project
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
-from test.conftest import language_server_tests_enabled
+from test.conftest import get_repos_dir, language_server_tests_enabled
 
 # These marks will be applied to all tests in this module
 pytestmark = [
@@ -28,8 +28,7 @@ class TestElixirIntegration:
     @pytest.fixture
     def elixir_test_repo_path(self):
         """Get the path to the Elixir test repository."""
-        test_dir = Path(__file__).parent.parent.parent
-        return str(test_dir / "resources" / "repos" / "elixir" / "test_repo")
+        return str(get_repos_dir("elixir") / "test_repo")
 
     def test_elixir_repo_structure(self, elixir_test_repo_path):
         """Test that the Elixir test repository has the expected structure."""

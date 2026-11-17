@@ -18,7 +18,7 @@ from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.ls_types import SymbolKind
 from solidlsp.ls_utils import SymbolUtils
 from solidlsp.settings import SolidLSPSettings
-from test.conftest import find_identifier_position, get_repo_path, ls_has_verified_implementation_support
+from test.conftest import find_identifier_position, get_repo_path, get_repos_dir, ls_has_verified_implementation_support
 from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name, request_all_symbols
 
 
@@ -407,7 +407,7 @@ class TestCSharpSolutionProjectOpening:
     def test_solution_and_project_opening_with_real_test_repo(self):
         """Test solution and project opening with the actual C# test repository."""
         # Get the C# test repo path
-        test_repo_path = Path(__file__).parent.parent.parent / "resources" / "repos" / "csharp" / "test_repo"
+        test_repo_path = get_repos_dir("csharp") / "test_repo"
 
         if not test_repo_path.exists():
             pytest.skip("C# test repository not found")

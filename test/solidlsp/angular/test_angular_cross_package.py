@@ -7,17 +7,16 @@ a file in it — which is what ``_activate_additional_workspaces`` does at start
 """
 
 import logging
-from pathlib import Path
 
 import pytest
 
 from serena.util.text_utils import find_text_coordinates
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
-from test.conftest import start_ls_context
+from test.conftest import get_repos_dir, start_ls_context
 from test.solidlsp.conftest import read_repo_file
 
-ANGULAR_REPOS_DIR = Path(__file__).parent.parent.parent / "resources" / "repos" / "angular"
+ANGULAR_REPOS_DIR = get_repos_dir("angular")
 APP = str(ANGULAR_REPOS_DIR / "test_repo")
 LIB = str(ANGULAR_REPOS_DIR / "cross_package_lib")
 

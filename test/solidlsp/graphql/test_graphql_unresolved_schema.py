@@ -7,19 +7,17 @@ for a missing config, but here its caches do come up and requests are served, so
 symbols must still be returned.
 """
 
-from pathlib import Path
-
 import pytest
 
 from solidlsp.ls_config import LanguageServerId
-from test.conftest import language_server_tests_enabled, start_ls_context
+from test.conftest import get_repos_dir, language_server_tests_enabled, start_ls_context
 
 pytestmark = [
     pytest.mark.graphql,
     pytest.mark.skipif(not language_server_tests_enabled(LanguageServerId.GRAPHQL), reason="GraphQL tests are disabled"),
 ]
 
-_FIXTURE_REPO = Path(__file__).parent.parent.parent / "resources" / "repos" / "graphql_unresolved_schema" / "test_repo"
+_FIXTURE_REPO = get_repos_dir("graphql_unresolved_schema") / "test_repo"
 
 
 def test_document_symbols_are_returned_despite_unresolved_schema() -> None:

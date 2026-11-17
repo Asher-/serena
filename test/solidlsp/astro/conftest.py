@@ -18,14 +18,15 @@ import logging
 import os
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 from filelock import FileLock
 
+from test.conftest import get_repos_dir
+
 log = logging.getLogger(__name__)
 
-REPO_ROOT = Path(__file__).resolve().parents[2] / "resources" / "repos" / "astro" / "test_repo"
+REPO_ROOT = get_repos_dir("astro") / "test_repo"
 NODE_MODULES = REPO_ROOT / "node_modules"
 ASTRO_MARKER = NODE_MODULES / "astro" / "package.json"
 INSTALL_LOCK = REPO_ROOT / ".astro-install.lock"

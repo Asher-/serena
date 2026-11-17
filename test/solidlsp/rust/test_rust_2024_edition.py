@@ -1,13 +1,12 @@
 import os
 from collections.abc import Iterator
-from pathlib import Path
 
 import pytest
 
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_utils import SymbolUtils
-from test.conftest import start_ls_context
+from test.conftest import get_repos_dir, start_ls_context
 
 
 @pytest.fixture(scope="class")
@@ -25,7 +24,7 @@ def rust_language_server() -> Iterator[SolidLanguageServer]:
 
 @pytest.mark.rust
 class TestRust2024EditionLanguageServer:
-    test_repo_2024_path = Path(__file__).parent.parent.parent / "resources" / "repos" / "rust" / "test_repo_2024"
+    test_repo_2024_path = get_repos_dir("rust") / "test_repo_2024"
 
     def test_find_references_raw(self, rust_language_server) -> None:
         # Test finding references to the 'add' function defined in main.rs

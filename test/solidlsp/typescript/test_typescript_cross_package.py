@@ -1,13 +1,11 @@
 """Tests for cross-package TypeScript references using additional_workspace_folders."""
 
-from pathlib import Path
-
 import pytest
 
 from solidlsp.ls_config import LanguageServerId
-from test.conftest import TYPESCRIPT_LANGUAGE_BACKENDS, start_ls_context
+from test.conftest import TYPESCRIPT_LANGUAGE_BACKENDS, get_repos_dir, start_ls_context
 
-CROSS_PKG_DIR = Path(__file__).parent.parent.parent / "resources" / "repos" / "typescript"
+CROSS_PKG_DIR = get_repos_dir("typescript")
 PACKAGE_A = str(CROSS_PKG_DIR / "cross_package_a")
 PACKAGE_B = str(CROSS_PKG_DIR / "cross_package_b")
 

@@ -5,9 +5,10 @@ Elixir-specific test configuration and fixtures.
 import os
 import subprocess
 import time
-from pathlib import Path
 
 import pytest
+
+from test.conftest import get_repos_dir
 
 
 def ensure_elixir_test_repo_compiled(repo_path: str) -> None:
@@ -159,7 +160,7 @@ def setup_elixir_test_environment():
     All output is logged for transparency and debugging.
     """
     # Get the test repo path relative to this conftest.py file
-    test_repo_path = Path(__file__).parent.parent.parent / "resources" / "repos" / "elixir" / "test_repo"
+    test_repo_path = get_repos_dir("elixir") / "test_repo"
     ensure_elixir_test_repo_compiled(str(test_repo_path))
     return str(test_repo_path)
 

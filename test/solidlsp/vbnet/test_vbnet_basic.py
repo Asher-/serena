@@ -13,6 +13,7 @@ from solidlsp.language_servers.vbnet_language_server import (
 )
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_utils import SymbolUtils
+from test.conftest import get_repos_dir
 
 
 @pytest.mark.vbnet
@@ -161,7 +162,7 @@ class TestVBNetSolutionProjectOpening:
             assert result is None
 
     def test_solution_and_project_opening_with_real_test_repo(self):
-        test_repo_path = Path(__file__).parent.parent.parent / "resources" / "repos" / "vbnet" / "test_repo"
+        test_repo_path = get_repos_dir("vbnet") / "test_repo"
 
         if not test_repo_path.exists():
             pytest.skip("VB.NET test repository not found")

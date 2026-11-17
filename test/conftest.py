@@ -24,6 +24,8 @@ from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.settings import SolidLSPSettings
 
+from .fixture_repositories import FixtureRepositories
+from .language_server_installation import TestLanguageServerInstallation
 from .solidlsp.clojure import is_clojure_cli_available
 from .solidlsp.elixir import EXPERT_UNAVAILABLE
 from .solidlsp.erlang import ERLANG_UNAVAILABLE
@@ -45,12 +47,12 @@ tempfile.tempdir = str(SCRATCH_ROOT)
 os.environ["TMPDIR"] = str(SCRATCH_ROOT)
 
 # the serena home of this process and of every process a test starts, so that no test reads or writes the developer's
-# configuration (bug://serena/config/file/write/atomicity); the language servers already downloaded stay in use
+# configuration (bug://serena/config/file/write/atomicity) or installs a language server into the developer's home
 SERENA_HOME = Path(tempfile.mkdtemp(prefix="serena-home-", dir=SCRATCH_ROOT))
 os.environ["SERENA_HOME"] = str(SERENA_HOME)
-_DOWNLOADED_LANGUAGE_SERVERS = Path.home() / SERENA_MANAGED_DIR_NAME / "language_servers"
-if _DOWNLOADED_LANGUAGE_SERVERS.is_dir():
-    (SERENA_HOME / "language_servers").symlink_to(_DOWNLOADED_LANGUAGE_SERVERS)
+TestLanguageServerInstallation().link_into(SERENA_HOME)
+
+_FIXTURE_REPOSITORIES = FixtureRepositories(Path(tempfile.mkdtemp(prefix="repos-", dir=SCRATCH_ROOT)))
 
 
 @pytest.fixture(scope="session")
@@ -79,9 +81,21 @@ _LANGUAGE_REPO_ALIASES: dict[LanguageServerId, LanguageServerId] = {
 }
 
 
+def get_repos_dir(name: str) -> Path:
+    """
+    :param name: the name of a directory under ``test/resources/repos``, e.g. ``python``
+    :return: this process's copy of the directory
+    """
+    return _FIXTURE_REPOSITORIES.get_dir(name)
+
+
 def get_repo_path(language: LanguageServerId) -> Path:
+    """
+    :param language: the language server
+    :return: this process's copy of the language's fixture repository ``test/resources/repos/<language>/test_repo``
+    """
     repo_language = _LANGUAGE_REPO_ALIASES.get(language, language)
-    return Path(__file__).parent / "resources" / "repos" / repo_language.get_key() / "test_repo"
+    return get_repos_dir(repo_language.get_key()) / "test_repo"
 
 
 def _create_ls(
