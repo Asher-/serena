@@ -12,14 +12,12 @@ import time
 
 import pytest
 
-from solidlsp.language_servers.astro_language_server import AstroCompanionPreparationError, AstroLanguageServer
 from solidlsp.language_servers.svelte_language_server import (
     SvelteCompanionPreparationError,
     SvelteLanguageServer,
     SvelteTypeScriptServer,
 )
 from solidlsp.language_servers.typescript_language_server import TypeScriptLanguageServer, TypeScriptServerCrashedError
-from solidlsp.language_servers.vue_language_server import VueLanguageServer
 from solidlsp.settings import SolidLSPSettings
 
 
@@ -353,13 +351,11 @@ class _FakeCompanionTSServer:
     observable behavior (raised errors, message shape, which timeout is used) instead of mock interactions.
     """
 
-    def __init__(self, *, wait_result: bool = True, open_error: Exception | None = None, release_error: Exception | None = None) -> None:
+    def __init__(self, *, wait_result: bool = True, open_error: Exception | None = None) -> None:
         self.calls: list[str] = []
-        self.released: list[str] = []
         self.wait_timeout: float | None = None
         self._wait_result = wait_result
         self._open_error = open_error
-        self._release_error = release_error
 
     def expect_indexing(self) -> None:
         self.calls.append("expect_indexing")
@@ -370,18 +366,10 @@ class _FakeCompanionTSServer:
             raise self._open_error
         return f"file:///{relative_path}"
 
-    def release_retained_file(self, uri: str) -> None:
-        self.released.append(uri)
-        if self._release_error is not None:
-            raise self._release_error
-
     def _wait_for_indexing_start_or_completion(self, timeout: float) -> bool:
         self.calls.append("wait")
         self.wait_timeout = timeout
         return self._wait_result
-
-    def wait_for_indexing(self, timeout: float) -> bool:
-        return self._wait_for_indexing_start_or_completion(timeout)
 
     def describe_indexing_state(self) -> str:
         return "complete=False, active_progress_tokens=stuck-progress"
@@ -461,157 +449,3 @@ class TestSvelteLanguageServerCompanionGuard:
         assert "09.svelte" in message  # the 10th entry of the sorted listing is still shown
         assert "10.svelte" not in message  # the 11th is capped
         assert "and 5 more" in message
-
-    def test_cleanup_releases_each_retained_file_once(self, tmp_path) -> None:
-        (tmp_path / "A.svelte").touch()
-        (tmp_path / "B.svelte").touch()
-        ts_server = _FakeCompanionTSServer()
-        ls = self._bare_svelte_ls(ts_server, str(tmp_path))
-        ls._ensure_svelte_files_indexed_on_ts_server()
-
-        ls._cleanup_indexed_svelte_files()
-        ls._cleanup_indexed_svelte_files()
-
-        assert sorted(ts_server.released) == ["file:///A.svelte", "file:///B.svelte"]
-
-    def test_cleanup_releases_every_retained_file_past_a_failing_release(self, tmp_path) -> None:
-        (tmp_path / "A.svelte").touch()
-        (tmp_path / "B.svelte").touch()
-        ts_server = _FakeCompanionTSServer(release_error=RuntimeError("didClose failed"))
-        ls = self._bare_svelte_ls(ts_server, str(tmp_path))
-        ls._ensure_svelte_files_indexed_on_ts_server()
-
-        ls._cleanup_indexed_svelte_files()
-
-        assert sorted(ts_server.released) == ["file:///A.svelte", "file:///B.svelte"]
-
-
-class TestVueLanguageServerCompanionIndexing:
-    """VueLanguageServer retains its .vue files on the TypeScript server once and releases each of them."""
-
-    def _bare_vue_ls(self, ts_server: _FakeCompanionTSServer, vue_files: list[str]) -> VueLanguageServer:
-        ls = object.__new__(VueLanguageServer)
-        ls._vue_files_indexed = False
-        ls._indexed_vue_file_uris = []
-        ls._find_all_vue_files = lambda: vue_files
-        ls._ts_server = ts_server
-        return ls
-
-    def test_retains_each_file_once_and_waits_for_indexing(self) -> None:
-        ts_server = _FakeCompanionTSServer()
-        ls = self._bare_vue_ls(ts_server, ["A.vue", "B.vue"])
-
-        ls._ensure_vue_files_indexed_on_ts_server()
-        calls_after_indexing = list(ts_server.calls)
-        ls._ensure_vue_files_indexed_on_ts_server()
-
-        assert calls_after_indexing == ["expect_indexing", "retain_open_file", "retain_open_file", "wait"]
-        assert ts_server.calls == calls_after_indexing
-
-    def test_skips_a_file_that_fails_to_open_and_still_waits_for_indexing(self) -> None:
-        ts_server = _FakeCompanionTSServer(open_error=RuntimeError("didOpen failed"))
-        ls = self._bare_vue_ls(ts_server, ["A.vue"])
-
-        ls._ensure_vue_files_indexed_on_ts_server()
-        ls._cleanup_indexed_vue_files()
-
-        assert "wait" in ts_server.calls
-        assert ts_server.released == []
-
-    def test_cleanup_releases_each_retained_file_once(self) -> None:
-        ts_server = _FakeCompanionTSServer()
-        ls = self._bare_vue_ls(ts_server, ["A.vue", "B.vue"])
-        ls._ensure_vue_files_indexed_on_ts_server()
-
-        ls._cleanup_indexed_vue_files()
-        ls._cleanup_indexed_vue_files()
-
-        assert sorted(ts_server.released) == ["file:///A.vue", "file:///B.vue"]
-
-    def test_cleanup_releases_every_retained_file_past_a_failing_release(self) -> None:
-        ts_server = _FakeCompanionTSServer(release_error=RuntimeError("didClose failed"))
-        ls = self._bare_vue_ls(ts_server, ["A.vue", "B.vue"])
-        ls._ensure_vue_files_indexed_on_ts_server()
-
-        ls._cleanup_indexed_vue_files()
-
-        assert sorted(ts_server.released) == ["file:///A.vue", "file:///B.vue"]
-
-
-class TestAstroLanguageServerCompanionIndexing:
-    """AstroLanguageServer retains its .astro files on the companion TS server once and releases each of them."""
-
-    def _bare_astro_ls(self, ts_server: _FakeCompanionTSServer | None, repo_path: str) -> AstroLanguageServer:
-        ls = object.__new__(AstroLanguageServer)
-        ls.repo_path = repo_path
-        ls._astro_files_indexed = False
-        ls._indexed_astro_file_uris = []
-        ls._custom_settings = SolidLSPSettings.CustomLSSettings({"indexing_timeout": 0.01})
-        ls._solidlsp_settings = _FakeSolidLSPSettings(ts_indexing_timeout=999.0)
-        ls._ts_server = ts_server
-        return ls
-
-    def test_retains_each_file_once_and_waits_for_indexing(self, tmp_path) -> None:
-        (tmp_path / "A.astro").touch()
-        ts_server = _FakeCompanionTSServer()
-        ls = self._bare_astro_ls(ts_server, str(tmp_path))
-
-        ls._ensure_astro_files_indexed_on_ts_server()
-        calls_after_indexing = list(ts_server.calls)
-        ls._ensure_astro_files_indexed_on_ts_server()
-
-        assert calls_after_indexing == ["expect_indexing", "retain_open_file", "wait"]
-        assert ts_server.calls == calls_after_indexing
-
-    def test_indexes_once_a_companion_server_is_present(self, tmp_path) -> None:
-        (tmp_path / "A.astro").touch()
-        ls = self._bare_astro_ls(None, str(tmp_path))
-        ls._ensure_astro_files_indexed_on_ts_server()
-        ts_server = _FakeCompanionTSServer()
-        ls._ts_server = ts_server  # type: ignore[assignment]
-
-        ls._ensure_astro_files_indexed_on_ts_server()
-
-        assert ts_server.calls.count("retain_open_file") == 1
-
-    def test_raises_preparation_error_for_files_that_fail_to_open(self, tmp_path) -> None:
-        (tmp_path / "A.astro").touch()
-        ts_server = _FakeCompanionTSServer(open_error=RuntimeError("didOpen failed"))
-        ls = self._bare_astro_ls(ts_server, str(tmp_path))
-
-        with pytest.raises(AstroCompanionPreparationError, match="1 Astro file"):
-            ls._ensure_astro_files_indexed_on_ts_server()
-
-        assert "wait" not in ts_server.calls
-
-    def test_proceeds_when_companion_indexing_times_out(self, tmp_path) -> None:
-        (tmp_path / "A.astro").touch()
-        ts_server = _FakeCompanionTSServer(wait_result=False)
-        ls = self._bare_astro_ls(ts_server, str(tmp_path))
-
-        ls._ensure_astro_files_indexed_on_ts_server()
-
-        assert ts_server.wait_timeout == 0.01
-
-    def test_cleanup_releases_each_retained_file_once(self, tmp_path) -> None:
-        (tmp_path / "A.astro").touch()
-        (tmp_path / "B.astro").touch()
-        ts_server = _FakeCompanionTSServer()
-        ls = self._bare_astro_ls(ts_server, str(tmp_path))
-        ls._ensure_astro_files_indexed_on_ts_server()
-
-        ls._cleanup_indexed_astro_files()
-        ls._cleanup_indexed_astro_files()
-
-        assert sorted(ts_server.released) == ["file:///A.astro", "file:///B.astro"]
-
-    def test_cleanup_releases_every_retained_file_past_a_failing_release(self, tmp_path) -> None:
-        (tmp_path / "A.astro").touch()
-        (tmp_path / "B.astro").touch()
-        ts_server = _FakeCompanionTSServer(release_error=RuntimeError("didClose failed"))
-        ls = self._bare_astro_ls(ts_server, str(tmp_path))
-        ls._ensure_astro_files_indexed_on_ts_server()
-
-        ls._cleanup_indexed_astro_files()
-
-        assert sorted(ts_server.released) == ["file:///A.astro", "file:///B.astro"]
