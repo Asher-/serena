@@ -9,6 +9,7 @@ import pytest
 from solidlsp.language_servers.common import RuntimeDependency
 from solidlsp.language_servers.csharp_language_server import ROSLYN_LONGEST_KNOWN_PACKAGE_MEMBER, CSharpLanguageServer
 from solidlsp.settings import SolidLSPSettings
+from test.conftest import SERENA_HOME
 
 
 @pytest.mark.csharp
@@ -32,7 +33,7 @@ class TestNuGetOrgDownload:
             )
 
             # Mock the dependency provider
-            mock_settings = SolidLSPSettings()
+            mock_settings = SolidLSPSettings(solidlsp_dir=str(SERENA_HOME))
             custom_settings = SolidLSPSettings.CustomLSSettings({})
 
             dependency_provider = CSharpLanguageServer.DependencyProvider(
@@ -113,7 +114,7 @@ class TestNuGetOrgDownload:
                 binary_name="test.dll",
             )
 
-            mock_settings = SolidLSPSettings()
+            mock_settings = SolidLSPSettings(solidlsp_dir=str(SERENA_HOME))
             custom_settings = SolidLSPSettings.CustomLSSettings({})
 
             dependency_provider = CSharpLanguageServer.DependencyProvider(

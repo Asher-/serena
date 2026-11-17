@@ -17,6 +17,7 @@ from solidlsp.language_servers.scala_language_server import (
 )
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.settings import SolidLSPSettings
+from test.conftest import SERENA_HOME
 
 # `$/progress` as Metals sends it (scala/meta/internal/metals/WorkDoneProgress.scala), whose
 # titles are the ones that matter to a cross-file query: the build import, the index, and the
@@ -107,20 +108,24 @@ def test_describe_reports_outstanding_titles(tracker: MetalsProgressTracker) -> 
 
 
 def test_indexing_settings_defaults() -> None:
-    settings = _get_scala_settings(SolidLSPSettings())
+    settings = _get_scala_settings(SolidLSPSettings(solidlsp_dir=str(SERENA_HOME)))
     assert settings["indexing_timeout"] == DEFAULT_INDEXING_TIMEOUT
     assert settings["indexing_start_grace"] == DEFAULT_INDEXING_START_GRACE
 
 
 @pytest.mark.parametrize("value", [45, 45.0])
 def test_indexing_settings_are_read(value: object) -> None:
-    settings = _get_scala_settings(SolidLSPSettings(ls_specific_settings={LanguageServerId.SCALA: {"indexing_timeout": value}}))
+    settings = _get_scala_settings(
+        SolidLSPSettings(solidlsp_dir=str(SERENA_HOME), ls_specific_settings={LanguageServerId.SCALA: {"indexing_timeout": value}})
+    )
     assert settings["indexing_timeout"] == 45.0
 
 
 @pytest.mark.parametrize("value", [0, -1, "soon", True, None])
 def test_invalid_indexing_settings_fall_back_to_the_default(value: object) -> None:
-    settings = _get_scala_settings(SolidLSPSettings(ls_specific_settings={LanguageServerId.SCALA: {"indexing_start_grace": value}}))
+    settings = _get_scala_settings(
+        SolidLSPSettings(solidlsp_dir=str(SERENA_HOME), ls_specific_settings={LanguageServerId.SCALA: {"indexing_start_grace": value}})
+    )
     assert settings["indexing_start_grace"] == DEFAULT_INDEXING_START_GRACE
 
 
@@ -142,4 +147,4 @@ def test_a_gap_between_phases_does_not_end_the_wait(tracker: MetalsProgressTrack
 
 
 def test_quiet_period_default_is_read() -> None:
-    assert _get_scala_settings(SolidLSPSettings())["indexing_quiet_period"] == DEFAULT_INDEXING_QUIET_PERIOD
+    assert _get_scala_settings(SolidLSPSettings(solidlsp_dir=str(SERENA_HOME)))["indexing_quiet_period"] == DEFAULT_INDEXING_QUIET_PERIOD

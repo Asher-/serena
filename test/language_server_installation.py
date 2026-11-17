@@ -1,5 +1,5 @@
 """
-Installation of the language servers that test runs use, by a step of its own, into a root that no test run writes.
+Installation of the language servers that test runs use, by a step of its own, into a root that test runs only read.
 
 Run ``poe install-test-language-servers <language server> ...`` to install servers into the root.
 """
@@ -14,7 +14,8 @@ class TestLanguageServerInstallation:
     The root into which the language servers for test runs are installed: ``$SERENA_TEST_LANGUAGE_SERVERS`` when set, else
     ``~/.cache/serena/test-language-servers``.
 
-    The root is a serena home, so the servers installed into it are in ``<root>/language_servers/static``.
+    The root is a serena home, so the servers installed into it are in ``<root>/language_servers/static``, one directory per
+    language server class.
     """
 
     __test__ = False
@@ -25,24 +26,33 @@ class TestLanguageServerInstallation:
         configured_root = os.environ.get(self.ROOT_ENV_VAR, "").strip()
         self.root = Path(configured_root) if configured_root else Path.home() / ".cache" / "serena" / "test-language-servers"
 
-    def _static_dir(self, serena_home: Path) -> Path:
+    @staticmethod
+    def _static_dir(serena_home: Path) -> Path:
         return serena_home / "language_servers" / "static"
 
     def link_into(self, serena_home: Path) -> None:
         """
-        Makes each installed server available to the language servers that run with the given serena home.
+        Makes the installed servers available to the language servers that run with the given serena home.
 
-        Each installed server is linked from a directory of the home's own, so that a server which is not installed is installed
-        into the home and never into the root.
+        For each server installed in the root, the home receives a directory of its own that holds a link to each entry of the
+        server's installed directory. A language server thus reads its installation, while every entry it creates, replaces,
+        renames or removes in its directory, a version it installs or the runtime state it keeps there included, is the home's.
+        Writes beneath an installed entry reach the root.
 
         :param serena_home: a serena home without a ``language_servers`` directory
         """
         static_dir = self._static_dir(serena_home)
         static_dir.mkdir(parents=True)
         installed_dir = self._static_dir(self.root)
-        if installed_dir.is_dir():
-            for installed_server in installed_dir.iterdir():
-                (static_dir / installed_server.name).symlink_to(installed_server)
+        if not installed_dir.is_dir():
+            return
+        for installed_server in installed_dir.iterdir():
+            if not installed_server.is_dir():
+                continue
+            server_dir = static_dir / installed_server.name
+            server_dir.mkdir()
+            for installed_entry in installed_server.iterdir():
+                (server_dir / installed_entry.name).symlink_to(installed_entry)
 
     def install(self, language_servers: list[str]) -> None:
         """

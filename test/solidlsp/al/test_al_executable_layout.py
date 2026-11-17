@@ -12,6 +12,7 @@ import pytest
 from solidlsp.language_servers.al_language_server import ALLanguageServer
 from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.settings import SolidLSPSettings
+from test.conftest import SERENA_HOME
 
 pytestmark = pytest.mark.al
 
@@ -42,7 +43,7 @@ def _setup(extension_root: Path, system: str) -> str:
         patch.object(ALLanguageServer, "_find_al_extension", return_value=str(extension_root)),
     ):
         config = LanguageServerConfig(ls_id=LanguageServerId.AL)
-        return ALLanguageServer._setup_runtime_dependencies(config, SolidLSPSettings())
+        return ALLanguageServer._setup_runtime_dependencies(config, SolidLSPSettings(solidlsp_dir=str(SERENA_HOME)))
 
 
 @pytest.mark.parametrize("system", sorted(_PLATFORM_SUBDIR))

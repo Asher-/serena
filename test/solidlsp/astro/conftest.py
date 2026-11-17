@@ -34,7 +34,7 @@ INSTALL_LOCK = REPO_ROOT / ".astro-install.lock"
 
 @pytest.fixture(scope="session", autouse=True)
 def _install_astro_test_repo_node_modules() -> None:
-    """Populate the Astro fixture's project dependencies via npm (cached across sessions)."""
+    """Populate the Astro fixture's project dependencies via npm (once per pytest process)."""
     if ASTRO_MARKER.exists():
         log.info("Astro test repo node_modules already populated; skipping npm install")
         return
@@ -45,11 +45,11 @@ def _install_astro_test_repo_node_modules() -> None:
 
     with FileLock(str(INSTALL_LOCK)):
         if ASTRO_MARKER.exists():
-            log.info("Astro test repo node_modules populated by another worker; skipping npm install")
+            log.info("Astro test repo node_modules populated by an earlier lock holder; skipping npm install")
             return
 
         log.warning(
-            "Installing npm dependencies into the Astro test repo at %s. This is a one-time cost per checkout.",
+            "Installing npm dependencies into the Astro test repo at %s. This is a one-time cost per pytest process.",
             REPO_ROOT,
         )
         proc = subprocess.run(

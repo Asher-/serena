@@ -8,7 +8,7 @@ from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_utils import SymbolUtils
 from solidlsp.settings import SolidLSPSettings
-from test.conftest import language_server_tests_enabled
+from test.conftest import SERENA_HOME, language_server_tests_enabled
 from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name, request_all_symbols
 
 pytestmark = pytest.mark.skipif(
@@ -153,7 +153,7 @@ def test_bsl_dependency_provider_default_version() -> None:
         BSLLanguageServer,
     )
 
-    settings = SolidLSPSettings()
+    settings = SolidLSPSettings(solidlsp_dir=str(SERENA_HOME))
     provider = BSLLanguageServer.DependencyProvider(
         settings.get_ls_specific_settings(LanguageServerId.BSL),
         "/tmp/ls_resources",
@@ -175,7 +175,7 @@ def test_bsl_dependency_provider_custom_version_no_sha() -> None:
     from solidlsp.language_servers.bsl_language_server import BSLLanguageServer
     from solidlsp.language_servers.common import RuntimeDependencyCollection
 
-    settings = SolidLSPSettings()
+    settings = SolidLSPSettings(solidlsp_dir=str(SERENA_HOME))
     settings.ls_specific_settings[LanguageServerId.BSL.get_key()] = {"bsl_ls_version": "0.28.0"}
     provider = BSLLanguageServer.DependencyProvider(
         settings.get_ls_specific_settings(LanguageServerId.BSL),
@@ -215,7 +215,7 @@ def test_bsl_launch_command_uses_ls_path_without_download() -> None:
     from solidlsp.language_servers import bsl_language_server
     from solidlsp.language_servers.bsl_language_server import BSLLanguageServer
 
-    settings = SolidLSPSettings()
+    settings = SolidLSPSettings(solidlsp_dir=str(SERENA_HOME))
     settings.ls_specific_settings[LanguageServerId.BSL.get_key()] = {"ls_path": "/custom/path/bsl-language-server.jar"}
     provider = BSLLanguageServer.DependencyProvider(
         settings.get_ls_specific_settings(LanguageServerId.BSL),
@@ -242,7 +242,7 @@ def test_bsl_launch_command_requires_java() -> None:
     from solidlsp.language_servers import bsl_language_server
     from solidlsp.language_servers.bsl_language_server import BSLLanguageServer
 
-    settings = SolidLSPSettings()
+    settings = SolidLSPSettings(solidlsp_dir=str(SERENA_HOME))
     settings.ls_specific_settings[LanguageServerId.BSL.get_key()] = {"ls_path": "/custom/path/bsl-language-server.jar"}
     provider = BSLLanguageServer.DependencyProvider(
         settings.get_ls_specific_settings(LanguageServerId.BSL),
@@ -259,7 +259,7 @@ def test_bsl_launch_command_rejects_old_java() -> None:
     from solidlsp.language_servers import bsl_language_server
     from solidlsp.language_servers.bsl_language_server import BSL_LS_MIN_JAVA_VERSION, BSLLanguageServer
 
-    settings = SolidLSPSettings()
+    settings = SolidLSPSettings(solidlsp_dir=str(SERENA_HOME))
     settings.ls_specific_settings[LanguageServerId.BSL.get_key()] = {"ls_path": "/custom/path/bsl-language-server.jar"}
     provider = BSLLanguageServer.DependencyProvider(
         settings.get_ls_specific_settings(LanguageServerId.BSL),

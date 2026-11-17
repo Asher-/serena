@@ -10,6 +10,7 @@ from solidlsp.language_servers.scala_language_server import (
 )
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.settings import SolidLSPSettings
+from test.conftest import SERENA_HOME
 
 # Metals' own prompts, with the message and action titles as its `Messages` object builds them
 # (scala/meta/internal/metals/Messages.scala) and `type` as lsp4j serialises `MessageType.Info`.
@@ -83,12 +84,12 @@ class TestAutoImportBuildSetting:
 
     @staticmethod
     def setting(**scala_settings) -> object:
-        settings = SolidLSPSettings(ls_specific_settings={LanguageServerId.SCALA: scala_settings})
+        settings = SolidLSPSettings(solidlsp_dir=str(SERENA_HOME), ls_specific_settings={LanguageServerId.SCALA: scala_settings})
         return _get_scala_settings(settings)["auto_import_build"]
 
     def test_defaults_to_true(self) -> None:
         assert self.setting() is True
-        assert _get_scala_settings(SolidLSPSettings())["auto_import_build"] is True
+        assert _get_scala_settings(SolidLSPSettings(solidlsp_dir=str(SERENA_HOME)))["auto_import_build"] is True
 
     def test_can_be_disabled(self) -> None:
         assert self.setting(auto_import_build=False) is False

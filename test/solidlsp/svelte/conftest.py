@@ -67,7 +67,7 @@ def _install_svelte_test_repo_node_modules() -> None:
 
     with FileLock(str(INSTALL_LOCK)):
         if _fixture_ready():
-            log.info("Svelte test repo dependencies populated by another worker; skipping npm install")
+            log.info("Svelte test repo dependencies populated by an earlier lock holder; skipping npm install")
             return
 
         if not SVELTE_MARKER.exists() or not SVELTE_KIT_ADAPTER_MARKER.exists():

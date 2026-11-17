@@ -159,7 +159,7 @@ def setup_erlang_test_environment():
     Uses generous timeouts (3-5 minutes) to accommodate slow CI environments.
     All output is logged for transparency and debugging.
     """
-    # Get the test repo path relative to this conftest.py file
+    # this process's copy of the test repo
     test_repo_path = get_repos_dir("erlang") / "test_repo"
     ensure_erlang_test_repo_compiled(str(test_repo_path))
     return str(test_repo_path)

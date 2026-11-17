@@ -22,6 +22,7 @@ from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_process import StdioLanguageServer
 from solidlsp.settings import SolidLSPSettings
+from test.conftest import SERENA_HOME
 
 pytestmark = pytest.mark.skipif(platform.system() == "Windows", reason="POSIX signal semantics are used by the helper processes")
 
@@ -76,11 +77,13 @@ def _stop_scala_ls(terminate_bloop_on_stop: bool, monkeypatch: pytest.MonkeyPatc
 
 
 def test_terminate_bloop_on_stop_is_disabled_by_default():
-    assert _get_scala_settings(SolidLSPSettings())["terminate_bloop_on_stop"] is False
+    assert _get_scala_settings(SolidLSPSettings(solidlsp_dir=str(SERENA_HOME)))["terminate_bloop_on_stop"] is False
 
 
 def test_terminate_bloop_on_stop_can_be_enabled():
-    settings = _get_scala_settings(SolidLSPSettings(ls_specific_settings={LanguageServerId.SCALA: {"terminate_bloop_on_stop": True}}))
+    settings = _get_scala_settings(
+        SolidLSPSettings(solidlsp_dir=str(SERENA_HOME), ls_specific_settings={LanguageServerId.SCALA: {"terminate_bloop_on_stop": True}})
+    )
     assert settings["terminate_bloop_on_stop"] is True
 
 

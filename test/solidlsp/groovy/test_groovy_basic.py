@@ -8,7 +8,7 @@ from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.ls_utils import SymbolUtils
 from solidlsp.settings import SolidLSPSettings
-from test.conftest import get_repos_dir
+from test.conftest import SERENA_HOME, get_repos_dir
 from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name, request_all_symbols
 from test.solidlsp.util.diagnostics import assert_file_diagnostics
 
@@ -48,7 +48,7 @@ class TestGroovyLanguageServer:
 
         project_data_path = os.path.join(repo_path, SERENA_MANAGED_DIR_NAME)
         solidlsp_settings = SolidLSPSettings(
-            solidlsp_dir=str(Path.home() / ".serena"),
+            solidlsp_dir=str(SERENA_HOME),
             project_data_path=project_data_path,
             ls_specific_settings={LanguageServerId.GROOVY: groovy_settings},
         )

@@ -5,7 +5,7 @@ import pytest
 from solidlsp.language_servers.scala_language_server import ScalaLanguageServer
 from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.settings import SolidLSPSettings
-from test.conftest import get_repos_dir
+from test.conftest import SERENA_HOME, get_repos_dir
 from test.solidlsp.util.diagnostics import assert_file_diagnostics
 
 pytest.skip("Scala must be compiled for these tests to run through, which is a huge hassle", allow_module_level=True)
@@ -19,7 +19,7 @@ pytestmark = pytest.mark.scala
 def scala_ls():
     repo_root = str(get_repos_dir("scala"))
     config = LanguageServerConfig(ls_id=LanguageServerId.SCALA)
-    solidlsp_settings = SolidLSPSettings()
+    solidlsp_settings = SolidLSPSettings(solidlsp_dir=str(SERENA_HOME))
     ls = ScalaLanguageServer(config, repo_root, solidlsp_settings)
 
     with ls.start_server_context():

@@ -17,6 +17,7 @@ from solidlsp.language_servers.scala_language_server import ScalaLanguageServer
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.settings import SolidLSPSettings
 from solidlsp.util.metals_db_utils import MetalsDbStatus, MetalsLockInfo
+from test.conftest import SERENA_HOME
 
 pytestmark = pytest.mark.scala
 
@@ -69,7 +70,9 @@ class TestStaleLockHandling:
         ):
             # Create instance without calling __init__
             ls = object.__new__(ScalaLanguageServer)
-            settings = SolidLSPSettings(ls_specific_settings={LanguageServerId.SCALA: {"on_stale_lock": "auto-clean"}})
+            settings = SolidLSPSettings(
+                solidlsp_dir=str(SERENA_HOME), ls_specific_settings={LanguageServerId.SCALA: {"on_stale_lock": "auto-clean"}}
+            )
 
             # Call the method under test
             ls._check_metals_db_status(str(tmp_path), settings)
@@ -100,7 +103,9 @@ class TestStaleLockHandling:
             caplog.at_level(logging.WARNING),
         ):
             ls = object.__new__(ScalaLanguageServer)
-            settings = SolidLSPSettings(ls_specific_settings={LanguageServerId.SCALA: {"on_stale_lock": "warn"}})
+            settings = SolidLSPSettings(
+                solidlsp_dir=str(SERENA_HOME), ls_specific_settings={LanguageServerId.SCALA: {"on_stale_lock": "warn"}}
+            )
 
             ls._check_metals_db_status(str(tmp_path), settings)
 
@@ -128,7 +133,9 @@ class TestStaleLockHandling:
             pytest.raises(MetalsStaleLockError) as exc_info,
         ):
             ls = object.__new__(ScalaLanguageServer)
-            settings = SolidLSPSettings(ls_specific_settings={LanguageServerId.SCALA: {"on_stale_lock": "fail"}})
+            settings = SolidLSPSettings(
+                solidlsp_dir=str(SERENA_HOME), ls_specific_settings={LanguageServerId.SCALA: {"on_stale_lock": "fail"}}
+            )
 
             ls._check_metals_db_status(str(tmp_path), settings)
 
@@ -159,12 +166,13 @@ class TestStaleLockHandling:
         ):
             ls = object.__new__(ScalaLanguageServer)
             settings = SolidLSPSettings(
+                solidlsp_dir=str(SERENA_HOME),
                 ls_specific_settings={
                     LanguageServerId.SCALA: {
                         "on_stale_lock": "auto-clean",
                         "log_multi_instance_notice": True,
                     }
-                }
+                },
             )
 
             ls._check_metals_db_status(str(tmp_path), settings)
@@ -197,12 +205,13 @@ class TestStaleLockHandling:
         ):
             ls = object.__new__(ScalaLanguageServer)
             settings = SolidLSPSettings(
+                solidlsp_dir=str(SERENA_HOME),
                 ls_specific_settings={
                     LanguageServerId.SCALA: {
                         "on_stale_lock": "auto-clean",
                         "log_multi_instance_notice": False,
                     }
-                }
+                },
             )
 
             ls._check_metals_db_status(str(tmp_path), settings)
@@ -226,7 +235,9 @@ class TestStaleLockHandling:
             caplog.at_level(logging.DEBUG),
         ):
             ls = object.__new__(ScalaLanguageServer)
-            settings = SolidLSPSettings(ls_specific_settings={LanguageServerId.SCALA: {"on_stale_lock": "auto-clean"}})
+            settings = SolidLSPSettings(
+                solidlsp_dir=str(SERENA_HOME), ls_specific_settings={LanguageServerId.SCALA: {"on_stale_lock": "auto-clean"}}
+            )
 
             # Should complete without error
             ls._check_metals_db_status(str(tmp_path), settings)
@@ -251,7 +262,9 @@ class TestStaleLockHandling:
             caplog.at_level(logging.DEBUG),
         ):
             ls = object.__new__(ScalaLanguageServer)
-            settings = SolidLSPSettings(ls_specific_settings={LanguageServerId.SCALA: {"on_stale_lock": "auto-clean"}})
+            settings = SolidLSPSettings(
+                solidlsp_dir=str(SERENA_HOME), ls_specific_settings={LanguageServerId.SCALA: {"on_stale_lock": "auto-clean"}}
+            )
 
             # Should complete without error
             ls._check_metals_db_status(str(tmp_path), settings)

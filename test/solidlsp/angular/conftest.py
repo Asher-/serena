@@ -12,8 +12,8 @@ every file as "not in an Angular project", at which point all template-aware
 features (definition / hover / references on .html, cross-file template→component
 navigation) return empty results — tests would pass vacuously while exercising
 nothing. Vendoring ``node_modules`` in-repo is impractical (~500MB), so we run
-``npm install`` once per checkout, cached across sessions, and serialised across
-xdist workers via ``filelock``.
+``npm install`` once per pytest process, into its copy of the fixture repository
+(``get_repos_dir``).
 """
 
 from __future__ import annotations
@@ -33,9 +33,8 @@ log = logging.getLogger(__name__)
 REPO_ROOT = get_repos_dir("angular") / "test_repo"
 NODE_MODULES = REPO_ROOT / "node_modules"
 ANGULAR_CORE_MARKER = NODE_MODULES / "@angular" / "core" / "package.json"
-# Lock file lives inside the repo (covered by its .gitignore) so xdist workers
-# can serialise on the install. Putting it elsewhere risks placing it on a
-# different filesystem from the install dir, which makes flock semantics fuzzy.
+# Lock file lives inside the process's copy of the repo, so that it is on the
+# install dir's filesystem, where flock semantics are well defined.
 INSTALL_LOCK = REPO_ROOT / ".angular-install.lock"
 
 
@@ -45,13 +44,12 @@ def _install_angular_test_repo_node_modules() -> None:
     Populate the *test fixture project's* ``node_modules`` (NOT the language server's
     install; see module docstring for the distinction).
 
-    Cached across sessions: once ``node_modules/@angular/core/package.json`` exists,
+    Once ``node_modules/@angular/core/package.json`` exists in this process's copy,
     this is a no-op. Skipped (with the test session marked) if npm is unavailable.
 
-    Under pytest-xdist multiple workers race on the install. ``npm install`` does
-    not internally serialize concurrent runs against the same install dir, so we
-    take an exclusive ``filelock`` around the whole install/check sequence — the
-    second worker into the lock will then short-circuit on the marker check.
+    ``npm install`` does not serialize concurrent runs against the same install dir,
+    so the whole install/check sequence runs under an exclusive ``filelock``; a
+    later holder of the lock short-circuits on the marker check.
     """
     if ANGULAR_CORE_MARKER.exists():
         log.info("Angular test repo node_modules already populated; skipping npm install")
@@ -61,13 +59,13 @@ def _install_angular_test_repo_node_modules() -> None:
         pytest.skip("npm is not available; cannot install Angular test repo dependencies")
 
     with FileLock(str(INSTALL_LOCK)):
-        # Re-check inside the lock: a sibling worker may have just installed.
+        # Re-check inside the lock: an earlier holder may have just installed.
         if ANGULAR_CORE_MARKER.exists():
-            log.info("Angular test repo node_modules populated by another worker; skipping npm install")
+            log.info("Angular test repo node_modules populated by an earlier lock holder; skipping npm install")
             return
 
         log.warning(
-            "Installing npm dependencies into the Angular test repo at %s. This is a one-time cost per checkout and may take ~30s.",
+            "Installing npm dependencies into the Angular test repo at %s. This is a one-time cost per pytest process and may take ~30s.",
             REPO_ROOT,
         )
 

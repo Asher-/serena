@@ -19,6 +19,7 @@ from solidlsp.language_servers.scala_language_server import (
 )
 from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.settings import SolidLSPSettings
+from test.conftest import SERENA_HOME
 
 
 def make_sbt_build(path: Path) -> Path:
@@ -117,7 +118,7 @@ class TestResolveBuildRoots:
 
     @staticmethod
     def resolve(root: Path, **scala_settings) -> list[str]:
-        settings = SolidLSPSettings(ls_specific_settings={LanguageServerId.SCALA: scala_settings})
+        settings = SolidLSPSettings(solidlsp_dir=str(SERENA_HOME), ls_specific_settings={LanguageServerId.SCALA: scala_settings})
         return ScalaLanguageServer._resolve_build_roots(str(root), settings)
 
     def test_detection_is_used_when_unset(self, tmp_path: Path) -> None:
