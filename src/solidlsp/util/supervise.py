@@ -375,7 +375,8 @@ def reclaim(path: str | os.PathLike, consumed: int) -> None:
     :param path: the stream file.
     :param consumed: the first offset the reader has not consumed.
     """
-    fd = os.open(path, os.O_WRONLY)
+    with DescriptorExhaustion.watched("freeing the consumed prefix of a stream file"):
+        fd = os.open(path, os.O_WRONLY)
     try:
         length = consumed // os.fstatvfs(fd).f_frsize * os.fstatvfs(fd).f_frsize
         if length == 0:
@@ -497,7 +498,8 @@ class _Follow(io.RawIOBase):
         :param offset: the offset to read from, for an instance taking over a reader that ended.
         """
         super().__init__()
-        self._fd = os.open(path, os.O_RDONLY)
+        with DescriptorExhaustion.watched("following the output file of a supervised process"):
+            self._fd = os.open(path, os.O_RDONLY)
         os.lseek(self._fd, offset, os.SEEK_SET)
         self._ended = ended
         self._growth = _Growth(self._fd)
@@ -684,6 +686,9 @@ class Popen:
             for fd in handed:
                 os.close(fd)
 
+        # the supervisor's failure, as the OS error it met when it names one
+        if report.get("errno"):
+            raise OSError(report["errno"], report["error"])
         if report.get("error"):
             raise OSError(report["error"])
         self.pid: int = report["pid"]
@@ -1168,6 +1173,7 @@ class Adoption:
                 result = continuation.result(record.waiting.state, record)
             except Exception as e:
                 log.exception("The continuation of %s failed: %s", record.path, e)
+                DescriptorExhaustion.report(e, f"the continuation of the adopted process of {record.path}")
                 result = continuation.failure(e)
             try:
                 self._calls.finish(record.call_id, result)

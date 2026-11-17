@@ -34,6 +34,7 @@ from solidlsp.structural.backends.plaintext import PlaintextView
 from solidlsp.structural.base import StructuralLanguage
 from solidlsp.structural.kinds import KindName
 from solidlsp.structural.registry import StructuralBackendRegistry, default_plaintext_floor, default_structural_backend_registry
+from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
 
 log = logging.getLogger(__name__)
 
@@ -1823,6 +1824,7 @@ class CursorManager:
             # parsing is best-effort: a malformed file falls through to the
             # floor rather than raising (spec-v2 §5.1: no rung raises)
             log.debug(f"structural_overview: could not parse {relative_path}: {e}")
+            DescriptorExhaustion.report(e, f"the structural overview of {relative_path}")
             return []
         if cache_entry is None:
             return []

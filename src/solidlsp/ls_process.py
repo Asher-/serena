@@ -305,6 +305,7 @@ class LanguageServerInterface(ABC):
             self._receive_payload(json.loads(body))
         except OSError as ex:
             log.error(f"Error processing payload: {ex}", exc_info=ex)
+            DescriptorExhaustion.report(ex, f"the payload handling of language server {self.ls_id.get_key()}")
         except UnicodeDecodeError as ex:
             log.error(f"Decoding error for encoding={ENCODING}: {ex}")
         except json.JSONDecodeError as ex:
@@ -327,6 +328,7 @@ class LanguageServerInterface(ABC):
                 log.error(f"Unknown payload type: {payload}")
         except Exception as err:
             log.error(f"Error handling server payload: {err}")
+            DescriptorExhaustion.report(err, f"the payload dispatch of language server {self.ls_id.get_key()}")
 
     def send_notification(self, method: str, params: dict | None = None) -> None:
         """
@@ -480,6 +482,7 @@ class LanguageServerInterface(ABC):
         except LSPError as ex:
             self.send_error_response(request_id, ex)
         except Exception as ex:
+            DescriptorExhaustion.report(ex, f"the handler of request '{method}' from language server {self.ls_id.get_key()}")
             self.send_error_response(request_id, LSPError(ErrorCodes.InternalError, str(ex)))
 
     def _notification_handler(self, response: StringDict) -> None:
@@ -497,6 +500,7 @@ class LanguageServerInterface(ABC):
             except Exception as ex:
                 if not self._is_stopping:
                     log.error("Error handling notification observer for method '%s': %s", method, ex, exc_info=ex)
+                DescriptorExhaustion.report(ex, f"an observer of notification '{method}' from language server {self.ls_id.get_key()}")
 
         handler = self.on_notification_handlers.get(method)
         if not handler:
@@ -509,6 +513,7 @@ class LanguageServerInterface(ABC):
         except Exception as ex:
             if not self._is_stopping:
                 log.error("Error handling notification for method '%s': %s", method, ex, exc_info=ex)
+            DescriptorExhaustion.report(ex, f"the handler of notification '{method}' from language server {self.ls_id.get_key()}")
 
 
 class StdioLanguageServer(LanguageServerInterface):
@@ -721,6 +726,7 @@ class StdioLanguageServer(LanguageServerInterface):
             exception = LanguageServerTerminatedException(
                 "Unexpected error while reading stdout from language server process", self.ls_id, cause=e
             )
+            DescriptorExhaustion.report(e, f"the stdout reader of language server {self.ls_id.get_key()}")
         log.info("Language server stdout reader thread has terminated")
         if not self._is_stopping:
             if exception is None:
@@ -973,10 +979,12 @@ class TCPLanguageServer(LanguageServerInterface):
                 self._sock = None
                 self._file = None
                 self._cancel_pending_requests(LanguageServerTerminatedException("TCP send error", self.ls_id, cause=e))
+                DescriptorExhaustion.report(e, f"the sender to TCP language server {self.ls_id.get_key()}")
 
     def _read_loop(self) -> None:
         """Read Content-Length-framed LSP messages from the TCP socket and dispatch them."""
         exception: Exception | None = None
+        site = f"the reader of TCP language server {self.ls_id.get_key()}"
         try:
             while self._sock is not None:
                 f = self._file
@@ -985,6 +993,7 @@ class TCPLanguageServer(LanguageServerInterface):
                 try:
                     line = f.readline()
                 except OSError as exc:
+                    DescriptorExhaustion.report(exc, site)
                     if not self._is_stopping:
                         exception = LanguageServerTerminatedException("TCP read error", self.ls_id, cause=exc)
                     break
@@ -999,7 +1008,8 @@ class TCPLanguageServer(LanguageServerInterface):
                 while line and line.strip():
                     try:
                         line = f.readline()
-                    except OSError:
+                    except OSError as exc:
+                        DescriptorExhaustion.report(exc, site)
                         line = b""
                         break
                 if not line:
@@ -1007,6 +1017,7 @@ class TCPLanguageServer(LanguageServerInterface):
                 try:
                     body = f.read(num_bytes)
                 except OSError as exc:
+                    DescriptorExhaustion.report(exc, site)
                     if not self._is_stopping:
                         exception = LanguageServerTerminatedException("TCP read error", self.ls_id, cause=exc)
                     break
@@ -1015,6 +1026,7 @@ class TCPLanguageServer(LanguageServerInterface):
                 self._handle_body(body)
         except BaseException as exc:
             exception = LanguageServerTerminatedException("Unexpected error in TCP language server read loop", self.ls_id, cause=exc)
+            DescriptorExhaustion.report(exc, site)
         log.info("TCP language server read loop has terminated")
         if not self._is_stopping:
             if exception is None:
