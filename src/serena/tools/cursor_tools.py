@@ -23,6 +23,7 @@ from serena.util.line_numbers import to_display_line, to_internal_line
 from serena.util.staleness import UNCONDITIONAL, ExpectedVersion, check_stale, read_file_version
 from serena.util.text_utils import MatchedConsecutiveLines
 from solidlsp.ls_types import SymbolKind
+from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
 
 
 def _parse_edge_types(edge_types: list[str]) -> frozenset[EdgeType]:
@@ -107,6 +108,7 @@ def _reply_after_landed_edit(manager: CursorManager, cursor_id: str, applied: st
             manager.reanchor_cursor(cursor_id, name_path=name_path)
         view = manager.format_cursor_view(cursor_id)
     except Exception as e:
+        DescriptorExhaustion.report(e, f"re-anchoring cursor {cursor_id} after an edit")
         return f"{applied}\n\n(edit applied; cursor {cursor_id} could not re-anchor afterward: {e})"
     return f"{applied}\n\n{view}"
 
@@ -1578,6 +1580,7 @@ class CursorRenameTool(Tool, ToolMarkerSymbolicEdit):
             view = manager.format_cursor_view(cursor_id)
             return f"{status_message}\n\n{view}"
         except Exception as e:
+            DescriptorExhaustion.report(e, f"re-anchoring cursor {cursor_id} after a rename")
             return f"{status_message}\n\n(edit applied; cursor {cursor_id} could not re-anchor afterward to the renamed symbol: {e})"
 
 

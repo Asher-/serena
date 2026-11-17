@@ -24,6 +24,7 @@ from serena.call_journal import CallJournal, CallResult
 from serena.config.serena_config import SerenaConfig
 from serena.cursor import CursorManager
 from serena.ls_manager import LanguageServerManager
+from serena.tools.cursor_tools import _reply_after_landed_edit
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_process import StdioLanguageServer, TCPConnectionInfo, TCPLanguageServer
 from solidlsp.structural.bridge_process import StructuralBridge
@@ -466,4 +467,18 @@ def test_a_structural_overview_whose_bridge_fails_to_start_for_want_of_descripto
 
     CursorManager(project, registry).structural_overview("main.go")
 
+    _assert_ended(ending)
+
+
+def test_a_cursor_whose_re_anchor_after_an_edit_fails_for_want_of_descriptors_ends_the_daemon(
+    ending: _Ending, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cursor whose re-anchor after a landed edit starts a structural bridge that cannot start for want of descriptors ends the daemon."""
+    _supervisor_failing_for_want_of_descriptors(tmp_path, monkeypatch)
+    manager = MagicMock()
+    manager.reanchor_cursor.side_effect = lambda *_arguments, **_keywords: StructuralBridge([sys.executable], "go").call("walk_symbols")
+
+    reply = _reply_after_landed_edit(manager, "c1", "applied")
+
+    assert reply.startswith("applied")
     _assert_ended(ending)
