@@ -199,7 +199,8 @@ def _linux_start_time(pid: int) -> str:
     """
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
-    except OSError:
+    except OSError as e:
+        DescriptorExhaustion.report(e, f"reading the start time of process {pid}")
         return ""
 
     # the fields after the command name, which is parenthesised and may hold spaces: the state, and the start time 22nd
@@ -1135,6 +1136,7 @@ class Adoption:
             try:
                 ended = self._take_up(record)
             except Exception as e:
+                DescriptorExhaustion.report(e, f"taking up the process of {record.path}")
                 log.exception("Could not take up the process of %s: %s", record.path, e)
                 continue
             if ended:

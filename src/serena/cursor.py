@@ -973,6 +973,7 @@ class CursorManager:
             if found:
                 return found.name
         except Exception as e:
+            DescriptorExhaustion.report(e, f"resolving the symbol name at {relative_path}:{to_display_line(line)}")
             log.debug(f"Could not resolve symbol name at {relative_path}:{to_display_line(line)}: {e}")
         return f"{os.path.basename(relative_path)}:{to_display_line(line)}"
 
@@ -2021,6 +2022,7 @@ class CursorManager:
                     # rendering is best-effort: when the LSP cannot answer the
                     # containment query for one file, skip the hit rather than
                     # fail the whole search
+                    DescriptorExhaustion.report(e, f"resolving the containing symbol of {rel_path}:{line_0idx}")
                     log.debug(f"Could not resolve containing symbol for {rel_path}:{line_0idx}: {e}")
                     sym_dict = None
                 if sym_dict is None:
@@ -2089,6 +2091,7 @@ class CursorManager:
             overview = self._retriever.get_symbol_overview(relative_path)
         except Exception as e:
             # best-effort, mirroring the containment-query handling in the caller
+            DescriptorExhaustion.report(e, f"the symbol overview of {relative_path}")
             log.debug(f"Could not load symbol overview for {relative_path}: {e}")
             return None
         best: LanguageServerSymbol | None = None

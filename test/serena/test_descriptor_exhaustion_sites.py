@@ -482,3 +482,63 @@ def test_a_cursor_whose_re_anchor_after_an_edit_fails_for_want_of_descriptors_en
 
     assert reply.startswith("applied")
     _assert_ended(ending)
+
+
+def _manager_whose_retriever_fails_for_want_of_descriptors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CursorManager:
+    """A cursor manager whose symbol retriever answers every lookup with descriptor exhaustion."""
+    retriever = MagicMock()
+    retriever.find_by_location.side_effect = _exhausted
+    retriever.get_symbol_overview.side_effect = _exhausted
+    monkeypatch.setattr(CursorManager, "_retriever", property(lambda _self: retriever))
+    project = MagicMock()
+    project.project_root = str(tmp_path)
+    return CursorManager(project, MagicMock())
+
+
+def test_a_symbol_name_that_cannot_be_resolved_for_want_of_descriptors_ends_the_daemon(
+    ending: _Ending, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A symbol name lookup that fails for want of file descriptors falls back to file:line, and the daemon is ended."""
+    manager = _manager_whose_retriever_fails_for_want_of_descriptors(tmp_path, monkeypatch)
+
+    assert manager._symbol_name_at("main.go", 0, 0) == "main.go:1"
+    _assert_ended(ending)
+
+
+def test_a_symbol_overview_that_cannot_be_loaded_for_want_of_descriptors_ends_the_daemon(
+    ending: _Ending, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file's symbol overview that cannot be loaded for want of file descriptors covers no line, and the daemon is ended."""
+    manager = _manager_whose_retriever_fails_for_want_of_descriptors(tmp_path, monkeypatch)
+
+    assert manager._top_level_symbol_covering_line("main.go", 0) is None
+    _assert_ended(ending)
+
+
+def test_a_process_start_time_that_cannot_be_read_for_want_of_descriptors_ends_the_daemon(
+    ending: _Ending, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A process's start time that cannot be read from /proc for want of file descriptors reads as no live process, and the daemon is ended."""
+    monkeypatch.setattr(Path, "read_text", _exhausted)
+
+    assert supervise._linux_start_time(os.getpid()) == ""
+    _assert_ended(ending)
+
+
+def test_a_record_that_cannot_be_taken_up_for_want_of_descriptors_ends_the_daemon(
+    ending: _Ending, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A process record whose take-up fails for want of file descriptors is skipped, and the daemon is ended."""
+    process = root / supervise.OWNER / "process"
+    process.mkdir(parents=True, exist_ok=True)
+    (process / "ended.json").write_text(
+        json.dumps({"owner": supervise.OWNER, "id": "ended", "ended_at": "2026-11-16T00:00:00Z", "exit_code": 0})
+    )
+    live = root / supervise.OWNER / "live" / "process.json"
+    live.parent.mkdir(parents=True, exist_ok=True)
+    live.write_text(json.dumps(["ended"]))
+    monkeypatch.setattr(supervise.Adoption, "_take_up", _exhausted)
+
+    supervise.Adoption(MagicMock(), (), (), supervise.Continuations()).adopt()
+
+    _assert_ended(ending)

@@ -20,6 +20,7 @@ from typing import Any
 from solidlsp.ls_survival import HOLDINGS, KeptState, KeptStates
 from solidlsp.structural.errors import ParseError
 from solidlsp.util import supervise
+from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
 
 log = logging.getLogger(__name__)
 
@@ -187,8 +188,8 @@ class StructuralBridge:
                 while name not in self._receive(process):
                     pass
                 answered.set()
-            except OSError:
-                pass
+            except OSError as exc:
+                DescriptorExhaustion.report(exc, "reading an adopted bridge's answer")
 
         reader = threading.Thread(target=read, name="bridge-adoption", daemon=True)
         reader.start()
