@@ -16,6 +16,8 @@ import pathspec
 from pathspec import PathSpec
 from sensai.util.logging import LogTime
 
+from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
+
 log = logging.getLogger(__name__)
 
 
@@ -217,6 +219,7 @@ def walk_dir_entries(
         with os.scandir(top) as it:
             entries = list(it)
     except OSError as error:
+        DescriptorExhaustion.report(error, f"scanning the directory {top}")
         if onerror is not None:
             onerror(error)
         return

@@ -19,6 +19,7 @@ from abc import ABC, abstractmethod
 from serena.project import Project
 from serena.symbol import LanguageServerSymbol, PositionInFile
 from solidlsp.lsp_protocol_handler.lsp_types import SymbolKind
+from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
 
 log = logging.getLogger(__name__)
 
@@ -269,6 +270,7 @@ def compute_widened_body_text(symbol: LanguageServerSymbol, project: Project) ->
     try:
         file_text = project.read_file(relative_path)
     except OSError as e:
+        DescriptorExhaustion.report(e, f"reading {relative_path} for body widening")
         log.debug("Could not read %s for body widening: %s", relative_path, e)
         return None
 

@@ -66,6 +66,7 @@ from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
+from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
 
 log = logging.getLogger(__name__)
 
@@ -268,7 +269,8 @@ class PascalLanguageServer(SolidLanguageServer):
             try:
                 with open(version_file, encoding="utf-8") as f:
                     return f.read().strip()
-            except OSError:
+            except OSError as error:
+                DescriptorExhaustion.report(error, f"reading {version_file}")
                 return None
         return None
 
@@ -280,6 +282,7 @@ class PascalLanguageServer(SolidLanguageServer):
             with open(version_file, "w", encoding="utf-8") as f:
                 f.write(version)
         except OSError as e:
+            DescriptorExhaustion.report(e, f"writing {version_file}")
             log.warning(f"Failed to save version file: {e}")
 
     # ============== Update Check Timing ==============
@@ -305,6 +308,7 @@ class PascalLanguageServer(SolidLanguageServer):
             with open(last_check_file, "w", encoding="utf-8") as f:
                 f.write(str(time.time()))
         except OSError as e:
+            DescriptorExhaustion.report(e, f"writing {last_check_file}")
             log.warning(f"Failed to update last check time: {e}")
 
     # ============== SHA256 Checksum ==============
@@ -405,8 +409,8 @@ class PascalLanguageServer(SolidLanguageServer):
         try:
             with open(cleanup_file, "a", encoding="utf-8") as f:
                 f.write(file_path + "\n")
-        except OSError:
-            pass
+        except OSError as error:
+            DescriptorExhaustion.report(error, f"marking {file_path} for cleanup")
 
     @classmethod
     def _cleanup_old_files(cls, pasls_dir: str) -> None:
@@ -433,8 +437,8 @@ class PascalLanguageServer(SolidLanguageServer):
                     f.write("\n".join(remaining) + "\n")
             else:
                 os.remove(cleanup_file)
-        except OSError:
-            pass
+        except OSError as error:
+            DescriptorExhaustion.report(error, f"cleaning up the old files of {pasls_dir}")
 
     # ============== Download and Atomic Update ==============
 

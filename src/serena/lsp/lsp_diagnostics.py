@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Optional, Self
 from serena.util.text_utils import TextOutputUtils
 from solidlsp import ls_types
 from solidlsp.lsp_protocol_handler.lsp_types import DiagnosticSeverity
+from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
 
 if TYPE_CHECKING:
     from serena.agent import SerenaAgent
@@ -65,7 +66,8 @@ class PublishedDiagnosticsSnapshot:
         for edited_file_path in edited_file_paths:
             try:
                 language_server = symbol_retriever.get_language_server(edited_file_path.after_relative_path)
-            except Exception:
+            except Exception as e:
+                DescriptorExhaustion.report(e, f"finding the language server of {edited_file_path.after_relative_path}")
                 continue
 
             generation_by_after_path[edited_file_path.after_relative_path] = language_server.get_published_diagnostics_generation(
@@ -82,7 +84,8 @@ class PublishedDiagnosticsSnapshot:
                         edited_file_path.before_relative_path,
                         min_severity=2,
                     )
-                except Exception:
+                except Exception as e:
+                    DescriptorExhaustion.report(e, f"requesting the diagnostics of {edited_file_path.before_relative_path}")
                     cached_diagnostics = []
             warning_identities_by_before_path[edited_file_path.before_relative_path] = {
                 DiagnosticIdentity.from_diagnostic(diagnostic) for diagnostic in cached_diagnostics or []

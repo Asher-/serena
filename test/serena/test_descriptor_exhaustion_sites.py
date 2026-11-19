@@ -24,7 +24,15 @@ from serena.call_journal import CallJournal, CallResult
 from serena.config.serena_config import SerenaConfig
 from serena.cursor import CursorManager
 from serena.ls_manager import LanguageServerManager
-from serena.tools.cursor_tools import _reply_after_landed_edit
+from serena.lsp.lsp_diagnostics import PublishedDiagnosticsSnapshot
+from serena.symbol_extent import compute_widened_body_text
+from serena.tools.cursor_tools import CursorRenameTool, _reply_after_landed_edit
+from serena.util import staleness
+from serena.util.file_lifecycle import FilesystemLifecycle
+from serena.util.file_system import walk_dir_entries
+from serena.util.text_utils import LineType, MatchedConsecutiveLines, MultiFileReplacement, TextLine
+from solidlsp.language_servers.pascal_server import PascalLanguageServer
+from solidlsp.language_servers.scala_language_server import _contains_json_file, _is_build_root
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_process import StdioLanguageServer, TCPConnectionInfo, TCPLanguageServer
 from solidlsp.structural.bridge_process import StructuralBridge
@@ -553,4 +561,260 @@ def test_a_record_that_cannot_be_taken_up_for_want_of_descriptors_ends_the_daemo
 
     supervise.Adoption(MagicMock(), (), (), supervise.Continuations()).adopt()
 
+    _assert_ended(ending)
+
+
+def test_a_cursor_whose_re_anchor_after_a_rename_fails_for_want_of_descriptors_ends_the_daemon(
+    ending: _Ending, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cursor whose re-anchor after a rename starts a structural bridge that cannot start for want of descriptors ends the daemon."""
+    _supervisor_failing_for_want_of_descriptors(tmp_path, monkeypatch)
+    manager = MagicMock()
+    manager.get_lsp_cursor.return_value.current_symbol.get_name_path.return_value = "Greeter/greet"
+    manager.get_lsp_cursor.return_value.current_location.relative_path = "main.go"
+    manager.reanchor_cursor.side_effect = lambda *_arguments, **_keywords: StructuralBridge([sys.executable], "go").call("walk_symbols")
+    agent = MagicMock()
+    agent.get_cursor_manager.return_value = manager
+    editor = MagicMock()
+    editor.rename_symbol.return_value = "renamed"
+    tool = CursorRenameTool(agent)
+    monkeypatch.setattr(tool, "create_code_editor", lambda: editor)
+
+    reply = tool.apply("c1", "salute")
+
+    assert reply.startswith("renamed")
+    _assert_ended(ending)
+
+
+def test_a_search_hit_whose_containing_symbol_cannot_be_resolved_for_want_of_descriptors_ends_the_daemon(
+    ending: _Ending, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A search hit whose containing symbol cannot be resolved for want of file descriptors is surfaced unsymboled, and the daemon is ended."""
+    (tmp_path / "main.go").write_text("package main\n")
+    retriever = MagicMock()
+    retriever.get_language_server.side_effect = _exhausted
+    retriever.get_symbol_overview.return_value = {}
+    monkeypatch.setattr(CursorManager, "_retriever", property(lambda _self: retriever))
+    project = MagicMock()
+    project.project_root = str(tmp_path)
+    project.search_project_files_for_pattern.return_value = [
+        MatchedConsecutiveLines(
+            lines=[TextLine(line_number=0, line_content="package main", match_type=LineType.MATCH)], source_file_path="main.go"
+        )
+    ]
+
+    groups, unsymboled = CursorManager(project, MagicMock()).find_pattern_with_enclosing_symbols("package", relative_path="main.go")
+
+    assert groups == []
+    assert [path for path, _hits in unsymboled] == ["main.go"]
+    _assert_ended(ending)
+
+
+def test_a_file_version_that_cannot_be_read_for_want_of_descriptors_ends_the_daemon(ending: _Ending, tmp_path: Path) -> None:
+    """A file's version that cannot be read for want of file descriptors reads as none, and the daemon is ended."""
+    (tmp_path / "main.go").write_text("package main\n")
+
+    with _descriptors_exhausted():
+        version = staleness.read_file_version(str(tmp_path), "main.go")
+
+    assert version is None
+    _assert_ended(ending)
+
+
+def test_a_write_whose_target_cannot_be_read_for_want_of_descriptors_ends_the_daemon(ending: _Ending, tmp_path: Path) -> None:
+    """A write whose target cannot be read for want of file descriptors is refused as stale, and the daemon is ended."""
+    (tmp_path / "main.go").write_text("package main\n")
+
+    with _descriptors_exhausted():
+        stale = staleness.check_stale(str(tmp_path), "main.go", "expected")
+
+    assert stale is not None
+    _assert_ended(ending)
+
+
+def test_a_file_that_cannot_be_described_for_want_of_descriptors_ends_the_daemon(ending: _Ending, tmp_path: Path) -> None:
+    """A file that cannot be read for want of file descriptors is described with the error, and the daemon is ended."""
+    (tmp_path / "main.go").write_text("package main\n")
+    lifecycle = FilesystemLifecycle(str(tmp_path), is_ignored=lambda _path: False)
+
+    with _descriptors_exhausted():
+        described = lifecycle.stat("main.go")
+
+    assert described.error
+    _assert_ended(ending)
+
+
+def test_a_directory_walk_that_cannot_scan_for_want_of_descriptors_ends_the_daemon(ending: _Ending, tmp_path: Path) -> None:
+    """A directory walk that cannot scan its top directory for want of file descriptors hands on the error, and the daemon is ended."""
+    errors: list[OSError] = []
+
+    with _descriptors_exhausted():
+        walked = list(walk_dir_entries(str(tmp_path), onerror=errors.append))
+
+    assert walked == []
+    assert [error.errno for error in errors] == [errno.EMFILE]
+    _assert_ended(ending)
+
+
+def test_a_plaintext_view_that_cannot_be_read_for_want_of_descriptors_ends_the_daemon(ending: _Ending, tmp_path: Path) -> None:
+    """A file's plaintext view that cannot be read for want of file descriptors is an error view, and the daemon is ended."""
+    (tmp_path / "notes.txt").write_text("notes\n")
+    project = MagicMock()
+    project.project_root = str(tmp_path)
+    manager = CursorManager(project, MagicMock())
+
+    with _descriptors_exhausted():
+        manager._plaintext_view("notes.txt")
+
+    _assert_ended(ending)
+
+
+def test_a_scala_directory_that_cannot_be_scanned_for_want_of_descriptors_ends_the_daemon(ending: _Ending, tmp_path: Path) -> None:
+    """A directory that cannot be scanned for JSON files for want of file descriptors holds none, and the daemon is ended."""
+    (tmp_path / "bsp.json").write_text("{}\n")
+
+    with _descriptors_exhausted():
+        holds_json = _contains_json_file(str(tmp_path))
+
+    assert not holds_json
+    _assert_ended(ending)
+
+
+def test_a_directory_that_cannot_be_listed_for_want_of_descriptors_ends_the_daemon(ending: _Ending, tmp_path: Path) -> None:
+    """A directory that cannot be scanned for want of file descriptors lists no entries, and the daemon is ended."""
+    (tmp_path / "main.go").write_text("package main\n")
+    lifecycle = FilesystemLifecycle(str(tmp_path), is_ignored=lambda _path: False)
+
+    with _descriptors_exhausted():
+        listing = lifecycle.list_dir(".")
+
+    assert listing.entries == ()
+    _assert_ended(ending)
+
+
+def test_a_delete_whose_target_cannot_be_read_for_want_of_descriptors_ends_the_daemon(ending: _Ending, tmp_path: Path) -> None:
+    """A delete whose target cannot be read to check its version for want of file descriptors is refused, and the daemon is ended."""
+    target = tmp_path / "main.go"
+    target.write_text("package main\n")
+    lifecycle = FilesystemLifecycle(str(tmp_path), is_ignored=lambda _path: False)
+    version = lifecycle.stat("main.go").version
+    assert version is not None
+
+    with _descriptors_exhausted():
+        result = lifecycle.delete("main.go", expect_version=version)
+
+    assert not result.ok
+    assert target.exists()
+    _assert_ended(ending)
+
+
+def test_a_scala_build_definition_that_cannot_be_read_for_want_of_descriptors_ends_the_daemon(ending: _Ending, tmp_path: Path) -> None:
+    """An sbt build definition that cannot be read for want of file descriptors marks no build root, and the daemon is ended."""
+    (tmp_path / "project").mkdir()
+    (tmp_path / "project" / "build.properties").write_text("sbt.version=1.9.0\n")
+
+    with _descriptors_exhausted():
+        is_build_root = _is_build_root(str(tmp_path))
+
+    assert not is_build_root
+    _assert_ended(ending)
+
+
+def test_a_pascal_server_version_that_cannot_be_read_for_want_of_descriptors_ends_the_daemon(ending: _Ending, tmp_path: Path) -> None:
+    """An installed Pascal server's version that cannot be read for want of file descriptors reads as none, and the daemon is ended."""
+    version_file = Path(PascalLanguageServer._meta_file(str(tmp_path), "version"))
+    version_file.parent.mkdir(parents=True, exist_ok=True)
+    version_file.write_text("v1.0.0\n")
+
+    with _descriptors_exhausted():
+        version = PascalLanguageServer._get_local_version(str(tmp_path))
+
+    assert version is None
+    _assert_ended(ending)
+
+
+def test_a_body_that_cannot_be_widened_for_want_of_descriptors_ends_the_daemon(ending: _Ending) -> None:
+    """A symbol body whose file cannot be read for want of file descriptors is not widened, and the daemon is ended."""
+    symbol = MagicMock()
+    symbol.relative_path = "main.py"
+    project = MagicMock()
+    project.read_file.side_effect = _exhausted
+
+    assert compute_widened_body_text(symbol, project) is None
+    _assert_ended(ending)
+
+
+def test_a_diagnostics_snapshot_whose_language_server_cannot_be_found_for_want_of_descriptors_ends_the_daemon(ending: _Ending) -> None:
+    """A diagnostics snapshot of a file whose language server cannot be found for want of file descriptors omits it, and the daemon is ended."""
+    edited = MagicMock()
+    edited.after_relative_path = "main.py"
+    edited.before_relative_path = "main.py"
+    retriever = MagicMock()
+    retriever.get_language_server.side_effect = _exhausted
+
+    snapshot = PublishedDiagnosticsSnapshot([edited], retriever)
+
+    assert snapshot.generation_by_after_path == {}
+    _assert_ended(ending)
+
+
+def _pascal_metadata_directory(tmp_path: Path) -> str:
+    """The Pascal server directory under ``tmp_path``, its metadata directory created."""
+    Path(PascalLanguageServer._meta_file(str(tmp_path), "version")).parent.mkdir(parents=True, exist_ok=True)
+    return str(tmp_path)
+
+
+def test_a_pascal_server_version_that_cannot_be_saved_for_want_of_descriptors_ends_the_daemon(ending: _Ending, tmp_path: Path) -> None:
+    """An installed Pascal server's version that cannot be saved for want of file descriptors ends the daemon."""
+    pasls_dir = _pascal_metadata_directory(tmp_path)
+
+    with _descriptors_exhausted():
+        PascalLanguageServer._save_local_version(pasls_dir, "v1.0.0")
+
+    _assert_ended(ending)
+
+
+def test_a_pascal_update_check_that_cannot_be_recorded_for_want_of_descriptors_ends_the_daemon(ending: _Ending, tmp_path: Path) -> None:
+    """A Pascal server update check whose time cannot be recorded for want of file descriptors ends the daemon."""
+    pasls_dir = _pascal_metadata_directory(tmp_path)
+
+    with _descriptors_exhausted():
+        PascalLanguageServer._update_last_check(pasls_dir)
+
+    _assert_ended(ending)
+
+
+def test_a_pascal_file_that_cannot_be_marked_for_cleanup_for_want_of_descriptors_ends_the_daemon(ending: _Ending, tmp_path: Path) -> None:
+    """A Pascal server file that cannot be marked for cleanup for want of file descriptors ends the daemon."""
+    pasls_dir = _pascal_metadata_directory(tmp_path)
+
+    with _descriptors_exhausted():
+        PascalLanguageServer._mark_for_cleanup(pasls_dir, str(tmp_path / "old"))
+
+    _assert_ended(ending)
+
+
+def test_a_pascal_cleanup_list_that_cannot_be_read_for_want_of_descriptors_ends_the_daemon(ending: _Ending, tmp_path: Path) -> None:
+    """A Pascal server cleanup list that cannot be read for want of file descriptors cleans nothing up, and the daemon is ended."""
+    pasls_dir = _pascal_metadata_directory(tmp_path)
+    old = tmp_path / "old"
+    old.write_text("old\n")
+    Path(PascalLanguageServer._meta_file(pasls_dir, "cleanup_list")).write_text(f"{old}\n")
+
+    with _descriptors_exhausted():
+        PascalLanguageServer._cleanup_old_files(pasls_dir)
+
+    assert old.exists()
+    _assert_ended(ending)
+
+
+def test_a_replacement_file_that_cannot_be_read_for_want_of_descriptors_ends_the_daemon(ending: _Ending) -> None:
+    """A file in a replacement's scope that cannot be read for want of file descriptors is skipped, and the daemon is ended."""
+    file_proxy = MagicMock()
+    file_proxy.get_relative_path.return_value = "main.go"
+    file_proxy.get_contents.side_effect = _exhausted
+    project = MagicMock()
+    project.create_file_collection.return_value.filter_glob.return_value = [file_proxy]
+
+    assert MultiFileReplacement._collect_files(project, "", "", "") == []
     _assert_ended(ending)

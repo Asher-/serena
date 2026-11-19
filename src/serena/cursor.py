@@ -1546,6 +1546,7 @@ class CursorManager:
         except FileNotFoundError:
             return self._plaintext_floor.not_found_view(relative_path)
         except OSError as e:
+            DescriptorExhaustion.report(e, f"reading {relative_path} for its plaintext view")
             return self._plaintext_floor.error_view(relative_path, str(e))
         return self._plaintext_floor.render(data, relative_path)
 

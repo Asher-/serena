@@ -22,6 +22,7 @@ from solidlsp.ls_utils import PlatformUtils
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
 from solidlsp.util import supervise
+from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
 
 if not PlatformUtils.get_platform_id().value.startswith("win"):
     pass
@@ -261,7 +262,8 @@ def choose_show_message_request_action(params: dict, auto_import_build: bool = D
 def _contains_json_file(path: str) -> bool:
     try:
         return any(entry.name.endswith(".json") for entry in os.scandir(path))
-    except OSError:
+    except OSError as error:
+        DescriptorExhaustion.report(error, f"scanning {path} for JSON files")
         return False
 
 
@@ -279,7 +281,8 @@ def _is_build_root(path: str) -> bool:
         try:
             with open(build_properties, encoding="utf-8", errors="replace") as f:
                 return any(line.lstrip().startswith("sbt.version") for line in f)
-        except OSError:
+        except OSError as error:
+            DescriptorExhaustion.report(error, f"reading {build_properties}")
             return False
     return False
 
@@ -311,7 +314,8 @@ def find_build_roots(repository_root_path: str, max_depth: int = DEFAULT_PROJECT
         visited.add(real_path)
         try:
             entries = sorted(os.scandir(directory), key=lambda e: e.name)
-        except OSError:
+        except OSError as error:
+            DescriptorExhaustion.report(error, f"scanning {directory} for Scala build roots")
             return
         for entry in entries:
             if entry.name.startswith(".") or not entry.is_dir():

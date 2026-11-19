@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 
 from serena.util.file_lifecycle import StaleVersion, WritePrecondition, content_version
+from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
 
 __all__ = ["UNCONDITIONAL", "ExpectedVersion", "StaleVersion", "check_stale", "content_version", "read_file_version"]
 
@@ -48,7 +49,8 @@ def read_file_version(project_root: str, relative_path: str) -> str | None:
     try:
         with open(_abs(project_root, relative_path), "rb") as handle:
             return content_version(handle.read())
-    except OSError:
+    except OSError as error:
+        DescriptorExhaustion.report(error, f"reading the version of {relative_path}")
         return None
 
 
@@ -81,7 +83,8 @@ def check_stale(
     try:
         with open(_abs(project_root, relative_path), "rb") as handle:
             raw = handle.read()
-    except OSError:
+    except OSError as error:
+        DescriptorExhaustion.report(error, f"reading {relative_path} to check its version")
         return StaleVersion(relative_path, expect_version, "", current_bytes if current_bytes is not None else b"")
 
     # compare-and-swap: an actual-vs-expected mismatch strands the write and hands back the

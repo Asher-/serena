@@ -18,6 +18,7 @@ from sensai.util.string import ToStringMixin
 
 from serena.util.file_proxy import FileCollection, FileProxy
 from solidlsp.ls_utils import TextCoordinateProvider, TextCoordinates, TextUtils
+from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
 
 if TYPE_CHECKING:
     from serena.code_editor import CodeEditor
@@ -1136,7 +1137,8 @@ class MultiFileReplacement:
         for file_proxy in sorted(file_collection, key=lambda f: f.get_relative_path()):
             try:
                 files.append((file_proxy.get_relative_path(), file_proxy.get_contents()))
-            except Exception:
+            except Exception as e:
+                DescriptorExhaustion.report(e, f"reading {file_proxy.get_relative_path()} for a replacement")
                 continue  # skip unreadable (e.g. binary) files
         return files
 

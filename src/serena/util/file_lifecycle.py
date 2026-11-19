@@ -23,6 +23,7 @@ from enum import Enum
 
 from serena.util.file_system import GitignoreParser
 from solidlsp.structural.backends.plaintext import PlaintextFloor
+from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
 
 
 def content_version(raw_bytes: bytes) -> str:
@@ -454,7 +455,8 @@ class FilesystemLifecycle:
         try:
             with os.scandir(dir_abs) as scanner:
                 scanned = sorted(scanner, key=lambda entry: entry.name)
-        except OSError:
+        except OSError as error:
+            DescriptorExhaustion.report(error, f"scanning the directory {dir_abs}")
             return False
 
         for entry in scanned:
@@ -580,6 +582,7 @@ class FilesystemLifecycle:
             with open(abs_path, "rb") as handle:
                 raw = handle.read()
         except OSError as error:
+            DescriptorExhaustion.report(error, f"reading {relative_path} to describe it")
             return FileStat(relative_path, exists=True, kind=EntryKind.FILE, size=st.st_size, permissions=permissions, error=str(error))
         view = self._floor.render(raw, relative_path)
         return FileStat(
@@ -603,7 +606,8 @@ class FilesystemLifecycle:
         try:
             with open(abs_path, "rb") as handle:
                 raw = handle.read()
-        except OSError:
+        except OSError as error:
+            DescriptorExhaustion.report(error, f"reading {relative_path} to check its version")
             raw = b""
         actual = content_version(raw)
         if actual != expected:

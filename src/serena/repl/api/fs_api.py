@@ -13,6 +13,7 @@ from serena.tools import CreateTextFileTool, FindFileTool, ListDirTool, ReadFile
 from serena.util.file_lifecycle import AtomicFileWriter, FilesystemLifecycle
 from serena.util.text_utils import MatchedConsecutiveLines
 from solidlsp.ls_utils import TextUtils
+from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
 
 from ..facade import FacadeApi, ReferencedType, facade_method
 from ..representable import Renderer, RepresentableViaRenderer
@@ -499,8 +500,8 @@ class FsApi(FacadeApi):
                         sym = LanguageServerSymbol(sym_dict)
                         name_path = sym.get_name_path()
                         kind = sym.symbol_kind_name
-                except Exception:
-                    pass
+                except Exception as e:
+                    DescriptorExhaustion.report(e, f"resolving the containing symbol of {rel}:{line}")
             elif retriever is not None:
                 unavailability = retriever.get_unavailability_of_file(rel)
                 if unavailability is not None and unavailability.language is not None:
