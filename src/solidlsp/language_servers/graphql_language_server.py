@@ -45,7 +45,6 @@ from solidlsp.language_servers.common import RuntimeDependency, RuntimeDependenc
 from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.settings import SolidLSPSettings
-from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
 
 log = logging.getLogger(__name__)
 
@@ -119,8 +118,7 @@ class GraphQLLanguageServer(SolidLanguageServer):
             try:
                 with open(path, "rb") as f:
                     content = f.read()
-            except OSError as error:
-                DescriptorExhaustion.report(error, f"reading {path} for the symbol cache fingerprint")
+            except OSError:
                 continue
             if filename == "package.json":
                 content = self._extract_graphql_config_from_package_json(content)

@@ -60,7 +60,6 @@ from solidlsp.lsp_protocol_handler.server import (
 )
 from solidlsp.settings import SolidLSPSettings
 from solidlsp.util.cache import load_cache, save_cache
-from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
 from solidlsp.util.pickle_util import SafePickleLoader
 
 RawDocumentSymbol = Union[DocumentSymbol, SymbolInformation]
@@ -2470,8 +2469,7 @@ class SolidLanguageServer(ABC):
             result = []
             try:
                 contained_dir_or_file_entries = os.scandir(abs_dir_path)
-            except OSError as error:
-                DescriptorExhaustion.report(error, f"scanning {abs_dir_path} for the full symbol tree")
+            except OSError:
                 return []
 
             # Create package symbol for directory

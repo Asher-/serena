@@ -314,8 +314,7 @@ def find_build_roots(repository_root_path: str, max_depth: int = DEFAULT_PROJECT
         visited.add(real_path)
         try:
             entries = sorted(os.scandir(directory), key=lambda e: e.name)
-        except OSError as error:
-            DescriptorExhaustion.report(error, f"scanning {directory} for Scala build roots")
+        except OSError:
             return
         for entry in entries:
             if entry.name.startswith(".") or not entry.is_dir():

@@ -31,6 +31,7 @@ from serena.util import staleness
 from serena.util.file_lifecycle import FilesystemLifecycle
 from serena.util.file_system import walk_dir_entries
 from serena.util.text_utils import LineType, MatchedConsecutiveLines, MultiFileReplacement, TextLine
+from solidlsp.language_servers import scala_language_server
 from solidlsp.language_servers.pascal_server import PascalLanguageServer
 from solidlsp.language_servers.scala_language_server import _contains_json_file, _is_build_root
 from solidlsp.ls_config import LanguageServerId
@@ -708,15 +709,32 @@ def test_a_delete_whose_target_cannot_be_read_for_want_of_descriptors_ends_the_d
     _assert_ended(ending)
 
 
-def test_a_scala_build_definition_that_cannot_be_read_for_want_of_descriptors_ends_the_daemon(ending: _Ending, tmp_path: Path) -> None:
-    """An sbt build definition that cannot be read for want of file descriptors marks no build root, and the daemon is ended."""
+def test_a_scala_build_definition_that_cannot_be_read_for_want_of_descriptors_ends_the_daemon(
+    ending: _Ending, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An sbt build definition that cannot be opened for want of file descriptors marks no build root, and the daemon is ended."""
     (tmp_path / "project").mkdir()
     (tmp_path / "project" / "build.properties").write_text("sbt.version=1.9.0\n")
+    monkeypatch.setattr(scala_language_server, "open", lambda *_arguments, **_keywords: _exhausted(), raising=False)
 
-    with _descriptors_exhausted():
-        is_build_root = _is_build_root(str(tmp_path))
+    assert not _is_build_root(str(tmp_path))
+    _assert_ended(ending)
 
-    assert not is_build_root
+
+def test_a_diagnostics_snapshot_whose_diagnostics_cannot_be_requested_for_want_of_descriptors_ends_the_daemon(ending: _Ending) -> None:
+    """A diagnostics snapshot of a file whose diagnostics cannot be requested for want of file descriptors holds no warnings for it, and the daemon is ended."""
+    edited = MagicMock()
+    edited.after_relative_path = "main.py"
+    edited.before_relative_path = "main.py"
+    language_server = MagicMock()
+    language_server.get_cached_published_text_document_diagnostics.return_value = None
+    language_server.request_text_document_diagnostics.side_effect = lambda *_arguments, **_keywords: _exhausted()
+    retriever = MagicMock()
+    retriever.get_language_server.return_value = language_server
+
+    snapshot = PublishedDiagnosticsSnapshot([edited], retriever)
+
+    assert snapshot.warning_identities_by_before_path == {"main.py": set()}
     _assert_ended(ending)
 
 
