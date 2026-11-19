@@ -484,6 +484,18 @@ def test_a_cursor_whose_re_anchor_after_an_edit_fails_for_want_of_descriptors_en
     _assert_ended(ending)
 
 
+def test_an_adopted_bridge_whose_answer_cannot_be_read_for_want_of_descriptors_ends_the_daemon(
+    ending: _Ending, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An adopted bridge whose answer cannot be read for want of file descriptors is not synchronized, and the daemon is ended."""
+    bridge = StructuralBridge([sys.executable], "go")
+    monkeypatch.setattr(bridge, "_receive", _exhausted)
+    monkeypatch.setattr(bridge, "_send", lambda *_arguments: None)
+
+    assert bridge._synchronize(MagicMock()) is False
+    _assert_ended(ending)
+
+
 def _manager_whose_retriever_fails_for_want_of_descriptors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CursorManager:
     """A cursor manager whose symbol retriever answers every lookup with descriptor exhaustion."""
     retriever = MagicMock()
