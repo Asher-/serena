@@ -35,14 +35,12 @@ from serena.constants import (
     SERENA_FILE_ENCODING,
     SERENA_MANAGED_DIR_NAME,
 )
-from serena.util.inspection import compute_language_server_support_composition
 from serena.util.text_utils import GlobMatcher
 from serena.util.yaml import YamlCommentNormalisation, load_yaml, normalise_yaml_comments, save_yaml, transfer_yaml_comments
 from solidlsp.ls_config import LanguageServerIdLike, LanguageServerRegistry
 
 from ..analytics import RegisteredTokenCountEstimator
 from ..language_backend import BuiltinLanguageBackend, LanguageBackend, LanguageBackendRegistry
-from ..util.cli_util import ask_yes_no
 from ..util.dataclass import get_dataclass_default
 from .serena_paths import SerenaPaths
 
@@ -269,73 +267,10 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
     the comment normalisation strategy to use when loading/saving project configuration files.
     The template file must match this configuration (i.e. it must use leading comments if this is set to LEADING).
     """
-    _async_completion_events = {}
-    """
-    maps the object id of a ProjectConfig instance to an event which is set when the asynchronous auto-generation of 
-    the configuration is complete (if applicable).
-    """
     _save_lock = threading.Lock()
 
     def _tostring_includes(self) -> list[str]:
         return ["project_name"]
-
-    @classmethod
-    def _determine_project_language_servers(
-        cls, project_root: str, interactive: bool, serena_config: "SerenaConfig"
-    ) -> list[LanguageServerIdLike]:
-        log.info("Determining suitable language servers for the project")
-
-        # determine language servers to be considered and their priorities
-        # the registry is the single source of truth — it includes both built-in enum members
-        # and externally-registered adapters (via solidlsp.language_server_registration entry points).
-        # priorities are user-configurable per-key via serena_config.ls_priorities (works for both kinds).
-        ls_priorities: dict[LanguageServerIdLike, int] = {}
-        registry = LanguageServerRegistry.get_instance()
-        for ls_id in registry.iter_registered_ls_ids():
-            priority = serena_config.get_ls_priority(ls_id)
-            if priority > 0:
-                ls_priorities[ls_id] = priority
-
-        log.debug("Language server priorities: %s", ls_priorities)
-        ls_composition = compute_language_server_support_composition(project_root, list(ls_priorities.keys()))
-        log.info("Project composition: %s", ls_composition)
-
-        if len(ls_composition) == 0:
-            log.warning(
-                "No source files for supported language servers were found in %s. "
-                "Creating project with no configured language servers. "
-                "Symbol-related tools (e.g. find_symbol, get_symbols_overview) will not work "
-                "when using the LSP backend. You can add languages later via the Serena dashboard "
-                "or by manually editing the project configuration.",
-                project_root,
-            )
-            language_servers_to_use = []
-        else:
-            # sort languages by number of files found
-            languages_and_percentages = sorted(ls_composition.items(), key=lambda item: (item[1], ls_priorities[item[0]]), reverse=True)
-            # find the language with the highest percentage and enable it
-            top_language_pair = languages_and_percentages[0]
-            other_language_pairs = languages_and_percentages[1:]
-            language_servers_to_use = [top_language_pair[0]]
-            # if in interactive mode, ask the user which other languages to enable
-            if len(other_language_pairs) > 0 and interactive:
-                print(
-                    "Detected and enabled main language server '%s' (%.2f%% of source files)."
-                    % (top_language_pair[0].get_key(), top_language_pair[1])
-                )
-                print(f"Additionally detected {len(other_language_pairs)} other applicable language servers.\n")
-                print("Note: Enable only servers for languages you need symbolic retrieval/editing capabilities for.")
-                print("      Additional language servers use resources and some may require additional")
-                print("      system-level installations/configuration (see Serena documentation).")
-                print("\nWhich additional language servers do you want to enable?")
-                for ls_id, perc in other_language_pairs:
-                    enable = ask_yes_no("Enable %s (%.2f%% of source files)?" % (ls_id.get_key(), perc), default=False)
-                    if enable:
-                        language_servers_to_use.append(ls_id)
-                print()
-
-        log.info("Using language servers: %s", language_servers_to_use)
-        return language_servers_to_use
 
     @classmethod
     def autogenerate(
@@ -345,8 +280,6 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
         project_name: str | None = None,
         languages: list[LanguageServerIdLike] | None = None,
         save_to_disk: bool = True,
-        interactive: bool = False,
-        asynchronous: bool = False,
     ) -> Self:
         """
         Autogenerate a project configuration for a given project root.
@@ -355,15 +288,11 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
         :param serena_config: the global Serena configuration
         :param project_name: the name of the project; if None, the name of the project will be the name of the directory
             containing the project
-        :param languages: the languages of the project; if None, they will be determined automatically
+        :param languages: the languages of the project; if None, those of the registered main checkout of the git
+            repository whose linked worktree the project root is (see :meth:`_languages_of_main_checkout`)
         :param save_to_disk: whether to save the project configuration to disk
-        :param interactive: whether to run in interactive CLI mode, asking the user for input where appropriate
-        :param asynchronous: whether to run in asynchronous mode, where time-consuming configuration parts (currently only the
-            determination of the list of programming languages) are determined in a background thread and initialised as empty
         :return: the project configuration
         """
-        if interactive and asynchronous:
-            raise ValueError("Cannot use interactive mode with asynchronous auto-generation")
         project_root = Path(project_root).resolve()
         if not project_root.exists():
             raise FileNotFoundError(f"Project root not found: {project_root}")
@@ -371,16 +300,9 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
             log.info("Project root: %s", project_root)
             project_folder_name = project_root.name
             project_name = project_name or project_folder_name
-            use_asynchronous_language_determination = False
             if languages is None:
-                if asynchronous:
-                    use_asynchronous_language_determination = True
-                    languages_to_use = []  # temporarily empty, will be determined in background thread
-                else:
-                    determined_languages = cls._determine_project_language_servers(
-                        str(project_root), interactive=interactive, serena_config=serena_config
-                    )
-                    languages_to_use = [l.get_key() for l in determined_languages]
+                # the languages a checkout of the same repository is registered with; the tree itself is never scanned
+                languages_to_use = cls._languages_of_main_checkout(project_root, serena_config)
             else:
                 languages_to_use = [lang.get_key() for lang in languages]
             config_with_comments, _ = cls._load_yaml_dict(PROJECT_TEMPLATE_FILE)
@@ -395,42 +317,34 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
                 project_local_yml_path = os.path.join(os.path.dirname(project_yml_path), cls.SERENA_LOCAL_PROJECT_FILE)
                 shutil.copy(PROJECT_LOCAL_TEMPLATE_FILE, project_local_yml_path)
 
-            project_config = cls._from_dict(config_with_comments, local_override_keys=[])
+            return cls._from_dict(config_with_comments, local_override_keys=[])
 
-            # if asynchronous language determination is used, start a background thread which updates and saves the configuration
-            # and set an event which can be awaited to ensure that the configuration is complete
-            if use_asynchronous_language_determination:
-                event = threading.Event()
-                project_config._async_completion_events[id(project_config)] = event
-
-                def async_language_determination():
-                    try:
-                        with LogTime("Asynchronous language determination", logger=log):
-                            project_config.language_servers = cls._determine_project_language_servers(
-                                str(project_root), interactive=False, serena_config=serena_config
-                            )
-                            if save_to_disk:
-                                project_config.save(project_yml_path)
-                    finally:
-                        event.set()
-
-                threading.Thread(target=async_language_determination, name="project-language-determination", daemon=True).start()
-
-            return project_config
-
-    def await_asynchronous_completion(self):
+    @staticmethod
+    def _languages_of_main_checkout(project_root: Path, serena_config: "SerenaConfig") -> list[str]:
         """
-        Wait for the asynchronous auto-generation of the configuration to complete (if applicable), ensuring
-        that, in particular, the list of programming languages is complete, which may be determined asynchronously
-        when first creating the project configuration.
+        :param project_root: the resolved root of a project being configured for the first time
+        :param serena_config: the global Serena configuration, whose registered projects are consulted
+        :return: the language server keys of the registered project at the main checkout of the git repository whose
+            linked worktree ``project_root`` is, read through the worktree's ``.git`` file and ``commondir``; empty when
+            ``project_root`` is no linked worktree or its main checkout is not registered
         """
-        event = ProjectConfig._async_completion_events.get(id(self))
-        if event is None:
-            return
-        if not event.is_set():
-            log.info("Waiting for asynchronous auto-generation of project configuration to complete ...")
-            event.wait()
-            log.info("Asynchronous auto-generation of project configuration completed.")
+        git_file = project_root / ".git"
+        if not git_file.is_file():
+            return []
+        pointer = git_file.read_text().strip()
+        if not pointer.startswith("gitdir:"):
+            return []
+        worktree_git_dir = (project_root / pointer[len("gitdir:") :].strip()).resolve()
+        commondir_file = worktree_git_dir / "commondir"
+        if not commondir_file.is_file():
+            return []
+        common_dir = (worktree_git_dir / commondir_file.read_text().strip()).resolve()
+        if common_dir.name != ".git":
+            return []
+        main_checkout = serena_config.get_registered_project(str(common_dir.parent))
+        if main_checkout is None:
+            return []
+        return [ls_id.get_key() for ls_id in main_checkout.project_config.language_servers]
 
     @classmethod
     def default_project_yml_path(cls, project_root: str | Path) -> str:
@@ -632,7 +546,7 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
         # auto-generate if necessary
         if not os.path.exists(yaml_path):
             if autogen.is_autogen_enabled():
-                return cls.autogenerate(project_root, serena_config, asynchronous=autogen == ProjectConfigAutoGenerationMode.ASYNCHRONOUS)
+                return cls.autogenerate(project_root, serena_config)
             else:
                 raise FileNotFoundError(f"Project configuration file not found: {yaml_path}")
 
@@ -892,22 +806,6 @@ class RegisteredProject(ToStringMixin):
                 self._replaced_project_instance = self._project_instance
             self._project_instance = None
             return True
-
-    def reinstate_replaced_instance(self, refused_instance: "Project") -> None:
-        """
-        Reinstates the instance that the given instance was built to replace, together with that instance's configuration,
-        as the memoized instance of this project, so that a refused configuration change leaves the project as it was before.
-        A later :meth:`reload_if_changed` compares the on-disk configuration with the reinstated one.
-
-        :param refused_instance: the memoized instance built from the refused configuration; if it is not the memoized
-            instance or replaces no instance, nothing is reinstated
-        """
-        with self._instance_lock:
-            replaced_instance = refused_instance.replaced_project
-            if self._project_instance is not refused_instance or replaced_instance is None:
-                return
-            self._project_instance = replaced_instance
-            self.project_config = replaced_instance.project_config
 
 
 @dataclass(kw_only=True)

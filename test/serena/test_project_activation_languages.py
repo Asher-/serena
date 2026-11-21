@@ -1,101 +1,102 @@
-"""tests for the activation of a project that is configured for no language server."""
+"""tests for the languages a newly configured project is given, and for its activation, neither of which scans the project tree."""
 
 from __future__ import annotations
 
 import logging
+import time
+from pathlib import Path
 
 import pytest
 
+import serena.util.file_system as file_system
 from serena.agent import SerenaAgent
 from serena.config.serena_config import ProjectConfig, RegisteredProject, SerenaConfig
-from serena.language_backend import BuiltinLanguageBackend, LanguageBackend
-from serena.project import Project, UnconfiguredLanguageServersError
+from serena.project import Project
 from solidlsp.ls_config import LanguageServerId
-from test.conftest import get_repo_path
-
-_PROJECT_NAME = "unconfigured"
 
 
-def _project(repo_language: LanguageServerId, language_servers: list[LanguageServerId], backend: LanguageBackend) -> Project:
-    config = SerenaConfig(gui_log_window=False, web_dashboard=False, log_level=logging.ERROR, language_backend=backend)
+def _serena_config(tmp_path: Path) -> SerenaConfig:
+    config = SerenaConfig(gui_log_window=False, web_dashboard=False, log_level=logging.ERROR)
+    config.projects = []
+    return config
+
+
+def _main_checkout_with_worktree(tmp_path: Path) -> tuple[Path, Path]:
+    """
+    :return: a main checkout and a linked worktree of it, laid out as git lays them out: the worktree's ``.git`` file names
+        its git directory under the main checkout's ``.git/worktrees``, whose ``commondir`` names the main ``.git``
+    """
+    main = tmp_path / "main"
+    worktree_git_dir = main / ".git" / "worktrees" / "worktree"
+    worktree_git_dir.mkdir(parents=True)
+    (worktree_git_dir / "commondir").write_text("../..\n")
+    (main / "a.py").write_text("x = 1\n")
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / ".git").write_text(f"gitdir: {worktree_git_dir}\n")
+    return main, worktree
+
+
+def _register(config: SerenaConfig, root: Path, language_servers: list[LanguageServerId]) -> None:
     project = Project(
-        project_root=str(get_repo_path(repo_language)),
-        project_config=ProjectConfig(project_name=_PROJECT_NAME, language_servers=language_servers),
+        project_root=str(root),
+        project_config=ProjectConfig(project_name=root.name, language_servers=language_servers),
         serena_config=config,
     )
-    config.projects = [RegisteredProject.from_project_instance(project)]
-    return project
+    config.projects.append(RegisteredProject.from_project_instance(project))
 
 
-class TestActivationOfProjectWithoutLanguageServers:
-    _LSP = BuiltinLanguageBackend.LSP.get_instance()
+@pytest.fixture
+def no_tree_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(*args: object, **kwargs: object) -> list[str]:
+        raise AssertionError("the project tree was scanned")
 
-    def test_verification_over_source_files_raises_naming_the_project_and_its_empty_language_servers(self) -> None:
-        project = _project(LanguageServerId.PYTHON, [], self._LSP)
+    monkeypatch.setattr(file_system, "find_all_non_ignored_files", refuse)
 
-        with pytest.raises(UnconfiguredLanguageServersError) as exc_info:
-            project.verify_language_servers_configured()
 
-        message = str(exc_info.value)
-        assert f"'{_PROJECT_NAME}'" in message
-        assert "language_servers: []" in message
-        assert "language_servers: [python]" in message
-        assert "project.yml" in message
+class TestLanguagesOfANewProject:
+    def test_a_worktree_takes_the_languages_of_its_registered_main_checkout(self, tmp_path: Path, no_tree_scan: None) -> None:
+        config = _serena_config(tmp_path)
+        main, worktree = _main_checkout_with_worktree(tmp_path)
+        _register(config, main, [LanguageServerId.PYTHON, LanguageServerId.GO])
 
-    def test_verification_over_documentation_only_returns(self) -> None:
-        project = _project(LanguageServerId.MARKDOWN, [], self._LSP)
+        project_config = ProjectConfig.autogenerate(worktree, config, save_to_disk=False)
 
-        project.verify_language_servers_configured()
+        assert project_config.language_servers == [LanguageServerId.PYTHON, LanguageServerId.GO]
 
-    def test_verification_of_a_project_configured_for_a_language_server_returns(self) -> None:
-        project = _project(LanguageServerId.PYTHON, [LanguageServerId.PYTHON], self._LSP)
+    def test_a_worktree_whose_main_checkout_is_not_registered_has_no_languages(self, tmp_path: Path, no_tree_scan: None) -> None:
+        config = _serena_config(tmp_path)
+        _, worktree = _main_checkout_with_worktree(tmp_path)
 
-        project.verify_language_servers_configured()
+        project_config = ProjectConfig.autogenerate(worktree, config, save_to_disk=False)
 
-    def test_activation_over_source_files_fails_naming_the_project(self) -> None:
-        project = _project(LanguageServerId.PYTHON, [], self._LSP)
-        agent = SerenaAgent(project=None, serena_config=project.serena_config)
+        assert project_config.language_servers == []
 
-        try:
-            with pytest.raises(UnconfiguredLanguageServersError) as exc_info:
-                agent.activate_project_from_path_or_name(_PROJECT_NAME)
-            active_project = agent.get_active_project()
-        finally:
-            agent.on_shutdown(timeout=5)
+    def test_a_main_checkout_has_no_languages_without_a_scan(self, tmp_path: Path, no_tree_scan: None) -> None:
+        config = _serena_config(tmp_path)
+        main, _ = _main_checkout_with_worktree(tmp_path)
 
-        message = str(exc_info.value)
-        assert f"'{_PROJECT_NAME}'" in message
-        assert "language_servers: []" in message
-        assert "language_servers: [python]" in message
-        assert "project.yml" in message
-        assert active_project is None
+        project_config = ProjectConfig.autogenerate(main, config, save_to_disk=False)
 
-    def test_activation_over_documentation_only_succeeds(self) -> None:
-        project = _project(LanguageServerId.MARKDOWN, [], self._LSP)
-        agent = SerenaAgent(project=None, serena_config=project.serena_config)
+        assert project_config.language_servers == []
+
+
+class TestActivationOfANewWorktree:
+    def test_activation_returns_within_a_second_with_the_main_checkouts_languages(self, tmp_path: Path, no_tree_scan: None) -> None:
+        config = _serena_config(tmp_path)
+        main, worktree = _main_checkout_with_worktree(tmp_path)
+        _register(config, main, [LanguageServerId.PYTHON])
+        agent = SerenaAgent(project=None, serena_config=config)
 
         try:
-            activated = agent.activate_project_from_path_or_name(_PROJECT_NAME)
-        finally:
-            agent.on_shutdown(timeout=5)
-
-        assert activated
-
-    def test_reinstating_for_an_instance_that_replaces_none_keeps_the_registered_instance(self) -> None:
-        project = _project(LanguageServerId.PYTHON, [], self._LSP)
-        registered_project = project.serena_config.projects[0]
-
-        registered_project.reinstate_replaced_instance(project)
-
-        assert registered_project.get_project_instance(project.serena_config) is project
-
-    def test_activation_over_source_files_under_a_non_lsp_backend_succeeds(self) -> None:
-        project = _project(LanguageServerId.PYTHON, [], BuiltinLanguageBackend.JETBRAINS.get_instance())
-        agent = SerenaAgent(project=None, serena_config=project.serena_config)
-
-        try:
-            activated = agent.activate_project_from_path_or_name(_PROJECT_NAME)
+            started = time.monotonic()
+            activated = agent.activate_project_from_path_or_name(str(worktree))
+            elapsed = time.monotonic() - started
+            active = agent.get_active_project()
         finally:
             agent.on_shutdown(timeout=5)
 
         assert activated
+        assert elapsed <= 1.0
+        assert active is not None
+        assert active.project_config.language_servers == [LanguageServerId.PYTHON]

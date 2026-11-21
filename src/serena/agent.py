@@ -51,7 +51,7 @@ from serena.dashboard.dashboard_viewer import SerenaDashboardViewer, open_url_in
 from serena.language_backend import BuiltinLanguageBackend, LanguageBackend
 from serena.ls_manager import LanguageServerManager
 from serena.memories.memory_manager import MemoryManager
-from serena.project import Project, UnconfiguredLanguageServersError
+from serena.project import Project
 from serena.prompt_factory import SerenaPromptFactory
 from serena.repl.api.cfg_api import ConfigApi
 from serena.repl.api.edit_api import EditApi
@@ -2454,19 +2454,6 @@ class SerenaAgent:
         """
         return self._language_backend == BuiltinLanguageBackend.LSP
 
-    def _verify_language_servers_configured(self, project: Project) -> None:
-        """
-        Verifies, when the language backend in effect for the given project is LSP, that the project is configured for a
-        language server serving its source files (see :meth:`Project.verify_language_servers_configured`).
-
-        :param project: the project to verify
-        :raises UnconfiguredLanguageServersError: if the backend in effect is LSP and the project is configured for no
-            language server while its tree contains recognised source files
-        """
-        project_backend = project.project_config.language_backend
-        if (project_backend or self._language_backend).is_lsp():
-            project.verify_language_servers_configured()
-
     def _activate_project(
         self,
         project: Project,
@@ -2497,9 +2484,6 @@ class SerenaAgent:
             return False
 
         log.info(f"Activating {project.project_name} at {project.project_root}")
-
-        # refuse a project whose language servers cannot serve its source files, before any state changes
-        self._verify_language_servers_configured(project)
 
         # handle the case where the project requires a different language backend than the current one.
         # With the tool interface, the backend cannot change, since the set of exposed tools depends on it and is fixed
@@ -2681,13 +2665,6 @@ class SerenaAgent:
             # the new one rather than shutting it down under them (pg://serena/session/project/instance/shutdown)
             replaced_project = project_instance.replaced_project
             if config_changed and replaced_project is not None:
-                # refuse the new instance before any session holding the replaced one is moved onto it, keeping the
-                # replaced one registered
-                try:
-                    self._verify_language_servers_configured(project_instance)
-                except UnconfiguredLanguageServersError:
-                    registered_project.reinstate_replaced_instance(project_instance)
-                    raise
                 log.info(
                     "Configuration changed for project '%s'; moving the sessions holding it onto a new instance.",
                     registered_project.project_name,
