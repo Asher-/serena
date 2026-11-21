@@ -1152,6 +1152,26 @@ def test_reload_rebuilds_lookup(tmp_path: Path):
     _assert_linear_equivalence(parser, tmp_path)
 
 
+def test_paths_outside_the_chain_lookup(tmp_path: Path):
+    """
+    A path inside the root's .git is ignored, a path escaping the root is governed by the root's .gitignore alone,
+    and a path that cannot be made relative to the root is ignored and governed by nothing; none lists a directory.
+    """
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / ".gitignore").write_text("*\n")
+    (tmp_path / ".gitignore").write_text("*.log\n")
+    parser = GitignoreParser(str(tmp_path))
+    with _no_directory_listing():
+        assert parser.should_ignore(".git/config")
+        assert [Path(spec.file_path).name for spec in parser.specs_of(".git/config")] == [".gitignore"]
+        assert parser.specs_of(".git/config")[0].file_path == str(tmp_path / ".gitignore")
+        assert parser.specs_of("../outside.txt") == parser.specs_of("inside.txt")
+        assert parser.should_ignore("../outside.log")
+        with mock.patch.object(os.path, "relpath", side_effect=ValueError("path is on mount 'D:'")):
+            assert parser.should_ignore(str(tmp_path.parent / "elsewhere.txt"))
+            assert parser.specs_of(str(tmp_path.parent / "elsewhere.txt")) == []
+
+
 class TestGitignoreParserPermissionError:
     """Test PermissionError handling in GitignoreParser."""
 

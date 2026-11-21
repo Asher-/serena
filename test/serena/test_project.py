@@ -158,6 +158,17 @@ class TestProjectRespectsGlobalIgnoredPaths:
         assert not os.path.exists(nonexistent)
         assert not project.is_ignored_path(nonexistent)
 
+    def test_project_root_is_never_ignored_and_non_source_files_are_ignored_on_request(self) -> None:
+        """The project root is not ignored even by a pattern matching it; a file that is no source file of the
+        project's languages is ignored when non-source files are asked to be ignored, and not otherwise.
+        """
+        (self.project_path / "README.md").write_text("readme\n")
+        project = _create_test_project(self.project_path, global_ignored_paths=["/.*/"])
+        assert not project.is_ignored_path(".")
+        assert not project.is_ignored_path("")
+        assert project.is_ignored_path("README.md", ignore_non_source_files=True)
+        assert not project.is_ignored_path("README.md")
+
     def test_nonexistent_path_with_ignore_patterns(self) -> None:
         """Non-existent paths matching ignore patterns still return False (cannot check)."""
         project = _create_test_project(
