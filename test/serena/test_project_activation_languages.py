@@ -1,14 +1,16 @@
-"""tests for the languages a newly configured project is given, and for its activation, neither of which scans the project tree."""
+"""tests for the languages a newly configured project is given, and for its activation, neither of which lists a directory of the project tree."""
 
 from __future__ import annotations
 
 import logging
+import os
 import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-import serena.util.file_system as file_system
 from serena.agent import SerenaAgent
 from serena.config.serena_config import ProjectConfig, RegisteredProject, SerenaConfig
 from serena.project import Project
@@ -47,11 +49,27 @@ def _register(config: SerenaConfig, root: Path, language_servers: list[LanguageS
 
 
 @pytest.fixture
-def no_tree_scan(monkeypatch: pytest.MonkeyPatch) -> None:
-    def refuse(*args: object, **kwargs: object) -> list[str]:
-        raise AssertionError("the project tree was scanned")
+def no_tree_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """
+    Records every directory listed through os.scandir, os.listdir or os.walk, from any thread, for the whole test;
+    the test fails if any directory of its trees (under tmp_path) was listed.
+    """
+    listed: list[str] = []
 
-    monkeypatch.setattr(file_system, "find_all_non_ignored_files", refuse)
+    def recording(real: Callable[..., Any]) -> Callable[..., Any]:
+        def record(path: Any = ".", *args: Any, **kwargs: Any) -> Any:
+            if not isinstance(path, int):
+                listed.append(os.path.realpath(os.fspath(path)))
+            return real(path, *args, **kwargs)
+
+        return record
+
+    for name in ("scandir", "listdir", "walk"):
+        monkeypatch.setattr(os, name, recording(getattr(os, name)))
+    yield
+    root = os.path.realpath(tmp_path)
+    scanned = [path for path in listed if path == root or path.startswith(root + os.sep)]
+    assert not scanned, f"directories of the project trees were listed: {scanned}"
 
 
 class TestLanguagesOfANewProject:

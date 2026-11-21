@@ -24,7 +24,7 @@ def _create_test_project(
         ignored_paths=project_ignored_paths or [],
         ignore_all_files_in_gitignore=False,
     )
-    serena_config = SerenaConfig(ignored_paths=global_ignored_paths).with_headless_mode_overrides()
+    serena_config = SerenaConfig(ignored_paths=global_ignored_paths or []).with_headless_mode_overrides()
     return Project(
         project_root=str(project_root),
         project_config=config,
@@ -238,8 +238,11 @@ class TestProjectIgnoreRulesWithGlobalPathsAndGitignore:
                 ),
                 serena_config=SerenaConfig(gui_log_window=False, web_dashboard=False, ignored_paths=[]),
             )
-            assert r"a\[bc\]/drop.txt" in project._ignored_patterns
-            assert "build/cache/**/*.tmp" not in project._ignored_patterns
+            parser = project._ignore_specs._gitignore_parser
+            assert r"a\[bc\]/drop.txt" in parser.specs_of("a[bc]/drop.txt")[-1].patterns
+            # the configured "build\cache\" prunes the chain: build/cache/.gitignore is never read, so only the
+            # root's rules govern a path below it
+            assert parser.specs_of("build/cache/drop.tmp") == parser.specs_of("drop.txt")
             assert project.is_ignored_path("a[bc]/drop.txt")
             assert not project.is_ignored_path("ab/drop.txt")
             assert project.is_ignored_path("build/cache/drop.txt")
@@ -307,14 +310,14 @@ class TestProjectIgnoreRulesWithGlobalPathsAndGitignore:
                 gui_log_window=False, web_dashboard=False, ignored_paths=configured if configuration == "global" else []
             ),
         )
-        assert project._ignored_patterns[-2:] == configured
-        assert "build/keep/**/*.tmp" not in project._ignored_patterns
-        assert self.project_path / "build" not in entered
-        assert self.project_path / "build/keep" not in entered
+        # the excluded parent prunes the chain: build/keep/.gitignore is never read
+        governing = [Path(spec.file_path) for spec in project._ignore_specs._gitignore_parser.specs_of("build/keep/a.tmp")]
+        assert self.project_path / "build/keep/.gitignore" not in governing
         assert project.is_ignored_path("build/")
         assert project.is_ignored_path("build/other.txt")
         assert not project.is_ignored_path("build/keep/readme.md")
         assert not project.is_ignored_path("build/keep/a.tmp")
+        assert not [path for path in entered if path == self.project_path or self.project_path in path.parents]
 
     def test_configured_directories_prune_nested_negations(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """An excluded parent cannot be reopened by a nested gitignore negation."""

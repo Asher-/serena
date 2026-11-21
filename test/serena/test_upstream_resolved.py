@@ -5,7 +5,6 @@ and passed at upstream, carried onto the branch's API. test_gather_failure_leave
 case: its base_exception case failed on both sides.
 """
 
-import contextlib
 import inspect
 import threading
 from types import SimpleNamespace
@@ -13,7 +12,6 @@ from types import SimpleNamespace
 import pytest
 
 from serena.agent import SerenaAgent
-from serena.project import Project
 from serena.task_executor import TaskExecutor
 from serena.util.text_utils import search_files, search_text
 from solidlsp.ls import SolidLanguageServer
@@ -128,26 +126,6 @@ def test_open_file_whose_body_raises_leaves_no_buffer(tmp_path) -> None:
 
 
 # bug://serena/project/ignore/spec/readiness, for an Exception; a BaseException that is not one stays open at both sides
-@pytest.mark.parametrize("failure", [RuntimeError("gather failed")], ids=["exception"])
-def test_gather_failure_leaves_no_reader_waiting(failure: BaseException) -> None:
-    class RaisingConfig:
-        @property
-        def ignored_paths(self) -> list[str]:
-            raise failure
-
-    project = Project.__new__(Project)
-    project.project_config = SimpleNamespace(project_name="t7", ignored_paths=[])
-    project.serena_config = RaisingConfig()
-    project._ignore_spec_available = threading.Event()
-
-    # the thread body runs on this thread, so its return is the ordering point and no clock is involved
-    with contextlib.suppress(Exception):
-        project._gather_ignorespec()
-
-    # a read blocks exactly when this event is unset, so checking it first keeps the test from blocking on the defect
-    assert project._ignore_spec_available.is_set(), "a reader of the ignore spec would wait forever"
-    with contextlib.suppress(Exception):
-        _ = project._ignore_spec
 
 
 class _InitFailure(Exception):

@@ -7,7 +7,7 @@ import pathspec
 import pytest
 
 from solidlsp.language_servers.vue_language_server import VueLanguageServer
-from solidlsp.ls_config import LanguageServerId
+from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 
 
 class _VueDiscoveryServer(VueLanguageServer):
@@ -16,7 +16,8 @@ class _VueDiscoveryServer(VueLanguageServer):
     def __init__(self, root: Path, ignored_paths: tuple[str, ...]) -> None:
         self.repository_root_path = str(root)
         self.ls_id = LanguageServerId.VUE
-        self._ignore_spec = pathspec.PathSpec.from_lines(pathspec.patterns.GitWildMatchPattern, ignored_paths)
+        ignore_spec = pathspec.PathSpec.from_lines(pathspec.patterns.GitWildMatchPattern, ignored_paths)
+        self.config = LanguageServerConfig(ls_id=LanguageServerId.VUE, ignore_spec_of=lambda relative_path: ignore_spec)
 
 
 @pytest.mark.parametrize(

@@ -6,7 +6,6 @@ import re
 import stat
 import tempfile
 import time
-from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,7 +13,6 @@ from typing import NamedTuple
 
 import pathspec
 from pathspec import PathSpec
-from sensai.util.logging import LogTime
 
 from solidlsp.util.descriptor_exhaustion import DescriptorExhaustion
 
@@ -249,20 +247,6 @@ def walk_dir_entries(
         yield top, dirs, files
 
 
-def find_all_non_ignored_files(repo_root: str) -> list[str]:
-    """
-    Find all non-ignored files in the repository, respecting all gitignore files in the repository.
-
-    :param repo_root: The root directory of the repository
-    :return: A list of all non-ignored files in the repository
-    """
-    gitignore_parser = GitignoreParser(repo_root)
-    _, files = scan_directory(
-        repo_root, recursive=True, is_ignored_dir=gitignore_parser.should_ignore, is_ignored_file=gitignore_parser.should_ignore
-    )
-    return files
-
-
 @dataclass
 class GitignoreSpec:
     file_path: str
@@ -290,10 +274,11 @@ class GitignoreSpec:
 
 class GitignoreParser:
     """
-    Parser for gitignore files in a repository.
+    Parser for the gitignore files of a repository.
 
-    This class handles parsing multiple gitignore files throughout a repository
-    and provides methods to check if paths should be ignored.
+    A path's ignore decision reads only the .gitignore files in the directories on its ancestor chain, from the
+    repository root down to the path itself, since a .gitignore governs only its own subtree. Each directory's
+    .gitignore is read on its first use and memoised; the repository tree is never listed.
     """
 
     def __init__(self, repo_root: str, *, prune_spec: PathSpec | None = None) -> None:
@@ -301,97 +286,108 @@ class GitignoreParser:
         Initialize the parser for a repository.
 
         :param repo_root: Root directory of the repository
-        :param prune_spec: Configured ignore patterns used to prune gitignore discovery
+        :param prune_spec: Configured ignore patterns; the .gitignore of a directory they match, and of every directory
+            below it, is never read
         """
         self.repo_root = os.path.abspath(repo_root)
-        self.ignore_specs: list[GitignoreSpec] = []
-        self._specs_by_directory: dict[str, list[GitignoreSpec]] = {}
-        self._indexed_specs_count = 0
         self._prune_spec = prune_spec
-        self._load_gitignore_files()
+        self._spec_by_directory: dict[str, GitignoreSpec | None] = {}
 
-    def _load_gitignore_files(self) -> None:
-        """Load all gitignore files from the repository."""
-        with LogTime("Loading of .gitignore files", logger=log):
-            for gitignore_path in self._iter_gitignore_files():
-                log.info("Processing .gitignore file: %s", gitignore_path)
-                spec = self._create_ignore_spec(gitignore_path)
-                if spec.patterns:  # Only add non-empty specs
-                    self.ignore_specs.append(spec)
-                    rel_dir = os.path.relpath(os.path.dirname(gitignore_path), self.repo_root).replace(os.sep, "/")
-                    self._specs_by_directory.setdefault("" if rel_dir == "." else rel_dir, []).append(spec)
-                    self._indexed_specs_count = len(self.ignore_specs)
-
-    def _iter_gitignore_files(self, follow_symlinks: bool = False) -> Iterator[str]:
+    def _directory_spec(self, directory: str) -> GitignoreSpec | None:
         """
-        Iteratively discover .gitignore files in a top-down fashion, starting from the repository root.
-        Directory paths are skipped if they match any already loaded ignore patterns.
-
-        :return: an iterator yielding paths to .gitignore files (top-down)
+        :param directory: a directory relative to the repository root, with forward slashes ("" for the root)
+        :return: the non-empty spec of the directory's .gitignore, or None if it has none, it is empty or it
+            cannot be read; memoised per directory
         """
-        queue: deque[str] = deque([self.repo_root])
-
-        def scan(abs_path: str | None) -> Iterator[str]:
-            try:
-                entries = os.scandir(abs_path)
-            except PermissionError as ex:
-                if abs_path == self.repo_root:
-                    # The repository root itself cannot be read — e.g. a macOS privacy-protected
-                    # folder such as ~/Desktop, ~/Documents or ~/Downloads. Fail with an actionable
-                    # message rather than an opaque crash or a silently-empty parser.
-                    raise PermissionError(
-                        f"serena cannot read the folder '{abs_path}': macOS is blocking access to it. "
-                        f"Desktop, Documents, and Downloads are protected by the system's privacy "
-                        f"settings, and serena does not have permission to open them."
-                    ) from ex
-                log.debug(f"Skipping unreadable directory {abs_path}: {ex}")
-                return
-            for entry in entries:
-                try:
-                    if entry.is_dir(follow_symlinks=follow_symlinks):
-                        queue.append(entry.path)
-                    elif entry.is_file(follow_symlinks=follow_symlinks) and entry.name == ".gitignore":
-                        yield entry.path
-                except PermissionError as ex:
-                    log.debug(f"Skipping entry due to permission error: {entry.path}", exc_info=ex)
-                    continue
-                except FileNotFoundError as ex:
-                    log.debug(f"Skipping entry due to file not found error (possibly a broken link): {entry.path}", exc_info=ex)
-                    continue
-
-        while queue:
-            next_abs_path = queue.popleft()
-            if next_abs_path != self.repo_root:
-                try:
-                    rel_path = os.path.relpath(next_abs_path, self.repo_root)
-                except ValueError:
-                    # If the path is on a different drive (Windows) or cannot be made relative for another reason, we ignore it
-                    continue
-                if (
-                    self._prune_spec is not None
-                    and match_path(rel_path.replace(os.sep, "/") + "/", self._prune_spec, root_path=self.repo_root)
-                ) or self.should_ignore(rel_path):
-                    continue
-            yield from scan(next_abs_path)
-
-    def _create_ignore_spec(self, gitignore_file_path: str) -> GitignoreSpec:
-        """
-        Create a GitignoreSpec from a single gitignore file.
-
-        :param gitignore_file_path: Path to the .gitignore file
-        :return: GitignoreSpec object for the gitignore patterns
-        """
+        if directory in self._spec_by_directory:
+            return self._spec_by_directory[directory]
+        gitignore_dir = os.path.join(self.repo_root, directory) if directory else self.repo_root
+        gitignore_path = os.path.join(gitignore_dir, ".gitignore")
+        spec: GitignoreSpec | None
         try:
-            with open(gitignore_file_path, encoding="utf-8") as f:
+            with open(gitignore_path, encoding="utf-8") as f:
                 content = f.read()
+        except PermissionError as ex:
+            if not directory:
+                # The repository root itself cannot be read — e.g. a macOS privacy-protected
+                # folder such as ~/Desktop, ~/Documents or ~/Downloads. Fail with an actionable
+                # message rather than an opaque crash or a silently-empty parser.
+                raise PermissionError(
+                    f"serena cannot read the folder '{self.repo_root}': macOS is blocking access to it. "
+                    f"Desktop, Documents, and Downloads are protected by the system's privacy "
+                    f"settings, and serena does not have permission to open them."
+                ) from ex
+            log.debug(f"Skipping unreadable .gitignore {gitignore_path}: {ex}")
+            spec = None
         except (OSError, UnicodeDecodeError):
-            # If we can't read the file, return an empty spec
-            return GitignoreSpec(gitignore_file_path, [])
+            spec = None
+        else:
+            log.info("Processing .gitignore file: %s", gitignore_path)
+            spec = GitignoreSpec(gitignore_path, self._parse_gitignore_content(content, gitignore_dir))
+            if not spec.patterns:
+                spec = None
+        self._spec_by_directory[directory] = spec
+        return spec
 
-        gitignore_dir = os.path.dirname(gitignore_file_path)
-        patterns = self._parse_gitignore_content(content, gitignore_dir)
+    def _relative_path(self, path: str, is_dir: bool | None) -> str | None:
+        """
+        :param path: a path, absolute or relative to the repository root
+        :param is_dir: whether the path is a directory, where the caller knows; None determines it from the filesystem
+        :return: the path relative to the repository root with forward slashes, ending in "/" for a directory, or None
+            if it cannot be made relative to the repository root
+        """
+        if os.path.isabs(path):
+            try:
+                rel_path = os.path.relpath(path, self.repo_root)
+            except ValueError as e:
+                log.info("Ignoring path '%s' which is outside of the repository root (%s)", path, e)
+                return None
+        else:
+            rel_path = path
+        rel_path = rel_path.replace(os.sep, "/")
+        if not rel_path.endswith("/"):
+            if is_dir is None:
+                is_dir = os.path.isdir(os.path.join(self.repo_root, rel_path))
+            if is_dir:
+                rel_path = rel_path + "/"
+        return rel_path
 
-        return GitignoreSpec(gitignore_file_path, patterns)
+    def specs_of(self, path: str, is_dir: bool | None = None) -> list[GitignoreSpec]:
+        """
+        The specs of the .gitignore files governing a path: those in the directories on its ancestor chain, from the
+        repository root down to the path itself if it is a directory, root first. Reading stops at a directory the
+        prune spec matches, at a directory the specs above it ignore, and at the root's .git directory; a path
+        outside the repository root is governed by the root's .gitignore alone.
+
+        :param path: a path, absolute or relative to the repository root
+        :param is_dir: whether the path is a directory, where the caller knows; None determines it from the filesystem
+        :return: the governing specs, root first
+        """
+        rel_path = self._relative_path(path, is_dir)
+        if rel_path is None:
+            return []
+        normalized = os.path.normpath(rel_path).replace(os.sep, "/")
+        directories = [] if normalized in (".", "..") or normalized.startswith("../") else normalized.split("/")
+        if directories and not rel_path.endswith("/"):
+            directories = directories[:-1]
+        specs: list[GitignoreSpec] = []
+        root_spec = self._directory_spec("")
+        if root_spec is not None:
+            specs.append(root_spec)
+        directory = ""
+        for component in directories:
+            directory = f"{directory}/{component}" if directory else component
+            if directory == ".git":
+                break
+            directory_path = directory + "/"
+            if self._prune_spec is not None and match_path(directory_path, self._prune_spec, root_path=self.repo_root):
+                break
+            if any(spec.matches(directory_path) for spec in specs):
+                break
+            spec = self._directory_spec(directory)
+            if spec is not None:
+                specs.append(spec)
+        return specs
 
     # Backport of upstream #1806: keep filesystem names literal in patterns.
     def _parse_gitignore_content(self, content: str, gitignore_dir: str) -> list[str]:
@@ -488,64 +484,61 @@ class GitignoreParser:
         :param path: Path to check (absolute or relative to repo_root)
         :return: True if the path should be ignored, False otherwise
         """
-        # The public list is authoritative; refresh the derived cache after length changes.
-        if self._indexed_specs_count != len(self.ignore_specs):
-            self._specs_by_directory.clear()
-            for spec in self.ignore_specs:
-                rel_dir = os.path.relpath(os.path.dirname(spec.file_path), self.repo_root).replace(os.sep, "/")
-                self._specs_by_directory.setdefault("" if rel_dir == "." else rel_dir, []).append(spec)
-            self._indexed_specs_count = len(self.ignore_specs)
-
-        # Convert to relative path from repo root
-        if os.path.isabs(path):
-            try:
-                rel_path = os.path.relpath(path, self.repo_root)
-            except Exception as e:
-                # If the path could not be converted to a relative path,
-                # it is outside the repository root, so we ignore it
-                log.info("Ignoring path '%s' which is outside of the repository root (%s)", path, e)
-                return True
-        else:
-            rel_path = path
-
-        # Ignore paths inside .git
-        rel_path_first_path = Path(rel_path).parts[0]
-        if rel_path_first_path == ".git":
+        rel_path = self._relative_path(path, None)
+        if rel_path is None:
+            # a path that cannot be made relative to the repository root is outside it, so it is ignored
             return True
 
-        abs_path = os.path.join(self.repo_root, rel_path)
+        # Ignore paths inside .git
+        if Path(rel_path).parts[:1] == (".git",):
+            return True
 
-        # Normalize path separators
-        rel_path = rel_path.replace(os.sep, "/")
-
-        if os.path.exists(abs_path) and os.path.isdir(abs_path) and not rel_path.endswith("/"):
-            rel_path = rel_path + "/"
-
-        # Escaped directory prefixes restrict specs to their own subtrees. Walk from
-        # root to parent (including a directory itself) in the original discovery order.
-        directory = ""
-        for component in ["", *rel_path.split("/")[:-1]]:
-            directory = f"{directory}/{component}" if directory else component
-            for spec in self._specs_by_directory.get(directory, []):
-                if spec.matches(rel_path):
-                    return True
-
-        return False
-
-    def get_ignore_specs(self) -> list[GitignoreSpec]:
-        """
-        Get all loaded gitignore specs.
-
-        :return: List of GitignoreSpec objects
-        """
-        return self.ignore_specs
+        return any(spec.matches(rel_path) for spec in self.specs_of(rel_path, is_dir=rel_path.endswith("/")))
 
     def reload(self) -> None:
-        """Reload all gitignore files from the repository."""
-        self.ignore_specs.clear()
-        self._specs_by_directory.clear()
-        self._indexed_specs_count = 0
-        self._load_gitignore_files()
+        """Forget every .gitignore read so far, so that each is read again on its next use."""
+        self._spec_by_directory = {}
+
+
+class IgnoreSpecs:
+    """
+    The ignore spec that governs each path of a project: the configured patterns, then the patterns of the .gitignore
+    files on the path's ancestor chain (if those are honoured), then the configured patterns again, so that neither a
+    .gitignore negation can re-include a configured exclusion nor a .gitignore rule narrow a configured re-inclusion.
+    The configured patterns also prune the chain: the .gitignore of a directory they exclude is never read.
+    Each directory's spec is composed on first use and memoised.
+    """
+
+    def __init__(self, root: str, configured_patterns: list[str], read_gitignore_files: bool) -> None:
+        """
+        :param root: the project root
+        :param configured_patterns: the configured ignore patterns, in order (gitignore syntax, forward slashes)
+        :param read_gitignore_files: whether the .gitignore files of the project are honoured
+        """
+        self._configured_patterns = list(configured_patterns)
+        self._configured_spec = PathSpec.from_lines(pathspec.patterns.GitWildMatchPattern, self._configured_patterns)
+        self._gitignore_parser = GitignoreParser(root, prune_spec=self._configured_spec) if read_gitignore_files else None
+        self._spec_by_gitignore_files: dict[tuple[str, ...], PathSpec] = {}
+
+    def spec_of(self, relative_path: str, is_dir: bool | None = None) -> PathSpec:
+        """
+        :param relative_path: a path relative to the project root
+        :param is_dir: whether the path is a directory, where the caller knows; None determines it from the filesystem
+        :return: the ignore spec governing the path
+        """
+        if self._gitignore_parser is None:
+            return self._configured_spec
+        gitignore_specs = self._gitignore_parser.specs_of(relative_path, is_dir=is_dir)
+        key = tuple(spec.file_path for spec in gitignore_specs)
+        spec = self._spec_by_gitignore_files.get(key)
+        if spec is None:
+            patterns = [*self._configured_patterns]
+            for gitignore_spec in gitignore_specs:
+                patterns.extend(gitignore_spec.patterns)
+            patterns.extend(self._configured_patterns)
+            spec = PathSpec.from_lines(pathspec.patterns.GitWildMatchPattern, patterns)
+            self._spec_by_gitignore_files[key] = spec
+        return spec
 
 
 def match_path(relative_path: str, path_spec: PathSpec, root_path: str = "", is_dir: bool | None = None) -> bool:

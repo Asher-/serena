@@ -18,7 +18,6 @@ from pathlib import Path, PurePath
 from time import monotonic, perf_counter, sleep
 from typing import Any, Self, Union, cast
 
-import pathspec
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString, SingleQuotedScalarString
 from sensai.util.helper import mark_used
 from sensai.util.pickle import getstate
@@ -767,9 +766,6 @@ class SolidLanguageServer(ABC):
         """
         self.server.on_any_notification(self._observe_server_notification)
 
-        # create a pathspec matcher from the given patterns
-        self._ignore_spec = pathspec.PathSpec.from_lines(pathspec.patterns.GitWildMatchPattern, config.ignored_paths)
-
         self._has_waited_for_cross_file_references = False
 
         self._abs_workspace_folders_indexed = self.config.get_absolute_workspace_folders(self.repository_root_path)
@@ -1394,19 +1390,6 @@ class SolidLanguageServer(ABC):
         """
         self.server.set_request_timeout(timeout)
 
-    def get_ignore_spec(self) -> pathspec.PathSpec:
-        """
-        Returns the pathspec matcher for the paths that were configured to be ignored through
-        the language server configuration.
-
-        This is a subset of the full language-specific ignore spec that determines
-        which files are relevant for the language server.
-
-        This matcher is useful for operations outside of the language server,
-        such as when searching for relevant non-language files in the project.
-        """
-        return self._ignore_spec
-
     def get_source_fn_matcher(self) -> FilenameMatcher:
         """
         :return: the source filename matcher for this language server, which must positively match all files that
@@ -1547,7 +1530,9 @@ class SolidLanguageServer(ABC):
             if not fn_matcher.is_relevant_filename(project_entry.get_abs_path()):
                 return True
 
-        return match_path(relative_path, self.get_ignore_spec(), root_path=self.repository_root_path, is_dir=project_entry.is_dir())
+        return match_path(
+            relative_path, self.config.ignore_spec_of(relative_path), root_path=self.repository_root_path, is_dir=project_entry.is_dir()
+        )
 
     @contextmanager
     def start_server_context(self) -> Iterator["SolidLanguageServer"]:

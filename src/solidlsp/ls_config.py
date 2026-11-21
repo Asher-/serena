@@ -10,12 +10,14 @@ import logging
 import os
 import re
 import threading
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, Self
+
+from pathspec import PathSpec
 
 if TYPE_CHECKING:
     from solidlsp import SolidLanguageServer
@@ -1200,6 +1202,17 @@ class LanguageServerRegistry:
         return sorted(self._registered_language_servers.keys())
 
 
+_NO_IGNORE_SPEC = PathSpec([])
+
+
+def ignore_nothing(relative_path: str) -> PathSpec:
+    """
+    :param relative_path: a path relative to the repository root
+    :return: the ignore spec of a language server configured to ignore nothing, which matches no path
+    """
+    return _NO_IGNORE_SPEC
+
+
 @dataclass(frozen=True)
 class LanguageServerConfig:
     """
@@ -1224,10 +1237,10 @@ class LanguageServerConfig:
     """
     trace_lsp_communication: bool = False
     start_independent_lsp_process: bool = True
-    ignored_paths: list[str] = field(default_factory=list)
+    ignore_spec_of: Callable[[str], PathSpec] = field(default=ignore_nothing)
     """
-    list of ordered ignore patterns (same syntax as .gitignore; only forward slashes) to be used by the language server
-    for filtering out files and folders from indexing and analysis.
+    the ignore spec governing a path relative to the repository root, used by the language server for filtering out
+    files and folders from indexing and analysis; asked about one path at a time.
     """
     encoding: str = "utf-8"
     """File encoding to use when reading source files"""

@@ -17,7 +17,7 @@ import pathspec
 import pytest
 
 from solidlsp import SolidLanguageServer, ls_types
-from solidlsp.ls_config import LanguageServerId
+from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.ls_utils import PathUtils
 
 
@@ -35,7 +35,8 @@ class _IgnoredPathServer(SolidLanguageServer):
         self.repository_root_path = str(root)
         self.ls_id = language
         self._ignored_dirnames = frozenset(ignored_dirnames)
-        self._ignore_spec = pathspec.PathSpec.from_lines(pathspec.patterns.GitWildMatchPattern, ignore_lines)
+        ignore_spec = pathspec.PathSpec.from_lines(pathspec.patterns.GitWildMatchPattern, ignore_lines)
+        self.config = LanguageServerConfig(ls_id=language, ignore_spec_of=lambda relative_path: ignore_spec)
 
     def is_ignored_dirname(self, dirname: str) -> bool:
         return super().is_ignored_dirname(dirname) or dirname in self._ignored_dirnames

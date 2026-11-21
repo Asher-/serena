@@ -7,8 +7,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
-import pathspec
-from sensai.util.logging import LogTime
 from sensai.util.string import TextBuilder, ToStringMixin
 
 from serena.config.serena_config import (
@@ -20,7 +18,7 @@ from serena.language_backend import LanguageBackend
 from serena.ls_manager import LanguageServerFactory, LanguageServerManager
 from serena.memories.memory_manager import MemoryManager
 from serena.util.file_proxy import FileCollection, FileProxy
-from serena.util.file_system import GitignoreParser, ScanResult, dir_entry_from_path, match_path, walk_dir_entries
+from serena.util.file_system import IgnoreSpecs, ScanResult, dir_entry_from_path, match_path, walk_dir_entries
 from serena.util.text_utils import MatchedConsecutiveLines, search_files
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerIdLike
@@ -125,56 +123,14 @@ class Project(ToStringMixin):
                 f.write(f"/{SolidLanguageServer.CACHE_FOLDER_NAME}\n")
                 f.write(f"/{ProjectConfig.SERENA_LOCAL_PROJECT_FILE}\n")
 
-        # prepare ignore spec asynchronously, ensuring immediate project activation.
-        self.__ignored_patterns: list[str] | None = None
-        self.__ignore_spec: pathspec.PathSpec | None = None
-        self._ignore_spec_available = threading.Event()
-        threading.Thread(name=f"gather-ignorespec[{self.project_config.project_name}]", target=self._gather_ignorespec, daemon=True).start()
-
-    def _gather_ignorespec(self) -> None:
-        with LogTime(f"Gathering ignore spec for project {self.project_config.project_name}", logger=log):
-            # gather ignored paths from the global configuration, project configuration, and gitignore files
-            try:
-                # extend the ignored paths from the global config with ".git" to ensure that .git folders (anywhere in the project)
-                # are always ignored
-                global_ignored_paths = [".git"] + self.serena_config.ignored_paths
-
-                # Only configured paths need separator normalization; gitignore patterns already use POSIX syntax and escapes.
-                configured_patterns = [
-                    pattern.replace(os.path.sep, "/") for pattern in [*global_ignored_paths, *self.project_config.ignored_paths]
-                ]
-
-                ignored_patterns = list(configured_patterns)
-                if len(global_ignored_paths) > 0:
-                    log.info(f"Using {len(global_ignored_paths)} ignored paths from the global configuration.")
-                    log.debug(f"Global ignored paths: {list(global_ignored_paths)}")
-                if len(self.project_config.ignored_paths) > 0:
-                    log.info(f"Using {len(self.project_config.ignored_paths)} ignored paths from the project configuration.")
-                    log.debug(f"Project ignored paths: {self.project_config.ignored_paths}")
-                log.debug(f"Combined ignored patterns: {ignored_patterns}")
-                if self.project_config.ignore_all_files_in_gitignore:
-                    # Directories excluded by the configured patterns are never entered by the .gitignore
-                    # discovery walk (the configured patterns have the final say, see below, so nested
-                    # .gitignore rules under such a directory could never change a verdict anyway).
-                    prune_spec = pathspec.PathSpec.from_lines(pathspec.patterns.GitWildMatchPattern, configured_patterns)
-                    gitignore_parser = GitignoreParser(self.project_root, prune_spec=prune_spec)
-                    for spec in gitignore_parser.get_ignore_specs():
-                        log.debug(f"Adding {len(spec.patterns)} patterns from {spec.file_path} to the ignored paths.")
-                        ignored_patterns.extend(spec.patterns)
-                    # Explicit configuration has the final say, in its configured order: re-appending it after
-                    # the .gitignore patterns means neither a .gitignore negation can re-include a configured
-                    # exclusion nor a .gitignore rule can narrow a configured re-inclusion. This is what keeps
-                    # discovery pruning (by configuration) and the final verdict consistent by construction.
-                    ignored_patterns.extend(configured_patterns)
-                self.__ignored_patterns = ignored_patterns
-
-                # Set up the pathspec matcher for the ignored paths
-                log.debug(f"Processing {len(ignored_patterns)} ignored paths")
-                self.__ignore_spec = pathspec.PathSpec.from_lines(pathspec.patterns.GitWildMatchPattern, ignored_patterns)
-            except Exception as e:
-                log.error(f"Error while gathering ignore spec for project {self.project_config.project_name}: {e}", exc_info=e)
-
-        self._ignore_spec_available.set()
+        # the ignore spec governing each path; nothing is read until a path is asked about. ".git" is always ignored,
+        # and only configured paths need separator normalization (gitignore patterns already use POSIX syntax).
+        configured_patterns = [
+            pattern.replace(os.path.sep, "/") for pattern in [".git", *serena_config.ignored_paths, *project_config.ignored_paths]
+        ]
+        self._ignore_specs = IgnoreSpecs(
+            self.project_root, configured_patterns, read_gitignore_files=project_config.ignore_all_files_in_gitignore
+        )
 
     def _tostring_includes(self) -> list[str]:
         return []
@@ -243,39 +199,6 @@ class Project(ToStringMixin):
         """
         return FileProxy.from_project_relative_path(self, relative_path).get_contents()
 
-    @property
-    def _ignore_spec(self) -> pathspec.PathSpec:
-        """
-        :return: the pathspec matcher for the paths that were configured to be ignored,
-            either explicitly or implicitly through .gitignore files, with explicit configuration taking precedence.
-        """
-        if not self._ignore_spec_available.is_set():
-            log.info("Waiting for ignore spec to become available ...")
-            self._ignore_spec_available.wait()
-            if self.__ignore_spec is not None:
-                log.info("Ignore spec is now available for project; proceeding")
-        if self.__ignore_spec is None:
-            raise ValueError(
-                "The ignore spec could not be computed; please check the log for errors and report here: https://github.com/oraios/serena/issues"
-            )
-        return self.__ignore_spec
-
-    @property
-    def _ignored_patterns(self) -> list[str]:
-        """
-        :return: the list of ignored path patterns
-        """
-        if not self._ignore_spec_available.is_set():
-            log.info("Waiting for ignored patterns to become available ...")
-            self._ignore_spec_available.wait()
-            if self.__ignored_patterns is not None:
-                log.info("Ignored patterns are now available for project; proceeding")
-        if self.__ignored_patterns is None:
-            raise ValueError(
-                "The ignored patterns could not be computed; please check the log for errors and report here: https://github.com/oraios/serena/issues"
-            )
-        return self.__ignored_patterns
-
     def _is_ignored_relative_path(
         self, relative_path: str | Path, ignore_non_source_files: bool = True, is_file: bool | None = None
     ) -> bool:
@@ -312,7 +235,8 @@ class Project(ToStringMixin):
                     return True
 
         is_dir = None if is_file is None else not is_file
-        return match_path(str(relative_path), self._ignore_spec, root_path=self.project_root, is_dir=is_dir)
+        ignore_spec = self._ignore_specs.spec_of(str(relative_path), is_dir=is_dir)
+        return match_path(str(relative_path), ignore_spec, root_path=self.project_root, is_dir=is_dir)
 
     def is_ignored_path(self, path: str | Path, ignore_non_source_files: bool = False, is_file: bool | None = None) -> bool:
         """
@@ -786,7 +710,7 @@ class Project(ToStringMixin):
                     project_config=self.project_config,
                     project_data_path=self._serena_data_folder,
                     encoding=self.project_config.encoding,
-                    ignored_patterns=self._ignored_patterns,
+                    ignore_spec_of=self._ignore_specs.spec_of,
                     ls_timeout=ls_timeout,
                     ls_specific_settings=ls_specific_settings,
                     trace_lsp_communication=self.serena_config.trace_lsp_communication,

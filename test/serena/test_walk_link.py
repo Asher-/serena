@@ -19,7 +19,7 @@ from serena.language_backend import BuiltinLanguageBackend
 from serena.project import Project
 from serena.tools.cursor_tools import CursorGrepTool
 from serena.tools.file_tools import SearchForPatternTool
-from serena.util.file_system import find_all_non_ignored_files, scan_directory
+from serena.util.file_system import scan_directory
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.structural.registry import StructuralBackendRegistry
 
@@ -120,11 +120,6 @@ class TestWalkEntersNoLinkToADirectory:
 
         assert result.files == [_SOURCE_FILE]
         assert result.directories == ["pkg"]
-
-    def test_find_all_non_ignored_files(self, linked_tree: Path) -> None:
-        files = [os.path.relpath(path, linked_tree) for path in find_all_non_ignored_files(str(linked_tree))]
-
-        assert files == [_SOURCE_FILE]
 
     def test_gather_source_files(self, linked_tree: Path) -> None:
         files = [project_file.rel_path for project_file in _project(linked_tree).gather_source_files()]

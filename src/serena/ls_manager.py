@@ -3,10 +3,11 @@
 import logging
 import os.path
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from pathspec import PathSpec
 from sensai.util.logging import LogTime
 
 from serena.config.serena_config import ProjectConfig, SerenaPaths
@@ -54,7 +55,7 @@ class LanguageServerFactory:
         project_config: ProjectConfig,
         project_data_path: str,
         encoding: str,
-        ignored_patterns: list[str],
+        ignore_spec_of: Callable[[str], PathSpec],
         ls_timeout: float | None = None,
         ls_specific_settings: dict | None = None,
         trace_lsp_communication: bool = False,
@@ -64,7 +65,7 @@ class LanguageServerFactory:
         self.project_config = project_config
         self.project_data_path = project_data_path
         self.encoding = encoding
-        self.ignored_patterns = ignored_patterns
+        self.ignore_spec_of = ignore_spec_of
         self.ls_timeout = ls_timeout
         self.ls_specific_settings = ls_specific_settings
         self.trace_lsp_communication = trace_lsp_communication
@@ -75,7 +76,7 @@ class LanguageServerFactory:
             workspace_folders=self.project_config.ls_workspace_folders,
             additional_workspace_folders=self.project_config.ls_additional_workspace_folders,
             ls_id=ls_id,
-            ignored_paths=self.ignored_patterns,
+            ignore_spec_of=self.ignore_spec_of,
             trace_lsp_communication=self.trace_lsp_communication,
             encoding=self.encoding,
             is_project_trusted=self.is_project_trusted,

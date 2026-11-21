@@ -15,11 +15,30 @@ import pytest
 from _pytest.mark import Mark, MarkDecorator
 from sensai.util.logging import configure
 
+SCRATCH_ROOT = Path(__file__).resolve().parents[1] / "build" / "test"
+"""
+The directory under which every test keeps its files, in the repository's ``build/``, which ``.gitignore`` excludes, and
+never a system temp directory (convention://global/organization/script/project/temp).
+"""
+
+# the temp directory of this process and of every process a test starts: tempfile and pytest's tmp_path and
+# tmp_path_factory, whose numbered base directory pytest takes from tempfile, all make their files under SCRATCH_ROOT
+SCRATCH_ROOT.mkdir(parents=True, exist_ok=True)
+tempfile.tempdir = str(SCRATCH_ROOT)
+os.environ["TMPDIR"] = str(SCRATCH_ROOT)
+
+# the serena home of this process and of every process a test starts, so that no test reads or writes the developer's
+# configuration (bug://serena/config/file/write/atomicity) or installs a language server into the developer's home.
+# It is set before any serena module is imported: importing serena.agent instantiates the SerenaPaths singleton, which
+# reads SERENA_HOME once, so a later assignment would leave this process on the developer's home.
+SERENA_HOME = Path(tempfile.mkdtemp(prefix="serena-home-", dir=SCRATCH_ROOT))
+os.environ["SERENA_HOME"] = str(SERENA_HOME)
+
 from serena.agent import SerenaAgent
 from serena.config.serena_config import SerenaConfig, SerenaPaths
 from serena.constants import SERENA_MANAGED_DIR_NAME
 from serena.project import Project
-from serena.util.file_system import GitignoreParser
+from serena.util.file_system import IgnoreSpecs
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.settings import SolidLSPSettings
@@ -34,22 +53,6 @@ configure(level=logging.INFO)
 
 log = logging.getLogger(__name__)
 
-SCRATCH_ROOT = Path(__file__).resolve().parents[1] / "build" / "test"
-"""
-The directory under which every test keeps its files, in the repository's ``build/``, which ``.gitignore`` excludes, and
-never a system temp directory (convention://global/organization/script/project/temp).
-"""
-
-# the temp directory of this process and of every process a test starts: tempfile and pytest's tmp_path and
-# tmp_path_factory, whose numbered base directory pytest takes from tempfile, all make their files under SCRATCH_ROOT
-SCRATCH_ROOT.mkdir(parents=True, exist_ok=True)
-tempfile.tempdir = str(SCRATCH_ROOT)
-os.environ["TMPDIR"] = str(SCRATCH_ROOT)
-
-# the serena home of this process and of every process a test starts, so that no test reads or writes the developer's
-# configuration (bug://serena/config/file/write/atomicity) or installs a language server into the developer's home
-SERENA_HOME = Path(tempfile.mkdtemp(prefix="serena-home-", dir=SCRATCH_ROOT))
-os.environ["SERENA_HOME"] = str(SERENA_HOME)
 TestLanguageServerInstallation().link_into(SERENA_HOME)
 
 _FIXTURE_REPOSITORIES = FixtureRepositories(Path(tempfile.mkdtemp(prefix="repos-", dir=SCRATCH_ROOT)))
@@ -108,15 +111,12 @@ def _create_ls(
     additional_workspace_folders: list[str] | None = None,
     solidlsp_dir: Path | None = None,
 ) -> SolidLanguageServer:
-    ignored_paths = ignored_paths or []
     if repo_path is None:
         repo_path = str(get_repo_path(ls_id))
-    gitignore_parser = GitignoreParser(str(repo_path))
-    for spec in gitignore_parser.get_ignore_specs():
-        ignored_paths.extend(spec.patterns)
+    ignore_specs = IgnoreSpecs(str(repo_path), ignored_paths or [], read_gitignore_files=True)
     config = LanguageServerConfig(
         ls_id=ls_id,
-        ignored_paths=ignored_paths,
+        ignore_spec_of=ignore_specs.spec_of,
         trace_lsp_communication=trace_lsp_communication,
         workspace_folders=workspace_folders or ["."],
         additional_workspace_folders=additional_workspace_folders or [],

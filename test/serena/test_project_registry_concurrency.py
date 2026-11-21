@@ -48,10 +48,6 @@ def _call_at_once(call: Callable[[], Project]) -> tuple[list[Project], list[Base
     for thread in threads:
         thread.join(timeout=60)
     assert not any(thread.is_alive() for thread in threads)
-
-    # the background scan of every project built, which would otherwise outlive the test's directory
-    for project in results:
-        project._ignore_spec_available.wait()
     return results, errors
 
 

@@ -754,7 +754,7 @@ class CSharpLanguageServer(SolidLanguageServer):
         """
 
         def is_ignored_path(relative_path: str) -> bool:
-            return match_path(relative_path, self.get_ignore_spec(), root_path=self.repository_root_path)
+            return match_path(relative_path, self.config.ignore_spec_of(relative_path), root_path=self.repository_root_path)
 
         # Find solution file (.sln or .slnx)
         solution_file = None

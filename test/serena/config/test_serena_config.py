@@ -4,7 +4,6 @@ import os
 import shutil
 import tempfile
 import threading
-from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -491,13 +490,11 @@ class TestProjectSerenaDataFolder:
             project_name="myproject",
             language_servers=[LanguageServerId.PYTHON],
         )
-        project = Project(
+        return Project(
             project_root=str(self.project_path),
             project_config=project_config,
             serena_config=serena_config,
         )
-        project._ignore_spec_available.wait()
-        return project
 
     def test_default_config_creates_in_project_dir(self):
         config = SerenaConfig(gui_log_window=False, web_dashboard=False)
@@ -597,15 +594,11 @@ class TestDataFolderPlacement:
     @staticmethod
     def _add(config: SerenaConfig, project_root: Path) -> Project:
         """
-        Adds a project and waits for its background scan, which would otherwise outlive the test's directory.
-
         :param config: the configuration to add the project to
         :param project_root: the project directory
         :return: the added project
         """
-        project = config.add_project_from_path(project_root)
-        project._ignore_spec_available.wait()
-        return project
+        return config.add_project_from_path(project_root)
 
     def test_add_refuses_a_path_that_does_not_exist(self):
         with pytest.raises(FileNotFoundError, match="Path does not exist"):

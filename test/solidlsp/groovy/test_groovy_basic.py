@@ -44,7 +44,7 @@ class TestGroovyLanguageServer:
 
         # Create language server directly with Groovy-specific settings
         repo_path = str(cls.test_repo_path)
-        config = LanguageServerConfig(ls_id=LanguageServerId.GROOVY, ignored_paths=[], trace_lsp_communication=False)
+        config = LanguageServerConfig(ls_id=LanguageServerId.GROOVY, trace_lsp_communication=False)
 
         project_data_path = os.path.join(repo_path, SERENA_MANAGED_DIR_NAME)
         solidlsp_settings = SolidLSPSettings(

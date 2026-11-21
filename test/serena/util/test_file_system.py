@@ -1,8 +1,11 @@
+import contextlib
 import os
 import shutil
 import sys
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any, NoReturn
 from unittest import mock
 
 import pytest
@@ -110,28 +113,30 @@ temp/
         )
 
     def test_initialization(self):
-        """Test GitignoreParser initialization."""
-        parser = GitignoreParser(str(self.repo_path))
+        """Constructing a parser lists no directory and reads no .gitignore."""
+        with (
+            _no_directory_listing(),
+            mock.patch("serena.util.file_system.open", side_effect=AssertionError("a file was read"), create=True),
+        ):
+            parser = GitignoreParser(str(self.repo_path))
 
         assert parser.repo_root == str(self.repo_path.absolute())
-        assert len(parser.get_ignore_specs()) == 4
 
     def test_find_gitignore_files(self):
-        """Test finding all gitignore files in repository, including deeply nested ones."""
+        """The .gitignore files governing a path are those on its ancestor chain, including deeply nested ones, root first."""
         parser = GitignoreParser(str(self.repo_path))
 
-        # Get file paths from specs
-        gitignore_files = [spec.file_path for spec in parser.get_ignore_specs()]
+        def governing(path: str) -> list[str]:
+            return [os.path.relpath(spec.file_path, self.repo_path) for spec in parser.specs_of(path)]
 
-        # Convert to relative paths for easier testing
-        rel_paths = [os.path.relpath(f, self.repo_path) for f in gitignore_files]
-        rel_paths.sort()
-
-        assert len(rel_paths) == 4
-        assert ".gitignore" in rel_paths
-        assert os.path.join("src", ".gitignore") in rel_paths
-        assert os.path.join("src", "lib", ".gitignore") in rel_paths  # Deeply nested
-        assert os.path.join("docs", ".gitignore") in rel_paths
+        with _no_directory_listing():
+            assert governing("src/lib/cache.tmp") == [
+                ".gitignore",
+                os.path.join("src", ".gitignore"),
+                os.path.join("src", "lib", ".gitignore"),
+            ]
+            assert governing("docs/api.md") == [".gitignore", os.path.join("docs", ".gitignore")]
+            assert governing("file1.txt") == [".gitignore"]
 
     def test_parse_patterns_root_directory(self):
         """Test parsing gitignore patterns in root directory."""
@@ -148,7 +153,7 @@ build/
         )
 
         parser = GitignoreParser(str(test_dir))
-        specs = parser.get_ignore_specs()
+        specs = parser.specs_of("file.txt")
 
         assert len(specs) == 1
         patterns = specs[0].patterns
@@ -174,7 +179,7 @@ test.log
         )
 
         parser = GitignoreParser(str(test_dir))
-        specs = parser.get_ignore_specs()
+        specs = parser.specs_of("src/file.txt")
 
         assert len(specs) == 1
         patterns = specs[0].patterns
@@ -401,7 +406,7 @@ debug.log
         )
 
         parser = GitignoreParser(str(test_dir))
-        specs = parser.get_ignore_specs()
+        specs = parser.specs_of("file.txt")
 
         assert len(specs) == 1
         patterns = specs[0].patterns
@@ -428,7 +433,7 @@ build/
         )
 
         parser = GitignoreParser(str(test_dir))
-        specs = parser.get_ignore_specs()
+        specs = parser.specs_of("file.txt")
 
         assert len(specs) == 1
         patterns = specs[0].patterns
@@ -450,7 +455,7 @@ build/
         )
 
         parser = GitignoreParser(str(test_dir))
-        specs = parser.get_ignore_specs()
+        specs = parser.specs_of("file.txt")
 
         assert len(specs) == 1
         patterns = specs[0].patterns
@@ -471,7 +476,7 @@ build/
         )
 
         parser = GitignoreParser(str(test_dir))
-        specs = parser.get_ignore_specs()
+        specs = parser.specs_of("file.txt")
 
         assert len(specs) == 1
         patterns = specs[0].patterns
@@ -545,7 +550,8 @@ src/*.o
         parser = GitignoreParser(str(test_dir))
 
         # Should not crash and should return empty list
-        assert len(parser.get_ignore_specs()) == 0
+        with _no_directory_listing():
+            assert parser.specs_of("file.txt") == []
 
     def test_malformed_gitignore(self):
         """Test handling of malformed gitignore content."""
@@ -564,7 +570,8 @@ src/*.o
         parser = GitignoreParser(str(test_dir))
 
         # Should handle gracefully
-        assert len(parser.get_ignore_specs()) == 0
+        with _no_directory_listing():
+            assert parser.specs_of("file.txt") == []
 
     def test_reload(self):
         """Test reloading gitignore files."""
@@ -576,7 +583,7 @@ src/*.o
         gitignore.write_text("*.log")
 
         parser = GitignoreParser(str(test_dir))
-        assert len(parser.get_ignore_specs()) == 1
+        assert len(parser.specs_of("test.log")) == 1
         assert parser.should_ignore("test.log")
 
         # Modify gitignore
@@ -722,53 +729,53 @@ src/*.o
         assert not parser.should_ignore("other/foo.txt"), "other/foo.txt should NOT be ignored by foo/.gitignore"
 
     def test_unreadable_subdirectory_is_skipped_not_fatal(self):
-        """A subdirectory whose os.scandir raises PermissionError is skipped rather than
-        crashing the parser, mirroring scan_directory's guard.
+        """A subdirectory whose .gitignore cannot be read for want of permission is skipped rather
+        than failing the decision, mirroring scan_directory's guard.
 
-        Regression for the ~/Desktop EPERM crash: an unreadable directory encountered while
-        discovering .gitignore files must not abort the whole scan.
+        Regression for the ~/Desktop EPERM crash: an unreadable directory on a path's chain must
+        not abort the decision.
         """
         test_dir = self.repo_path / "test_perm_subtree"
         test_dir.mkdir()
         (test_dir / ".gitignore").write_text("*.log\n")
         secret = test_dir / "secret"
         secret.mkdir()
-        (secret / ".gitignore").write_text("*.tmp\n")  # would be discovered if the dir were readable
+        (secret / ".gitignore").write_text("*.tmp\n")  # would apply if the dir were readable
+        secret_gitignore = str((secret / ".gitignore").absolute())
 
-        real_scandir = os.scandir
-        secret_abs = str(secret.absolute())
-
-        def guarded_scandir(path, *args, **kwargs):
-            if os.path.abspath(path) == secret_abs:
+        def guarded_open(file, *args, **kwargs):
+            if os.path.abspath(file) == secret_gitignore:
                 raise PermissionError(1, "Operation not permitted")
-            return real_scandir(path, *args, **kwargs)
+            return open(file, *args, **kwargs)
 
-        with mock.patch("serena.util.file_system.os.scandir", side_effect=guarded_scandir):
-            parser = GitignoreParser(str(test_dir))  # must NOT raise
+        with _no_directory_listing(), mock.patch("serena.util.file_system.open", guarded_open, create=True):
+            parser = GitignoreParser(str(test_dir))
+            rel_paths = [os.path.relpath(spec.file_path, test_dir) for spec in parser.specs_of("secret/drop.tmp")]  # must NOT raise
+            assert parser.should_ignore("secret/drop.log")  # the root .gitignore still applies
+            assert not parser.should_ignore("secret/drop.tmp")
 
-        rel_paths = [os.path.relpath(spec.file_path, test_dir) for spec in parser.get_ignore_specs()]
-        assert ".gitignore" in rel_paths  # root .gitignore still discovered
+        assert ".gitignore" in rel_paths  # root .gitignore still read
         assert os.path.join("secret", ".gitignore") not in rel_paths  # unreadable subtree skipped
 
     def test_unreadable_root_raises_actionable_error(self):
         """When the repository ROOT itself is unreadable (e.g. a macOS privacy-protected folder
-        such as ~/Desktop), the parser raises a clear, actionable error that names the folder —
-        not an opaque, path-less crash.
+        such as ~/Desktop), deciding a path raises a clear, actionable error that names the folder —
+        not an opaque, path-less crash. Constructing the parser reads nothing, so it does not raise.
         """
         test_dir = self.repo_path / "test_perm_root"
         test_dir.mkdir()
         root_abs = str(test_dir.absolute())
+        root_gitignore = os.path.join(root_abs, ".gitignore")
 
-        real_scandir = os.scandir
-
-        def guarded_scandir(path, *args, **kwargs):
-            if os.path.abspath(path) == root_abs:
+        def guarded_open(file, *args, **kwargs):
+            if os.path.abspath(file) == root_gitignore:
                 raise PermissionError(1, "Operation not permitted")
-            return real_scandir(path, *args, **kwargs)
+            return open(file, *args, **kwargs)
 
-        with mock.patch("serena.util.file_system.os.scandir", side_effect=guarded_scandir):
+        with _no_directory_listing(), mock.patch("serena.util.file_system.open", guarded_open, create=True):
+            parser = GitignoreParser(str(test_dir))
             with pytest.raises(PermissionError) as excinfo:
-                GitignoreParser(str(test_dir))
+                parser.should_ignore("file.txt")
 
         message = str(excinfo.value)
         assert root_abs in message  # names the offending folder
@@ -942,8 +949,29 @@ class TestWriteFileAtomic:
         assert target.read_text(encoding="utf-8") == "new"
 
 
-def _linear_should_ignore(parser: GitignoreParser, path: str) -> bool:
-    """Reproduce the pre-index lookup, independently of the parser's private index."""
+@contextlib.contextmanager
+def _no_directory_listing() -> Iterator[None]:
+    """Make every directory listing raise, so that a decision which lists any directory fails."""
+
+    def refuse(*args: object, **kwargs: object) -> NoReturn:
+        raise AssertionError("a directory was listed")
+
+    with mock.patch.object(os, "scandir", refuse), mock.patch.object(os, "listdir", refuse), mock.patch.object(os, "walk", refuse):
+        yield
+
+
+def _every_spec(parser: GitignoreParser, root: Path) -> list[GitignoreSpec]:
+    """Every non-empty .gitignore under root, found by listing the tree, independently of the parser's chain lookup."""
+    specs = []
+    for gitignore in sorted(root.rglob(".gitignore")):
+        spec = GitignoreSpec(str(gitignore), parser._parse_gitignore_content(gitignore.read_text(), str(gitignore.parent)))
+        if spec.patterns:
+            specs.append(spec)
+    return specs
+
+
+def _linear_should_ignore(parser: GitignoreParser, specs: list[GitignoreSpec], path: str) -> bool:
+    """Decide a path against every spec of the tree, linearly and independently of the parser's chain lookup."""
     if os.path.isabs(path):
         try:
             rel_path = os.path.relpath(path, parser.repo_root)
@@ -957,20 +985,21 @@ def _linear_should_ignore(parser: GitignoreParser, path: str) -> bool:
     rel_path = rel_path.replace(os.sep, "/")
     if os.path.exists(abs_path) and os.path.isdir(abs_path) and not rel_path.endswith("/"):
         rel_path += "/"
-    for spec in parser.ignore_specs:
-        if spec.matches(rel_path):
-            return True
-    return False
+    return any(spec.matches(rel_path) for spec in specs)
 
 
 def _assert_linear_equivalence(parser: GitignoreParser, root: Path) -> None:
-    for entry in root.rglob("*"):
-        relative = entry.relative_to(root).as_posix()
-        paths = [relative, str(entry), "./" + relative]
-        if entry.is_dir():
-            paths.extend([relative + "/", str(entry) + "/"])
-        for path in paths:
-            assert parser.should_ignore(path) == _linear_should_ignore(parser, path), path
+    """The parser decides every path of the tree as a linear check against every spec of the tree does, listing no directory."""
+    specs = _every_spec(parser, root)
+    entries = list(root.rglob("*"))
+    with _no_directory_listing():
+        for entry in entries:
+            relative = entry.relative_to(root).as_posix()
+            paths = [relative, str(entry), "./" + relative]
+            if entry.is_dir():
+                paths.extend([relative + "/", str(entry) + "/"])
+            for path in paths:
+                assert parser.should_ignore(path) == _linear_should_ignore(parser, specs, path), path
 
 
 def test_nested_lookup_equivalence(tmp_path: Path):
@@ -991,7 +1020,7 @@ def test_nested_lookup_equivalence(tmp_path: Path):
         for name in ("drop.tmp", "keep.tmp", "plain.txt"):
             (directory / name).touch()
     parser = GitignoreParser(str(tmp_path))
-    assert len(parser.ignore_specs) == len(directories)
+    assert len(_every_spec(parser, tmp_path)) == len(directories)
     _assert_linear_equivalence(parser, tmp_path)
 
 
@@ -1002,11 +1031,13 @@ def test_literal_gitignore_directory(tmp_path: Path, pattern: str):
         (tmp_path / name / "drop.txt").touch()
     (tmp_path / "a[bc]" / ".gitignore").write_text(pattern)
     parser = GitignoreParser(str(tmp_path))
-    assert parser.should_ignore("a[bc]/drop.txt")
-    assert not parser.should_ignore("ab/drop.txt")
-    # Also pin the compiled patterns used by Project's combined spec.
-    assert parser.ignore_specs[0].matches("a[bc]/drop.txt")
-    assert not parser.ignore_specs[0].matches("ab/drop.txt")
+    with _no_directory_listing():
+        assert parser.should_ignore("a[bc]/drop.txt")
+        assert not parser.should_ignore("ab/drop.txt")
+        # Also pin the compiled patterns used by Project's per-path spec.
+        (spec,) = parser.specs_of("a[bc]/drop.txt")
+        assert spec.matches("a[bc]/drop.txt")
+        assert not spec.matches("ab/drop.txt")
     _assert_linear_equivalence(parser, tmp_path)
 
 
@@ -1024,27 +1055,23 @@ def test_whitespace_gitignore_directory(tmp_path: Path, directory_name: str):
     _assert_linear_equivalence(parser, tmp_path)
 
 
-def test_discovery_prune_spec(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_discovery_prune_spec(tmp_path: Path):
     for name in ("build/sub", "outside"):
         directory = tmp_path / name
         directory.mkdir(parents=True)
         (directory / ".gitignore").write_text("*.tmp\n")
     unpruned = GitignoreParser(str(tmp_path))
-    assert len(unpruned.ignore_specs) == 2
-    assert unpruned.should_ignore("build/sub/drop.tmp")
-    scandir = os.scandir
-    entered = []
-
-    def record_scan(path):
-        entered.append(Path(path))
-        return scandir(path)
-
-    monkeypatch.setattr(os, "scandir", record_scan)
     parser = GitignoreParser(str(tmp_path), prune_spec=PathSpec.from_lines("gitwildmatch", ["build/"]))
-    assert [Path(spec.file_path).relative_to(tmp_path).as_posix() for spec in parser.ignore_specs] == ["outside/.gitignore"]
-    assert tmp_path / "build" not in entered
-    assert tmp_path / "build/sub" not in entered
-    assert parser.should_ignore("outside/drop.tmp")
+    with _no_directory_listing():
+        assert unpruned.should_ignore("build/sub/drop.tmp")
+        assert unpruned.should_ignore("outside/drop.tmp")
+        # the pruned directory's .gitignore is never read, so it decides nothing
+        assert parser.specs_of("build/sub/drop.tmp") == []
+        assert not parser.should_ignore("build/sub/drop.tmp")
+        assert [Path(spec.file_path).relative_to(tmp_path).as_posix() for spec in parser.specs_of("outside/drop.tmp")] == [
+            "outside/.gitignore"
+        ]
+        assert parser.should_ignore("outside/drop.tmp")
 
 
 def test_discovery_wildcard_prune_spec(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -1052,28 +1079,19 @@ def test_discovery_wildcard_prune_spec(tmp_path: Path, monkeypatch: pytest.Monke
         directory = tmp_path / name
         directory.mkdir(parents=True)
         (directory / ".gitignore").write_text("*.tmp\n")
-    scandir = os.scandir
-    entered = []
-    should_ignore = GitignoreParser.should_ignore
-    checked = []
+    opened: list[str] = []
 
-    def record_scan(path):
-        entered.append(Path(path))
-        return scandir(path)
+    def record_open(file: str, *args: Any, **kwargs: Any) -> Any:
+        opened.append(Path(file).relative_to(tmp_path).as_posix())
+        return open(file, *args, **kwargs)
 
-    def record_check(parser, path):
-        checked.append(Path(path).as_posix())
-        return should_ignore(parser, path)
-
-    monkeypatch.setattr(os, "scandir", record_scan)
-    monkeypatch.setattr(GitignoreParser, "should_ignore", record_check)
+    monkeypatch.setattr("serena.util.file_system.open", record_open, raising=False)
     parser = GitignoreParser(str(tmp_path), prune_spec=PathSpec.from_lines("gitwildmatch", ["rounds/*/evidence/"]))
-    assert tmp_path / "rounds/one/evidence" not in entered
-    assert tmp_path / "rounds/one/evidence/deep" not in entered
-    assert tmp_path / "rounds/two" in entered
-    assert tmp_path / "rounds/two/source" in entered
-    assert "rounds/one/evidence" not in checked
-    assert [Path(spec.file_path).relative_to(tmp_path).as_posix() for spec in parser.ignore_specs] == ["rounds/two/source/.gitignore"]
+    with _no_directory_listing():
+        assert not parser.should_ignore("rounds/one/evidence/deep/drop.tmp")
+        assert parser.should_ignore("rounds/two/source/drop.tmp")
+    assert not [path for path in opened if path.startswith("rounds/one/evidence")]
+    assert "rounds/two/source/.gitignore" in opened
 
 
 def test_discovery_matches_cost(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -1087,6 +1105,7 @@ def test_discovery_matches_cost(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         directories.extend(level)
     for directory in directories:
         (directory / ".gitignore").write_text("*.ignored\n")
+    assert len(directories) == 85
     matches = GitignoreSpec.matches
     calls = 0
 
@@ -1095,11 +1114,20 @@ def test_discovery_matches_cost(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         calls += 1
         return matches(spec, path)
 
+    opened: list[str] = []
+
+    def record_open(file: str, *args: Any, **kwargs: Any) -> Any:
+        opened.append(Path(file).relative_to(tmp_path).as_posix())
+        return open(file, *args, **kwargs)
+
     monkeypatch.setattr(GitignoreSpec, "matches", count_matches)
+    monkeypatch.setattr("serena.util.file_system.open", record_open, raising=False)
     parser = GitignoreParser(str(tmp_path))
-    assert len(parser.ignore_specs) == len(directories) == 85
-    assert calls <= len(directories) * (depth + 1)
-    assert calls < len(directories) * len(parser.ignore_specs)
+    with _no_directory_listing():
+        assert parser.should_ignore("d0/d1/d2/file.ignored")
+    # only the four .gitignore files on the chain are read, and the decision checks each loaded spec once per chain level
+    assert opened == [".gitignore", "d0/.gitignore", "d0/d1/.gitignore", "d0/d1/d2/.gitignore"]
+    assert calls <= depth * (depth + 1) // 2 + depth + 1
 
 
 def test_reload_rebuilds_lookup(tmp_path: Path):
@@ -1111,31 +1139,17 @@ def test_reload_rebuilds_lookup(tmp_path: Path):
     for name in ("file.old", "file.nested", "file.new"):
         (tmp_path / "nested" / name).touch()
     parser = GitignoreParser(str(tmp_path))
-    public_specs = parser.get_ignore_specs()
     _assert_linear_equivalence(parser, tmp_path)
     root_ignore.unlink()
     nested_ignore.write_text("*.new\n")
-    parser.reload()
-    assert parser.get_ignore_specs() is public_specs
-    assert len(public_specs) == 1
-    assert not parser.should_ignore("nested/file.old")
-    assert not parser.should_ignore("nested/file.nested")
-    assert parser.should_ignore("nested/file.new")
+    # until reloaded, the parser keeps the rules it read
+    with _no_directory_listing():
+        assert parser.should_ignore("nested/file.old")
+        parser.reload()
+        assert not parser.should_ignore("nested/file.old")
+        assert not parser.should_ignore("nested/file.nested")
+        assert parser.should_ignore("nested/file.new")
     _assert_linear_equivalence(parser, tmp_path)
-
-
-def test_public_ignore_specs_mutation_rebuilds_lookup(tmp_path: Path):
-    (tmp_path / "nested").mkdir()
-    (tmp_path / ".gitignore").write_text("*.old\n")
-    parser = GitignoreParser(str(tmp_path))
-    public_specs = parser.get_ignore_specs()
-    assert parser.should_ignore("nested/file.old")
-    public_specs.clear()
-    assert not parser.should_ignore("nested/file.old")
-    public_specs.append(GitignoreSpec(str(tmp_path / "nested/.gitignore"), ["nested/**/*.new"]))
-    assert parser.get_ignore_specs() is public_specs
-    assert parser.should_ignore("nested/file.new")
-    assert not parser.should_ignore("file.new")
 
 
 class TestGitignoreParserPermissionError:
