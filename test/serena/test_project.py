@@ -158,6 +158,29 @@ class TestProjectRespectsGlobalIgnoredPaths:
         assert not os.path.exists(nonexistent)
         assert not project.is_ignored_path(nonexistent)
 
+    def test_construction_lists_nothing_and_keeps_an_existing_data_gitignore(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Constructing a project lists no directory of it; it writes the data folder's .gitignore only when absent."""
+        (self.project_path / ".gitignore").write_text("*.log\n")
+        listed: list[str] = []
+        for name in ("scandir", "listdir", "walk"):
+            real = getattr(os, name)
+
+            def record(path=".", *args, _real=real, **kwargs):
+                listed.append(os.path.realpath(path))
+                return _real(path, *args, **kwargs)
+
+            monkeypatch.setattr(os, name, record)
+        data_gitignore = self.project_path / ".serena" / ".gitignore"
+
+        _create_test_project(self.project_path)
+        assert data_gitignore.read_text().startswith("/")
+        data_gitignore.write_text("# kept\n")
+        _create_test_project(self.project_path)
+
+        assert data_gitignore.read_text() == "# kept\n"
+        root = os.path.realpath(self.project_path)
+        assert not [path for path in listed if path == root or path.startswith(root + os.sep)]
+
     def test_project_root_is_never_ignored_and_non_source_files_are_ignored_on_request(self) -> None:
         """The project root is not ignored even by a pattern matching it; a file that is no source file of the
         project's languages is ignored when non-source files are asked to be ignored, and not otherwise.
