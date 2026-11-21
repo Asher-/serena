@@ -49,16 +49,9 @@ class LSPLanguageBackend(LanguageBackend):
         language_servers_str = ", ".join(ls.get_key() for ls in project.project_config.language_servers)
         statement = f"Programming languages: {language_servers_str}.\n"
 
-        # activation is a blocking call until the language server manager is up: wait on the project's readiness event
-        # with the same bound the read path uses (:meth:`Project.get_language_server_manager_or_raise`). The event lives on
-        # the project, so multi-session daemons get a stable per-project signal regardless of activation interleaving.
+        # activation does not wait for the language servers: their start-up runs in the background, and a tool call
+        # that needs a server waits on the project's readiness event (:meth:`Project.get_language_server_manager_or_raise`)
         ls_manager = project.language_server_manager
-        wait_timeout: float | None = None
-        if ls_manager is None:
-            tool_timeout = project.serena_config.tool_timeout
-            wait_timeout = None if (tool_timeout is None or tool_timeout < 0) else tool_timeout
-            project._lsm_ready_event.wait(timeout=wait_timeout)
-            ls_manager = project.language_server_manager
         if ls_manager is None:
             # a manager whose construction failed is reported with that failure for each configured language
             construction_failures = project.get_unavailable_languages()
@@ -68,12 +61,9 @@ class LSPLanguageBackend(LanguageBackend):
                     f"Language servers could not be started: {failures}. Tools that target these languages will raise a "
                     "LanguageUnavailableError until the servers are restarted (use restart_language_server).\n"
                 )
-            waited = f"{wait_timeout:g}s" if wait_timeout is not None else "the unbounded activation budget"
             return statement + (
-                f"Language servers ({language_servers_str}) had not finished starting within {waited} "
-                "(the activation wait budget, not the observed duration; cold starts normally complete "
-                "in seconds). The next tool call will block on the readiness event and proceed once a "
-                "server is up; query get_current_config or check logs for the latest status.\n"
+                f"Language servers ({language_servers_str}) are starting. A tool call that needs one waits until it is "
+                "up; query get_current_config or check logs for the latest status.\n"
             )
 
         # the servers that are up and those that failed

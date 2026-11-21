@@ -228,12 +228,11 @@ class TestRestartRecoversUnavailableLanguage:
             manager.restart_language_server(LanguageServerId.SCALA)
 
 
-class TestActivationMessageWaitsForLsInit:
+class TestActivationMessageDoesNotWaitForLsInit:
     """
-    Covers the race between `SerenaAgent.activate_project_from_path_or_name` returning and
-    the backgrounded language-server-manager init task completing. The activation message
-    must wait on the init task with a bounded timeout so per-language LSP startup failures
-    are surfaced in the message itself, not deferred to the next tool call.
+    Covers the activation message while the backgrounded language-server-manager init task runs: the message reports
+    the servers as starting without waiting for them, and once they have started it reports the active servers and
+    the per-language failures.
     """
 
     _PYTHON_REPO = str(get_repos_dir("python") / "test_repo")
@@ -271,11 +270,8 @@ class TestActivationMessageWaitsForLsInit:
         return agent, project
 
     def test_activation_message_surfaces_per_language_failure_after_init_completes(self) -> None:
-        # scripted LS manager creation: sleep briefly so the init task is demonstrably
-        # still running when get_project_activation_message is called, then install a
-        # fake manager whose get_unavailable_languages mimics the Metals-crash case
+        # scripted LS manager creation: install a fake manager whose get_unavailable_languages mimics the Metals-crash case
         def create_manager(project: Project) -> LanguageServerManager:
-            time.sleep(0.3)
             fake_manager = MagicMock(spec=LanguageServerManager)
             fake_manager.get_active_language_server_ids.return_value = [LanguageServerId.PYTHON]
             fake_manager.get_unavailable_languages.return_value = {
@@ -296,6 +292,7 @@ class TestActivationMessageWaitsForLsInit:
         agent, project = self._build_agent(create_manager)
         try:
             agent._activate_project(project)
+            assert project._lsm_ready_event.wait(timeout=5), "the language server manager never became ready"
             msg = agent.get_project_activation_message(agent.get_calling_session_id())
 
             assert "Active language servers: python" in msg
@@ -304,11 +301,9 @@ class TestActivationMessageWaitsForLsInit:
         finally:
             agent.on_shutdown(timeout=5)
 
-    def test_activation_message_falls_back_to_not_finished_on_timeout(self) -> None:
-        # shrink the project's tool_timeout so the test does not have to sleep the default
-        # 240 seconds to observe the fallback path; the scripted factory blocks on a gate
-        # that is never released within the patched timeout, guaranteeing the readiness
-        # wait expires and the activation message falls through to the 'had not finished starting' branch.
+    def test_activation_returns_the_starting_statement_while_server_start_is_held(self) -> None:
+        # the scripted factory blocks on a gate released only after activation has returned: an activation that waited
+        # for the servers could not return while the gate is held
         init_gate = threading.Event()
 
         def create_manager(project: Project) -> LanguageServerManager:
@@ -327,19 +322,50 @@ class TestActivationMessageWaitsForLsInit:
         # _activate_project is called directly for the same reason as the companion
         # test: to keep our custom project instance (with the gated create_language_server_manager)
         agent, project = self._build_agent(create_manager)
-        # tool_timeout is now the unified wait budget for both activation and the
-        # read path; shrink it so the activation wait expires fast and the test does
-        # not stall on the 240s default
-        project.serena_config.tool_timeout = 0.1
         try:
             agent._activate_project(project)
             msg = agent.get_project_activation_message(agent.get_calling_session_id())
 
-            assert "had not finished starting" in msg
+            assert not project._lsm_ready_event.is_set()
+            assert "Language servers (python, scala) are starting" in msg
         finally:
             # release the gate so the executor thread can finish before on_shutdown
             init_gate.set()
             agent.on_shutdown(timeout=5)
+
+    def test_activation_p95_cpu_time_over_fifty_activations_is_at_most_20ms(self) -> None:
+        # the calling thread's CPU time, not wall-clock time: the thread is at times kept off the CPU by something
+        # outside this code (symptom://serena/agent/activation/duration), which this test does not measure
+        def create_manager(project: Project) -> LanguageServerManager:
+            fake_manager = MagicMock(spec=LanguageServerManager)
+            fake_manager.get_active_language_server_ids.return_value = []
+            fake_manager.get_unavailable_languages.return_value = {}
+            project.language_server_manager = fake_manager
+            project._lsm_ready_event.set()
+            return fake_manager
+
+        # one agent, and fifty further projects it switches to in turn, each starting its servers in the background
+        agent, first = self._build_agent(create_manager)
+        projects = [
+            Project(project_root=first.project_root, project_config=first.project_config, serena_config=first.serena_config)
+            for _ in range(50)
+        ]
+        for project in projects:
+            project.create_language_server_manager = types.MethodType(create_manager, project)  # type: ignore[method-assign]
+
+        durations: list[float] = []
+        try:
+            agent._activate_project(first)
+            for project in projects:
+                started = time.thread_time()
+                agent._activate_project(project)
+                agent.get_project_activation_message(agent.get_calling_session_id())
+                durations.append(time.thread_time() - started)
+        finally:
+            agent.on_shutdown(timeout=5)
+
+        p95 = sorted(durations)[int(0.95 * len(durations)) - 1]
+        assert p95 <= 0.02, f"p95 activation CPU time {p95 * 1000:.2f}ms over {len(durations)} activations"
 
 
 class TestGetLanguageServerManagerOrRaiseBlocksOnReadiness:
@@ -498,7 +524,7 @@ class TestLanguageServerStatus:
 
         try:
             agent._activate_project(project)
-            agent.get_project_activation_message(agent.get_calling_session_id())
+            assert project._lsm_ready_event.wait(timeout=5), "the manager's construction never finished"
             payload = json.loads(GetLanguageServerStatusTool(agent=agent).apply())
         finally:
             agent.on_shutdown(timeout=5)
@@ -513,6 +539,7 @@ class TestLanguageServerStatus:
 
         try:
             agent._activate_project(project)
+            assert project._lsm_ready_event.wait(timeout=5), "the manager's construction never finished"
             message = agent.get_project_activation_message(agent.get_calling_session_id())
         finally:
             agent.on_shutdown(timeout=5)
@@ -524,7 +551,7 @@ class TestLanguageServerStatus:
 
         try:
             agent._activate_project(project)
-            agent.get_project_activation_message(agent.get_calling_session_id())
+            assert project._lsm_ready_event.wait(timeout=5), "the manager's construction never finished"
             dashboard = SerenaDashboardAPI(memory_log_handler=MagicMock(), tool_names=[], agent=agent)
             response = dashboard._get_language_server_status()
         finally:
