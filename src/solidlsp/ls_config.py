@@ -430,19 +430,6 @@ class LanguageServerId(Enum):
             self.LUA_EMMYLUA,
         }
 
-    def is_superset_language(self) -> bool:
-        """
-        Check if the language server is a superset of another language (e.g. Vue/Svelte are supersets of TypeScript/JavaScript).
-        This is used to assign lower priority to these languages when breaking ties between languages.
-        """
-        return self in {
-            self.VUE,  # superset of TypeScript/JavaScript
-            self.SVELTE,  # superset of TypeScript/JavaScript
-            self.ASTRO,  # superset of TypeScript/JavaScript
-            self.VBNET,  # also matches .cs so mixed VB/C# solutions share one Roslyn instance; C# takes precedence on ties
-            self.ANGULAR,  # superset of TypeScript/JavaScript
-        }
-
     def is_programming_language(self) -> bool:
         """Whether the supported language should be considered a programming language.
         Solidlsp supports languages like markdown or json, this method returns False for them.

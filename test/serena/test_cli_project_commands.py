@@ -333,6 +333,17 @@ class TestProjectCreateHelper:
         with pytest.raises(FileExistsError):
             ProjectCommands._create_project(temp_project_dir, None, ("python",))
 
+    def test_create_project_helper_refuses_an_unknown_language(self, temp_project_dir):
+        with pytest.raises(ValueError, match="Unknown language 'klingon'"):
+            ProjectCommands._create_project(temp_project_dir, None, ("klingon",))
+
+        assert not os.path.exists(SerenaConfig.from_config_file().get_project_yml_location(temp_project_dir))
+
+    def test_create_project_helper_registers_the_new_project(self, temp_project_dir):
+        ProjectCommands._create_project(temp_project_dir, None, ("python",))
+
+        assert SerenaConfig.from_config_file().get_registered_project(str(Path(temp_project_dir).resolve())) is not None
+
 
 class TestFindProjectRoot:
     """Tests for find_project_root helper with virtual chroot boundary."""

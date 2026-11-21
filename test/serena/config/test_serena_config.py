@@ -2,6 +2,7 @@ import hashlib
 import logging
 import os
 import shutil
+import stat
 import tempfile
 import threading
 from pathlib import Path
@@ -15,6 +16,7 @@ from serena.config.serena_config import (
     DEFAULT_PROJECT_SERENA_FOLDER_LOCATION,
     AgentInterface,
     ProjectConfig,
+    ProjectConfigAutoGenerationMode,
     RegisteredProject,
     SerenaConfig,
     SerenaConfigError,
@@ -23,6 +25,7 @@ from serena.config.serena_config import (
 from serena.constants import PROJECT_TEMPLATE_FILE, SERENA_MANAGED_DIR_NAME
 from serena.language_backend import BuiltinLanguageBackend, LanguageBackend
 from serena.project import MemoryManager, Project
+from serena.util.dataclass import get_dataclass_default
 from solidlsp.ls_config import LanguageServerId
 from test.conftest import create_default_serena_config, get_repos_dir
 
@@ -149,6 +152,78 @@ class TestProjectConfigRoundtripEquality:
         second = ProjectConfig.load(self.project_path, serena_config=self.serena_config)
 
         assert first == second
+
+
+class TestProjectConfigLoad:
+    def setup_method(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.project_path = Path(self.test_dir) / "loaded_project"
+        self.serena_dir = self.project_path / SERENA_MANAGED_DIR_NAME
+        self.serena_dir.mkdir(parents=True)
+        self.yml_path = self.serena_dir / ProjectConfig.SERENA_PROJECT_FILE
+        self.serena_config = create_default_serena_config()
+
+    def teardown_method(self):
+        shutil.rmtree(self.test_dir)
+
+    def test_a_missing_configuration_is_refused_without_autogeneration(self):
+        self.yml_path.parent.rmdir()
+
+        with pytest.raises(FileNotFoundError):
+            ProjectConfig.load(self.project_path, serena_config=self.serena_config)
+
+    def test_a_missing_configuration_is_generated_with_autogeneration(self):
+        self.yml_path.parent.rmdir()
+
+        config = ProjectConfig.load(
+            self.project_path, serena_config=self.serena_config, autogen=ProjectConfigAutoGenerationMode.SYNCHRONOUS
+        )
+
+        assert config.project_name == self.project_path.name
+        assert config.language_servers == []
+        assert self.yml_path.is_file()
+
+    def test_an_unnamed_project_takes_its_folder_name(self):
+        self.yml_path.write_text("languages:\n  - python\n", encoding="utf-8")
+
+        config = ProjectConfig.load(self.project_path, serena_config=self.serena_config)
+
+        assert config.project_name == self.project_path.name
+
+    def test_a_local_configuration_overrides_the_project_configuration(self):
+        self.yml_path.write_text('project_name: loaded\nlanguages:\n  - python\nignored_paths: ["dist"]\n', encoding="utf-8")
+        (self.serena_dir / ProjectConfig.SERENA_LOCAL_PROJECT_FILE).write_text('ignored_paths: ["build"]\n', encoding="utf-8")
+
+        config = ProjectConfig.load(self.project_path, serena_config=self.serena_config)
+
+        assert config.ignored_paths == ["build"]
+
+    def test_an_empty_local_configuration_overrides_nothing(self):
+        self.yml_path.write_text('project_name: loaded\nlanguages:\n  - python\nignored_paths: ["dist"]\n', encoding="utf-8")
+        (self.serena_dir / ProjectConfig.SERENA_LOCAL_PROJECT_FILE).write_text("", encoding="utf-8")
+
+        config = ProjectConfig.load(self.project_path, serena_config=self.serena_config)
+
+        assert config.ignored_paths == ["dist"]
+
+    def test_an_incomplete_configuration_is_completed_on_disk(self):
+        self.yml_path.write_text("project_name: loaded\nlanguages:\n  - python\n", encoding="utf-8")
+
+        ProjectConfig.load(self.project_path, serena_config=self.serena_config)
+
+        assert "ls_workspace_folders" in self.yml_path.read_text(encoding="utf-8")
+
+    def test_a_complete_configuration_is_not_rewritten(self):
+        self.yml_path.write_text("project_name: loaded\nlanguages:\n  - python\n", encoding="utf-8")
+        ProjectConfig.load(self.project_path, serena_config=self.serena_config)
+        content = self.yml_path.read_text(encoding="utf-8")
+        written = self.yml_path.stat().st_mtime_ns
+
+        config = ProjectConfig.load(self.project_path, serena_config=self.serena_config)
+
+        assert config.language_servers == [LanguageServerId.PYTHON]
+        assert self.yml_path.stat().st_mtime_ns == written
+        assert self.yml_path.read_text(encoding="utf-8") == content
 
 
 class TestProjectConfigLanguageBackend:
@@ -1063,6 +1138,188 @@ class TestSerenaConfigLoadSave:
         SerenaConfig.from_config_file(generate_if_missing=False)
 
         assert "ls_priorities" not in self.master_config_path.read_text()
+
+    def test_a_missing_file_is_refused_when_generation_is_off(self) -> None:
+        with pytest.raises(FileNotFoundError):
+            SerenaConfig.from_config_file(generate_if_missing=False)
+
+        assert not self.master_config_path.exists()
+
+    def test_a_missing_file_is_generated_from_the_template(self) -> None:
+        config = SerenaConfig.from_config_file()
+
+        assert self.master_config_path.is_file()
+        assert config.projects == []
+
+    @pytest.mark.skipif(os.name != "posix", reason="file modes are POSIX")
+    def test_a_file_readable_by_others_is_restricted_to_its_owner(self) -> None:
+        self.master_config_path.write_text("projects: []\n")
+        self.master_config_path.chmod(0o644)
+
+        SerenaConfig.from_config_file(generate_if_missing=False)
+
+        assert stat.S_IMODE(self.master_config_path.stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(os.name != "posix", reason="file modes are POSIX")
+    def test_a_file_whose_mode_cannot_be_changed_still_loads(self, monkeypatch, caplog) -> None:
+        self.master_config_path.write_text("projects: []\nauth_secret: kept\n")
+        self.master_config_path.chmod(0o644)
+
+        real_chmod = os.chmod
+
+        def refuse_for_the_config_file(path: Any, mode: int, **kwargs: Any) -> None:
+            if str(path) == str(self.master_config_path):
+                raise PermissionError(f"chmod refused for {path}")
+            real_chmod(path, mode, **kwargs)
+
+        monkeypatch.setattr(os, "chmod", refuse_for_the_config_file)
+        with caplog.at_level(logging.ERROR):
+            config = SerenaConfig.from_config_file(generate_if_missing=False)
+
+        assert config.auth_secret == "kept"
+        assert any("Failed to restrict permissions" in message for message in caplog.messages)
+
+    def test_an_unparseable_file_is_refused(self) -> None:
+        self.master_config_path.write_text("projects: [\n")
+
+        with pytest.raises(ValueError, match="Error loading Serena configuration"):
+            SerenaConfig.from_config_file(generate_if_missing=False)
+
+    def test_an_absent_setting_takes_its_default_and_is_written_back(self) -> None:
+        self.master_config_path.write_text("projects: []\n")
+
+        config = SerenaConfig.from_config_file(generate_if_missing=False)
+
+        assert config.log_level == get_dataclass_default(SerenaConfig, "log_level")
+        assert "log_level:" in self.master_config_path.read_text()
+
+    def test_a_file_without_a_projects_key_is_refused(self) -> None:
+        self.master_config_path.write_text("log_level: 20\n")
+
+        with pytest.raises(SerenaConfigError, match="`projects` key not found"):
+            SerenaConfig.from_config_file(generate_if_missing=False)
+
+    def test_a_project_path_that_cannot_be_checked_is_skipped(self, caplog) -> None:
+        good_project = self._make_project_dir("good_project", 'project_name: "good_project"\nlanguages: ["python"]\n')
+        self._write_master_config([good_project, self.test_dir / ("x" * 300)])
+
+        with caplog.at_level(logging.WARNING):
+            config = SerenaConfig.from_config_file(generate_if_missing=False)
+
+        assert [Path(p.project_root) for p in config.projects] == [good_project.resolve()]
+        assert any("is not accessible" in message for message in caplog.messages)
+
+    @pytest.mark.parametrize("make_directory", [False, True])
+    def test_a_project_path_without_a_project_configuration_is_skipped(self, make_directory: bool, caplog) -> None:
+        good_project = self._make_project_dir("good_project", 'project_name: "good_project"\nlanguages: ["python"]\n')
+        other = self.test_dir / "other"
+        if make_directory:
+            other.mkdir()
+        self._write_master_config([good_project, other])
+
+        with caplog.at_level(logging.WARNING):
+            config = SerenaConfig.from_config_file(generate_if_missing=False)
+
+        assert [Path(p.project_root) for p in config.projects] == [good_project.resolve()]
+        assert any("no associated project configuration file found" in message for message in caplog.messages)
+
+    def test_a_legacy_project_file_is_moved_into_its_project_and_registered(self) -> None:
+        project_root = self.test_dir / "legacy_project"
+        (project_root / SERENA_MANAGED_DIR_NAME).mkdir(parents=True)
+        legacy_file = self.test_dir / "legacy_project.yml"
+        legacy_file.write_text(f'project_root: {project_root}\nlanguages: ["python"]\n')
+        self._write_master_config([legacy_file])
+
+        config = SerenaConfig.from_config_file(generate_if_missing=False)
+
+        assert [Path(p.project_root) for p in config.projects] == [project_root.resolve()]
+        assert not legacy_file.exists()
+        assert (project_root / SERENA_MANAGED_DIR_NAME / "project.yml").is_file()
+
+    def test_a_legacy_project_file_naming_no_project_root_is_skipped(self) -> None:
+        legacy_file = self.test_dir / "legacy_project.yml"
+        legacy_file.write_text("project_name: orphan\n")
+        self._write_master_config([legacy_file])
+
+        config = SerenaConfig.from_config_file(generate_if_missing=False)
+
+        assert config.projects == []
+        assert legacy_file.exists()
+
+    def test_a_configured_language_backend_is_used(self) -> None:
+        self.master_config_path.write_text(f"projects: []\nlanguage_backend: {BuiltinLanguageBackend.JETBRAINS.value}\n")
+
+        config = SerenaConfig.from_config_file(generate_if_missing=False)
+
+        assert config.language_backend.get_key() == BuiltinLanguageBackend.JETBRAINS.value
+
+    @pytest.mark.parametrize(
+        ("jetbrains", "expected"),
+        [("true", BuiltinLanguageBackend.JETBRAINS), ("false", BuiltinLanguageBackend.LSP)],
+    )
+    def test_a_legacy_jetbrains_flag_becomes_the_language_backend(self, jetbrains: str, expected: BuiltinLanguageBackend) -> None:
+        self.master_config_path.write_text(f"projects: []\njetbrains: {jetbrains}\n")
+
+        config = SerenaConfig.from_config_file(generate_if_missing=False)
+
+        assert config.language_backend.get_key() == expected.value
+        saved = self.master_config_path.read_text()
+        assert "jetbrains:" not in saved
+        assert f"language_backend: {expected.value}" in saved
+
+    def test_an_absent_agent_interface_takes_its_default_and_is_written_back(self) -> None:
+        self.master_config_path.write_text("projects: []\n")
+
+        config = SerenaConfig.from_config_file(generate_if_missing=False)
+
+        assert config.agent_interface == get_dataclass_default(SerenaConfig, "agent_interface")
+        assert "agent_interface:" in self.master_config_path.read_text()
+
+    def test_an_absent_line_ending_takes_its_default_and_is_written_back(self) -> None:
+        self.master_config_path.write_text("projects: []\n")
+
+        config = SerenaConfig.from_config_file(generate_if_missing=False)
+
+        assert config.line_ending == get_dataclass_default(SerenaConfig, "line_ending")
+        assert f"line_ending: {config.line_ending.value}" in self.master_config_path.read_text()
+
+    @pytest.mark.parametrize(("log_level_setting", "expected"), [("", 10), ("log_level: 30\n", 30)])
+    def test_a_legacy_gui_log_level_is_removed_and_yields_to_log_level(self, log_level_setting: str, expected: int) -> None:
+        self.master_config_path.write_text("projects: []\ngui_log_level: 10\n" + log_level_setting)
+
+        config = SerenaConfig.from_config_file(generate_if_missing=False)
+
+        assert config.log_level == expected
+        assert "gui_log_level" not in self.master_config_path.read_text()
+
+    @pytest.mark.parametrize(("editable", "read_only"), [("true", False), ("false", True)])
+    def test_a_legacy_edit_global_memories_flag_becomes_a_read_only_pattern(self, editable: str, read_only: bool) -> None:
+        self.master_config_path.write_text(f"projects: []\nedit_global_memories: {editable}\n")
+
+        config = SerenaConfig.from_config_file(generate_if_missing=False)
+
+        assert ("global/.*" in config.read_only_memory_patterns) is read_only
+        assert "edit_global_memories" not in self.master_config_path.read_text()
+
+    def test_a_registered_projects_local_configuration_applies_when_the_registry_loads(self) -> None:
+        project = self._make_project_dir("local_project", 'project_name: "local_project"\nlanguages: ["python"]\nignored_paths: ["dist"]\n')
+        (project / SERENA_MANAGED_DIR_NAME / ProjectConfig.SERENA_LOCAL_PROJECT_FILE).write_text('ignored_paths: ["build"]\n')
+        self._write_master_config([project])
+
+        config = SerenaConfig.from_config_file(generate_if_missing=False)
+
+        assert [p.project_config.ignored_paths for p in config.projects] == [["build"]]
+
+    def test_a_file_needing_no_migration_is_not_rewritten(self) -> None:
+        SerenaConfig.from_config_file()
+        SerenaConfig.from_config_file(generate_if_missing=False)
+        content = self.master_config_path.read_text()
+        written = self.master_config_path.stat().st_mtime_ns
+
+        SerenaConfig.from_config_file(generate_if_missing=False)
+
+        assert self.master_config_path.stat().st_mtime_ns == written
+        assert self.master_config_path.read_text() == content
 
     def test_configured_auth_secret_is_preserved(self) -> None:
         # retain a user-provided secret across loading and migration

@@ -52,6 +52,14 @@ def _git_layout() -> Path:
     return root
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _git_layout_made_in_module_setup() -> None:
+    """
+    Makes the git layout (:func:`_git_layout`) while the module is set up, so that no test's own time includes running git
+    """
+    _git_layout()
+
+
 def _main_checkout_with_worktree(tmp_path: Path) -> tuple[Path, Path]:
     """
     :return: a main checkout and a linked worktree of it, copied from the layout git made (:func:`_git_layout`): the
