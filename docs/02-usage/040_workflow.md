@@ -28,9 +28,9 @@ To explicitly create a project, use the following command while in the project d
     serena project create [options] [project directory]
 
  * The project directory defaults to the current directory if not specified.
- * For an existing project, the programming languages will be detected based on
-   the source files present, and the main language will be activated automatically.
-   If multiple languages are detected, you will be prompted whether you want to enable them.  
+ * Without `--language`, a project that is a linked git worktree takes the language servers of its
+   main checkout, if that checkout is a registered project; any other project is created with no language
+   server. The project's source files are not scanned to detect languages.
  * For an empty project, you can optionally specify one or more languages
    to be activated explicitly via the `--language` parameter
    (e.g. `--language python --language typescript`).

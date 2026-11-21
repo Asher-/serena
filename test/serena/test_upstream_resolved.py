@@ -1,8 +1,7 @@
 """The tests of task://upstream_merge.7 that fail at main d69e440a and pass at upstream ede329aa, one per issue upstream resolves.
 
 They are the tests of the file fact://serena/upstream_merge/issues_resolved records as run on each side that failed at main
-and passed at upstream, carried onto the branch's API. test_gather_failure_leaves_no_reader_waiting keeps only its exception
-case: its base_exception case failed on both sides.
+and passed at upstream, carried onto the branch's API.
 """
 
 import inspect
@@ -123,9 +122,6 @@ def test_open_file_whose_body_raises_leaves_no_buffer(tmp_path) -> None:
             raise BodyFailure
 
     assert server.open_file_buffers == {}
-
-
-# bug://serena/project/ignore/spec/readiness, for an Exception; a BaseException that is not one stays open at both sides
 
 
 class _InitFailure(Exception):

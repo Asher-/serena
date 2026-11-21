@@ -975,7 +975,7 @@ class ProjectCommands(AutoRegisteringGroup):
         "language",
         type=str,
         multiple=True,
-        help="Language server(s); inferred if not specified. Can be passed multiple times.",
+        help="Language server(s). Without it, a linked git worktree takes the language servers of its registered main checkout, and any other project gets none. Can be passed multiple times.",
     )
     @click.option("--index", is_flag=True, help="Index the project after creation.")
     @click.option(

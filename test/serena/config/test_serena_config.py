@@ -1057,6 +1057,13 @@ class TestSerenaConfigLoadSave:
         assert UUID(config.auth_secret).version == 4
         assert SerenaConfig.from_config_file(generate_if_missing=False).auth_secret == config.auth_secret
 
+    def test_a_stored_ls_priorities_setting_is_removed_and_the_file_re_saved(self) -> None:
+        self.master_config_path.write_text("projects: []\nls_priorities:\n  python: 0\n")
+
+        SerenaConfig.from_config_file(generate_if_missing=False)
+
+        assert "ls_priorities" not in self.master_config_path.read_text()
+
     def test_configured_auth_secret_is_preserved(self) -> None:
         # retain a user-provided secret across loading and migration
         self.master_config_path.write_text("projects: []\nauth_secret: custom-secret\n")

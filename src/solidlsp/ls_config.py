@@ -112,9 +112,6 @@ class LanguageServerIdLike(Protocol):
     def get_ls_class(self) -> type["SolidLanguageServer"]:
         pass
 
-    def get_priority(self) -> int:
-        pass
-
     def supports_implementation_request(self) -> bool:
         return self.get_ls_class().supports_implementation_request()
 
@@ -454,22 +451,6 @@ class LanguageServerId(Enum):
 
     def __str__(self) -> str:
         return self.value
-
-    def get_priority(self) -> int:
-        """
-        :return: priority of the language for breaking ties between languages; higher is more important.
-        """
-        # experimental, secondary and non-programming languages have the lowest priority
-        # (Serena will not auto-enable them, and they will only be used if explicitly requested by the user)
-        if self.is_experimental() or self.is_secondary() or not self.is_programming_language():
-            return 0
-        # We assign lower priority to languages that are supersets of others, such that
-        # the "larger" language is only chosen when it matches more strongly
-        if self.is_superset_language():
-            return 1
-        # regular languages
-        else:
-            return 2
 
     def supports_implementation_request(self) -> bool:
         """
@@ -1076,11 +1057,10 @@ class ExternalLanguageServerId(LanguageServerIdLike):
     Represents an identifier for a language server that is externally provided and registered.
     """
 
-    def __init__(self, key: str, matcher: FilenameMatcher, implementation: type["SolidLanguageServer"], priority: int = 0):
+    def __init__(self, key: str, matcher: FilenameMatcher, implementation: type["SolidLanguageServer"]):
         self._key = key
         self._matcher = matcher
         self._implementation = implementation
-        self._priority = priority
 
     def get_key(self) -> str:
         return self._key
@@ -1090,20 +1070,6 @@ class ExternalLanguageServerId(LanguageServerIdLike):
 
     def get_ls_class(self) -> type["SolidLanguageServer"]:
         return self._implementation
-
-    def get_priority(self) -> int:
-        """
-        Gets the priority of the language server for determining which languages are considered for
-        auto-detection and for breaking ties between languages.
-        Specifically, 0 used for experimentaL/secondary/non-programming languages, which are not
-        considered for auto-detection and only used if explicitly requested by the user.
-        1 used for superset languages, which are considered for auto-detection but have lower priority than regular languages
-        (such that they will be selected only if the match a greater number of files than the other language).
-        2 used for regular languages.
-
-        :return: the priority (higher is more important)
-        """
-        return self._priority
 
 
 class LanguageServerRegistry:

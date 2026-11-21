@@ -17,7 +17,7 @@ from serena.project import Project
 from solidlsp.ls_config import LanguageServerId
 
 
-def _serena_config(tmp_path: Path) -> SerenaConfig:
+def _serena_config() -> SerenaConfig:
     config = SerenaConfig(gui_log_window=False, web_dashboard=False, log_level=logging.ERROR)
     config.projects = []
     return config
@@ -74,7 +74,7 @@ def no_tree_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
 
 class TestLanguagesOfANewProject:
     def test_a_worktree_takes_the_languages_of_its_registered_main_checkout(self, tmp_path: Path, no_tree_scan: None) -> None:
-        config = _serena_config(tmp_path)
+        config = _serena_config()
         main, worktree = _main_checkout_with_worktree(tmp_path)
         _register(config, main, [LanguageServerId.PYTHON, LanguageServerId.GO])
 
@@ -83,7 +83,7 @@ class TestLanguagesOfANewProject:
         assert project_config.language_servers == [LanguageServerId.PYTHON, LanguageServerId.GO]
 
     def test_a_worktree_whose_main_checkout_is_not_registered_has_no_languages(self, tmp_path: Path, no_tree_scan: None) -> None:
-        config = _serena_config(tmp_path)
+        config = _serena_config()
         _, worktree = _main_checkout_with_worktree(tmp_path)
 
         project_config = ProjectConfig.autogenerate(worktree, config, save_to_disk=False)
@@ -91,7 +91,7 @@ class TestLanguagesOfANewProject:
         assert project_config.language_servers == []
 
     def test_a_main_checkout_has_no_languages_without_a_scan(self, tmp_path: Path, no_tree_scan: None) -> None:
-        config = _serena_config(tmp_path)
+        config = _serena_config()
         main, _ = _main_checkout_with_worktree(tmp_path)
 
         project_config = ProjectConfig.autogenerate(main, config, save_to_disk=False)
@@ -99,7 +99,7 @@ class TestLanguagesOfANewProject:
         assert project_config.language_servers == []
 
     def test_a_git_file_naming_no_git_directory_gives_no_languages(self, tmp_path: Path, no_tree_scan: None) -> None:
-        config = _serena_config(tmp_path)
+        config = _serena_config()
         main, worktree = _main_checkout_with_worktree(tmp_path)
         _register(config, main, [LanguageServerId.PYTHON])
         (worktree / ".git").write_text("not a git pointer\n")
@@ -109,7 +109,7 @@ class TestLanguagesOfANewProject:
         assert project_config.language_servers == []
 
     def test_a_git_directory_without_commondir_gives_no_languages(self, tmp_path: Path, no_tree_scan: None) -> None:
-        config = _serena_config(tmp_path)
+        config = _serena_config()
         main, worktree = _main_checkout_with_worktree(tmp_path)
         _register(config, main, [LanguageServerId.PYTHON])
         (main / ".git" / "worktrees" / "worktree" / "commondir").unlink()
@@ -119,7 +119,7 @@ class TestLanguagesOfANewProject:
         assert project_config.language_servers == []
 
     def test_a_worktree_of_a_bare_repository_gives_no_languages(self, tmp_path: Path, no_tree_scan: None) -> None:
-        config = _serena_config(tmp_path)
+        config = _serena_config()
         main, worktree = _main_checkout_with_worktree(tmp_path)
         _register(config, main, [LanguageServerId.PYTHON])
         bare_worktree_git_dir = tmp_path / "repo.git" / "worktrees" / "worktree"
@@ -131,10 +131,30 @@ class TestLanguagesOfANewProject:
 
         assert project_config.language_servers == []
 
+    def test_an_undecodable_git_file_gives_no_languages(self, tmp_path: Path, no_tree_scan: None) -> None:
+        config = _serena_config()
+        main, worktree = _main_checkout_with_worktree(tmp_path)
+        _register(config, main, [LanguageServerId.PYTHON])
+        (worktree / ".git").write_bytes(b"gitdir: \xff\xfe\n")
+
+        project_config = ProjectConfig.autogenerate(worktree, config, save_to_disk=False)
+
+        assert project_config.language_servers == []
+
+    def test_an_undecodable_commondir_gives_no_languages(self, tmp_path: Path, no_tree_scan: None) -> None:
+        config = _serena_config()
+        main, worktree = _main_checkout_with_worktree(tmp_path)
+        _register(config, main, [LanguageServerId.PYTHON])
+        (main / ".git" / "worktrees" / "worktree" / "commondir").write_bytes(b"\xff\xfe\n")
+
+        project_config = ProjectConfig.autogenerate(worktree, config, save_to_disk=False)
+
+        assert project_config.language_servers == []
+
 
 class TestActivationOfANewWorktree:
     def test_activation_returns_within_a_second_with_the_main_checkouts_languages(self, tmp_path: Path, no_tree_scan: None) -> None:
-        config = _serena_config(tmp_path)
+        config = _serena_config()
         main, worktree = _main_checkout_with_worktree(tmp_path)
         _register(config, main, [LanguageServerId.PYTHON])
         agent = SerenaAgent(project=None, serena_config=config)

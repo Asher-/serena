@@ -326,14 +326,20 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
         git_file = project_root / ".git"
         if not git_file.is_file():
             return []
-        pointer = git_file.read_text().strip()
+        try:
+            pointer = git_file.read_text().strip()
+        except (OSError, UnicodeDecodeError):
+            return []
         if not pointer.startswith("gitdir:"):
             return []
         worktree_git_dir = (project_root / pointer[len("gitdir:") :].strip()).resolve()
         commondir_file = worktree_git_dir / "commondir"
         if not commondir_file.is_file():
             return []
-        common_dir = (worktree_git_dir / commondir_file.read_text().strip()).resolve()
+        try:
+            common_dir = (worktree_git_dir / commondir_file.read_text().strip()).resolve()
+        except (OSError, UnicodeDecodeError):
+            return []
         if common_dir.name != ".git":
             return []
         main_checkout = serena_config.get_registered_project(str(common_dir.parent))
@@ -1115,6 +1121,11 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
             if not edit_global_memories:
                 instance.read_only_memory_patterns.append("global/.*")
             del loaded_commented_yaml["edit_global_memories"]
+
+        # remove "ls_priorities", which nothing reads since languages are no longer detected
+        if "ls_priorities" in loaded_commented_yaml:
+            num_migrations += 1
+            del loaded_commented_yaml["ls_priorities"]
 
         # re-save the configuration file if any migrations were performed
         if num_migrations > 0:
