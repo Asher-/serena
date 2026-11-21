@@ -230,11 +230,6 @@ class ProjectConfigAutoGenerationMode(Enum):
     """
     synchronous auto-generation, i.e. the configuration is fully generated before returning from the function call
     """
-    ASYNCHRONOUS = "async"
-    """
-    asynchronous auto-generation, where time-consuming configuration parts (currently only the 
-    list of programming languages) are determined in a background thread and initialised as empty 
-    """
 
     def is_autogen_enabled(self):
         return self != ProjectConfigAutoGenerationMode.NONE
@@ -884,11 +879,6 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
     defined in the configuration template file. 
     """
 
-    ls_priorities: dict[str, int] | None = None
-    """
-    mapping from language server keys to their priority (higher number = higher priority).
-    """
-
     # settings with overridden defaults
 
     agent_interface: AgentInterface = AgentInterface.TOOLS
@@ -1266,14 +1256,13 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
             self.projects.remove(registered_project)
             self._persist_projects()
 
-    def add_project_from_path(self, project_root: Path | str, asynchronous_autogen: bool = False) -> "Project":
+    def add_project_from_path(self, project_root: Path | str) -> "Project":
         """
         Adds a new project to the Serena configuration from a given path, auto-generating the project
         with defaults if it does not exist.
         Will raise a FileExistsError if a project already exists at the path.
 
         :param project_root: the path to the project to add
-        :param asynchronous_autogen: whether to use asynchronous auto-generation for the project configuration
         :return: the project that was added
         """
         from ..project import Project
@@ -1293,8 +1282,7 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
 
             self.place_data_folder_outside_project(project_root)
 
-            autogen = ProjectConfigAutoGenerationMode.ASYNCHRONOUS if asynchronous_autogen else ProjectConfigAutoGenerationMode.SYNCHRONOUS
-            project_config = ProjectConfig.load(project_root, serena_config=self, autogen=autogen)
+            project_config = ProjectConfig.load(project_root, serena_config=self, autogen=ProjectConfigAutoGenerationMode.SYNCHRONOUS)
 
             new_project = Project(
                 project_root=str(project_root),
