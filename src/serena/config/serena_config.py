@@ -1608,19 +1608,3 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
             if log_choice:
                 log.info(f"Using language backend from global configuration: {language_backend.name}")
         return language_backend
-
-    def get_ls_priority(self, ls_id: LanguageServerIdLike) -> int:
-        """
-        Gets the priority value associated with a language server
-
-        :param ls_id: identifies the language server
-        :return: the integer priority
-        """
-        if self.ls_priorities is not None:
-            try:
-                configured_value = self.ls_priorities.get(ls_id.get_key())
-                if configured_value is not None:
-                    return int(configured_value)
-            except Exception as e:
-                log.error("Error reading language priority for %s: %s. Using default priority.", ls_id.get_key(), e)
-        return ls_id.get_priority()

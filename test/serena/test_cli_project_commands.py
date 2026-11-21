@@ -74,12 +74,11 @@ class TestProjectCreate:
         yml_path = os.path.join(temp_project_dir, ".serena", "project.yml")
         assert os.path.exists(yml_path), f"project.yml not found at {yml_path}"
 
-    def test_create_auto_detect_language(self, cli_runner, temp_project_dir_with_python_file):
-        """Test project creation with auto-detected language."""
+    def test_create_without_a_language_configures_none_without_scanning(self, cli_runner, temp_project_dir_with_python_file):
+        """A project created without --language outside a linked worktree is configured for no language server."""
         result = cli_runner.invoke(ProjectCommands.create, [temp_project_dir_with_python_file])
         assert result.exit_code == 0, f"Command failed: {result.output}"
-        assert "Generated project" in result.output
-        assert "python" in result.output.lower()
+        assert "Generated project with language servers {N/A}" in result.output
 
         # Verify project.yml was created
         yml_path = os.path.join(temp_project_dir_with_python_file, ".serena", "project.yml")
@@ -288,7 +287,9 @@ class TestProjectCommandLogLocation:
             raise RuntimeError(f"cannot index {relative_file_path}")
 
         monkeypatch.setattr(SolidLanguageServer, "request_document_symbols", fail)
-        result = cli_runner.invoke(ProjectCommands.index, [temp_project_dir_with_python_file, "--log-level", "ERROR", "--timeout", "5"])
+        result = cli_runner.invoke(
+            ProjectCommands.index, [temp_project_dir_with_python_file, "--language", "python", "--log-level", "ERROR", "--timeout", "5"]
+        )
 
         assert result.exit_code == 0, f"Command failed: {result.output}"
         assert os.listdir(temp_project_dir_with_python_file) == ["test.py"]
@@ -310,12 +311,12 @@ class TestProjectCreateHelper:
         assert isinstance(config, ProjectConfig)
         assert config.project_name == "test-project"
 
-    def test_create_project_helper_with_auto_detect(self, temp_project_dir_with_python_file):
-        """Test _create_project with auto-detected language."""
+    def test_create_project_helper_without_languages_configures_none(self, temp_project_dir_with_python_file):
+        """_create_project without languages, outside a linked worktree, configures no language server."""
         config = ProjectCommands._create_project(temp_project_dir_with_python_file, "my-project", ()).project_config
         assert isinstance(config, ProjectConfig)
         assert config.project_name == "my-project"
-        assert len(config.language_servers) >= 1
+        assert config.language_servers == []
 
     def test_create_project_helper_with_languages(self, temp_project_dir):
         """Test _create_project with language specification."""

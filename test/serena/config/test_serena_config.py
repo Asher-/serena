@@ -50,56 +50,25 @@ class TestProjectConfigAutogenerate:
         assert config.project_name == self.project_path.name
         assert config.language_servers == []
 
-    def test_autogenerate_empty_directory_logs_warning(self, caplog):
-        """Test that autogenerate logs a warning when no language files are found."""
-        with caplog.at_level(logging.WARNING):
-            ProjectConfig.autogenerate(self.project_path, self.serena_config, save_to_disk=False)
-
-        assert any("No source files for supported language servers were found" in msg for msg in caplog.messages)
-
-    def test_autogenerate_with_python_files(self):
-        """Test successful autogeneration with Python source files."""
-        # Create a Python file
-        python_file = self.project_path / "main.py"
-        python_file.write_text("def hello():\n    print('Hello, world!')\n")
-
-        # Run autogenerate
-        config = ProjectConfig.autogenerate(self.project_path, self.serena_config, save_to_disk=False)
-
-        # Verify the configuration
-        assert config.project_name == self.project_path.name
-        assert config.language_servers == [LanguageServerId.PYTHON]
-
-    def test_autogenerate_with_js_files(self):
-        """Test successful autogeneration with JavaScript source files."""
-        # Create files for multiple languages
-        (self.project_path / "small.js").write_text("console.log('JS');")
-
-        # Run autogenerate - should pick Python as dominant
-        config = ProjectConfig.autogenerate(self.project_path, self.serena_config, save_to_disk=False)
-
-        assert config.language_servers == [LanguageServerId.TYPESCRIPT]
-
-    def test_autogenerate_with_multiple_languages(self):
-        """Test autogeneration picks dominant language when multiple are present."""
-        # Create files for multiple languages
+    def test_autogenerate_over_source_files_scans_no_tree_and_configures_no_language(self):
+        """A directory that is no linked worktree is given no language, whatever source files it holds."""
         (self.project_path / "main.py").write_text("print('Python')")
-        (self.project_path / "util.py").write_text("def util(): pass")
         (self.project_path / "small.js").write_text("console.log('JS');")
 
-        # Run autogenerate - should pick Python as dominant
         config = ProjectConfig.autogenerate(self.project_path, self.serena_config, save_to_disk=False)
 
-        assert config.language_servers == [LanguageServerId.PYTHON]
+        assert config.language_servers == []
+
+    def test_autogenerate_takes_the_languages_it_is_given(self):
+        config = ProjectConfig.autogenerate(
+            self.project_path, self.serena_config, languages=[LanguageServerId.PYTHON, LanguageServerId.GO], save_to_disk=False
+        )
+
+        assert config.language_servers == [LanguageServerId.PYTHON, LanguageServerId.GO]
 
     def test_autogenerate_saves_to_disk(self):
         """Test that autogenerate can save the configuration to disk."""
-        # Create a Go file
-        go_file = self.project_path / "main.go"
-        go_file.write_text("package main\n\nfunc main() {}\n")
-
-        # Run autogenerate with save_to_disk=True
-        config = ProjectConfig.autogenerate(self.project_path, self.serena_config, save_to_disk=True)
+        config = ProjectConfig.autogenerate(self.project_path, self.serena_config, languages=[LanguageServerId.GO], save_to_disk=True)
 
         # Verify the configuration file was created
         config_path = self.project_path / ".serena" / "project.yml"
@@ -134,32 +103,10 @@ class TestProjectConfigAutogenerate:
 
     def test_autogenerate_custom_project_name(self):
         """Test autogenerate with custom project name."""
-        # Create a TypeScript file
-        ts_file = self.project_path / "index.ts"
-        ts_file.write_text("const greeting: string = 'Hello';\n")
-
-        # Run autogenerate with custom name
         custom_name = "my-custom-project"
         config = ProjectConfig.autogenerate(self.project_path, self.serena_config, project_name=custom_name, save_to_disk=False)
 
         assert config.project_name == custom_name
-        assert config.language_servers == [LanguageServerId.TYPESCRIPT]
-
-    def test_autogenerate_with_python_files_and_custom_ls_priorities(self):
-        """Test successful autogeneration with Python source files, using custom language server priorities."""
-        # Create a Python file
-        python_file = self.project_path / "main.py"
-        python_file.write_text("def hello():\n    print('Hello, world!')\n")
-
-        serena_config = deepcopy(self.serena_config)
-        serena_config.ls_priorities = {LanguageServerId.PYTHON_TY.value: 3}
-
-        # Run autogenerate
-        config = ProjectConfig.autogenerate(self.project_path, serena_config, save_to_disk=False)
-
-        # Verify the configuration
-        assert config.project_name == self.project_path.name
-        assert config.language_servers == [LanguageServerId.PYTHON_TY]
 
 
 class TestProjectConfig:
