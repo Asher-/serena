@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
+import shutil
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -31,20 +34,34 @@ call through it costs a tool lookup that would otherwise put a test over its tim
 """
 
 
-def _main_checkout_with_worktree(tmp_path: Path) -> tuple[Path, Path]:
+@functools.cache
+def _git_layout() -> Path:
     """
-    :return: a main checkout and a linked worktree of it, made by ``git init`` and ``git worktree add``: the worktree's
-        ``.git`` file names its git directory under the main checkout's ``.git/worktrees``, whose ``commondir`` names
-        the main ``.git``
+    :return: a directory holding ``main``, made by ``git init``, and ``worktree``, a linked worktree of it made by
+        ``git worktree add --relative-paths``, so that the pair stays valid when copied elsewhere; git runs once per
+        module, not once per test
     """
-    main = tmp_path / "main"
-    worktree = tmp_path / "worktree"
+    root = Path(tempfile.mkdtemp(prefix="activation-git-layout-"))
+    main = root / "main"
     subprocess.run([_GIT, "init", "--quiet", str(main)], check=True, capture_output=True)
     subprocess.run(
-        [_GIT, "-C", str(main), "worktree", "add", "--quiet", "--orphan", "-b", "worktree", str(worktree)], check=True, capture_output=True
+        [_GIT, "-C", str(main), "worktree", "add", "--quiet", "--relative-paths", "--orphan", "-b", "worktree", str(root / "worktree")],
+        check=True,
+        capture_output=True,
     )
+    return root
+
+
+def _main_checkout_with_worktree(tmp_path: Path) -> tuple[Path, Path]:
+    """
+    :return: a main checkout and a linked worktree of it, copied from the layout git made (:func:`_git_layout`): the
+        worktree's ``.git`` file names its git directory under the main checkout's ``.git/worktrees``, whose
+        ``commondir`` names the main ``.git``
+    """
+    shutil.copytree(_git_layout(), tmp_path, symlinks=True, dirs_exist_ok=True)
+    main = tmp_path / "main"
     (main / "a.py").write_text("x = 1\n")
-    return main, worktree
+    return main, tmp_path / "worktree"
 
 
 def _register(config: SerenaConfig, root: Path, language_servers: list[LanguageServerId]) -> None:
