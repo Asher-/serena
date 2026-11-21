@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -23,19 +24,26 @@ def _serena_config() -> SerenaConfig:
     return config
 
 
+_GIT = os.path.join(subprocess.run(["git", "--exec-path"], check=True, capture_output=True, text=True).stdout.strip(), "git")
+"""
+the git binary itself, resolved once at import: where ``git`` on PATH is a launcher (as macOS's /usr/bin/git is), each
+call through it costs a tool lookup that would otherwise put a test over its time bound
+"""
+
+
 def _main_checkout_with_worktree(tmp_path: Path) -> tuple[Path, Path]:
     """
-    :return: a main checkout and a linked worktree of it, laid out as git lays them out: the worktree's ``.git`` file names
-        its git directory under the main checkout's ``.git/worktrees``, whose ``commondir`` names the main ``.git``
+    :return: a main checkout and a linked worktree of it, made by ``git init`` and ``git worktree add``: the worktree's
+        ``.git`` file names its git directory under the main checkout's ``.git/worktrees``, whose ``commondir`` names
+        the main ``.git``
     """
     main = tmp_path / "main"
-    worktree_git_dir = main / ".git" / "worktrees" / "worktree"
-    worktree_git_dir.mkdir(parents=True)
-    (worktree_git_dir / "commondir").write_text("../..\n")
-    (main / "a.py").write_text("x = 1\n")
     worktree = tmp_path / "worktree"
-    worktree.mkdir()
-    (worktree / ".git").write_text(f"gitdir: {worktree_git_dir}\n")
+    subprocess.run([_GIT, "init", "--quiet", str(main)], check=True, capture_output=True)
+    subprocess.run(
+        [_GIT, "-C", str(main), "worktree", "add", "--quiet", "--orphan", "-b", "worktree", str(worktree)], check=True, capture_output=True
+    )
+    (main / "a.py").write_text("x = 1\n")
     return main, worktree
 
 
