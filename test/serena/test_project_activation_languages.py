@@ -80,6 +80,39 @@ class TestLanguagesOfANewProject:
 
         assert project_config.language_servers == []
 
+    def test_a_git_file_naming_no_git_directory_gives_no_languages(self, tmp_path: Path, no_tree_scan: None) -> None:
+        config = _serena_config(tmp_path)
+        main, worktree = _main_checkout_with_worktree(tmp_path)
+        _register(config, main, [LanguageServerId.PYTHON])
+        (worktree / ".git").write_text("not a git pointer\n")
+
+        project_config = ProjectConfig.autogenerate(worktree, config, save_to_disk=False)
+
+        assert project_config.language_servers == []
+
+    def test_a_git_directory_without_commondir_gives_no_languages(self, tmp_path: Path, no_tree_scan: None) -> None:
+        config = _serena_config(tmp_path)
+        main, worktree = _main_checkout_with_worktree(tmp_path)
+        _register(config, main, [LanguageServerId.PYTHON])
+        (main / ".git" / "worktrees" / "worktree" / "commondir").unlink()
+
+        project_config = ProjectConfig.autogenerate(worktree, config, save_to_disk=False)
+
+        assert project_config.language_servers == []
+
+    def test_a_worktree_of_a_bare_repository_gives_no_languages(self, tmp_path: Path, no_tree_scan: None) -> None:
+        config = _serena_config(tmp_path)
+        main, worktree = _main_checkout_with_worktree(tmp_path)
+        _register(config, main, [LanguageServerId.PYTHON])
+        bare_worktree_git_dir = tmp_path / "repo.git" / "worktrees" / "worktree"
+        bare_worktree_git_dir.mkdir(parents=True)
+        (bare_worktree_git_dir / "commondir").write_text("../..\n")
+        (worktree / ".git").write_text(f"gitdir: {bare_worktree_git_dir}\n")
+
+        project_config = ProjectConfig.autogenerate(worktree, config, save_to_disk=False)
+
+        assert project_config.language_servers == []
+
 
 class TestActivationOfANewWorktree:
     def test_activation_returns_within_a_second_with_the_main_checkouts_languages(self, tmp_path: Path, no_tree_scan: None) -> None:
