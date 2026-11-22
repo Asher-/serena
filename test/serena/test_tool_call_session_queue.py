@@ -162,8 +162,8 @@ class _DaemonWideQueueProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
 
 class _ActivatingProbeTool(Tool, ToolMarkerDoesNotRequireActiveProject):
     """
-    A tool whose call activates a project for its session, as ``activate_project`` and the self-heal do, and then waits
-    for the project's language server manager, as the activation message does.
+    A tool whose call activates a project for its session, as the self-heal does, and then waits for the project's
+    language server manager, as the read path of the healed tool's body does.
     """
 
     def __init__(self, agent: SerenaAgent, project: Project) -> None:
@@ -451,9 +451,9 @@ def test_an_activation_within_a_session_call_does_not_queue_language_server_star
 ) -> None:
     """
     An activation made inside a call of session A (``activate_project``, or the self-heal before a tool body) starts
-    the project's language server manager without queueing it behind that call, so the call can wait for the manager,
-    as the activation message does, and is answered before its deadline. Queued on the session's own queue, the start
-    would wait for the very call that waits for it, and the call would be answered with a timeout.
+    the project's language server manager without queueing it behind that call, so a call whose read path waits for
+    the manager is answered before its deadline. Queued on the session's own queue, the start would wait for the very
+    call that waits for it, and the call would be answered with a timeout.
     """
     project = _project(tmp_path, agent)
     monkeypatch.setattr(project, "create_language_server_manager", project._lsm_ready_event.set)

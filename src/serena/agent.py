@@ -2569,11 +2569,12 @@ class SerenaAgent:
                     self._language_backend.init_active_project(self)
 
         # initialise the project's language backend in the background; readiness is signalled on the project's
-        # :attr:`Project._lsm_ready_event`, which both the activation-message path and downstream tool-call read paths
+        # :attr:`Project._lsm_ready_event`, which only tool-call read paths
         # (:meth:`Project.get_language_server_manager_or_raise`) wait on. The signal lives on the project rather than on a
         # per-agent task handle so concurrent activations in other sessions cannot overwrite it. With a session in scope,
-        # this activation runs inside a task of the session's own queue that goes on to wait for that signal, so the
-        # initialization is started on a thread of its own rather than queued behind that task.
+        # this activation runs inside a task of the session's own queue, and that task's read path waits for the signal
+        # when the activation was the self-heal before a tool body, so the initialization is started on a thread of its
+        # own rather than queued behind that task.
         if _SESSION_KEY_VAR.get(None) is None:
             self.issue_task(init_project_services)
         else:

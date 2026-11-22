@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import threading
 import time
 import types
@@ -279,9 +280,8 @@ class TestActivationMessageDoesNotWaitForLsInit:
             }
             fake_manager.stop_all.return_value = None
             project.language_server_manager = fake_manager
-            # mirror the new contract: create_language_server_manager sets the readiness
-            # event in its finally — the monkey-patched replacement must do the same so
-            # the activation message wait in get_project_activation_message unblocks
+            # create_language_server_manager sets the readiness event in its finally, and the monkey-patched
+            # replacement does the same: this test waits on it, as only tool-call read paths do in production
             project._lsm_ready_event.set()
             return fake_manager
 
@@ -333,6 +333,19 @@ class TestActivationMessageDoesNotWaitForLsInit:
             init_gate.set()
             agent.on_shutdown(timeout=5)
 
+    def test_activation_statement_names_no_starting_servers_when_none_are_configured(self) -> None:
+        backend = BuiltinLanguageBackend.LSP.get_instance()
+        config = SerenaConfig(gui_log_window=False, web_dashboard=False, log_level=logging.ERROR, language_backend=backend)
+        project = Project(
+            project_root=self._PYTHON_REPO,
+            project_config=ProjectConfig(project_name="no_servers_test", language_servers=[], language_backend=backend),
+            serena_config=config,
+        )
+
+        statement = backend.get_project_activation_statement(project)
+
+        assert statement == "Programming languages: none. No language servers are configured for this project.\n"
+
     def test_activation_p95_cpu_time_over_fifty_activations_is_at_most_20ms(self) -> None:
         # the calling thread's CPU time, not wall-clock time: the thread is at times kept off the CPU by something
         # outside this code (symptom://serena/agent/activation/duration), which this test does not measure
@@ -364,8 +377,27 @@ class TestActivationMessageDoesNotWaitForLsInit:
         finally:
             agent.on_shutdown(timeout=5)
 
-        p95 = sorted(durations)[int(0.95 * len(durations)) - 1]
+        # nearest-rank p95
+        p95 = sorted(durations)[math.ceil(0.95 * len(durations)) - 1]
         assert p95 <= 0.02, f"p95 activation CPU time {p95 * 1000:.2f}ms over {len(durations)} activations"
+
+
+class _ReadinessEventReleasingConstructionOnWait(threading.Event):
+    """
+    A readiness event that releases the held construction when the read path enters its wait, so that the
+    construction can complete only once a reader waits for it.
+    """
+
+    def __init__(self, construction_gate: threading.Event) -> None:
+        """
+        :param construction_gate: the event the scripted construction is held on
+        """
+        super().__init__()
+        self._construction_gate = construction_gate
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self._construction_gate.set()
+        return super().wait(timeout)
 
 
 class TestGetLanguageServerManagerOrRaiseBlocksOnReadiness:
@@ -407,44 +439,55 @@ class TestGetLanguageServerManagerOrRaiseBlocksOnReadiness:
         return project
 
     def test_read_path_blocks_until_in_flight_construction_completes(self) -> None:
-        # scripted construction installs the fake manager only after a short sleep; a
+        # scripted construction installs the fake manager only once the read path waits; a
         # read-path call issued while construction is still in flight must wait for the
         # readiness event rather than raising the scary "could not be constructed at all"
         # message
+        construction_entered = threading.Event()
+        construction_gate = threading.Event()
+
         def create_manager(project: Project) -> LanguageServerManager:
-            time.sleep(0.3)
+            construction_entered.set()
+            construction_gate.wait(timeout=5.0)
             fake_manager = MagicMock(spec=LanguageServerManager)
             project.language_server_manager = fake_manager
             project._lsm_ready_event.set()
             return fake_manager
 
         project = self._build_project(create_manager)
+        project._lsm_ready_event = _ReadinessEventReleasingConstructionOnWait(construction_gate)
 
         # kick construction in a background thread so the read path on the main thread can
         # observe the transient None slot before the readiness event sets
         bg = threading.Thread(target=project.create_language_server_manager, daemon=True)
         bg.start()
-        time.sleep(0.05)  # ensure read path enters wait while construction is still running
-
-        manager = project.get_language_server_manager_or_raise()
-        bg.join(timeout=5.0)
+        try:
+            assert construction_entered.wait(timeout=5.0), "construction never started"
+            manager = project.get_language_server_manager_or_raise()
+        finally:
+            construction_gate.set()
+            bg.join(timeout=5.0)
         assert manager is project.language_server_manager
         assert manager is not None
 
     def test_read_path_surfaces_init_error_after_construction_fails(self) -> None:
-        # scripted construction raises after a brief delay; the read path must wait for
+        # scripted construction raises only once the read path waits; the read path must wait for
         # the readiness signal then surface the captured init error in the raised message
         # rather than the bare "construction not attempted" text
         synthetic_error_text = "synthetic config failure"
+        construction_entered = threading.Event()
+        construction_gate = threading.Event()
 
         def create_manager(project: Project) -> LanguageServerManager:
-            time.sleep(0.2)
+            construction_entered.set()
+            construction_gate.wait(timeout=5.0)
             err = RuntimeError(synthetic_error_text)
             project._language_server_manager_init_error = err
             project._lsm_ready_event.set()
             raise err
 
         project = self._build_project(create_manager)
+        project._lsm_ready_event = _ReadinessEventReleasingConstructionOnWait(construction_gate)
 
         def call_construction() -> None:
             # swallow the synthetic failure so the executor thread does not log a noisy
@@ -455,11 +498,13 @@ class TestGetLanguageServerManagerOrRaiseBlocksOnReadiness:
 
         bg = threading.Thread(target=call_construction, daemon=True)
         bg.start()
-        time.sleep(0.05)
-
-        with pytest.raises(Exception) as exc_info:
-            project.get_language_server_manager_or_raise()
-        bg.join(timeout=5.0)
+        try:
+            assert construction_entered.wait(timeout=5.0), "construction never started"
+            with pytest.raises(Exception) as exc_info:
+                project.get_language_server_manager_or_raise()
+        finally:
+            construction_gate.set()
+            bg.join(timeout=5.0)
         assert synthetic_error_text in str(exc_info.value)
         assert "could not be constructed at all" in str(exc_info.value)
 

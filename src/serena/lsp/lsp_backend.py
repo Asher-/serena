@@ -46,6 +46,10 @@ class LSPLanguageBackend(LanguageBackend):
 
     @override
     def get_project_activation_statement(self, project: "Project") -> str:
+        # with no language server configured there is none to report as starting, active or failed
+        if not project.project_config.language_servers:
+            return "Programming languages: none. No language servers are configured for this project.\n"
+
         language_servers_str = ", ".join(ls.get_key() for ls in project.project_config.language_servers)
         statement = f"Programming languages: {language_servers_str}.\n"
 
