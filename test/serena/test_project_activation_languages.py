@@ -28,17 +28,19 @@ def _serena_config() -> SerenaConfig:
 @pytest.fixture(scope="module")
 def git_layout(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """
-    A directory holding ``main``, made by ``git init``, and ``worktree``, a linked worktree of it made by
-    ``git worktree add --relative-paths``, so that the pair stays valid when copied elsewhere. Git runs once per module,
-    during module setup, and pytest removes the directory with its other temporary directories.
+    A directory holding ``main``, made by ``git init`` without template files, and ``worktree``, a linked worktree of
+    it made by ``git worktree add --relative-paths``, so that the pair stays valid when copied elsewhere. Git runs once
+    per module, during module setup, and pytest removes the directory with its other temporary directories.
 
     The git binary is resolved through ``git --exec-path``: where ``git`` on PATH is a launcher (as macOS's
     /usr/bin/git is), each call through it costs a tool lookup that would otherwise put the setup over its time bound.
+    Without template files (sample hooks, ``info/exclude``, ``description``), each test's copy of the layout holds only
+    the files git needs for the pair.
     """
     git = os.path.join(subprocess.run(["git", "--exec-path"], check=True, capture_output=True, text=True).stdout.strip(), "git")
     root = tmp_path_factory.mktemp("activation-git-layout")
     main = root / "main"
-    subprocess.run([git, "init", "--quiet", str(main)], check=True, capture_output=True)
+    subprocess.run([git, "init", "--quiet", "--template=", str(main)], check=True, capture_output=True)
     subprocess.run(
         [git, "-C", str(main), "worktree", "add", "--quiet", "--relative-paths", "--orphan", "-b", "worktree", str(root / "worktree")],
         check=True,
