@@ -429,7 +429,9 @@ class TestFindPatternSurfacesNonSymbolHits:
     """
 
     def test_non_symbol_match_surfaced_with_content_not_counted(self, tmp_path: Path) -> None:
-        (tmp_path / "compose.yaml").write_text("services:\n  serena:\n    image: serena:latest\n", encoding="utf-8")
+        (tmp_path / "compose.yaml").write_text(
+            "services:\n  serena:\n    image: serena:latest\n", encoding="utf-8"
+        )
         project = MagicMock()
         project.project_root = str(tmp_path)
         project.read_file = MagicMock(side_effect=lambda p: Path(tmp_path / p).read_text(encoding="utf-8"))
