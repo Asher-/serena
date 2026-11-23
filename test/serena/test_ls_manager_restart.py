@@ -189,7 +189,7 @@ class TestStopAllStartsNoServer:
         assert raised.value is failure
         second.stop.assert_called_once()
 
-    def test_stop_all_saving_caches_saves_the_running_server_s_cache_and_not_the_stopped_one_s(self) -> None:
+    def test_stop_all_saving_caches_saves_the_cache_of_a_running_and_of_a_stopped_server(self) -> None:
         # one held server runs, the other reports not running
         factory = _GatedLanguageServerFactory()
         manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON, LanguageServerId.TYPESCRIPT], factory, project=None)
@@ -198,9 +198,9 @@ class TestStopAllStartsNoServer:
 
         manager.stop_all(save_cache=True)
 
-        # the running server's cache was saved and both were stopped
+        # both servers' caches were saved, a stopped server's caches being still held in memory, and both were stopped
         running.save_cache.assert_called_once()
-        stopped.save_cache.assert_not_called()
+        stopped.save_cache.assert_called_once()
         running.stop.assert_called_once()
         stopped.stop.assert_called_once()
 

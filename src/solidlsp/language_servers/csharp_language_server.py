@@ -161,7 +161,8 @@ def breadth_first_file_scan(root_dir: str, is_ignored_path: Callable[[str], bool
         current_dir = queue.pop(0)
         try:
             with os.scandir(current_dir) as scanner:
-                entries = list(scanner)
+                # in name order, so that which link names a directory does not depend on the file system's listing order
+                entries = sorted(scanner, key=lambda entry: entry.name)
         except (PermissionError, OSError):
             # Skip directories we can't access
             continue

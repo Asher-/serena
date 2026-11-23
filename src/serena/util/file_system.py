@@ -310,6 +310,11 @@ def _walk_dir_entries(
     dirs = []
     files = []
 
+    # a walk that follows links meets them in name order, so that which link names a directory does not depend on the
+    # order the file system lists entries in
+    if entered is not None:
+        entries.sort(key=lambda entry: entry.name)
+
     for entry in entries:
         try:
             is_dir = entry.is_dir()

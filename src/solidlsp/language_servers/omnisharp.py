@@ -50,7 +50,8 @@ def breadth_first_file_scan(root: str) -> Iterable[str]:
         for parent in dirs:
             # scan each dir: files are yielded, the admitted subdirectories are scanned in the next iteration
             with os.scandir(parent) as scanner:
-                entries = list(scanner)
+                # in name order, so that which link names a directory does not depend on the file system's listing order
+                entries = sorted(scanner, key=lambda entry: entry.name)
             subdirectories = []
             for entry in entries:
                 if entry.is_dir():

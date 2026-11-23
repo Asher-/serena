@@ -130,6 +130,44 @@ def test_a_following_walk_enters_a_directory_it_skips_once_through_a_link_to_it(
     assert walked == ["first/x.py"]
 
 
+def test_a_following_walk_names_a_directory_only_links_reach_by_the_first_link_in_name_order(tmp_path: Path) -> None:
+    # links made in reverse name order, so that neither creation nor listing order agrees with name order by design
+    root = tmp_path / "root"
+    (root / "skipped" / "inner").mkdir(parents=True)
+    (root / "skipped" / "inner" / "x.py").write_text("X = 1\n", encoding="utf-8")
+    for name in ["link_e", "link_d", "link_c", "link_b", "link_a"]:
+        _link(root / name, root / "skipped" / "inner")
+
+    walked = [
+        Path(os.path.relpath(entry.path, root)).as_posix()
+        for _directory, _subdirectories, files in walk_dir_entries(
+            str(root), followlinks=True, is_ignored_dir=lambda entry: entry.name == "skipped"
+        )
+        for entry in files
+    ]
+
+    assert walked == ["link_a/x.py"]
+
+
+def test_a_following_walk_names_a_nested_directory_under_the_link_met_first_in_name_order(tmp_path: Path) -> None:
+    # a link to a skipped directory and a link to its subdirectory, the latter first in name order
+    root = tmp_path / "root"
+    (root / "skipped" / "sub").mkdir(parents=True)
+    (root / "skipped" / "sub" / "x.py").write_text("X = 1\n", encoding="utf-8")
+    _link(root / "z_outer", root / "skipped")
+    _link(root / "a_sub", root / "skipped" / "sub")
+
+    walked = [
+        Path(os.path.relpath(entry.path, root)).as_posix()
+        for _directory, _subdirectories, files in walk_dir_entries(
+            str(root), followlinks=True, is_ignored_dir=lambda entry: entry.name == "skipped"
+        )
+        for entry in files
+    ]
+
+    assert walked == ["a_sub/x.py"]
+
+
 def test_a_following_walk_does_not_enter_a_link_its_ignore_rule_holds_for(tmp_path: Path) -> None:
     root = tmp_path / "root"
     root.mkdir()

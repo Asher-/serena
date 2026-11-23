@@ -2463,7 +2463,9 @@ class SolidLanguageServer(ABC):
 
             result = []
             try:
-                contained_dir_or_file_entries = os.scandir(abs_dir_path)
+                # in name order, so that which link names a directory does not depend on the file system's listing order
+                with os.scandir(abs_dir_path) as scanner:
+                    contained_dir_or_file_entries = sorted(scanner, key=lambda entry: entry.name)
             except OSError:
                 return []
 
