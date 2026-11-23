@@ -33,6 +33,22 @@ INITIAL_FORGE_VERSION = "1.5.1"
 DEFAULT_FORGE_VERSION = "1.5.1"
 
 
+def count_solidity_files(root: str) -> int:
+    """
+    :param root: the directory to count in
+    :return: the number of non-hidden ``.sol`` files below ``root`` outside hidden directories, following links to
+        directories and counting each real directory's files once
+    """
+    return sum(
+        1
+        for _directory, _subdirectories, files in walk_dir_entries(
+            root, followlinks=True, is_ignored_dir=lambda entry: entry.name.startswith(".")
+        )
+        for file in files
+        if file.name.endswith(".sol") and not file.name.startswith(".")
+    )
+
+
 class SolidityLanguageServer(SolidLanguageServer):
     """
     Provides Solidity-specific instantiation of the LanguageServer class using
@@ -281,14 +297,7 @@ class SolidityLanguageServer(SolidLanguageServer):
             log.info(f"LSP: window/logMessage: {msg}")
 
         # Count .sol files in the project to know when indexing is complete.
-        expected_count = sum(
-            1
-            for _directory, _subdirectories, files in walk_dir_entries(
-                self.repository_root_path, followlinks=True, is_ignored_dir=lambda entry: entry.name.startswith(".")
-            )
-            for file in files
-            if file.name.endswith(".sol") and not file.name.startswith(".")
-        )
+        expected_count = count_solidity_files(self.repository_root_path)
         indexed_count = [0]
         all_indexed = threading.Event()
 

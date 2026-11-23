@@ -305,8 +305,21 @@ def find_build_roots(repository_root_path: str, max_depth: int = DEFAULT_PROJECT
         return [repository_root_path]
 
     roots: list[str] = []
-    # symlinks are followed, as Metals' own search does, each real directory entered at most once
-    entered = EnteredDirectories(repository_root_path, is_ignored_dir=lambda entry: entry.name.startswith("."))
+
+    # symlinks to directories are followed, each real directory entered or found as a build root at most once: only the
+    # directories the scan enters or finds are recorded, and links are followed only once every directory reached without
+    # a link has been scanned, so a directory reached both ways is named by its own path, and a link to one the scan skips
+    # or never reaches is followed
+    entered = EnteredDirectories(repository_root_path)
+    # the links met, each with the depth of the scan that met it, in the order met
+    deferred_links: list[tuple[os.DirEntry, int]] = []
+
+    def visit(entry: os.DirEntry, depth: int) -> None:
+        # a subdirectory the scan of the given depth admitted: a build root found, or a directory entered
+        if _is_build_root(entry.path):
+            roots.append(entry.path)
+        elif entry.name not in BUILD_ROOT_SCAN_SKIP_DIRS:
+            scan(entry.path, depth + 1)
 
     def scan(directory: str, depth: int) -> None:
         if depth > max_depth:
@@ -315,14 +328,25 @@ def find_build_roots(repository_root_path: str, max_depth: int = DEFAULT_PROJECT
             entries = sorted(os.scandir(directory), key=lambda e: e.name)
         except OSError:
             return
-        subdirectories = [entry for entry in entries if not entry.name.startswith(".") and entry.is_dir()]
-        for entry in entered.admit(subdirectories):
-            if _is_build_root(entry.path):
-                roots.append(entry.path)
-            elif entry.name not in BUILD_ROOT_SCAN_SKIP_DIRS:
-                scan(entry.path, depth + 1)
+        # the subdirectories found as build roots, and those the scan enters
+        subdirectories = [
+            entry
+            for entry in entries
+            if not entry.name.startswith(".")
+            and entry.is_dir()
+            and (_is_build_root(entry.path) or (entry.name not in BUILD_ROOT_SCAN_SKIP_DIRS and depth + 1 <= max_depth))
+        ]
+        deferred_links.extend((entry, depth) for entry in subdirectories if entry.is_symlink())
+        for entry in entered.admit([entry for entry in subdirectories if not entry.is_symlink()]):
+            visit(entry, depth)
 
     scan(repository_root_path, 1)
+    index = 0
+    while index < len(deferred_links):
+        link, depth = deferred_links[index]
+        index += 1
+        for entry in entered.admit([link]):
+            visit(entry, depth)
     return roots or [repository_root_path]
 
 

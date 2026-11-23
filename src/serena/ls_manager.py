@@ -411,7 +411,8 @@ class LanguageServerManager:
         save that raises does not keep its server from being stopped; when no stop raised, the first such exception
         is raised instead.
 
-        :param save_cache: whether to save the cache of each running server before stopping it
+        :param save_cache: whether to save the cache of each server, running or not (a crashed server's cache is still
+            held in memory), before stopping it
         :param timeout: timeout for shutdown of each language server
         """
         save_failure: Exception | None = None
@@ -419,8 +420,7 @@ class LanguageServerManager:
         for ls in list(self._language_servers.values()):
             if save_cache:
                 try:
-                    if ls.is_running():
-                        ls.save_cache()
+                    ls.save_cache()
                 except Exception as exception:
                     log.error(f"Failed to save the cache of the language server for language {ls.ls_id}: {exception}", exc_info=exception)
                     if save_failure is None:

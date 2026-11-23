@@ -2,7 +2,7 @@
 The memory that sessions' cursor greps and finds retain on a trusted project whose links loop back into it stays
 bounded: the document symbols they keep alive number at most the project's files, and each session holds at most
 :attr:`CursorManager.MAX_CURSORS` cursors. An idle stop of the project's servers releases the symbols it served, and the
-next call is served again.
+next call is served again; stopping a server whose process has ended saves its symbols and releases them as well.
 """
 
 from __future__ import annotations
@@ -10,14 +10,14 @@ from __future__ import annotations
 import contextvars
 import gc
 import logging
-import time
+import threading
 import weakref
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from serena.agent import _SESSION_KEY_VAR, SerenaAgent
+from serena.agent import _SESSION_KEY_VAR, SerenaAgent, _LanguageServerIdleStop
 from serena.config.serena_config import ProjectConfig, SerenaConfig
 from serena.cursor import CursorManager
 from serena.language_backend import BuiltinLanguageBackend
@@ -27,8 +27,14 @@ from solidlsp.ls_config import LanguageServerId
 
 pytestmark = pytest.mark.python
 
-_FILES = 3
+_FILES = 1
 """the number of source files of the looped project"""
+
+_SESSIONS = 2
+"""the number of sessions working on the looped project, the fewest that share its servers"""
+
+_ROUNDS = 2
+"""the number of rounds of greps and finds each session makes, the fewest that repeat one"""
 
 _IDLE_TIMEOUT = 0.5
 """the language-server idle timeout, in seconds, of the agent whose idle stop is observed"""
@@ -103,8 +109,8 @@ def _live_document_symbols() -> int:
 def test_sessions_greps_and_finds_on_a_looped_project_keep_at_most_its_files_symbols_alive(looped_project: Project) -> None:
     before = _live_document_symbols()
 
-    sessions = [CursorManager(looped_project) for _ in range(2)]
-    for _round in range(2):
+    sessions = [CursorManager(looped_project) for _ in range(_SESSIONS)]
+    for _round in range(_ROUNDS):
         for session in sessions:
             groups, _ = session.find_pattern_with_enclosing_symbols("return")
             for symbol, _hits in groups:
@@ -123,7 +129,7 @@ def test_sessions_greps_and_finds_on_a_looped_project_keep_at_most_its_files_sym
 
 def test_an_idle_stop_releases_the_symbols_its_servers_served_and_the_next_call_is_served_again(tmp_path: Path) -> None:
     root = _looped_tree(tmp_path / "project")
-    agent = SerenaAgent(serena_config=_config(root, idle_timeout=_IDLE_TIMEOUT))
+    agent = SerenaAgent(serena_config=_config(root))
     project = _project(root, agent.serena_config)
     manager = project.create_language_server_manager()
     try:
@@ -136,12 +142,12 @@ def test_an_idle_stop_releases_the_symbols_its_servers_served_and_the_next_call_
         server = manager.get_language_server("pkg/module_0.py")
         served = weakref.ref(server.request_document_symbols("pkg/module_0.py"))
 
-        # the idle stop
-        deadline = time.monotonic() + _WAIT
-        while time.monotonic() < deadline and served() is not None:
-            time.sleep(0.1)
-            gc.collect()
+        # the agent's idle stop, begun once the symbols are served and reporting each project whose servers it stopped
+        stopped = threading.Event()
+        agent._language_server_idle_stop = _LanguageServerIdleStop(agent, _IDLE_TIMEOUT, on_stopped=lambda _project: stopped.set())
 
+        assert stopped.wait(_WAIT)
+        gc.collect()
         assert served() is None
         names = [
             symbol["name"]
@@ -151,3 +157,22 @@ def test_an_idle_stop_releases_the_symbols_its_servers_served_and_the_next_call_
     finally:
         manager.stop_all()
         agent.on_shutdown(timeout=1.0)
+
+
+def test_stopping_a_crashed_server_saves_its_symbols_and_keeps_none_of_them_alive(looped_project: Project) -> None:
+    manager = looped_project.create_language_server_manager()
+    server = manager.get_language_server("pkg/module_0.py")
+    served = weakref.ref(server.request_document_symbols("pkg/module_0.py"))
+    saved = server.cache_dir / server.DOCUMENT_SYMBOL_CACHE_FILENAME
+    saved.unlink(missing_ok=True)
+
+    # the server's process ends on its own
+    process = server.server._process
+    process.kill()
+    process.wait()
+
+    manager.stop_all(save_cache=True)
+    gc.collect()
+
+    assert saved.is_file()
+    assert served() is None

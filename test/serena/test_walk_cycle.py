@@ -93,6 +93,62 @@ def test_a_following_walk_names_a_directory_by_its_own_path_when_a_link_to_it_co
     assert _walked_files(root) == ["z/pkg/x.py"]
 
 
+def test_a_following_walk_names_a_directory_by_its_own_path_when_the_directory_comes_first(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "a" / "pkg").mkdir(parents=True)
+    (root / "a" / "pkg" / "x.py").write_text("X = 1\n", encoding="utf-8")
+    _link(root / "z_link", root / "a" / "pkg")
+
+    assert _walked_files(root) == ["a/pkg/x.py"]
+
+
+def test_a_following_walk_does_not_enter_again_a_sibling_it_has_entered(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "x.py").write_text("X = 1\n", encoding="utf-8")
+    (root / "zz").mkdir()
+    _link(root / "zz" / "again", root / "pkg")
+
+    assert _walked_files(root) == ["pkg/x.py"]
+
+
+def test_a_following_walk_enters_a_directory_it_skips_once_through_a_link_to_it(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "skipped" / "inner").mkdir(parents=True)
+    (root / "skipped" / "inner" / "x.py").write_text("X = 1\n", encoding="utf-8")
+    _link(root / "first", root / "skipped" / "inner")
+    _link(root / "second", root / "skipped" / "inner")
+
+    walked = [
+        Path(os.path.relpath(entry.path, root)).as_posix()
+        for _directory, _subdirectories, files in walk_dir_entries(
+            str(root), followlinks=True, is_ignored_dir=lambda entry: entry.name == "skipped"
+        )
+        for entry in files
+    ]
+
+    assert walked == ["first/x.py"]
+
+
+def test_a_following_walk_does_not_enter_a_link_its_ignore_rule_holds_for(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "x.py").write_text("X = 1\n", encoding="utf-8")
+    _link(root / ".hidden", shared)
+
+    walked = [
+        entry.name
+        for _directory, _subdirectories, files in walk_dir_entries(
+            str(root), followlinks=True, is_ignored_dir=lambda entry: entry.name.startswith(".")
+        )
+        for entry in files
+    ]
+
+    assert walked == []
+
+
 def test_a_non_recursive_following_walk_lists_every_link_beside_the_directory(tmp_path: Path) -> None:
     root = tmp_path / "root"
     (root / "shared").mkdir(parents=True)

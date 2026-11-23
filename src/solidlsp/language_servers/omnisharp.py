@@ -39,8 +39,13 @@ def breadth_first_file_scan(root: str) -> Iterable[str]:
     """
     entered = EnteredDirectories(root)
     dirs = [root]
+    # the links to directories met, followed in the order met once every directory reached without a link is scanned
+    deferred_links: list[os.DirEntry] = []
     # while we has dirs to scan
-    while dirs:
+    while dirs or deferred_links:
+        if not dirs:
+            dirs = [link.path for link in entered.admit([deferred_links.pop(0)])]
+            continue
         next_dirs = []
         for parent in dirs:
             # scan each dir: files are yielded, the admitted subdirectories are scanned in the next iteration
@@ -52,7 +57,8 @@ def breadth_first_file_scan(root: str) -> Iterable[str]:
                     subdirectories.append(entry)
                 else:
                     yield entry.path
-            next_dirs.extend(subdirectory.path for subdirectory in entered.admit(subdirectories))
+            deferred_links.extend(subdirectory for subdirectory in subdirectories if subdirectory.is_symlink())
+            next_dirs.extend(subdirectory.path for subdirectory in entered.admit([s for s in subdirectories if not s.is_symlink()]))
 
         # once we've done all the current dirs then
         # we set up the next itter as the child dirs

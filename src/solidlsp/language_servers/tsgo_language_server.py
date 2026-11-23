@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 
-import glob
+import fnmatch
 import logging
 import os
 import shutil
@@ -9,6 +9,7 @@ from typing import Any
 from overrides import override
 from sensai.util.logging import LogTime
 
+from serena.util.file_system import walk_dir_entries
 from solidlsp.ls import LanguageServerDependencyProviderSinglePath
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.lsp_protocol_handler.lsp_types import InitializeResult, TextDocumentSyncKind
@@ -19,6 +20,30 @@ from .typescript_language_server import TypeScriptLanguageServer
 log = logging.getLogger(__name__)
 
 DEFAULT_TYPESCRIPT_VERSION = "7.0.2"
+
+
+def find_tsgo_executable(install_dir: str) -> str | None:
+    """
+    :param install_dir: the directory the typescript npm package was installed into
+    :return: the first native TypeScript executable, ``@typescript/typescript-*/lib/tsc`` (``tsc.exe`` on Windows), in a
+        walk of the install directory's ``node_modules`` that skips hidden directories and follows links to directories,
+        entering each real directory at most once; None if there is none
+    """
+    executable_name = "tsc.exe" if os.name == "nt" else "tsc"
+    node_modules = os.path.join(install_dir, "node_modules")
+    for directory, _subdirectories, files in walk_dir_entries(
+        node_modules, followlinks=True, is_ignored_dir=lambda entry: entry.name.startswith(".")
+    ):
+        package_dir, lib = os.path.split(directory)
+        scope_dir, package = os.path.split(package_dir)
+        if (
+            lib == "lib"
+            and fnmatch.fnmatchcase(package, "typescript-*")
+            and os.path.basename(scope_dir) == "@typescript"
+            and any(file.name == executable_name for file in files)
+        ):
+            return os.path.join(directory, executable_name)
+    return None
 
 
 class TsgoLanguageServer(TypeScriptLanguageServer):
@@ -67,10 +92,7 @@ class TsgoLanguageServer(TypeScriptLanguageServer):
 
         @staticmethod
         def _find_executable(install_dir: str) -> str | None:
-            executable_name = "tsc.exe" if os.name == "nt" else "tsc"
-            pattern = os.path.join(install_dir, "node_modules", "**", "@typescript", "typescript-*", "lib", executable_name)
-            matches = glob.glob(pattern, recursive=True)
-            return matches[0] if matches else None
+            return find_tsgo_executable(install_dir)
 
         def _create_launch_command(self, core_path: str) -> list[str]:
             return [core_path, "--lsp", "--stdio"]

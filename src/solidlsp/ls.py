@@ -2445,14 +2445,10 @@ class SolidLanguageServer(ABC):
             If a directory is passed, all files within this directory will be considered.
         :return: A list of root symbols representing the top-level packages/modules in the project.
         """
-
-        def is_ignored_dir(entry: os.DirEntry) -> bool:
-            # discovery's ignore rule for a directory, applied to its unresolved path
-            try:
-                rel_path = os.path.relpath(entry.path, self.repository_root_path)
-            except ValueError:
-                return True
-            return self.is_ignored_path(rel_path, dir_entry=entry, check_path_for_ignored_dirnames=True)
+        # the links to directories discovery met, each with the package symbol of the directory holding it; a link is
+        # followed only after every directory reached without a link has been discovered, so that a directory reached
+        # both ways is named by its own path
+        deferred_links: list[tuple[os.DirEntry, ls_types.UnifiedSymbolInformation]] = []
 
         # Helper function to recursively process directories
         def process_directory(abs_dir_path: str) -> list[ls_types.UnifiedSymbolInformation]:
@@ -2513,14 +2509,20 @@ class SolidLanguageServer(ABC):
                     continue
                 kept_entries.append((contained_dir_or_file_entry, contained_dir_or_file_rel_path, is_dir))
 
-            # the kept directories whose real directory discovery has not entered yet
-            admitted_dirs = {id(entry) for entry in entered.admit([entry for entry, _, is_dir in kept_entries if is_dir])}
+            # the kept real directories whose real directory discovery has not entered yet
+            admitted_dirs = {
+                id(entry) for entry in entered.admit([entry for entry, _, is_dir in kept_entries if is_dir and not entry.is_symlink()])
+            }
 
             for contained_dir_or_file_entry, contained_dir_or_file_rel_path, is_dir in kept_entries:
                 contained_dir_or_file_name = contained_dir_or_file_entry.name
                 contained_dir_or_file_abs_path = contained_dir_or_file_entry.path
 
                 if is_dir:
+                    if contained_dir_or_file_entry.is_symlink():
+                        # followed once every directory reached without a link has been discovered
+                        deferred_links.append((contained_dir_or_file_entry, package_symbol))
+                        continue
                     if id(contained_dir_or_file_entry) not in admitted_dirs:
                         log.debug("Skipping directory: %s (because its real directory was entered before)", contained_dir_or_file_rel_path)
                         continue
@@ -2561,6 +2563,21 @@ class SolidLanguageServer(ABC):
 
             return result
 
+        def follow_deferred_links() -> None:
+            # the deferred links in the order met, those met inside a followed link included, each entered unless its real
+            # directory was entered before, and its directory linked into the package that holds the link
+            index = 0
+            while index < len(deferred_links):
+                link, holding_package = deferred_links[index]
+                index += 1
+                if not entered.admit([link]):
+                    log.debug("Skipping directory link: %s (because its real directory was entered before)", link.path)
+                    continue
+                child_symbols = process_directory(link.path)
+                holding_package["children"].extend(child_symbols)
+                for child in child_symbols:
+                    child["parent"] = holding_package
+
         if within_relative_path:
             within_abs_path = os.path.join(self.repository_root_path, within_relative_path)
             if not os.path.exists(within_abs_path):
@@ -2572,14 +2589,17 @@ class SolidLanguageServer(ABC):
                 return root_nodes
             else:
                 self.PathWorkspaceStatus.from_abs_resolved_path(Path(within_abs_path).resolve(), self).check_within_workspace_or_raise()
-                entered = EnteredDirectories(within_abs_path, is_ignored_dir=is_ignored_dir)
-                return process_directory(within_abs_path)
+                entered = EnteredDirectories(within_abs_path)
+                within_result = process_directory(within_abs_path)
+                follow_deferred_links()
+                return within_result
         else:
             full_result = []
             workspace_roots = self.config.get_absolute_workspace_folders(self.repository_root_path)
-            entered = EnteredDirectories(*workspace_roots, is_ignored_dir=is_ignored_dir)
+            entered = EnteredDirectories(*workspace_roots)
             for root in workspace_roots:
                 full_result.extend(process_directory(root))
+            follow_deferred_links()
             return full_result
 
     @staticmethod

@@ -108,9 +108,14 @@ def breadth_first_file_scan(root_dir: str) -> Iterable[str]:
     Yields file paths in breadth-first order. Links to directories are followed, each real directory entered at most
     once (see :class:`EnteredDirectories`).
     """
-    entered = EnteredDirectories(root_dir, is_ignored_dir=lambda entry: entry.name.startswith("."))
+    entered = EnteredDirectories(root_dir)
     queue = [root_dir]
-    while queue:
+    # the links to directories met, followed in the order met once every directory reached without a link is scanned
+    deferred_links: list[os.DirEntry] = []
+    while queue or deferred_links:
+        if not queue:
+            queue.extend(link.path for link in entered.admit([deferred_links.pop(0)]))
+            continue
         current_dir = queue.pop(0)
         try:
             with os.scandir(current_dir) as scanner:
@@ -125,7 +130,8 @@ def breadth_first_file_scan(root_dir: str) -> Iterable[str]:
                 subdirectories.append(entry)
             elif entry.is_file():
                 yield entry.path
-        queue.extend(subdirectory.path for subdirectory in entered.admit(subdirectories))
+        deferred_links.extend(subdirectory for subdirectory in subdirectories if subdirectory.is_symlink())
+        queue.extend(subdirectory.path for subdirectory in entered.admit([s for s in subdirectories if not s.is_symlink()]))
 
 
 def find_solution_or_project_file(root_dir: str) -> str | None:

@@ -487,65 +487,18 @@ class CursorManager:
     MAX_CURSORS = 512
     """the most cursors a manager holds"""
 
+    _GENERATED_ID = re.compile(r"c([1-9][0-9]*)")
+    """the form of the cursor IDs a manager generates, capturing the number"""
+
     class _CursorTable:
         """
         The cursors of a manager, bounded by :attr:`CursorManager.MAX_CURSORS` with least-recently-used eviction.
 
-        A cursor counts as used when it is added or looked up. Every evicted ID is remembered, so that a lookup of one
-        reports the eviction rather than an unknown ID: a generated ID (``c<n>``) as one bit of a bit set, any other ID by
-        name.
+        A cursor counts as used when it is added or looked up. Nothing of an evicted cursor is kept.
         """
-
-        _GENERATED_ID = re.compile(r"c(\d+)")
 
         def __init__(self) -> None:
             self._cursors: OrderedDict[str, AnyCursorState] = OrderedDict()
-            self._evicted_generated = bytearray()
-            self._evicted_named: set[str] = set()
-
-        def _evicted_bit(self, cursor_id: str) -> tuple[int, int] | None:
-            """
-            :param cursor_id: a cursor ID
-            :return: the byte index and bit mask of a generated ID in the evicted bit set; None for any other ID
-            """
-            match = self._GENERATED_ID.fullmatch(cursor_id)
-            if match is None:
-                return None
-            byte, bit = divmod(int(match.group(1)), 8)
-            return byte, 1 << bit
-
-        def _mark_evicted(self, cursor_id: str, evicted: bool) -> None:
-            """
-            :param cursor_id: a cursor ID
-            :param evicted: whether the ID is remembered as evicted (True) or forgotten as such (False)
-            """
-            position = self._evicted_bit(cursor_id)
-            if position is None:
-                if evicted:
-                    self._evicted_named.add(cursor_id)
-                else:
-                    self._evicted_named.discard(cursor_id)
-                return
-            byte, mask = position
-            if byte >= len(self._evicted_generated):
-                if not evicted:
-                    return
-                self._evicted_generated.extend(bytes(byte + 1 - len(self._evicted_generated)))
-            if evicted:
-                self._evicted_generated[byte] |= mask
-            else:
-                self._evicted_generated[byte] &= ~mask & 0xFF
-
-        def _was_evicted(self, cursor_id: str) -> bool:
-            """
-            :param cursor_id: a cursor ID
-            :return: whether the ID's cursor was evicted for the cap and not added again since
-            """
-            position = self._evicted_bit(cursor_id)
-            if position is None:
-                return cursor_id in self._evicted_named
-            byte, mask = position
-            return byte < len(self._evicted_generated) and bool(self._evicted_generated[byte] & mask)
 
         def __contains__(self, cursor_id: str) -> bool:
             return cursor_id in self._cursors
@@ -556,23 +509,17 @@ class CursorManager:
             """
             return list(self._cursors.keys())
 
-        def get(self, cursor_id: str) -> AnyCursorState:
+        def get(self, cursor_id: str) -> AnyCursorState | None:
             """
             Looks up a held cursor, marking it as used.
 
             :param cursor_id: the cursor's ID
-            :return: the cursor
-            :raises ValueError: if the cursor is not held; the message says so when it was evicted for the cap
+            :return: the cursor, or None if it is not held
             """
-            if cursor_id not in self._cursors:
-                if self._was_evicted(cursor_id):
-                    raise ValueError(
-                        f"Cursor '{cursor_id}' was evicted: a session holds at most {CursorManager.MAX_CURSORS} cursors, and "
-                        "starting another one evicted this least recently used one. Start a new cursor at the position you need."
-                    )
-                raise ValueError(f"No cursor with id '{cursor_id}'. Active cursors: {self.ids()}")
-            self._cursors.move_to_end(cursor_id)
-            return self._cursors[cursor_id]
+            state = self._cursors.get(cursor_id)
+            if state is not None:
+                self._cursors.move_to_end(cursor_id)
+            return state
 
         def put(self, cursor_id: str, state: AnyCursorState) -> None:
             """
@@ -583,12 +530,10 @@ class CursorManager:
             """
             self._cursors[cursor_id] = state
             self._cursors.move_to_end(cursor_id)
-            self._mark_evicted(cursor_id, False)
 
-            # the least recently used cursors beyond the cap, remembered as evicted
+            # the least recently used cursors beyond the cap
             while len(self._cursors) > CursorManager.MAX_CURSORS:
-                evicted_id, _evicted_state = self._cursors.popitem(last=False)
-                self._mark_evicted(evicted_id, True)
+                self._cursors.popitem(last=False)
 
         def remove(self, cursor_id: str) -> None:
             """
@@ -638,7 +583,34 @@ class CursorManager:
         return cursor_id
 
     def get_cursor(self, cursor_id: str) -> AnyCursorState:
-        return self._cursors.get(cursor_id)
+        """
+        :param cursor_id: the cursor's ID
+        :return: the held cursor, now the most recently used one
+        :raises ValueError: if the cursor is not held; for an ID this manager generated, the message says the cursor was
+            closed or evicted for the cap, and for any other ID that it is an unknown or evicted cursor
+        """
+        state = self._cursors.get(cursor_id)
+        if state is not None:
+            return state
+        if self._is_generated_id(cursor_id):
+            raise ValueError(
+                f"Cursor '{cursor_id}' was closed or evicted: a session holds at most {CursorManager.MAX_CURSORS} cursors, and "
+                "starting another one evicts the least recently used one. Start a new cursor at the position you need."
+            )
+        raise ValueError(f"No cursor with id '{cursor_id}': unknown or evicted cursor. Active cursors: {self._cursors.ids()}")
+
+    def _is_generated_id(self, cursor_id: str) -> bool:
+        """
+        :param cursor_id: a cursor ID
+        :return: whether the ID is one this manager has generated: ``c`` followed by a number without a leading zero
+            that is below the next number the manager generates
+        """
+        match = self._GENERATED_ID.fullmatch(cursor_id)
+        if match is None:
+            return False
+        # the numbers compared as digit strings, so that an overlong number is never converted
+        number, next_number = match.group(1), str(self._next_cursor_id)
+        return len(number) < len(next_number) or (len(number) == len(next_number) and number < next_number)
 
     def get_lsp_cursor(self, cursor_id: str) -> CursorState:
         """Return the cursor strictly as an LSP :class:`CursorState`.

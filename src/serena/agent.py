@@ -163,14 +163,17 @@ class _LanguageServerIdleStop:
     holding it, so the next call that asks the manager for a server gets that server restarted.
     """
 
-    def __init__(self, agent: "SerenaAgent", idle_timeout: float) -> None:
+    def __init__(self, agent: "SerenaAgent", idle_timeout: float, on_stopped: Callable[[Project], None] = lambda project: None) -> None:
         """
         :param agent: the agent whose held projects are watched
         :param idle_timeout: the seconds without a tool call after which a project's language servers are stopped; a value
             of 0 or less stops none
+        :param on_stopped: called on the idle-stop thread with each project once the stop of its language servers has
+            finished and a call waiting for it has been released
         """
         self._agent = agent
         self._idle_timeout = idle_timeout
+        self._on_stopped = on_stopped
         self._lock = threading.Lock()
         # the monotonic time each watched project instance was last in use, keyed by the instance's identity
         self._last_use: dict[int, float] = {}
@@ -287,6 +290,7 @@ class _LanguageServerIdleStop:
                     self._stopping.discard(key)
                     self._stopped.add(key)
                     self._condition.notify_all()
+        self._on_stopped(project)
 
 
 class ProjectNotFoundError(Exception):
