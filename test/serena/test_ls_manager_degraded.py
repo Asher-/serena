@@ -15,7 +15,8 @@ import math
 import threading
 import time
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -229,6 +230,27 @@ class TestRestartRecoversUnavailableLanguage:
             manager.restart_language_server(LanguageServerId.SCALA)
 
 
+@dataclass
+class _HeldStartAgent:
+    """
+    An inactive agent and the registered project it is to activate, whose language-server start is held.
+    """
+
+    agent: SerenaAgent
+    project: Project
+
+
+@dataclass
+class _SwitchingAgent:
+    """
+    An inactive agent, the project it activates first, and the projects it then switches to in turn.
+    """
+
+    agent: SerenaAgent
+    first: Project
+    projects: list[Project]
+
+
 class TestActivationMessageDoesNotWaitForLsInit:
     """
     Covers the activation message while the backgrounded language-server-manager init task runs: the message reports
@@ -301,9 +323,12 @@ class TestActivationMessageDoesNotWaitForLsInit:
         finally:
             agent.on_shutdown(timeout=5)
 
-    def test_activation_returns_the_starting_statement_while_server_start_is_held(self) -> None:
-        # the scripted factory blocks on a gate released only after activation has returned: an activation that waited
-        # for the servers could not return while the gate is held
+    @pytest.fixture
+    def held_start_agent(self) -> Iterator[_HeldStartAgent]:
+        """
+        An inactive agent, constructed during setup and shut down during teardown, with a project whose scripted
+        server start blocks on a gate that teardown releases.
+        """
         init_gate = threading.Event()
 
         def create_manager(project: Project) -> LanguageServerManager:
@@ -319,19 +344,24 @@ class TestActivationMessageDoesNotWaitForLsInit:
             project._lsm_ready_event.set()
             return fake_manager
 
+        agent, project = self._build_agent(create_manager)
+        yield _HeldStartAgent(agent=agent, project=project)
+
+        # release the gate so the executor thread can finish before on_shutdown
+        init_gate.set()
+        agent.on_shutdown(timeout=5)
+
+    def test_activation_returns_the_starting_statement_while_server_start_is_held(self, held_start_agent: _HeldStartAgent) -> None:
+        # the scripted factory blocks on a gate released only after the test has returned: an activation that waited
+        # for the servers could not return while the gate is held.
         # _activate_project is called directly for the same reason as the companion
         # test: to keep our custom project instance (with the gated create_language_server_manager)
-        agent, project = self._build_agent(create_manager)
-        try:
-            agent._activate_project(project)
-            msg = agent.get_project_activation_message(agent.get_calling_session_id())
+        agent, project = held_start_agent.agent, held_start_agent.project
+        agent._activate_project(project)
+        msg = agent.get_project_activation_message(agent.get_calling_session_id())
 
-            assert not project._lsm_ready_event.is_set()
-            assert "Language servers (python, scala) are starting" in msg
-        finally:
-            # release the gate so the executor thread can finish before on_shutdown
-            init_gate.set()
-            agent.on_shutdown(timeout=5)
+        assert not project._lsm_ready_event.is_set()
+        assert "Language servers (python, scala) are starting" in msg
 
     def test_activation_statement_names_no_starting_servers_when_none_are_configured(self) -> None:
         backend = BuiltinLanguageBackend.LSP.get_instance()
@@ -346,9 +376,13 @@ class TestActivationMessageDoesNotWaitForLsInit:
 
         assert statement == "Programming languages: none. No language servers are configured for this project.\n"
 
-    def test_activation_p95_cpu_time_over_fifty_activations_is_at_most_20ms(self) -> None:
-        # the calling thread's CPU time, not wall-clock time: the thread is at times kept off the CPU by something
-        # outside this code (symptom://serena/agent/activation/duration), which this test does not measure
+    @pytest.fixture
+    def switching_agent(self) -> Iterator[_SwitchingAgent]:
+        """
+        An inactive agent, constructed during setup and shut down during teardown, with a project to activate first
+        and fifty further projects to switch to in turn, each starting its servers in the background.
+        """
+
         def create_manager(project: Project) -> LanguageServerManager:
             fake_manager = MagicMock(spec=LanguageServerManager)
             fake_manager.get_active_language_server_ids.return_value = []
@@ -357,7 +391,6 @@ class TestActivationMessageDoesNotWaitForLsInit:
             project._lsm_ready_event.set()
             return fake_manager
 
-        # one agent, and fifty further projects it switches to in turn, each starting its servers in the background
         agent, first = self._build_agent(create_manager)
         projects = [
             Project(project_root=first.project_root, project_config=first.project_config, serena_config=first.serena_config)
@@ -365,17 +398,20 @@ class TestActivationMessageDoesNotWaitForLsInit:
         ]
         for project in projects:
             project.create_language_server_manager = types.MethodType(create_manager, project)  # type: ignore[method-assign]
+        yield _SwitchingAgent(agent=agent, first=first, projects=projects)
+        agent.on_shutdown(timeout=5)
 
+    def test_activation_p95_cpu_time_over_fifty_activations_is_at_most_20ms(self, switching_agent: _SwitchingAgent) -> None:
+        # the calling thread's CPU time, not wall-clock time: the thread is at times kept off the CPU by something
+        # outside this code (symptom://serena/agent/activation/duration), which this test does not measure
+        agent = switching_agent.agent
         durations: list[float] = []
-        try:
-            agent._activate_project(first)
-            for project in projects:
-                started = time.thread_time()
-                agent._activate_project(project)
-                agent.get_project_activation_message(agent.get_calling_session_id())
-                durations.append(time.thread_time() - started)
-        finally:
-            agent.on_shutdown(timeout=5)
+        agent._activate_project(switching_agent.first)
+        for project in switching_agent.projects:
+            started = time.thread_time()
+            agent._activate_project(project)
+            agent.get_project_activation_message(agent.get_calling_session_id())
+            durations.append(time.thread_time() - started)
 
         # nearest-rank p95
         p95 = sorted(durations)[math.ceil(0.95 * len(durations)) - 1]
