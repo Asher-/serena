@@ -10,8 +10,6 @@ import pytest
 
 from solidlsp.language_servers import csharp_language_server, omnisharp, vbnet_language_server
 from solidlsp.language_servers.scala_language_server import find_build_roots
-from solidlsp.language_servers.solidity_language_server import count_solidity_files
-from solidlsp.language_servers.tsgo_language_server import find_tsgo_executable
 
 
 @pytest.fixture
@@ -62,6 +60,8 @@ def test_the_build_root_search_finds_a_build_root_it_reaches_only_through_a_link
 def test_the_solidity_file_count_counts_each_file_once_over_a_link_to_the_root(looped_tree: Path) -> None:
     (looped_tree / "token.sol").write_text("contract Token {}\n", encoding="utf-8")
     (looped_tree / "pkg" / "vault.sol").write_text("contract Vault {}\n", encoding="utf-8")
+    # imported here, so that the module's other tests run against a source without it
+    from solidlsp.language_servers.solidity_language_server import count_solidity_files
 
     assert count_solidity_files(str(looped_tree)) == 2
 
@@ -80,4 +80,8 @@ def test_the_tsgo_executable_search_ends_and_finds_the_executable_over_links_tha
     except OSError as exc:
         pytest.skip(f"Symbolic links are unavailable: {exc}")
 
-    assert find_tsgo_executable(str(tmp_path / "install")) == str(executable_dir / executable_name)
+    from solidlsp.language_servers.tsgo_language_server import TsgoLanguageServer
+
+    found = TsgoLanguageServer.DependencyProvider._find_executable(str(tmp_path / "install"))
+
+    assert found == str(executable_dir / executable_name)
