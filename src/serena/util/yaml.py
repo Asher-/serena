@@ -15,12 +15,22 @@ from serena.util.file_lifecycle import AtomicFileWriter
 log = logging.getLogger(__name__)
 
 
+class _YAMLWithoutPlugInDiscovery(YAML):
+    """
+    A YAML that does not list ruamel's installation directory for plug-ins when it is constructed: the typs used
+    here, rt and safe, are built into ruamel.
+    """
+
+    def official_plug_ins(self) -> list[str]:
+        return []
+
+
 def _create_yaml(preserve_comments: bool = False) -> YAML:
     """
     Creates a YAML that can load/save with comments if preserve_comments is True.
     """
     typ = None if preserve_comments else "safe"
-    result = YAML(typ=typ)
+    result = _YAMLWithoutPlugInDiscovery(typ=typ)
     result.preserve_quotes = preserve_comments
     return result
 

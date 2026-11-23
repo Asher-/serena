@@ -183,6 +183,9 @@ class TestActivationOfANewWorktree:
         config = _serena_config()
         main, worktree = _main_checkout_with_worktree(git_layout, tmp_path)
         _register(config, main, [LanguageServerId.PYTHON])
+        memories = worktree / ".serena" / "memories"
+        memories.mkdir(parents=True)
+        (memories / "notes.md").write_text("notes\n")
         agent = SerenaAgent(project=None, serena_config=config)
 
         try:
@@ -190,6 +193,7 @@ class TestActivationOfANewWorktree:
             activated = agent.activate_project_from_path_or_name(str(worktree))
             elapsed = time.monotonic() - started
             active = agent.get_active_project()
+            message = agent.get_project_activation_message(agent.get_calling_session_id())
         finally:
             agent.on_shutdown(timeout=5)
 
@@ -197,3 +201,4 @@ class TestActivationOfANewWorktree:
         assert elapsed <= 1.0
         assert active is not None
         assert active.project_config.language_servers == [LanguageServerId.PYTHON]
+        assert str(active.project_root) in message

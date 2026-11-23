@@ -100,3 +100,34 @@ def test_concurrent_saves_never_corrupt(tmp_path):
     loaded = load_yaml(path)
     assert "projects" in loaded
     assert all(isinstance(p, str) for p in loaded["projects"])
+
+
+@pytest.mark.parametrize("preserve_comments", [True, False])
+def test_a_load_and_a_save_list_no_directory_and_write_what_ruamel_writes(tmp_path, monkeypatch, preserve_comments: bool) -> None:
+    source = tmp_path / "source.yml"
+    source.write_text("# leading\nname: 'quoted'  # trailing\nitems:\n- one\n- two: 2\n")
+    written, reference = tmp_path / "written.yml", tmp_path / "reference.yml"
+
+    listed: list[str] = []
+    with monkeypatch.context() as patched:
+        for primitive in ("scandir", "listdir", "walk"):
+            original = getattr(os, primitive)
+
+            def record(path=".", *args, _original=original, **kwargs):
+                listed.append(str(path))
+                return _original(path, *args, **kwargs)
+
+            patched.setattr(os, primitive, record)
+        loaded = load_yaml(str(source))
+        # the safe dumper, used without comments, represents plain containers only
+        data = loaded if preserve_comments else {"name": str(loaded["name"]), "items": ["one", {"two": 2}]}
+        save_yaml(str(written), data, preserve_comments=preserve_comments)
+
+    # the same load and save through ruamel's own class, which discovers plug-ins
+    monkeypatch.setattr("serena.util.yaml._YAMLWithoutPlugInDiscovery", YAML)
+    loaded = load_yaml(str(source))
+    data = loaded if preserve_comments else {"name": str(loaded["name"]), "items": ["one", {"two": 2}]}
+    save_yaml(str(reference), data, preserve_comments=preserve_comments)
+
+    assert listed == []
+    assert written.read_bytes() == reference.read_bytes()

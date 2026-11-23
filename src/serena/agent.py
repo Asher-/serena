@@ -3,7 +3,6 @@ The Serena Model Context Protocol (MCP) Server
 """
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-import json
 import os
 import platform
 import re
@@ -65,10 +64,11 @@ from serena.session import SerenaSession, SessionRegistry
 from serena.task_executor import TaskExecutor
 from serena.tools import (
     ActivateProjectTool,
+    CheckOnboardingPerformedTool,
     GetCurrentConfigTool,
     GetLanguageServerStatusTool,
     InitialInstructionsTool,
-    OnboardingTool,
+    ListMemoriesTool,
     OpenDashboardTool,
     ReadMemoryTool,
     RestartLanguageServerTool,
@@ -2177,17 +2177,14 @@ class SerenaAgent:
         msg += self._language_backend.get_project_activation_statement(proj)
         msg += f"File encoding: {proj.project_config.encoding}.\n"
 
-        # add list of memories (if memories are enabled)
+        # point to the memory tools (if memories are enabled)
         include_memories = self._calling_active_tools().contains_tool_class(ReadMemoryTool)
         if include_memories:
-            project_memories = proj.memory_manager.list_project_memories()
-            if project_memories:
-                msg += (
-                    f"{json.dumps(project_memories.to_dict())}\n"
-                    + f"Use `{prompt_params.get_function_name(ReadMemoryTool)}` to read these memories later if they are relevant to the task.\n"
-                )
-            elif self.is_tool_function_available(OnboardingTool):
-                msg += f"Onboarding has not been performed yet. Ask the user whether to perform onboarding and if so, call `{prompt_params.get_function_name(OnboardingTool)}`.\n"
+            if self.is_tool_function_available(ListMemoriesTool):
+                msg += f"Use `{prompt_params.get_function_name(ListMemoriesTool)}` to list the project's memories.\n"
+            msg += f"Use `{prompt_params.get_function_name(ReadMemoryTool)}` to read memories later if they are relevant to the task.\n"
+            if self.is_tool_function_available(CheckOnboardingPerformedTool):
+                msg += f"Call `{prompt_params.get_function_name(CheckOnboardingPerformedTool)}` to learn whether onboarding has been performed.\n"
 
         # add prompts for modes that were dynamically activated by the project
         modes_with_prompts = self._project_prompt_status.get_modes_with_prompts_to_be_provided_for_project_activation(session_id)
