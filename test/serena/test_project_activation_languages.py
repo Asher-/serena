@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -204,3 +205,52 @@ class TestActivationOfANewWorktree:
         assert active is not None
         assert active.project_config.language_servers == [LanguageServerId.PYTHON]
         assert str(active.project_root) in message
+
+
+@dataclass
+class _PointerCase:
+    """
+    An inactive agent, constructed during setup, and the root of the registered project it is to activate, which
+    leaves the memory tools in ``excluded_tools`` inactive.
+    """
+
+    agent: SerenaAgent
+    root: Path
+    excluded_tools: list[str]
+
+
+class TestActivationMessageMemoryPointers:
+    """
+    Covers the activation message's pointers to the memory tools, for each memory tool the activated project leaves
+    inactive.
+    """
+
+    @pytest.fixture(
+        params=[[], ["list_memories"], ["check_onboarding_performed"], ["read_memory"]],
+        ids=["all-active", "without-list-memories", "without-onboarding-check", "without-read-memory"],
+    )
+    def pointer_case(self, request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[_PointerCase]:
+        config = _serena_config()
+        root = tmp_path / "project"
+        root.mkdir()
+        project = Project(
+            project_root=str(root),
+            project_config=ProjectConfig(project_name="project", language_servers=[], excluded_tools=request.param),
+            serena_config=config,
+        )
+        config.projects.append(RegisteredProject.from_project_instance(project))
+        agent = SerenaAgent(project=None, serena_config=config)
+        yield _PointerCase(agent=agent, root=root, excluded_tools=request.param)
+        agent.on_shutdown(timeout=5)
+
+    def test_the_message_points_to_each_memory_tool_the_project_leaves_active(self, pointer_case: _PointerCase) -> None:
+        agent = pointer_case.agent
+        agent.activate_project_from_path_or_name(str(pointer_case.root))
+        message = agent.get_project_activation_message(agent.get_calling_session_id())
+
+        reads_memories = "read_memory" not in pointer_case.excluded_tools
+        assert ("`read_memory`" in message) == reads_memories
+        assert ("`list_memories`" in message) == (reads_memories and "list_memories" not in pointer_case.excluded_tools)
+        assert ("`check_onboarding_performed`" in message) == (
+            reads_memories and "check_onboarding_performed" not in pointer_case.excluded_tools
+        )
