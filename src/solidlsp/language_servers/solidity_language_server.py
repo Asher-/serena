@@ -4,7 +4,6 @@ the Nomic Foundation Solidity Language Server (@nomicfoundation/solidity-languag
 """
 # SPDX-License-Identifier: MIT
 
-import glob
 import logging
 import os
 import pathlib
@@ -16,6 +15,7 @@ from typing import Any
 
 from overrides import override
 
+from serena.util.file_system import walk_dir_entries
 from solidlsp import ls_types
 from solidlsp.language_servers.common import RuntimeDependency, RuntimeDependencyCollection, build_npm_install_command
 from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, LSPConstants, SolidLanguageServer
@@ -281,8 +281,14 @@ class SolidityLanguageServer(SolidLanguageServer):
             log.info(f"LSP: window/logMessage: {msg}")
 
         # Count .sol files in the project to know when indexing is complete.
-        sol_files = glob.glob(os.path.join(self.repository_root_path, "**", "*.sol"), recursive=True)
-        expected_count = len(sol_files)
+        expected_count = sum(
+            1
+            for _directory, _subdirectories, files in walk_dir_entries(
+                self.repository_root_path, followlinks=True, is_ignored_dir=lambda entry: entry.name.startswith(".")
+            )
+            for file in files
+            if file.name.endswith(".sol") and not file.name.startswith(".")
+        )
         indexed_count = [0]
         all_indexed = threading.Event()
 

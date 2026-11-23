@@ -17,7 +17,7 @@ from typing import Any, cast
 from overrides import override
 
 from serena.util.dotnet import DotNETUtil
-from serena.util.file_system import match_path
+from serena.util.file_system import EnteredDirectories, match_path
 from solidlsp.ls import (
     LanguageServerDependencyProvider,
     LSPFileBuffer,
@@ -147,25 +147,32 @@ def breadth_first_file_scan(root_dir: str, is_ignored_path: Callable[[str], bool
 
     :param root_dir: the directory to scan
     :param is_ignored_path: predicate on paths relative to ``root_dir``; ignored directories are not traversed
-        and ignored files are not yielded
+        and ignored files are not yielded. Links to directories are followed, each real directory entered at most once
+        (see :class:`EnteredDirectories`).
     """
+
+    def is_ignored_dir(entry: os.DirEntry) -> bool:
+        return entry.name.startswith(".") or is_ignored_path(os.path.relpath(entry.path, root_dir))
+
+    entered = EnteredDirectories(root_dir, is_ignored_dir=is_ignored_dir)
     queue = [root_dir]
     while queue:
         current_dir = queue.pop(0)
         try:
-            for item in os.listdir(current_dir):
-                if item.startswith("."):
-                    continue
-                item_path = os.path.join(current_dir, item)
-                if is_ignored_path(os.path.relpath(item_path, root_dir)):
-                    continue
-                if os.path.isdir(item_path):
-                    queue.append(item_path)
-                elif os.path.isfile(item_path):
-                    yield item_path
+            with os.scandir(current_dir) as scanner:
+                entries = list(scanner)
         except (PermissionError, OSError):
             # Skip directories we can't access
-            pass
+            continue
+        subdirectories = []
+        for entry in entries:
+            if entry.name.startswith(".") or is_ignored_path(os.path.relpath(entry.path, root_dir)):
+                continue
+            if entry.is_dir():
+                subdirectories.append(entry)
+            elif entry.is_file():
+                yield entry.path
+        queue.extend(subdirectory.path for subdirectory in entered.admit(subdirectories))
 
 
 def find_solution_or_project_file(root_dir: str) -> str | None:

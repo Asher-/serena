@@ -14,6 +14,7 @@ from enum import Enum
 import psutil
 from overrides import override
 
+from serena.util.file_system import EnteredDirectories
 from solidlsp.initialize_params import DefaultInitializeParamsBuilder, InitializeParamsBuilder
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
@@ -304,21 +305,18 @@ def find_build_roots(repository_root_path: str, max_depth: int = DEFAULT_PROJECT
         return [repository_root_path]
 
     roots: list[str] = []
-    visited: set[str] = set()
+    # symlinks are followed, as Metals' own search does, each real directory entered at most once
+    entered = EnteredDirectories(repository_root_path, is_ignored_dir=lambda entry: entry.name.startswith("."))
 
     def scan(directory: str, depth: int) -> None:
-        # symlinks are followed, as Metals' own search does, so guard against cycles
-        real_path = os.path.realpath(directory)
-        if depth > max_depth or real_path in visited:
+        if depth > max_depth:
             return
-        visited.add(real_path)
         try:
             entries = sorted(os.scandir(directory), key=lambda e: e.name)
         except OSError:
             return
-        for entry in entries:
-            if entry.name.startswith(".") or not entry.is_dir():
-                continue
+        subdirectories = [entry for entry in entries if not entry.name.startswith(".") and entry.is_dir()]
+        for entry in entered.admit(subdirectories):
             if _is_build_root(entry.path):
                 roots.append(entry.path)
             elif entry.name not in BUILD_ROOT_SCAN_SKIP_DIRS:

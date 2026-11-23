@@ -662,7 +662,7 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoot):
             -- the only files where enclosing-symbol grouping is meaningful.
         :param max_matches: maximum number of cursors to open (one per
             unique enclosing symbol). Additional groups beyond this cap are
-            listed without cursor IDs. ``-1`` means no cap.
+            listed without cursor IDs. ``-1`` means no cap beyond the cursors a session holds (:attr:`CursorManager.MAX_CURSORS`).
         :param context_lines_before: number of lines of context to include
             before each match in the report.
         :param context_lines_after: number of lines of context to include
@@ -710,14 +710,12 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoot):
         if not groups and not unsymboled:
             return f"why: {because}\n\nNo matches for '{substring_pattern}'." + (f" {links_note}" if links_note else "")
 
-        # cap cursor creation at max_matches; the remainder are listed
-        # without cursors so the agent can decide whether to widen
-        if max_matches < 0:
-            opened_groups = groups
-            deferred = []
-        else:
-            opened_groups = groups[:max_matches]
-            deferred = groups[max_matches:]
+        # cap cursor creation at max_matches, and at the cursors a session holds, so that no cursor this grep
+        # opens is evicted by another it opens; the remainder are listed without cursors so the agent can decide
+        # whether to widen
+        cursor_cap = CursorManager.MAX_CURSORS if max_matches < 0 else min(max_matches, CursorManager.MAX_CURSORS)
+        opened_groups = groups[:cursor_cap]
+        deferred = groups[cursor_cap:]
 
         opened_cursors: list[tuple[str, LanguageServerSymbol, list[MatchedConsecutiveLines]]] = []
         for sym, hits in opened_groups:

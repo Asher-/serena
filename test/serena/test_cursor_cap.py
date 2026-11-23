@@ -1,43 +1,52 @@
 """tests of the bound on the cursors a session's :class:`CursorManager` holds.
 
-a manager holds at most :attr:`CursorManager.MAX_CURSORS` cursors; starting one more evicts the cursor used least
-recently, and using an evicted cursor's id reports that it was evicted for the cap.
+a manager holds at most :attr:`CursorManager.MAX_CURSORS` cursors; adding one more evicts the cursor used least recently,
+and using an evicted cursor's id reports that it was evicted for the cap, however long ago that was.
 """
 
 from pathlib import Path
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from serena.cursor import CursorManager
+from serena.symbol import LanguageServerSymbol
+from solidlsp import ls_types
 
 
 @pytest.fixture
 def manager(tmp_path: Path) -> CursorManager:
     """
-    :return: a manager over a stub project holding ``notes.txt``, a file no language server claims
+    :return: a manager over a stub project
     """
-    (tmp_path / "notes.txt").write_bytes(b"alpha\nbeta\n")
     project = MagicMock()
     project.project_root = str(tmp_path)
-    project.read_file = MagicMock(side_effect=lambda p: Path(tmp_path / p).read_text(encoding="utf-8"))
     return CursorManager(project)
 
 
-@pytest.fixture(autouse=True)
-def lsp_miss():
-    """Makes every language-server lookup miss, so each started cursor is a whole-file cursor on ``notes.txt``"""
-    retriever = MagicMock()
-    retriever.find_unique.side_effect = ValueError("no symbol")
-    with patch.object(CursorManager, "_retriever", new_callable=PropertyMock, return_value=retriever):
-        yield
+def _symbol(line: int) -> LanguageServerSymbol:
+    """
+    :param line: the line of the symbol
+    :return: a function symbol of ``module.py``, as a language server reports one
+    """
+    position_range = {"start": {"line": line, "character": 0}, "end": {"line": line, "character": 1}}
+    return LanguageServerSymbol(
+        ls_types.UnifiedSymbolInformation(  # type: ignore[typeddict-item]
+            name=f"function_{line}",
+            kind=ls_types.SymbolKind.Function,
+            range=position_range,
+            selectionRange=position_range,
+            location={"uri": "file:///module.py", "range": position_range, "relativePath": "module.py", "absolutePath": "/module.py"},
+            children=[],
+        )
+    )
 
 
 def _start(manager: CursorManager) -> str:
     """
-    :return: the id of a newly started cursor
+    :return: the id of a newly registered cursor
     """
-    cursor_id, _state = manager.start_cursor("notes.txt", relative_path="notes.txt")
+    cursor_id, _state = manager.register_cursor_at_symbol(_symbol(len(manager.list_cursors())))
     return cursor_id
 
 
@@ -69,6 +78,24 @@ def test_using_an_evicted_cursor_reports_its_eviction_for_the_cap(manager: Curso
 
     with pytest.raises(ValueError, match="evicted"):
         manager.get_cursor(evicted)
+
+
+def test_a_cursor_evicted_long_ago_still_reports_its_eviction(manager: CursorManager) -> None:
+    evicted = _start(manager)
+    for _ in range(CursorManager.MAX_CURSORS * 10):
+        _start(manager)
+
+    with pytest.raises(ValueError, match="evicted"):
+        manager.get_cursor(evicted)
+
+
+def test_a_named_cursor_evicted_reports_its_eviction(manager: CursorManager) -> None:
+    manager.register_cursor_at_symbol(_symbol(0), cursor_id="named")
+    for _ in range(CursorManager.MAX_CURSORS):
+        _start(manager)
+
+    with pytest.raises(ValueError, match="evicted"):
+        manager.get_cursor("named")
 
 
 def test_using_an_id_no_cursor_had_reports_it_as_unknown_rather_than_evicted(manager: CursorManager) -> None:

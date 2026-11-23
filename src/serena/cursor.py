@@ -491,16 +491,61 @@ class CursorManager:
         """
         The cursors of a manager, bounded by :attr:`CursorManager.MAX_CURSORS` with least-recently-used eviction.
 
-        A cursor counts as used when it is added or looked up. The IDs of the most recently evicted cursors are
-        remembered, a bounded number of them, so that a lookup of one reports the eviction rather than an unknown ID.
+        A cursor counts as used when it is added or looked up. Every evicted ID is remembered, so that a lookup of one
+        reports the eviction rather than an unknown ID: a generated ID (``c<n>``) as one bit of a bit set, any other ID by
+        name.
         """
 
-        _REMEMBERED_EVICTIONS_FACTOR = 4
-        """how many times :attr:`CursorManager.MAX_CURSORS` evicted IDs are remembered"""
+        _GENERATED_ID = re.compile(r"c(\d+)")
 
         def __init__(self) -> None:
             self._cursors: OrderedDict[str, AnyCursorState] = OrderedDict()
-            self._evicted: OrderedDict[str, None] = OrderedDict()
+            self._evicted_generated = bytearray()
+            self._evicted_named: set[str] = set()
+
+        def _evicted_bit(self, cursor_id: str) -> tuple[int, int] | None:
+            """
+            :param cursor_id: a cursor ID
+            :return: the byte index and bit mask of a generated ID in the evicted bit set; None for any other ID
+            """
+            match = self._GENERATED_ID.fullmatch(cursor_id)
+            if match is None:
+                return None
+            byte, bit = divmod(int(match.group(1)), 8)
+            return byte, 1 << bit
+
+        def _mark_evicted(self, cursor_id: str, evicted: bool) -> None:
+            """
+            :param cursor_id: a cursor ID
+            :param evicted: whether the ID is remembered as evicted (True) or forgotten as such (False)
+            """
+            position = self._evicted_bit(cursor_id)
+            if position is None:
+                if evicted:
+                    self._evicted_named.add(cursor_id)
+                else:
+                    self._evicted_named.discard(cursor_id)
+                return
+            byte, mask = position
+            if byte >= len(self._evicted_generated):
+                if not evicted:
+                    return
+                self._evicted_generated.extend(bytes(byte + 1 - len(self._evicted_generated)))
+            if evicted:
+                self._evicted_generated[byte] |= mask
+            else:
+                self._evicted_generated[byte] &= ~mask & 0xFF
+
+        def _was_evicted(self, cursor_id: str) -> bool:
+            """
+            :param cursor_id: a cursor ID
+            :return: whether the ID's cursor was evicted for the cap and not added again since
+            """
+            position = self._evicted_bit(cursor_id)
+            if position is None:
+                return cursor_id in self._evicted_named
+            byte, mask = position
+            return byte < len(self._evicted_generated) and bool(self._evicted_generated[byte] & mask)
 
         def __contains__(self, cursor_id: str) -> bool:
             return cursor_id in self._cursors
@@ -520,7 +565,7 @@ class CursorManager:
             :raises ValueError: if the cursor is not held; the message says so when it was evicted for the cap
             """
             if cursor_id not in self._cursors:
-                if cursor_id in self._evicted:
+                if self._was_evicted(cursor_id):
                     raise ValueError(
                         f"Cursor '{cursor_id}' was evicted: a session holds at most {CursorManager.MAX_CURSORS} cursors, and "
                         "starting another one evicted this least recently used one. Start a new cursor at the position you need."
@@ -538,14 +583,12 @@ class CursorManager:
             """
             self._cursors[cursor_id] = state
             self._cursors.move_to_end(cursor_id)
-            self._evicted.pop(cursor_id, None)
+            self._mark_evicted(cursor_id, False)
 
             # the least recently used cursors beyond the cap, remembered as evicted
             while len(self._cursors) > CursorManager.MAX_CURSORS:
                 evicted_id, _evicted_state = self._cursors.popitem(last=False)
-                self._evicted[evicted_id] = None
-            while len(self._evicted) > CursorManager.MAX_CURSORS * self._REMEMBERED_EVICTIONS_FACTOR:
-                self._evicted.popitem(last=False)
+                self._mark_evicted(evicted_id, True)
 
         def remove(self, cursor_id: str) -> None:
             """

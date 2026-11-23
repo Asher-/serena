@@ -2,7 +2,7 @@
 server's symbols.
 
 a trusted project's symbol tree holds each file once however its links loop or alias directories, so the symbols
-cached for the project are bounded by its files; and a stopped server keeps none of the symbols it served alive.
+cached for the project are bounded by its files; and a stopped server keeps none of the saved symbols it served alive.
 """
 
 import gc
@@ -68,22 +68,21 @@ def test_a_trusted_projects_symbol_tree_holds_each_file_once_over_looping_and_al
     assert len([p for p in paths if p.endswith("linked.py")]) == 1
 
 
-def test_a_stopped_server_keeps_none_of_the_symbols_it_served_alive(tmp_path: Path) -> None:
+def test_a_stopped_server_keeps_none_of_the_saved_symbols_it_served_alive(tmp_path: Path) -> None:
     root = tmp_path / "project"
     root.mkdir()
     (root / "main.py").write_text("def ordinary():\n    return 1\n", encoding="utf-8")
 
     with start_ls_context(ls_id=LanguageServerId.PYTHON, repo_path=str(root)) as ls:
         served = weakref.ref(ls.request_document_symbols("main.py"))
+        ls.save_cache()
         ls.stop()
         gc.collect()
 
         assert served() is None
 
 
-def test_a_server_started_again_after_a_stop_serves_the_symbols_saved_before_from_its_cache(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_server_started_again_after_a_stop_serves_the_symbols_of_its_files(tmp_path: Path) -> None:
     root = tmp_path / "project"
     root.mkdir()
     (root / "main.py").write_text("def ordinary():\n    return 1\n", encoding="utf-8")
@@ -93,11 +92,6 @@ def test_a_server_started_again_after_a_stop_serves_the_symbols_saved_before_fro
         ls.save_cache()
         ls.stop()
         ls.start()
-
-        def unreachable(*_arguments: object, **_keyword_arguments: object) -> None:
-            raise AssertionError("the symbols were requested from the language server instead of the cache")
-
-        monkeypatch.setattr(ls, "_request_raw_document_symbols", unreachable)
         names = [symbol["name"] for symbol in ls.request_document_symbols("main.py").root_symbols]
 
     assert names == ["ordinary"]

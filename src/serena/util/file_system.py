@@ -198,35 +198,61 @@ class EnteredDirectories:
     """
     The real paths of the directories a walk that follows symbolic links to directories has entered.
 
-    The walk enters a directory only if its real path is not yet among them, so a link to the walk's root or to an
-    ancestor, and a second link to a directory already entered, add nothing to the walk, while a link to a directory the
-    walk does not otherwise reach is followed. Of the subdirectories of one directory, real directories are admitted
-    before links, so a directory both contained and linked is walked under its own path.
+    The walk enters a directory only if its real path is not yet among them, and enters a link only if the directory it
+    leads to is one the walk does not reach through real directories alone. So a link to the walk's root, to an ancestor
+    or to any other directory the walk reaches itself adds nothing, and each such directory is walked under its own path
+    whatever order the walk meets it in; a link into an ignored directory or out of the walk's roots is followed, and of
+    several links to one such directory only the first, in walk order with names in sorted order, is entered.
     """
 
-    def __init__(self, *roots: str) -> None:
+    def __init__(self, *roots: str, is_ignored_dir: Callable[[os.DirEntry], bool] = lambda entry: False) -> None:
         """
         :param roots: the directories the walk starts in, which count as entered
+        :param is_ignored_dir: the walk's predicate for the directories it does not enter
         """
-        self._real_paths: set[str] = {os.path.realpath(root) for root in roots}
+        self._roots = [os.path.realpath(root) for root in roots]
+        self._is_ignored_dir = is_ignored_dir
+        self._real_paths: set[str] = set(self._roots)
 
     def admit(self, subdirectories: list[os.DirEntry]) -> list[os.DirEntry]:
         """
         Admits the subdirectories of one directory that the walk shall enter, recording them as entered.
 
-        :param subdirectories: the subdirectories the walk would descend into, links to directories included, in listing
-            order
-        :return: the subdirectories whose real path was not entered before, in listing order
+        :param subdirectories: the non-ignored subdirectories the walk would descend into, links to directories included
+        :return: the admitted subdirectories, in the order given
         """
-        # real directories are recorded before links, so a link to a sibling yields to the sibling itself
+        # real directories are considered before links, each in name order
         admitted: set[int] = set()
-        for subdirectory in sorted(subdirectories, key=lambda entry: entry.is_symlink()):
+        for subdirectory in sorted(subdirectories, key=lambda entry: (entry.is_symlink(), entry.name)):
             real_path = os.path.realpath(subdirectory.path)
-            if real_path not in self._real_paths:
-                self._real_paths.add(real_path)
-                admitted.add(id(subdirectory))
+            if real_path in self._real_paths:
+                continue
+            if subdirectory.is_symlink() and self._is_reached_through_real_directories(real_path):
+                continue
+            self._real_paths.add(real_path)
+            admitted.add(id(subdirectory))
 
         return [subdirectory for subdirectory in subdirectories if id(subdirectory) in admitted]
+
+    def _is_reached_through_real_directories(self, real_path: str) -> bool:
+        """
+        :param real_path: the real path of a directory a link leads to
+        :return: whether the walk reaches that directory without a link: it lies within a root, and no directory on the
+            way to it is ignored
+        """
+        for root in self._roots:
+            if os.path.commonpath([root, real_path]) != root:
+                continue
+            current = root
+            for part in os.path.relpath(real_path, root).split(os.sep):
+                current = os.path.join(current, part)
+                try:
+                    if self._is_ignored_dir(dir_entry_from_path(current)):
+                        return False
+                except OSError:
+                    return False
+            return True
+        return False
 
 
 def walk_dir_entries(
@@ -249,7 +275,7 @@ def walk_dir_entries(
         the directory should be ignored
     :return: an iterator yielding tuples of (directory path, list of subdirectory entries, list of file entries)
     """
-    entered = EnteredDirectories(top) if followlinks else None
+    entered = EnteredDirectories(top, is_ignored_dir=is_ignored_dir) if followlinks and recursive else None
     yield from _walk_dir_entries(top, topdown, onerror, followlinks, recursive, is_ignored_dir, entered)
 
 

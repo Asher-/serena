@@ -13,6 +13,7 @@ from typing import Any, cast
 from overrides import override
 
 from serena.util.dotnet import DotNETUtil
+from serena.util.file_system import EnteredDirectories
 from solidlsp.dependency_provider import DownloadedDependency, DownloadedDependencyHashDatabase
 from solidlsp.ls import LanguageServerDependencyProvider, LSPFileBuffer, RawDocumentSymbol, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
@@ -104,22 +105,27 @@ _RUNTIME_DEPENDENCIES = [
 def breadth_first_file_scan(root_dir: str) -> Iterable[str]:
     """
     Perform a breadth-first scan of files in the given directory.
-    Yields file paths in breadth-first order.
+    Yields file paths in breadth-first order. Links to directories are followed, each real directory entered at most
+    once (see :class:`EnteredDirectories`).
     """
+    entered = EnteredDirectories(root_dir, is_ignored_dir=lambda entry: entry.name.startswith("."))
     queue = [root_dir]
     while queue:
         current_dir = queue.pop(0)
         try:
-            for item in os.listdir(current_dir):
-                if item.startswith("."):
-                    continue
-                item_path = os.path.join(current_dir, item)
-                if os.path.isdir(item_path):
-                    queue.append(item_path)
-                elif os.path.isfile(item_path):
-                    yield item_path
+            with os.scandir(current_dir) as scanner:
+                entries = list(scanner)
         except (PermissionError, OSError):
-            pass
+            continue
+        subdirectories = []
+        for entry in entries:
+            if entry.name.startswith("."):
+                continue
+            if entry.is_dir():
+                subdirectories.append(entry)
+            elif entry.is_file():
+                yield entry.path
+        queue.extend(subdirectory.path for subdirectory in entered.admit(subdirectories))
 
 
 def find_solution_or_project_file(root_dir: str) -> str | None:

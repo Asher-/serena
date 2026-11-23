@@ -747,8 +747,10 @@ class SolidLanguageServer(ABC):
         """maps relative file paths to a tuple of (file_content_hash, document_symbols)"""
         self._document_symbols_cache_is_modified: bool = False
         self._load_document_symbols_cache()
-        self._symbol_caches_released: bool = False
-        """whether a stop released the symbol caches, which the next start reloads"""
+        self._raw_document_symbols_cache_released: bool = False
+        """whether a stop released the raw document symbols cache, which the next start reloads"""
+        self._document_symbols_cache_released: bool = False
+        """whether a stop released the document symbols cache, which the next start reloads"""
 
         self.server_started = False
         if config.trace_lsp_communication:
@@ -2444,6 +2446,14 @@ class SolidLanguageServer(ABC):
         :return: A list of root symbols representing the top-level packages/modules in the project.
         """
 
+        def is_ignored_dir(entry: os.DirEntry) -> bool:
+            # discovery's ignore rule for a directory, applied to its unresolved path
+            try:
+                rel_path = os.path.relpath(entry.path, self.repository_root_path)
+            except ValueError:
+                return True
+            return self.is_ignored_path(rel_path, dir_entry=entry, check_path_for_ignored_dirnames=True)
+
         # Helper function to recursively process directories
         def process_directory(abs_dir_path: str) -> list[ls_types.UnifiedSymbolInformation]:
             rel_dir_path: str | None
@@ -2562,12 +2572,12 @@ class SolidLanguageServer(ABC):
                 return root_nodes
             else:
                 self.PathWorkspaceStatus.from_abs_resolved_path(Path(within_abs_path).resolve(), self).check_within_workspace_or_raise()
-                entered = EnteredDirectories(within_abs_path)
+                entered = EnteredDirectories(within_abs_path, is_ignored_dir=is_ignored_dir)
                 return process_directory(within_abs_path)
         else:
             full_result = []
             workspace_roots = self.config.get_absolute_workspace_folders(self.repository_root_path)
-            entered = EnteredDirectories(*workspace_roots)
+            entered = EnteredDirectories(*workspace_roots, is_ignored_dir=is_ignored_dir)
             for root in workspace_roots:
                 full_result.extend(process_directory(root))
             return full_result
@@ -3693,10 +3703,12 @@ class SolidLanguageServer(ABC):
         log.info(f"Starting language server {self.language_server.ls_id} for {self.language_server.repository_root_path}")
 
         # the symbol caches a stop released, reloaded from disk
-        if self._symbol_caches_released:
+        if self._raw_document_symbols_cache_released:
             self._load_raw_document_symbols_cache()
+            self._raw_document_symbols_cache_released = False
+        if self._document_symbols_cache_released:
             self._load_document_symbols_cache()
-            self._symbol_caches_released = False
+            self._document_symbols_cache_released = False
 
         self.server_started = True
         try:
@@ -3714,8 +3726,8 @@ class SolidLanguageServer(ABC):
 
     def stop(self, shutdown_timeout: float = 2.0) -> None:
         """
-        Stops the language server process and releases the symbol caches it holds in memory; changes to them not saved
-        before the stop are discarded, and a later start reloads them from disk.
+        Stops the language server process and releases the symbol caches it holds in memory that hold no unsaved change;
+        a later start reloads released caches from disk.
         This function never raises an exception (any exceptions during shutdown are logged).
 
         :param shutdown_timeout: time, in seconds, to wait for the server to shutdown gracefully before killing it
@@ -3730,15 +3742,17 @@ class SolidLanguageServer(ABC):
 
     def _release_symbol_caches(self) -> None:
         """
-        Releases the symbol caches held in memory, leaving them empty and unmodified, so that a save writes nothing over
-        the caches on disk until the caches are reloaded.
+        Releases the symbol caches held in memory that hold no unsaved change, leaving them empty and unmodified, so that
+        a save writes nothing over the caches on disk until they are reloaded; a cache with unsaved changes is kept, so
+        that a later save can still write them.
         """
-        self._raw_document_symbols_cache = {}
-        self._raw_document_symbols_cache_is_modified = False
-        self._document_symbols_cache = {}
-        self._document_symbols_cache_is_modified = False
+        if not self._raw_document_symbols_cache_is_modified:
+            self._raw_document_symbols_cache = {}
+            self._raw_document_symbols_cache_released = True
+        if not self._document_symbols_cache_is_modified:
+            self._document_symbols_cache = {}
+            self._document_symbols_cache_released = True
         self.__dict__.pop("_symbol_range_index_cache", None)
-        self._symbol_caches_released = True
 
     @property
     def language_server(self) -> Self:

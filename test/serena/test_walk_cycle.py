@@ -84,6 +84,30 @@ def test_a_following_walk_gathers_the_files_of_a_directory_two_links_alias_once(
     assert Path(walked[0]).name == "x.py"
 
 
+def test_a_following_walk_names_a_directory_by_its_own_path_when_a_link_to_it_comes_first(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "z" / "pkg").mkdir(parents=True)
+    (root / "z" / "pkg" / "x.py").write_text("X = 1\n", encoding="utf-8")
+    _link(root / "a_link", root / "z" / "pkg")
+
+    assert _walked_files(root) == ["z/pkg/x.py"]
+
+
+def test_a_non_recursive_following_walk_lists_every_link_beside_the_directory(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "shared").mkdir(parents=True)
+    _link(root / "first", root / "shared")
+    _link(root / "second", root / "shared")
+
+    listed = [
+        entry.name
+        for _directory, subdirectories, _files in walk_dir_entries(str(root), followlinks=True, recursive=False)
+        for entry in subdirectories
+    ]
+
+    assert sorted(listed) == ["first", "second", "shared"]
+
+
 def test_a_following_walk_follows_a_link_to_a_directory_it_does_not_otherwise_reach(tmp_path: Path) -> None:
     root = tmp_path / "root"
     root.mkdir()

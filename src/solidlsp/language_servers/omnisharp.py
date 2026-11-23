@@ -11,6 +11,7 @@ from collections.abc import Iterable
 
 from overrides import override
 
+from serena.util.file_system import EnteredDirectories
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.ls_exceptions import SolidLSPException
@@ -33,22 +34,25 @@ DEFAULT_RAZOR_OMNISHARP_VERSION = "7.0.0-preview.23363.1"
 def breadth_first_file_scan(root: str) -> Iterable[str]:
     """
     This function was obtained from https://stackoverflow.com/questions/49654234/is-there-a-breadth-first-search-option-available-in-os-walk-or-equivalent-py
-    It traverses the directory tree in breadth first order.
+    It traverses the directory tree in breadth first order. Links to directories are followed, each real directory
+    entered at most once (see :class:`EnteredDirectories`).
     """
+    entered = EnteredDirectories(root)
     dirs = [root]
     # while we has dirs to scan
     while dirs:
         next_dirs = []
         for parent in dirs:
-            # scan each dir
-            for f in os.listdir(parent):
-                # if there is a dir, then save for next ittr
-                # if it  is a file then yield it (we'll return later)
-                ff = os.path.join(parent, f)
-                if os.path.isdir(ff):
-                    next_dirs.append(ff)
+            # scan each dir: files are yielded, the admitted subdirectories are scanned in the next iteration
+            with os.scandir(parent) as scanner:
+                entries = list(scanner)
+            subdirectories = []
+            for entry in entries:
+                if entry.is_dir():
+                    subdirectories.append(entry)
                 else:
-                    yield ff
+                    yield entry.path
+            next_dirs.extend(subdirectory.path for subdirectory in entered.admit(subdirectories))
 
         # once we've done all the current dirs then
         # we set up the next itter as the child dirs
