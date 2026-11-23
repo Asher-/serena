@@ -336,8 +336,13 @@ class LanguageServerManager:
             # successful startup clears any prior unavailability for the language
             self._unavailable_languages.pop(ls_id, None)
 
-            # stop the replaced server now that its replacement holds the slot
+            # save the replaced server's caches, which it holds in memory whether or not its process still runs, then
+            # stop it, now that its replacement holds the slot
             if replaced is not None:
+                try:
+                    replaced.save_cache()
+                except Exception as exception:
+                    log.error(f"Failed to save the cache of the replaced language server for {ls_id}: {exception}", exc_info=exception)
                 replaced.stop()
             return ls
 
@@ -393,11 +398,11 @@ class LanguageServerManager:
 
     @staticmethod
     def _stop_language_server(ls: SolidLanguageServer, save_cache: bool = False, timeout: float = 2.0) -> None:
-        if ls.is_running():
-            if save_cache:
-                ls.save_cache()
-            log.info(f"Stopping language server for language {ls.ls_id} ...")
-            ls.stop(shutdown_timeout=timeout)
+        # a server whose process has ended still holds its caches in memory, so it is saved and stopped all the same
+        if save_cache:
+            ls.save_cache()
+        log.info(f"Stopping language server for language {ls.ls_id} ...")
+        ls.stop(shutdown_timeout=timeout)
 
     def iter_language_servers(self) -> Iterator[SolidLanguageServer]:
         for ls in list(self._language_servers.values()):

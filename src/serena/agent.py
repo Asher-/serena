@@ -863,6 +863,7 @@ class SerenaAgent:
         context: SerenaAgentContext | None = None,
         modes: ModeSelectionDefinition | None = None,
         memory_log_handler: MemoryLogHandler | None = None,
+        on_language_servers_idle_stopped: Callable[[Project], None] = lambda project: None,
     ):
         """
         :param project: the project to load immediately or None to not load any project; may be a path to the project or a name of
@@ -876,6 +877,8 @@ class SerenaAgent:
         :param modes: mode selection definition to apply for this session
         :param memory_log_handler: a MemoryLogHandler instance from which to read log messages; if None, a new one will be created
             if necessary.
+        :param on_language_servers_idle_stopped: called with each project whose language servers the idle stop has stopped,
+            once that stop has finished
         """
         self._project_activation_callback = project_activation_callback
         self._project_activation_error: str | None = project_activation_error
@@ -951,7 +954,9 @@ class SerenaAgent:
 
         # obtain serena configuration using the decoupled factory function
         self.serena_config = serena_config or SerenaConfig.from_config_file()
-        self._language_server_idle_stop = _LanguageServerIdleStop(self, self.serena_config.language_server_idle_timeout)
+        self._language_server_idle_stop = _LanguageServerIdleStop(
+            self, self.serena_config.language_server_idle_timeout, on_stopped=on_language_servers_idle_stopped
+        )
         # the process's answer to running out of file descriptors, installed once construction is complete
         self._descriptor_exhaustion_responder = _ShutdownOnDescriptorExhaustion(self)
 

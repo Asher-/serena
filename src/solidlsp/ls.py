@@ -3792,6 +3792,12 @@ class SolidLanguageServer(ABC):
     def is_running(self) -> bool:
         return self.server.is_running()
 
+    def process_id(self) -> int | None:
+        """
+        :return: the id of the language server process this server started, or None if it started none
+        """
+        return self.server.process_id()
+
     def _create_initialize_params_builder(self) -> InitializeParamsBuilder:
         return DefaultInitializeParamsBuilder(self)
 

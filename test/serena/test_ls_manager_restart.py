@@ -131,6 +131,32 @@ class TestRestartStopsReplacedServer:
         assert replacement is factory.created[1]
         assert list(manager.iter_language_servers()) == [replacement]
 
+    def test_replacement_of_a_server_found_not_running_saves_its_cache_before_stopping_it(self) -> None:
+        # the held server's process has ended, its caches still held in memory
+        factory = _GatedLanguageServerFactory()
+        manager = _python_manager(factory)
+        replaced = factory.created[0]
+        replaced.is_running.return_value = False
+        order = MagicMock()
+        order.attach_mock(replaced.save_cache, "save_cache")
+        order.attach_mock(replaced.stop, "stop")
+
+        manager.restart_language_server(LanguageServerId.PYTHON)
+
+        # its caches were saved, then it was stopped
+        assert [entry[0] for entry in order.mock_calls] == ["save_cache", "stop"]
+
+    def test_removing_a_language_whose_server_is_not_running_saves_its_cache_and_stops_it(self) -> None:
+        factory = _GatedLanguageServerFactory()
+        manager = _python_manager(factory)
+        removed = factory.created[0]
+        removed.is_running.return_value = False
+
+        manager.remove_language_server(LanguageServerId.PYTHON, save_cache=True)
+
+        removed.save_cache.assert_called_once()
+        removed.stop.assert_called_once()
+
     def test_replacement_of_a_server_found_not_running_stops_it(self) -> None:
         # a caller finds the held server not running
         factory = _GatedLanguageServerFactory()

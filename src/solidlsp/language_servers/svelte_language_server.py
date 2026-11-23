@@ -443,6 +443,11 @@ class SvelteLanguageServer(SolidLanguageServer):
         """Shut down the companion TypeScript server if running."""
         if self._ts_server is not None:
             self._cleanup_indexed_svelte_files()
+            # the companion holds its symbol caches in memory; they are saved before it is stopped and dropped
+            try:
+                self._ts_server.save_cache()
+            except Exception as exc:
+                log.warning("Error saving the cache of the companion TypeScript server: %s", exc)
             try:
                 log.info("Stopping companion SvelteTypeScriptServer")
                 self._ts_server.stop()

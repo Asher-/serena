@@ -153,9 +153,9 @@ def test_a_grep_over_more_symbols_than_the_cap_opens_cursors_up_to_the_cap_and_k
         for line in range(CursorManager.MAX_CURSORS + 1)
     ]
     manager.find_pattern_with_enclosing_symbols = lambda *args, **kwargs: (groups, [])  # type: ignore[method-assign]
-    tool = object.__new__(CursorGrepTool)
-    tool.agent = MagicMock()
-    tool.agent.get_cursor_manager.return_value = manager
+    agent = MagicMock()
+    agent.get_cursor_manager.return_value = manager
+    tool = CursorGrepTool(agent)
 
     result = tool.apply(substring_pattern="x", because="to see the cap", max_matches=max_matches, max_answer_chars=10**8)
 

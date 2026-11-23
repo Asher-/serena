@@ -220,6 +220,12 @@ class LanguageServerInterface(ABC):
         """
         return False
 
+    def process_id(self) -> int | None:
+        """
+        :return: the id of the language server process this interface started, or None if it started none
+        """
+        return None
+
     @abstractmethod
     def is_running(self) -> bool:
         """
@@ -564,6 +570,9 @@ class StdioLanguageServer(LanguageServerInterface):
 
     def is_running(self) -> bool:
         return self._process is not None and self._process.returncode is None
+
+    def process_id(self) -> int | None:
+        return self._process.pid if self._process is not None else None
 
     def _start(self) -> None:
         child_proc_env = os.environ.copy()

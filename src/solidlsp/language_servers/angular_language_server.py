@@ -445,6 +445,11 @@ class AngularLanguageServer(SolidLanguageServer):
 
     def _stop_typescript_server(self) -> None:
         if self._ts_server is not None:
+            # the companion holds its symbol caches in memory; they are saved before it is stopped and dropped
+            try:
+                self._ts_server.save_cache()
+            except Exception as exc:
+                log.warning("Error saving the cache of the companion TypeScript server: %s", exc)
             try:
                 log.info("Stopping companion TypeScript server")
                 self._ts_server.stop()

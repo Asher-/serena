@@ -7,21 +7,24 @@ next call is served again; stopping a server whose process has ended saves its s
 
 from __future__ import annotations
 
-import contextvars
 import gc
 import logging
+import os
+import signal
 import threading
 import weakref
 from collections.abc import Iterator
 from pathlib import Path
 
+import psutil
 import pytest
 
-from serena.agent import _SESSION_KEY_VAR, SerenaAgent, _LanguageServerIdleStop
+from serena.agent import SerenaAgent
 from serena.config.serena_config import ProjectConfig, SerenaConfig
 from serena.cursor import CursorManager
 from serena.language_backend import BuiltinLanguageBackend
 from serena.project import Project
+from serena.tools.config_tools import GetCurrentConfigTool
 from solidlsp.ls import DocumentSymbols
 from solidlsp.ls_config import LanguageServerId
 
@@ -129,22 +132,30 @@ def test_sessions_greps_and_finds_on_a_looped_project_keep_at_most_its_files_sym
 
 def test_an_idle_stop_releases_the_symbols_its_servers_served_and_the_next_call_is_served_again(tmp_path: Path) -> None:
     root = _looped_tree(tmp_path / "project")
-    agent = SerenaAgent(serena_config=_config(root))
-    project = _project(root, agent.serena_config)
+    # an agent whose idle stop reports each project whose servers it stopped
+    stopped = threading.Event()
+    # the project's own configuration, naming its Python language server, which activation by path reads
+    (root / ".serena").mkdir(exist_ok=True)
+    (root / ".serena" / "project.yml").write_text(
+        f"project_name: {root.name}\nlanguage_servers:\n- {LanguageServerId.PYTHON.get_key()}\nlanguage_backend: LSP\n", encoding="utf-8"
+    )
+    agent = SerenaAgent(
+        project=str(root),
+        serena_config=_config(root, idle_timeout=_IDLE_TIMEOUT),
+        on_language_servers_idle_stopped=lambda _project: stopped.set(),
+    )
+    project = agent.get_active_project()
+    assert project is not None
     manager = project.create_language_server_manager()
     try:
-        # the project held by a session, whose call is served symbols
-        def activate() -> None:
-            _SESSION_KEY_VAR.set("session-1")
-            agent._activate_project(project, update_active_modes=False, update_active_tools=False)
+        # the idle stop of the newly activated project, after which it is not stopped again until it is used
+        assert stopped.wait(_WAIT)
+        stopped.clear()
 
-        contextvars.copy_context().run(activate)
+        # symbols served by the restarted server, then a tool call on the project, from whose end the next idle stop counts
         server = manager.get_language_server("pkg/module_0.py")
         served = weakref.ref(server.request_document_symbols("pkg/module_0.py"))
-
-        # the agent's idle stop, begun once the symbols are served and reporting each project whose servers it stopped
-        stopped = threading.Event()
-        agent._language_server_idle_stop = _LanguageServerIdleStop(agent, _IDLE_TIMEOUT, on_stopped=lambda _project: stopped.set())
+        agent.get_tool(GetCurrentConfigTool).apply_ex(log_call=False)
 
         assert stopped.wait(_WAIT)
         gc.collect()
@@ -167,9 +178,10 @@ def test_stopping_a_crashed_server_saves_its_symbols_and_keeps_none_of_them_aliv
     saved.unlink(missing_ok=True)
 
     # the server's process ends on its own
-    process = server.server._process
-    process.kill()
-    process.wait()
+    pid = server.process_id()
+    assert pid is not None
+    os.kill(pid, signal.SIGKILL)
+    psutil.Process(pid).wait(timeout=_WAIT)
 
     manager.stop_all(save_cache=True)
     gc.collect()

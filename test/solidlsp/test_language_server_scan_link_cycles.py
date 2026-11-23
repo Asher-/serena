@@ -80,8 +80,9 @@ def test_the_tsgo_executable_search_ends_and_finds_the_executable_over_links_tha
     except OSError as exc:
         pytest.skip(f"Symbolic links are unavailable: {exc}")
 
-    from solidlsp.language_servers.tsgo_language_server import TsgoLanguageServer
+    # imported here, so that the module's other tests run against a source without it
+    from solidlsp.language_servers.tsgo_language_server import find_tsgo_executable
 
-    found = TsgoLanguageServer.DependencyProvider._find_executable(str(tmp_path / "install"))
+    found = find_tsgo_executable(str(tmp_path / "install"))
 
     assert found == str(executable_dir / executable_name)

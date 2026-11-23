@@ -14,6 +14,7 @@ import pytest
 
 from solidlsp import ls_types
 from solidlsp.ls_config import LanguageServerId
+from solidlsp.util.cache import load_pickle
 from test.conftest import start_ls_context
 
 pytestmark = pytest.mark.python
@@ -62,10 +63,34 @@ def test_a_trusted_projects_symbol_tree_holds_each_file_once_over_looping_and_al
     with start_ls_context(ls_id=LanguageServerId.PYTHON, repo_path=str(root)) as ls:
         ls.config = replace(ls.config, is_project_trusted=True)
         paths = _file_paths(ls.request_full_symbol_tree())
+        # the document symbols the server holds, as its public save writes them
+        ls.save_cache()
+        saved = load_pickle(str(ls.cache_dir / ls.DOCUMENT_SYMBOL_CACHE_FILENAME))["obj"]
 
     assert len(paths) == 3
     assert {"main.py", "pkg/module.py"} <= set(paths)
     assert len([p for p in paths if p.endswith("linked.py")]) == 1
+    # at most one entry per distinct real file: main.py, pkg/module.py and the shared linked.py
+    assert 0 < len(saved) <= 3
+
+
+@pytest.mark.parametrize("alias_inside_project", [False, True], ids=["alias_outside_the_project", "alias_inside_the_project"])
+def test_a_symbol_tree_over_two_workspace_roots_with_one_real_directory_holds_each_file_once(
+    tmp_path: Path, alias_inside_project: bool
+) -> None:
+    # a guard of the claim that a second root sharing the first's real directory adds no file: the outside alias is an
+    # ignored path, and the inside alias is a link whose real directory, the root, is entered already
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "main.py").write_text("def ordinary():\n    return 1\n", encoding="utf-8")
+    alias = (root if alias_inside_project else tmp_path) / "alias"
+    _link(alias, root)
+
+    with start_ls_context(ls_id=LanguageServerId.PYTHON, repo_path=str(root)) as ls:
+        ls.config = replace(ls.config, is_project_trusted=True, workspace_folders=[str(root), str(alias)])
+        paths = _file_paths(ls.request_full_symbol_tree())
+
+    assert paths == ["main.py"]
 
 
 def test_a_stopped_server_keeps_none_of_the_saved_symbols_it_served_alive(tmp_path: Path) -> None:

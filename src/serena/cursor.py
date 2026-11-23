@@ -487,6 +487,9 @@ class CursorManager:
     MAX_CURSORS = 512
     """the most cursors a manager holds"""
 
+    MAX_STRUCTURAL_FILES = 256
+    """the most files whose structural walk a manager keeps; the one used least recently is dropped beyond it"""
+
     _GENERATED_ID = re.compile(r"c([1-9][0-9]*)")
     """the form of the cursor IDs a manager generates, capturing the number"""
 
@@ -563,7 +566,7 @@ class CursorManager:
         # lazy default so test overrides and production both go through one path
         self._structural_registry = structural_registry if structural_registry is not None else default_structural_backend_registry()
         # per-file cache of structural walk_nodes output; keyed by relative path
-        self._structural_nodes_cache: dict[str, _StructuralNodeCacheEntry] = {}
+        self._structural_nodes_cache: OrderedDict[str, _StructuralNodeCacheEntry] = OrderedDict()
         # the universal plaintext floor (spec-v2 §5.1 rung3): renders any file the
         # LSP and structural rungs do not claim; the manager owns the byte read
         self._plaintext_floor = default_plaintext_floor()
@@ -2305,9 +2308,10 @@ class CursorManager:
             self._structural_nodes_cache.pop(relative_path, None)
             return None
 
-        # hit the cache when the file has not changed since the last walk
+        # hit the cache when the file has not changed since the last walk, making it the most recently used
         cached = self._structural_nodes_cache.get(relative_path)
         if cached is not None and cached.mtime_ns == mtime_ns:
+            self._structural_nodes_cache.move_to_end(relative_path)
             return cached
 
         # miss or stale: re-read, re-parse, and re-index by canonical name path
@@ -2323,6 +2327,10 @@ class CursorManager:
 
         entry = _StructuralNodeCacheEntry(mtime_ns=mtime_ns, nodes_by_path=nodes_by_path)
         self._structural_nodes_cache[relative_path] = entry
+        self._structural_nodes_cache.move_to_end(relative_path)
+        # the walks of the files used least recently beyond the cap; an evicted file is read again when next used
+        while len(self._structural_nodes_cache) > CursorManager.MAX_STRUCTURAL_FILES:
+            self._structural_nodes_cache.popitem(last=False)
         return entry
 
     def _validate_container_edit_positioning(

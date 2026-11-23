@@ -429,9 +429,7 @@ class TestFindPatternSurfacesNonSymbolHits:
     """
 
     def test_non_symbol_match_surfaced_with_content_not_counted(self, tmp_path: Path) -> None:
-        (tmp_path / "compose.yaml").write_text(
-            "services:\n  serena:\n    image: serena:latest\n", encoding="utf-8"
-        )
+        (tmp_path / "compose.yaml").write_text("services:\n  serena:\n    image: serena:latest\n", encoding="utf-8")
         project = MagicMock()
         project.project_root = str(tmp_path)
         project.read_file = MagicMock(side_effect=lambda p: Path(tmp_path / p).read_text(encoding="utf-8"))
@@ -456,3 +454,43 @@ class TestFindPatternSurfacesNonSymbolHits:
         path, displays = unsymboled[0]
         assert path == "compose.yaml"
         assert any("serena:latest" in d.to_display_string() for d in displays), displays
+
+
+class TestStructuralNodesCacheCap:
+    """a session keeps the structural walks of at most :attr:`CursorManager.MAX_STRUCTURAL_FILES` files"""
+
+    def test_a_file_read_before_more_files_than_the_cap_is_read_again_and_resolves_as_before(
+        self, tmp_path: Path, python_only_registry: StructuralBackendRegistry
+    ) -> None:
+        # one file more than the cap, each holding the sample source
+        paths = [f"sample_{index}.py" for index in range(CursorManager.MAX_STRUCTURAL_FILES + 1)]
+        for path in paths:
+            (tmp_path / path).write_text(_PYTHON_SOURCE, encoding="utf-8")
+        project = MagicMock()
+        project.project_root = str(tmp_path)
+        project.read_file = MagicMock(side_effect=lambda p: Path(tmp_path / p).read_text(encoding="utf-8"))
+        manager = CursorManager(project, structural_registry=python_only_registry)
+        for path in paths:
+            assert manager.resolve_structural_name_path(path, "Thing/method") is not None
+
+        # the first file, used least recently, was evicted: it is read again and resolves as before
+        reads_before = project.read_file.call_count
+        resolution = manager.resolve_structural_name_path(paths[0], "Thing/method")
+
+        assert project.read_file.call_count == reads_before + 1
+        assert resolution is not None
+        assert resolution.name_path == "Thing/method"
+
+    def test_a_file_used_again_within_the_cap_is_not_read_again(
+        self, tmp_path: Path, python_only_registry: StructuralBackendRegistry
+    ) -> None:
+        (tmp_path / "sample.py").write_text(_PYTHON_SOURCE, encoding="utf-8")
+        project = MagicMock()
+        project.project_root = str(tmp_path)
+        project.read_file = MagicMock(side_effect=lambda p: Path(tmp_path / p).read_text(encoding="utf-8"))
+        manager = CursorManager(project, structural_registry=python_only_registry)
+
+        manager.resolve_structural_name_path("sample.py", "Thing/method")
+        manager.resolve_structural_name_path("sample.py", "Thing/method")
+
+        assert project.read_file.call_count == 1
