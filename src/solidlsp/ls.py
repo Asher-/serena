@@ -23,7 +23,7 @@ from sensai.util.helper import mark_used
 from sensai.util.pickle import getstate
 from sensai.util.string import ToStringMixin
 
-from serena.util.file_system import match_path
+from serena.util.file_system import EnteredDirectories, match_path
 from serena.util.text_utils import MatchedConsecutiveLines
 from solidlsp import ls_types
 from solidlsp.dependency_provider import (
@@ -525,7 +525,7 @@ class SolidLanguageServer(ABC):
     """
 
     CACHE_FOLDER_NAME = "cache"
-    RAW_DOCUMENT_SYMBOLS_CACHE_VERSION = 1
+    RAW_DOCUMENT_SYMBOLS_CACHE_VERSION = 2
     """
     global version identifier for raw symbol caches; an LS-specific version is defined separately and combined with this.
     This should be incremented whenever there is a change in the way raw document symbols are stored.
@@ -533,7 +533,7 @@ class SolidLanguageServer(ABC):
     the LS-specific version should be incremented instead.
     """
     RAW_DOCUMENT_SYMBOL_CACHE_FILENAME = "raw_document_symbols.pkl"
-    DOCUMENT_SYMBOL_CACHE_VERSION = 5
+    DOCUMENT_SYMBOL_CACHE_VERSION = 6
     """
     defines the version of the high-level document symbol format.
     This should be incremented whenever there is a change in the way document symbols are stored.
@@ -747,6 +747,8 @@ class SolidLanguageServer(ABC):
         """maps relative file paths to a tuple of (file_content_hash, document_symbols)"""
         self._document_symbols_cache_is_modified: bool = False
         self._load_document_symbols_cache()
+        self._symbol_caches_released: bool = False
+        """whether a stop released the symbol caches, which the next start reloads"""
 
         self.server_started = False
         if config.trace_lsp_communication:
@@ -2432,7 +2434,9 @@ class SolidLanguageServer(ABC):
         All symbols except the root packages will have a parent attribute.
         Will ignore directories starting with '.', language-specific defaults
         and user-configured directories (e.g. from .gitignore).
-        Ignore rules apply to unresolved paths. Discovered symbolic links are followed only in trusted projects.
+        Ignore rules apply to unresolved paths. Discovered symbolic links are followed only in trusted projects, and each
+        real directory is entered at most once (see :class:`EnteredDirectories`), so a link back into the project adds
+        no file twice.
 
         :param within_relative_path: pass a relative path to only consider symbols within this path.
             If a file is passed, only the symbols within this file will be considered.
@@ -2471,22 +2475,21 @@ class SolidLanguageServer(ABC):
             )
             result.append(package_symbol)
 
+            # the contained entries discovery keeps, with their relative paths and whether they are directories
+            kept_entries: list[tuple[os.DirEntry, str, bool]] = []
             for contained_dir_or_file_entry in contained_dir_or_file_entries:
                 # skip symbolic links during discovery in untrusted projects
                 if not self.config.is_project_trusted and contained_dir_or_file_entry.is_symlink():
                     continue
 
-                contained_dir_or_file_name = contained_dir_or_file_entry.name
-                contained_dir_or_file_abs_path = contained_dir_or_file_entry.path
-
                 # obtain relative path
                 try:
-                    contained_dir_or_file_rel_path = os.path.relpath(contained_dir_or_file_abs_path, self.repository_root_path)
+                    contained_dir_or_file_rel_path = os.path.relpath(contained_dir_or_file_entry.path, self.repository_root_path)
                 except ValueError as e:
                     # Typically happens when the path is not under the repository root (e.g., symlink pointing outside)
                     log.warning(
                         "Skipping path %s; likely outside of the repository root %s [cause: %s]",
-                        contained_dir_or_file_abs_path,
+                        contained_dir_or_file_entry.path,
                         self.repository_root_path,
                         e,
                     )
@@ -2498,8 +2501,19 @@ class SolidLanguageServer(ABC):
                 ):
                     log.debug("Skipping item: %s (because it should be ignored)", contained_dir_or_file_rel_path)
                     continue
+                kept_entries.append((contained_dir_or_file_entry, contained_dir_or_file_rel_path, is_dir))
+
+            # the kept directories whose real directory discovery has not entered yet
+            admitted_dirs = {id(entry) for entry in entered.admit([entry for entry, _, is_dir in kept_entries if is_dir])}
+
+            for contained_dir_or_file_entry, contained_dir_or_file_rel_path, is_dir in kept_entries:
+                contained_dir_or_file_name = contained_dir_or_file_entry.name
+                contained_dir_or_file_abs_path = contained_dir_or_file_entry.path
 
                 if is_dir:
+                    if id(contained_dir_or_file_entry) not in admitted_dirs:
+                        log.debug("Skipping directory: %s (because its real directory was entered before)", contained_dir_or_file_rel_path)
+                        continue
                     child_symbols = process_directory(contained_dir_or_file_abs_path)
                     package_symbol["children"].extend(child_symbols)
                     for child in child_symbols:
@@ -2548,10 +2562,13 @@ class SolidLanguageServer(ABC):
                 return root_nodes
             else:
                 self.PathWorkspaceStatus.from_abs_resolved_path(Path(within_abs_path).resolve(), self).check_within_workspace_or_raise()
+                entered = EnteredDirectories(within_abs_path)
                 return process_directory(within_abs_path)
         else:
             full_result = []
-            for root in self.config.get_absolute_workspace_folders(self.repository_root_path):
+            workspace_roots = self.config.get_absolute_workspace_folders(self.repository_root_path)
+            entered = EnteredDirectories(*workspace_roots)
+            for root in workspace_roots:
                 full_result.extend(process_directory(root))
             return full_result
 
@@ -3674,6 +3691,13 @@ class SolidLanguageServer(ABC):
         :return: self for method chaining
         """
         log.info(f"Starting language server {self.language_server.ls_id} for {self.language_server.repository_root_path}")
+
+        # the symbol caches a stop released, reloaded from disk
+        if self._symbol_caches_released:
+            self._load_raw_document_symbols_cache()
+            self._load_document_symbols_cache()
+            self._symbol_caches_released = False
+
         self.server_started = True
         try:
             self._start_server()
@@ -3690,7 +3714,8 @@ class SolidLanguageServer(ABC):
 
     def stop(self, shutdown_timeout: float = 2.0) -> None:
         """
-        Stops the language server process.
+        Stops the language server process and releases the symbol caches it holds in memory; changes to them not saved
+        before the stop are discarded, and a later start reloads them from disk.
         This function never raises an exception (any exceptions during shutdown are logged).
 
         :param shutdown_timeout: time, in seconds, to wait for the server to shutdown gracefully before killing it
@@ -3701,6 +3726,19 @@ class SolidLanguageServer(ABC):
             log.warning(f"Exception while shutting down language server: {e}")
         finally:
             self.server_started = False
+            self._release_symbol_caches()
+
+    def _release_symbol_caches(self) -> None:
+        """
+        Releases the symbol caches held in memory, leaving them empty and unmodified, so that a save writes nothing over
+        the caches on disk until the caches are reloaded.
+        """
+        self._raw_document_symbols_cache = {}
+        self._raw_document_symbols_cache_is_modified = False
+        self._document_symbols_cache = {}
+        self._document_symbols_cache_is_modified = False
+        self.__dict__.pop("_symbol_range_index_cache", None)
+        self._symbol_caches_released = True
 
     @property
     def language_server(self) -> Self:

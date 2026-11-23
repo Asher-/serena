@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import time
+from collections import OrderedDict
 from collections.abc import Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -478,8 +479,81 @@ class CursorManager:
     Manages cursor state and resolves LSP graph edges for navigation.
 
     Each cursor is identified by a string ID and tracks its current symbol,
-    trail of visited symbols, and configured edge types.
+    trail of visited symbols, and configured edge types. The manager holds at
+    most :attr:`MAX_CURSORS` cursors; starting one more evicts the cursor used
+    least recently, and using an evicted cursor's ID reports its eviction.
     """
+
+    MAX_CURSORS = 512
+    """the most cursors a manager holds"""
+
+    class _CursorTable:
+        """
+        The cursors of a manager, bounded by :attr:`CursorManager.MAX_CURSORS` with least-recently-used eviction.
+
+        A cursor counts as used when it is added or looked up. The IDs of the most recently evicted cursors are
+        remembered, a bounded number of them, so that a lookup of one reports the eviction rather than an unknown ID.
+        """
+
+        _REMEMBERED_EVICTIONS_FACTOR = 4
+        """how many times :attr:`CursorManager.MAX_CURSORS` evicted IDs are remembered"""
+
+        def __init__(self) -> None:
+            self._cursors: OrderedDict[str, AnyCursorState] = OrderedDict()
+            self._evicted: OrderedDict[str, None] = OrderedDict()
+
+        def __contains__(self, cursor_id: str) -> bool:
+            return cursor_id in self._cursors
+
+        def ids(self) -> list[str]:
+            """
+            :return: the IDs of the held cursors, least recently used first
+            """
+            return list(self._cursors.keys())
+
+        def get(self, cursor_id: str) -> AnyCursorState:
+            """
+            Looks up a held cursor, marking it as used.
+
+            :param cursor_id: the cursor's ID
+            :return: the cursor
+            :raises ValueError: if the cursor is not held; the message says so when it was evicted for the cap
+            """
+            if cursor_id not in self._cursors:
+                if cursor_id in self._evicted:
+                    raise ValueError(
+                        f"Cursor '{cursor_id}' was evicted: a session holds at most {CursorManager.MAX_CURSORS} cursors, and "
+                        "starting another one evicted this least recently used one. Start a new cursor at the position you need."
+                    )
+                raise ValueError(f"No cursor with id '{cursor_id}'. Active cursors: {self.ids()}")
+            self._cursors.move_to_end(cursor_id)
+            return self._cursors[cursor_id]
+
+        def put(self, cursor_id: str, state: AnyCursorState) -> None:
+            """
+            Adds a cursor as the most recently used one, evicting the least recently used cursor beyond the cap.
+
+            :param cursor_id: the cursor's ID
+            :param state: the cursor
+            """
+            self._cursors[cursor_id] = state
+            self._cursors.move_to_end(cursor_id)
+            self._evicted.pop(cursor_id, None)
+
+            # the least recently used cursors beyond the cap, remembered as evicted
+            while len(self._cursors) > CursorManager.MAX_CURSORS:
+                evicted_id, _evicted_state = self._cursors.popitem(last=False)
+                self._evicted[evicted_id] = None
+            while len(self._evicted) > CursorManager.MAX_CURSORS * self._REMEMBERED_EVICTIONS_FACTOR:
+                self._evicted.popitem(last=False)
+
+        def remove(self, cursor_id: str) -> None:
+            """
+            Removes a cursor, if it is held.
+
+            :param cursor_id: the cursor's ID
+            """
+            self._cursors.pop(cursor_id, None)
 
     def __init__(
         self,
@@ -496,7 +570,7 @@ class CursorManager:
             pass a custom registry to isolate from backend imports.
         """
         self._project = project
-        self._cursors: dict[str, AnyCursorState] = {}
+        self._cursors = CursorManager._CursorTable()
         self._next_cursor_id = 1
         # lazy default so test overrides and production both go through one path
         self._structural_registry = structural_registry if structural_registry is not None else default_structural_backend_registry()
@@ -521,9 +595,7 @@ class CursorManager:
         return cursor_id
 
     def get_cursor(self, cursor_id: str) -> AnyCursorState:
-        if cursor_id not in self._cursors:
-            raise ValueError(f"No cursor with id '{cursor_id}'. Active cursors: {list(self._cursors.keys())}")
-        return self._cursors[cursor_id]
+        return self._cursors.get(cursor_id)
 
     def get_lsp_cursor(self, cursor_id: str) -> CursorState:
         """Return the cursor strictly as an LSP :class:`CursorState`.
@@ -552,7 +624,7 @@ class CursorManager:
         )
 
     def list_cursors(self) -> list[str]:
-        return list(self._cursors.keys())
+        return self._cursors.ids()
 
     def start_cursor(
         self,
@@ -595,7 +667,7 @@ class CursorManager:
         # validate the cursor id up-front so both resolution paths share the check
         if cursor_id is not None and cursor_id in self._cursors:
             raise ValueError(
-                f"Cursor '{cursor_id}' already exists. Close it first or use a different ID. Active cursors: {list(self._cursors.keys())}"
+                f"Cursor '{cursor_id}' already exists. Close it first or use a different ID. Active cursors: {self._cursors.ids()}"
             )
 
         retriever = self._retriever
@@ -617,7 +689,7 @@ class CursorManager:
                     raise lsp_error
                 floor_id = cursor_id if cursor_id is not None else self._generate_cursor_id()
                 plain_state = PlaintextCursorState(cursor_id=floor_id, relative_path=relative_path)
-                self._cursors[floor_id] = plain_state
+                self._cursors.put(floor_id, plain_state)
                 return floor_id, plain_state
             assigned_id = cursor_id if cursor_id is not None else self._generate_cursor_id()
             struct_state = StructuralCursorState(
@@ -626,7 +698,7 @@ class CursorManager:
                 name_path=structural.name_path,
                 kind=structural.kind,
             )
-            self._cursors[assigned_id] = struct_state
+            self._cursors.put(assigned_id, struct_state)
             return assigned_id, struct_state
 
         location = symbol.location
@@ -639,7 +711,7 @@ class CursorManager:
             current_location=location,
             active_edge_types=edge_types if edge_types is not None else DEFAULT_EDGE_TYPES,
         )
-        self._cursors[assigned_id] = state
+        self._cursors.put(assigned_id, state)
         return assigned_id, state
 
     def move_cursor(
@@ -710,8 +782,7 @@ class CursorManager:
 
     def close_cursor(self, cursor_id: str) -> None:
         """Close and remove a cursor."""
-        if cursor_id in self._cursors:
-            del self._cursors[cursor_id]
+        self._cursors.remove(cursor_id)
 
     def resolve_neighbors(self, cursor_id: str, depth: int = 1) -> list[NeighborSymbol]:
         """
@@ -2131,7 +2202,7 @@ class CursorManager:
             cursor_id = self._generate_cursor_id()
         elif cursor_id in self._cursors:
             raise ValueError(
-                f"Cursor '{cursor_id}' already exists. Close it first or use a different ID. Active cursors: {list(self._cursors.keys())}"
+                f"Cursor '{cursor_id}' already exists. Close it first or use a different ID. Active cursors: {self._cursors.ids()}"
             )
         state = CursorState(
             cursor_id=cursor_id,
@@ -2139,7 +2210,7 @@ class CursorManager:
             current_location=location,
             active_edge_types=edge_types if edge_types is not None else DEFAULT_EDGE_TYPES,
         )
-        self._cursors[cursor_id] = state
+        self._cursors.put(cursor_id, state)
         return cursor_id, state
 
     def resolve_structural_name_path(

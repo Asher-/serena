@@ -12,7 +12,7 @@ from serena.config.serena_config import (
     SerenaPaths,
 )
 from serena.constants import SERENA_FILE_ENCODING
-from serena.util.file_system import write_file_atomic
+from serena.util.file_system import walk_dir_entries, write_file_atomic
 from serena.util.text_utils import ContentReplacer
 
 from .memory_reference_analysis import (
@@ -256,15 +256,13 @@ class MemoryManager:
 
         Directory symlinks must be followed so that memories shared via symlink are discovered
         (e.g. a monorepo whose ``.serena/memories`` folder symlinks each submodule's memory
-        directory, making them addressable as ``<submodule>/<name>``). ``Path.rglob`` only
-        follows symlinked directories from Python 3.13 onwards, via ``recurse_symlinks``; on
-        3.11/3.12 it silently skips them, so we fall back to ``os.walk(followlinks=True)`` there.
-        ``rglob`` is preferred when available as it is faster than ``os.walk``.
+        directory, making them addressable as ``<submodule>/<name>``). The walk enters each real
+        directory at most once, so a link back into the memories folder lists no memory twice.
         """
-        for root, _dirs, files in os.walk(search_dir, followlinks=True):
-            for filename in files:
-                if filename.endswith(".md"):
-                    yield Path(root) / filename
+        for root, _dirs, files in walk_dir_entries(str(search_dir), followlinks=True):
+            for file in files:
+                if file.name.endswith(".md"):
+                    yield Path(root) / file.name
 
     def _list_memories(self, search_dir: Path, base_dir: Path, prefix: str = "") -> MemoriesList:
         result = self.MemoriesList()

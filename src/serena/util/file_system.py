@@ -194,6 +194,41 @@ def dir_entry_from_path(path: str) -> os.DirEntry:
     raise FileNotFoundError(f"No such file or directory: '{path}'")
 
 
+class EnteredDirectories:
+    """
+    The real paths of the directories a walk that follows symbolic links to directories has entered.
+
+    The walk enters a directory only if its real path is not yet among them, so a link to the walk's root or to an
+    ancestor, and a second link to a directory already entered, add nothing to the walk, while a link to a directory the
+    walk does not otherwise reach is followed. Of the subdirectories of one directory, real directories are admitted
+    before links, so a directory both contained and linked is walked under its own path.
+    """
+
+    def __init__(self, *roots: str) -> None:
+        """
+        :param roots: the directories the walk starts in, which count as entered
+        """
+        self._real_paths: set[str] = {os.path.realpath(root) for root in roots}
+
+    def admit(self, subdirectories: list[os.DirEntry]) -> list[os.DirEntry]:
+        """
+        Admits the subdirectories of one directory that the walk shall enter, recording them as entered.
+
+        :param subdirectories: the subdirectories the walk would descend into, links to directories included, in listing
+            order
+        :return: the subdirectories whose real path was not entered before, in listing order
+        """
+        # real directories are recorded before links, so a link to a sibling yields to the sibling itself
+        admitted: set[int] = set()
+        for subdirectory in sorted(subdirectories, key=lambda entry: entry.is_symlink()):
+            real_path = os.path.realpath(subdirectory.path)
+            if real_path not in self._real_paths:
+                self._real_paths.add(real_path)
+                admitted.add(id(subdirectory))
+
+        return [subdirectory for subdirectory in subdirectories if id(subdirectory) in admitted]
+
+
 def walk_dir_entries(
     top, topdown=True, onerror=None, followlinks=False, recursive=True, is_ignored_dir: Callable[[os.DirEntry], bool] = lambda x: False
 ) -> Iterator[tuple[str, list[os.DirEntry], list[os.DirEntry]]]:
@@ -203,6 +238,7 @@ def walk_dir_entries(
 
     The directories contained in the result are exactly those that are descended into, i.e. ignored
     directories and (unless `followlinks` is set) symbolic links to directories are not contained.
+    A walk that follows links enters each real directory at most once (see :class:`EnteredDirectories`).
 
     :param top: the root directory to start walking from
     :param topdown: if True, yield the directory before its subdirectories; if False, yield the subdirectories before the directory
@@ -212,6 +248,24 @@ def walk_dir_entries(
     :param is_ignored_dir: a function to determine whether a directory should be ignored; it takes an os.DirEntry and returns True if
         the directory should be ignored
     :return: an iterator yielding tuples of (directory path, list of subdirectory entries, list of file entries)
+    """
+    entered = EnteredDirectories(top) if followlinks else None
+    yield from _walk_dir_entries(top, topdown, onerror, followlinks, recursive, is_ignored_dir, entered)
+
+
+def _walk_dir_entries(
+    top,
+    topdown: bool,
+    onerror: Callable[[OSError], None] | None,
+    followlinks: bool,
+    recursive: bool,
+    is_ignored_dir: Callable[[os.DirEntry], bool],
+    entered: EnteredDirectories | None,
+) -> Iterator[tuple[str, list[os.DirEntry], list[os.DirEntry]]]:
+    """
+    The walk of :func:`walk_dir_entries` from one directory.
+
+    :param entered: the directories the walk has entered, when it follows links; None when it does not
     """
     try:
         with os.scandir(top) as it:
@@ -236,12 +290,16 @@ def walk_dir_entries(
         elif (followlinks or not entry.is_symlink()) and not is_ignored_dir(entry):
             dirs.append(entry)
 
+    # the subdirectories whose real directory this walk has not entered yet
+    if entered is not None:
+        dirs = entered.admit(dirs)
+
     if topdown:
         yield top, dirs, files
 
     if recursive:
         for entry in dirs:
-            yield from walk_dir_entries(entry.path, topdown, onerror, followlinks, is_ignored_dir=is_ignored_dir)
+            yield from _walk_dir_entries(entry.path, topdown, onerror, followlinks, recursive, is_ignored_dir, entered)
 
     if not topdown:
         yield top, dirs, files
