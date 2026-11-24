@@ -10,9 +10,14 @@ import pytest
 from serena.constants import SERENA_MANAGED_DIR_NAME
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
-from test.conftest import get_repo_path, start_ls_context
+from test.conftest import get_repo_path, language_server_tests_enabled, start_ls_context
 
-pytestmark = pytest.mark.astro
+pytestmark = [
+    pytest.mark.astro,
+    pytest.mark.skipif(
+        not language_server_tests_enabled(LanguageServerId.ASTRO), reason="the Astro language server is not installed in this environment"
+    ),
+]
 
 # a plain .ts module, whose symbols the companion TypeScript server serves
 FORMAT_TS = os.path.join("src", "utils", "format.ts")
