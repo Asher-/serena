@@ -336,15 +336,16 @@ class LanguageServerManager:
             # successful startup clears any prior unavailability for the language
             self._unavailable_languages.pop(ls_id, None)
 
-            # save the replaced server's caches, which it holds in memory whether or not its process still runs, then
-            # stop it, now that its replacement holds the slot
-            if replaced is not None:
-                try:
-                    replaced.save_cache()
-                except Exception as exception:
-                    log.error(f"Failed to save the cache of the replaced language server for {ls_id}: {exception}", exc_info=exception)
-                replaced.stop()
-            return ls
+        # save the replaced server's caches, which it holds in memory whether or not its process still runs, then stop
+        # it, now that its replacement holds the slot; outside the lock, so that no disk write holds the language's
+        # restarts, at the cost that the replacement may have loaded a cache older than the one saved here
+        if replaced is not None:
+            try:
+                replaced.save_cache()
+            except Exception as exception:
+                log.error(f"Failed to save the cache of the replaced language server for {ls_id}: {exception}", exc_info=exception)
+            replaced.stop()
+        return ls
 
     def add_language_server(self, ls_id: LanguageServerIdLike) -> SolidLanguageServer:
         """
@@ -371,7 +372,9 @@ class LanguageServerManager:
             if ls_id not in self._language_servers:
                 raise ValueError(f"No language server for language {ls_id.get_key()} present; cannot remove")
             ls = self._language_servers.pop(ls_id)
-            self._stop_language_server(ls, save_cache=save_cache)
+
+        # saved and stopped outside the lock, so that no disk write holds the language's restarts
+        self._stop_language_server(ls, save_cache=save_cache)
 
     def get_active_language_server_ids(self) -> list[LanguageServerIdLike]:
         """

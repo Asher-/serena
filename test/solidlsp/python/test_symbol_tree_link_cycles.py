@@ -6,6 +6,7 @@ cached for the project are bounded by its files; and a stopped server keeps none
 """
 
 import gc
+import logging
 import weakref
 from dataclasses import replace
 from pathlib import Path
@@ -120,6 +121,26 @@ def test_a_stop_keeps_the_unsaved_symbols_a_server_served_for_a_later_save(tmp_p
         saved = load_pickle(str(ls.cache_dir / ls.DOCUMENT_SYMBOL_CACHE_FILENAME))["obj"]
 
     assert list(saved) == ["main.py"]
+
+
+def test_a_save_whose_cache_files_cannot_be_written_logs_the_failure_and_raises_nothing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "main.py").write_text("def ordinary():\n    return 1\n", encoding="utf-8")
+
+    with start_ls_context(ls_id=LanguageServerId.PYTHON, repo_path=str(root)) as ls:
+        ls.request_document_symbols("main.py")
+        # directories where the cache files would be written, so that neither write can succeed
+        (ls.cache_dir / ls.RAW_DOCUMENT_SYMBOL_CACHE_FILENAME).mkdir(parents=True, exist_ok=True)
+        (ls.cache_dir / ls.DOCUMENT_SYMBOL_CACHE_FILENAME).mkdir(parents=True, exist_ok=True)
+
+        with caplog.at_level(logging.ERROR):
+            ls.save_cache()
+
+    assert "Failed to save raw document symbols cache" in caplog.text
+    assert "Failed to save document symbols cache" in caplog.text
 
 
 def test_a_server_names_the_process_it_started_and_none_before_it_starts(tmp_path: Path) -> None:
