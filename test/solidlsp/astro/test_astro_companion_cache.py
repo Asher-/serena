@@ -4,6 +4,8 @@ holds in memory until then, to the companion's cache.
 """
 
 import os
+import shutil
+from pathlib import Path
 
 import pytest
 
@@ -23,17 +25,20 @@ pytestmark = [
 FORMAT_TS = os.path.join("src", "utils", "format.ts")
 
 
-def test_a_stop_writes_the_symbols_the_companion_served_to_the_companion_cache() -> None:
+def test_a_stop_writes_the_symbols_the_companion_served_to_the_companion_cache(tmp_path: Path) -> None:
+    # a copy of the fixture repository of this run only, whose companion cache no other run writes
+    repo = tmp_path / "test_repo"
+    shutil.copytree(get_repo_path(LanguageServerId.ASTRO), repo, symlinks=True, ignore=shutil.ignore_patterns(SERENA_MANAGED_DIR_NAME))
     cache_file = (
-        get_repo_path(LanguageServerId.ASTRO)
+        repo
         / SERENA_MANAGED_DIR_NAME
         / SolidLanguageServer.CACHE_FOLDER_NAME
         / LanguageServerId.TYPESCRIPT.get_key()
         / SolidLanguageServer.DOCUMENT_SYMBOL_CACHE_FILENAME
     )
-    cache_file.unlink(missing_ok=True)
 
-    with start_ls_context(LanguageServerId.ASTRO) as language_server:
+    with start_ls_context(LanguageServerId.ASTRO, repo_path=str(repo)) as language_server:
         assert language_server.request_document_symbols(FORMAT_TS).root_symbols
+        assert not cache_file.exists()
 
     assert cache_file.is_file()

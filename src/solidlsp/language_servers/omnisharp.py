@@ -34,8 +34,7 @@ DEFAULT_RAZOR_OMNISHARP_VERSION = "7.0.0-preview.23363.1"
 
 def breadth_first_file_scan(root: str) -> Iterable[str]:
     """
-    This function was obtained from https://stackoverflow.com/questions/49654234/is-there-a-breadth-first-search-option-available-in-os-walk-or-equivalent-py
-    It traverses the directory tree in breadth first order. Links to directories are followed, each real directory
+    Traverses the directory tree in breadth first order. Links to directories are followed, each real directory
     entered at most once (see :func:`walk_following_links`).
     """
 

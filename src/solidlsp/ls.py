@@ -3527,9 +3527,12 @@ class SolidLanguageServer(ABC):
         """
         :return: the raw document symbols cache, reloaded from disk if a stop released it
         """
-        if self._raw_document_symbols_cache is None:
-            self._raw_document_symbols_cache = self._load_raw_document_symbols_cache()
-        return self._raw_document_symbols_cache
+        # read once, so that a stop releasing the cache meanwhile cannot make this return None
+        cache = self._raw_document_symbols_cache
+        if cache is None:
+            cache = self._load_raw_document_symbols_cache()
+            self._raw_document_symbols_cache = cache
+        return cache
 
     def _save_document_symbols_cache(self) -> None:
         cache_file = self.cache_dir / self.DOCUMENT_SYMBOL_CACHE_FILENAME
@@ -3574,9 +3577,12 @@ class SolidLanguageServer(ABC):
         """
         :return: the document symbols cache, reloaded from disk if a stop released it
         """
-        if self._document_symbols_cache is None:
-            self._document_symbols_cache = self._load_document_symbols_cache()
-        return self._document_symbols_cache
+        # read once, so that a stop releasing the cache meanwhile cannot make this return None
+        cache = self._document_symbols_cache
+        if cache is None:
+            cache = self._load_document_symbols_cache()
+            self._document_symbols_cache = cache
+        return cache
 
     def save_cache(self) -> None:
         self._save_raw_document_symbols_cache()

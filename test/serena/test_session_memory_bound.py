@@ -228,3 +228,49 @@ def test_removing_the_language_of_a_crashed_server_saves_its_symbols(looped_proj
     manager.remove_language_server(LanguageServerId.PYTHON, save_cache=True)
 
     assert saved.is_file()
+
+
+def test_restarting_the_language_of_a_crashed_server_saves_its_symbols_and_holds_a_running_replacement(
+    looped_project: Project,
+) -> None:
+    manager = looped_project.create_language_server_manager()
+    server = manager.get_language_server("pkg/module_0.py")
+    server.request_document_symbols("pkg/module_0.py")
+    saved = server.cache_dir / server.DOCUMENT_SYMBOL_CACHE_FILENAME
+    saved.unlink(missing_ok=True)
+
+    # the server's process ends on its own
+    pid = server.process_id()
+    assert pid is not None
+    os.kill(pid, signal.SIGKILL)
+    psutil.Process(pid).wait(timeout=_WAIT)
+
+    try:
+        replacement = manager.restart_language_server(LanguageServerId.PYTHON)
+
+        assert saved.is_file()
+        assert replacement is not server
+        assert replacement.is_running()
+        assert list(manager.iter_language_servers()) == [replacement]
+    finally:
+        manager.stop_all()
+
+
+def test_a_language_removed_and_added_again_is_served_by_a_running_server_and_a_second_addition_is_refused(
+    looped_project: Project,
+) -> None:
+    manager = looped_project.create_language_server_manager()
+    removed = manager.get_language_server("pkg/module_0.py")
+    manager.remove_language_server(LanguageServerId.PYTHON)
+
+    try:
+        added = manager.add_language_server(LanguageServerId.PYTHON)
+
+        assert added is not removed
+        assert added.is_running()
+        assert manager.get_language_server("pkg/module_0.py") is added
+        with pytest.raises(ValueError):
+            manager.add_language_server(LanguageServerId.PYTHON)
+        assert list(manager.iter_language_servers()) == [added]
+    finally:
+        manager.stop_all()
