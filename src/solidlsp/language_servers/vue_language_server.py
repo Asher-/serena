@@ -727,8 +727,6 @@ class VueLanguageServer(SolidLanguageServer):
 
     def _stop_typescript_server(self) -> None:
         if self._ts_server is not None:
-            # the companion holds its symbol caches in memory; they are saved before it is stopped and dropped
-            self._ts_server.save_cache()
             try:
                 log.info("Stopping companion TypeScript server")
                 self._ts_server.stop()
