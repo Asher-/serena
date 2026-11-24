@@ -16,6 +16,7 @@ only uses ``project_root`` and ``read_file``.
 
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -23,12 +24,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from serena.config.serena_config import ProjectConfig, SerenaConfig
 from serena.cursor import (
     CursorManager,
     ReadRung,
     StructuralCursorState,
     StructuralResolution,
 )
+from serena.language_backend import BuiltinLanguageBackend
+from serena.project import Project
+from solidlsp.ls_config import LanguageServerId
 from solidlsp.structural.backends.python import PythonStructuralLanguage
 from solidlsp.structural.backends.toml import TomlStructuralLanguage
 from solidlsp.structural.backends.yaml import YamlStructuralLanguage
@@ -461,38 +466,67 @@ class TestFindPatternSurfacesNonSymbolHits:
 class TestStructuralNodesCacheCap:
     """a session keeps the structural walks of at most :attr:`CursorManager.MAX_STRUCTURAL_FILES` files"""
 
-    def test_a_file_read_before_more_files_than_the_cap_is_read_again_and_resolves_as_before(
+    @staticmethod
+    def _project(root: Path) -> Project:
+        """
+        :return: a real, trusted project over ``root``
+        """
+        serena_config = SerenaConfig(
+            gui_log_window=False,
+            web_dashboard=False,
+            log_level=logging.ERROR,
+            language_backend=BuiltinLanguageBackend.LSP.get_instance(),
+            trusted_project_path_patterns=[str(root)],
+        )
+        project_config = ProjectConfig(
+            project_name=root.name,
+            language_servers=[LanguageServerId.PYTHON],
+            language_backend=BuiltinLanguageBackend.LSP.get_instance(),
+        )
+        return Project(project_root=str(root), project_config=project_config, serena_config=serena_config)
+
+    @staticmethod
+    def _rename_method_keeping_mtime(file: Path) -> None:
+        """
+        Renames ``Thing.method`` to ``Thing.renamed`` in ``file`` and restores the file's modification time, so that only
+        a fresh read of the file sees the change.
+        """
+        mtime_ns = file.stat().st_mtime_ns
+        file.write_text(_PYTHON_SOURCE.replace("def method", "def renamed"), encoding="utf-8")
+        os.utime(file, ns=(mtime_ns, mtime_ns))
+
+    def test_a_file_used_least_recently_beyond_the_cap_is_read_again_and_a_held_file_is_not(
         self, tmp_path: Path, python_only_registry: StructuralBackendRegistry
     ) -> None:
-        # one file more than the cap, each holding the sample source
+        # one file more than the cap, each holding the sample source, each walked once in order
         paths = [f"sample_{index}.py" for index in range(CursorManager.MAX_STRUCTURAL_FILES + 1)]
         for path in paths:
             (tmp_path / path).write_text(_PYTHON_SOURCE, encoding="utf-8")
-        project = MagicMock()
-        project.project_root = str(tmp_path)
-        project.read_file = MagicMock(side_effect=lambda p: Path(tmp_path / p).read_text(encoding="utf-8"))
-        manager = CursorManager(project, structural_registry=python_only_registry)
+        manager = CursorManager(self._project(tmp_path), structural_registry=python_only_registry)
         for path in paths:
             assert manager.resolve_structural_name_path(path, "Thing/method") is not None
 
-        # the first file, used least recently, was evicted: it is read again and resolves as before
-        reads_before = project.read_file.call_count
-        resolution = manager.resolve_structural_name_path(paths[0], "Thing/method")
+        # the first file, used least recently, and the last file change on disk
+        evicted, held = paths[0], paths[-1]
+        self._rename_method_keeping_mtime(tmp_path / evicted)
+        self._rename_method_keeping_mtime(tmp_path / held)
 
-        assert project.read_file.call_count == reads_before + 1
-        assert resolution is not None
-        assert resolution.name_path == "Thing/method"
+        # the evicted file is read again and answers with its new content
+        assert manager.resolve_structural_name_path(evicted, "Thing/renamed") is not None
+        assert manager.resolve_structural_name_path(evicted, "Thing/method") is None
+        # the held file answers from the walk it holds, with its old content
+        assert manager.resolve_structural_name_path(held, "Thing/method") is not None
+        assert manager.resolve_structural_name_path(held, "Thing/renamed") is None
 
-    def test_a_file_used_again_within_the_cap_is_not_read_again(
+    def test_a_file_used_again_within_the_cap_answers_from_the_walk_it_holds(
         self, tmp_path: Path, python_only_registry: StructuralBackendRegistry
     ) -> None:
-        (tmp_path / "sample.py").write_text(_PYTHON_SOURCE, encoding="utf-8")
-        project = MagicMock()
-        project.project_root = str(tmp_path)
-        project.read_file = MagicMock(side_effect=lambda p: Path(tmp_path / p).read_text(encoding="utf-8"))
-        manager = CursorManager(project, structural_registry=python_only_registry)
+        sample = tmp_path / "sample.py"
+        sample.write_text(_PYTHON_SOURCE, encoding="utf-8")
+        manager = CursorManager(self._project(tmp_path), structural_registry=python_only_registry)
+        assert manager.resolve_structural_name_path("sample.py", "Thing/method") is not None
 
-        manager.resolve_structural_name_path("sample.py", "Thing/method")
-        manager.resolve_structural_name_path("sample.py", "Thing/method")
+        self._rename_method_keeping_mtime(sample)
 
-        assert project.read_file.call_count == 1
+        assert manager.resolve_structural_name_path("sample.py", "Thing/method") is not None
+        assert manager.resolve_structural_name_path("sample.py", "Thing/renamed") is None

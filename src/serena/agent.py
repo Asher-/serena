@@ -168,8 +168,9 @@ class _LanguageServerIdleStop:
         :param agent: the agent whose held projects are watched
         :param idle_timeout: the seconds without a tool call after which a project's language servers are stopped; a value
             of 0 or less stops none
-        :param on_stopped: called on the idle-stop thread with each project once the stop of its language servers has
-            finished and a call waiting for it has been released
+        :param on_stopped: called on the idle-stop thread with each project after each idle-stop attempt for it, once a
+            call waiting for the attempt has been released, whether the attempt stopped its language servers, found it
+            holding no language server manager, or its stop_all raised
         """
         self._agent = agent
         self._idle_timeout = idle_timeout
@@ -877,8 +878,8 @@ class SerenaAgent:
         :param modes: mode selection definition to apply for this session
         :param memory_log_handler: a MemoryLogHandler instance from which to read log messages; if None, a new one will be created
             if necessary.
-        :param on_language_servers_idle_stopped: called with each project whose language servers the idle stop has stopped,
-            once that stop has finished
+        :param on_language_servers_idle_stopped: called with each project after each idle-stop attempt for it, whether the
+            attempt stopped its language servers, found it holding no language server manager, or its stop_all raised
         """
         self._project_activation_callback = project_activation_callback
         self._project_activation_error: str | None = project_activation_error
