@@ -133,7 +133,8 @@ def test_sessions_greps_and_finds_on_a_looped_project_keep_at_most_its_files_sym
 def _idle_stopping_agent(root: Path, stopped: threading.Event) -> SerenaAgent:
     """
     :param root: the root of the project the agent activates, which this configures to use its Python language server
-    :param stopped: the event set each time the agent's idle stop has stopped the project's servers
+    :param stopped: the event set after each idle-stop attempt for a project, whether it stopped the project's servers,
+        found it holding no language server manager, or its stop_all raised
     :return: an agent on the project whose servers are stopped after :data:`_IDLE_TIMEOUT` seconds without a tool call
     """
     # the project's own configuration, naming its Python language server, which activation by path reads
