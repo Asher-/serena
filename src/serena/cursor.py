@@ -549,7 +549,7 @@ class CursorManager:
                 f"Cursor '{cursor_id}' was closed or evicted: a session holds at most {CursorManager.MAX_CURSORS} cursors, and "
                 "starting another one evicts the least recently used one. Start a new cursor at the position you need."
             )
-        raise ValueError(f"No cursor with id '{cursor_id}': unknown or evicted cursor. Active cursors: {list(self._cursors)}")
+        raise ValueError(f"No cursor with id '{cursor_id}': unknown or evicted cursor. Active cursors: {list(self._cursors.keys())}")
 
     def _hold_cursor(self, cursor_id: str, state: AnyCursorState) -> None:
         """
@@ -603,7 +603,7 @@ class CursorManager:
         )
 
     def list_cursors(self) -> list[str]:
-        return list(self._cursors)
+        return list(self._cursors.keys())
 
     def start_cursor(
         self,
@@ -646,7 +646,7 @@ class CursorManager:
         # validate the cursor id up-front so both resolution paths share the check
         if cursor_id is not None and cursor_id in self._cursors:
             raise ValueError(
-                f"Cursor '{cursor_id}' already exists. Close it first or use a different ID. Active cursors: {list(self._cursors)}"
+                f"Cursor '{cursor_id}' already exists. Close it first or use a different ID. Active cursors: {list(self._cursors.keys())}"
             )
 
         retriever = self._retriever
@@ -2181,7 +2181,7 @@ class CursorManager:
             cursor_id = self._generate_cursor_id()
         elif cursor_id in self._cursors:
             raise ValueError(
-                f"Cursor '{cursor_id}' already exists. Close it first or use a different ID. Active cursors: {list(self._cursors)}"
+                f"Cursor '{cursor_id}' already exists. Close it first or use a different ID. Active cursors: {list(self._cursors.keys())}"
             )
         state = CursorState(
             cursor_id=cursor_id,

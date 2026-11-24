@@ -170,6 +170,18 @@ class TestRestartStopsReplacedServer:
         replaced.stop.assert_called_once()  # type: ignore[attr-defined]
         assert list(manager.iter_language_servers()) == [replacement]
 
+    def test_removing_a_language_whose_save_fails_stops_its_server(self) -> None:
+        factory = _GatedLanguageServerFactory()
+        manager = _python_manager(factory)
+        removed = factory.created[0]
+        removed.save_cache.side_effect = OSError("disk full")  # type: ignore[attr-defined]
+
+        with pytest.raises(OSError):
+            manager.remove_language_server(LanguageServerId.PYTHON, save_cache=True)
+
+        removed.stop.assert_called_once()  # type: ignore[attr-defined]
+        assert manager.get_active_language_server_ids() == []
+
     def test_removing_a_language_whose_server_is_not_running_writes_its_unsaved_symbols_to_its_cache(self, tmp_path: Path) -> None:
         factory = _GatedLanguageServerFactory()
         manager = _python_manager(factory)

@@ -3724,7 +3724,6 @@ class SolidLanguageServer(ABC):
         :return: self for method chaining
         """
         log.info(f"Starting language server {self.language_server.ls_id} for {self.language_server.repository_root_path}")
-
         self.server_started = True
         try:
             self._start_server()

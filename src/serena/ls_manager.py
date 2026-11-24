@@ -398,11 +398,14 @@ class LanguageServerManager:
 
     @staticmethod
     def _stop_language_server(ls: SolidLanguageServer, save_cache: bool = False, timeout: float = 2.0) -> None:
-        # a server whose process has ended still holds its caches in memory, so it is saved and stopped all the same
-        if save_cache:
-            ls.save_cache()
-        log.info(f"Stopping language server for language {ls.ls_id} ...")
-        ls.stop(shutdown_timeout=timeout)
+        # a server whose process has ended still holds its caches in memory, so it is saved and stopped all the same; a
+        # save that raises does not keep it from being stopped
+        try:
+            if save_cache:
+                ls.save_cache()
+        finally:
+            log.info(f"Stopping language server for language {ls.ls_id} ...")
+            ls.stop(shutdown_timeout=timeout)
 
     def iter_language_servers(self) -> Iterator[SolidLanguageServer]:
         for ls in list(self._language_servers.values()):
