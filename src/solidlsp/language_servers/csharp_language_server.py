@@ -9,7 +9,7 @@ import platform
 import shutil
 import tempfile
 import threading
-from collections.abc import Callable, Hashable, Iterable, Sequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -17,7 +17,7 @@ from typing import Any, cast
 from overrides import override
 
 from serena.util.dotnet import DotNETUtil
-from serena.util.file_system import EnteredDirectories, match_path
+from serena.util.file_system import match_path, walk_following_links
 from solidlsp.ls import (
     LanguageServerDependencyProvider,
     LSPFileBuffer,
@@ -148,34 +148,32 @@ def breadth_first_file_scan(root_dir: str, is_ignored_path: Callable[[str], bool
     :param root_dir: the directory to scan
     :param is_ignored_path: predicate on paths relative to ``root_dir``; ignored directories are not traversed
         and ignored files are not yielded. Links to directories are followed, each real directory entered at most once
-        (see :class:`EnteredDirectories`).
+        (see :func:`walk_following_links`).
     """
-    entered = EnteredDirectories(root_dir)
-    queue = [root_dir]
-    # the links to directories met, followed in the order met once every directory reached without a link is scanned
-    deferred_links: list[os.DirEntry] = []
-    while queue or deferred_links:
-        if not queue:
-            queue.extend(link.path for link in entered.admit([deferred_links.pop(0)]))
-            continue
-        current_dir = queue.pop(0)
-        try:
-            with os.scandir(current_dir) as scanner:
-                # in name order, so that which link names a directory does not depend on the file system's listing order
-                entries = sorted(scanner, key=lambda entry: entry.name)
-        except (PermissionError, OSError):
-            # Skip directories we can't access
-            continue
-        subdirectories = []
-        for entry in entries:
-            if entry.name.startswith(".") or is_ignored_path(os.path.relpath(entry.path, root_dir)):
+
+    def scan(start: str, admit: Callable[[list[os.DirEntry], Any], list[os.DirEntry]]) -> Iterator[str]:
+        # the files below start, breadth first
+        queue = [start]
+        while queue:
+            current_dir = queue.pop(0)
+            try:
+                with os.scandir(current_dir) as scanner:
+                    # in name order, so that which link names a directory does not depend on the file system's listing order
+                    entries = sorted(scanner, key=lambda entry: entry.name)
+            except (PermissionError, OSError):
+                # Skip directories we can't access
                 continue
-            if entry.is_dir():
-                subdirectories.append(entry)
-            elif entry.is_file():
-                yield entry.path
-        deferred_links.extend(subdirectory for subdirectory in subdirectories if subdirectory.is_symlink())
-        queue.extend(subdirectory.path for subdirectory in entered.admit([s for s in subdirectories if not s.is_symlink()]))
+            subdirectories = []
+            for entry in entries:
+                if entry.name.startswith(".") or is_ignored_path(os.path.relpath(entry.path, root_dir)):
+                    continue
+                if entry.is_dir():
+                    subdirectories.append(entry)
+                elif entry.is_file():
+                    yield entry.path
+            queue.extend(subdirectory.path for subdirectory in admit(subdirectories, None))
+
+    yield from walk_following_links([root_dir], lambda admit: scan(root_dir, admit), lambda link, _, admit: scan(link.path, admit))
 
 
 def find_solution_or_project_file(root_dir: str) -> str | None:

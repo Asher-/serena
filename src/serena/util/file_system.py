@@ -6,10 +6,10 @@ import re
 import stat
 import tempfile
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import pathspec
 from pathspec import PathSpec
@@ -194,42 +194,61 @@ def dir_entry_from_path(path: str) -> os.DirEntry:
     raise FileNotFoundError(f"No such file or directory: '{path}'")
 
 
-class EnteredDirectories:
+def walk_following_links(
+    roots: Sequence[str],
+    walk: Callable[[Callable[[list[os.DirEntry], Any], list[os.DirEntry]]], Iterable[Any]],
+    follow: Callable[[os.DirEntry, Any, Callable[[list[os.DirEntry], Any], list[os.DirEntry]]], Iterable[Any]],
+) -> Iterator[Any]:
     """
-    The real paths of the directories a walk that follows symbolic links to directories has entered.
+    A walk that follows symbolic links to directories and enters each real directory at most once.
 
-    The walk enters a directory, real or reached through a link, only if its real path is not yet among them, and it
-    records only the directories it enters (or, for a search that stops at a directory it finds, that it finds). A walk
-    defers the links it meets until it has walked every directory it reaches without one, then admits each link in the
-    order met. So a link to the walk's root, to an ancestor or to any directory the walk reaches by real directories adds
-    nothing, and that directory is named by its own path; a link to a directory the walk skips or never reaches is
-    followed, and of several links to one such directory only the first met is entered.
+    The walk enters a directory, real or reached through a link, only if its real path is not among those of the
+    directories it has entered, the roots included. It defers the links it meets until it has walked every directory it
+    reaches without one, then follows them in the order met, those met inside a followed link included, each unless its
+    real directory was entered. So a link to the walk's root, to an ancestor or to any directory the walk reaches by real
+    directories adds nothing, and that directory is named by its own path; a link to a directory the walk skips or never
+    reaches is followed, and of several links to one such directory only the first met is entered.
+
+    The order in which directories are walked, and which are pruned, are the caller's: it passes the subdirectories of each
+    directory it would descend into through ``admit``, in the order it meets them, and descends only into those returned.
+
+    :param roots: the directories the walk starts in, which count as entered
+    :param walk: walks the tree from the roots, given ``admit``. ``admit(subdirectories, context)`` takes the
+        subdirectories of one directory the walk would descend into, defers the links among them with the given context,
+        records those others whose real directory was not entered as entered, and returns these, in the order given
+    :param follow: walks the tree from a followed link, given the link, the context it was deferred with and ``admit``
+    :return: the items ``walk`` yields, then those each ``follow`` yields
     """
+    entered = {os.path.realpath(root) for root in roots}
+    # the links met, each with the context it was deferred with, in the order met
+    deferred: list[tuple[os.DirEntry, Any]] = []
 
-    def __init__(self, *roots: str) -> None:
-        """
-        :param roots: the directories the walk starts in, which count as entered
-        """
-        self._real_paths: set[str] = {os.path.realpath(root) for root in roots}
+    def enter(directory: os.DirEntry) -> bool:
+        # the directory recorded as entered, unless its real directory was entered before
+        real_path = os.path.realpath(directory.path)
+        if real_path in entered:
+            return False
+        entered.add(real_path)
+        return True
 
-    def admit(self, subdirectories: list[os.DirEntry]) -> list[os.DirEntry]:
-        """
-        Admits the subdirectories of one directory, or a deferred link, that the walk shall enter, recording them as
-        entered.
+    def admit(subdirectories: list[os.DirEntry], context: Any) -> list[os.DirEntry]:
+        admitted = []
+        for subdirectory in subdirectories:
+            if subdirectory.is_symlink():
+                deferred.append((subdirectory, context))
+            elif enter(subdirectory):
+                admitted.append(subdirectory)
+        return admitted
 
-        :param subdirectories: the real subdirectories of one directory the walk would descend into, or one link to a
-            directory
-        :return: the admitted subdirectories, in the order given
-        """
-        admitted: set[int] = set()
-        for subdirectory in sorted(subdirectories, key=lambda entry: entry.name):
-            real_path = os.path.realpath(subdirectory.path)
-            if real_path in self._real_paths:
-                continue
-            self._real_paths.add(real_path)
-            admitted.add(id(subdirectory))
+    yield from walk(admit)
 
-        return [subdirectory for subdirectory in subdirectories if id(subdirectory) in admitted]
+    # the deferred links, those met inside a followed link included
+    index = 0
+    while index < len(deferred):
+        link, context = deferred[index]
+        index += 1
+        if enter(link):
+            yield from follow(link, context, admit)
 
 
 def walk_dir_entries(
@@ -241,10 +260,9 @@ def walk_dir_entries(
 
     The directories contained in the result are exactly those that are descended into, i.e. ignored
     directories and (unless `followlinks` is set) symbolic links to directories are not contained.
-    A recursive walk that follows links enters each real directory at most once (see :class:`EnteredDirectories`): it
-    first walks every directory it reaches without a link, then the links it met, in the order met and those met inside a
-    followed link included, entering each whose real directory it has not entered. So a directory reached both ways is
-    walked under its own path whatever the names, and a directory reached only through links under the first link's path.
+    A recursive walk that follows links enters each real directory at most once (see :func:`walk_following_links`),
+    meeting each directory's entries in name order. So a directory reached both ways is walked under its own path whatever
+    the names, and a directory reached only through links under the first link's path in name order.
     A followed link is reported in a result of its own, ``(path of the directory holding it, [link], [])``, given before
     the link's own results when ``topdown`` is set and after them otherwise.
 
@@ -258,26 +276,22 @@ def walk_dir_entries(
     :return: an iterator yielding tuples of (directory path, list of subdirectory entries, list of file entries)
     """
     if not (followlinks and recursive):
-        yield from _walk_dir_entries(top, topdown, onerror, followlinks, recursive, is_ignored_dir, None, None)
+        yield from _walk_dir_entries(top, topdown, onerror, followlinks, recursive, is_ignored_dir, None)
         return
 
-    entered = EnteredDirectories(top)
-    deferred_links: list[tuple[str, os.DirEntry]] = []
-    yield from _walk_dir_entries(top, topdown, onerror, followlinks, recursive, is_ignored_dir, entered, deferred_links)
-
-    # the links met, those met inside a followed link included, each followed unless its real directory was entered
-    index = 0
-    while index < len(deferred_links):
-        holder, link = deferred_links[index]
-        index += 1
-        followed = entered.admit([link])
-        if not followed:
-            continue
+    def follow(
+        link: os.DirEntry, holder: str, admit: Callable[[list[os.DirEntry], Any], list[os.DirEntry]]
+    ) -> Iterator[tuple[str, list[os.DirEntry], list[os.DirEntry]]]:
+        # the link reported in a result of its own, beside the results of the walk from it
         if topdown:
-            yield holder, followed, []
-        yield from _walk_dir_entries(link.path, topdown, onerror, followlinks, recursive, is_ignored_dir, entered, deferred_links)
+            yield holder, [link], []
+        yield from _walk_dir_entries(link.path, topdown, onerror, followlinks, recursive, is_ignored_dir, admit)
         if not topdown:
-            yield holder, followed, []
+            yield holder, [link], []
+
+    yield from walk_following_links(
+        [top], lambda admit: _walk_dir_entries(top, topdown, onerror, followlinks, recursive, is_ignored_dir, admit), follow
+    )
 
 
 def _walk_dir_entries(
@@ -287,16 +301,14 @@ def _walk_dir_entries(
     followlinks: bool,
     recursive: bool,
     is_ignored_dir: Callable[[os.DirEntry], bool],
-    entered: EnteredDirectories | None,
-    deferred_links: list[tuple[str, os.DirEntry]] | None,
+    admit: Callable[[list[os.DirEntry], Any], list[os.DirEntry]] | None,
 ) -> Iterator[tuple[str, list[os.DirEntry], list[os.DirEntry]]]:
     """
     The walk of :func:`walk_dir_entries` from one directory.
 
-    :param entered: the directories the walk has entered, when it follows links recursively; None when it does not
-    :param deferred_links: the links to directories met so far, each with the path of the directory holding it, to which
-        this walk adds those it meets instead of descending into them, when it follows links recursively; None when it
-        does not
+    :param admit: the ``admit`` of :func:`walk_following_links`, through which the walk passes the subdirectories it would
+        descend into, each deferred link with the path of the directory holding it, when it follows links recursively;
+        None when it does not
     """
     try:
         with os.scandir(top) as it:
@@ -312,7 +324,7 @@ def _walk_dir_entries(
 
     # a walk that follows links meets them in name order, so that which link names a directory does not depend on the
     # order the file system lists entries in
-    if entered is not None:
+    if admit is not None:
         entries.sort(key=lambda entry: entry.name)
 
     for entry in entries:
@@ -326,17 +338,16 @@ def _walk_dir_entries(
         elif (followlinks or not entry.is_symlink()) and not is_ignored_dir(entry):
             dirs.append(entry)
 
-    # the real subdirectories whose real directory this walk has not entered yet; the links are deferred
-    if entered is not None and deferred_links is not None:
-        deferred_links.extend((top, entry) for entry in dirs if entry.is_symlink())
-        dirs = entered.admit([entry for entry in dirs if not entry.is_symlink()])
+    # the subdirectories whose real directory this walk has not entered yet; the links are deferred
+    if admit is not None:
+        dirs = admit(dirs, top)
 
     if topdown:
         yield top, dirs, files
 
     if recursive:
         for entry in dirs:
-            yield from _walk_dir_entries(entry.path, topdown, onerror, followlinks, recursive, is_ignored_dir, entered, deferred_links)
+            yield from _walk_dir_entries(entry.path, topdown, onerror, followlinks, recursive, is_ignored_dir, admit)
 
     if not topdown:
         yield top, dirs, files

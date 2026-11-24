@@ -23,7 +23,7 @@ from sensai.util.helper import mark_used
 from sensai.util.pickle import getstate
 from sensai.util.string import ToStringMixin
 
-from serena.util.file_system import EnteredDirectories, match_path
+from serena.util.file_system import match_path, walk_following_links
 from serena.util.text_utils import MatchedConsecutiveLines
 from solidlsp import ls_types
 from solidlsp.dependency_provider import (
@@ -738,19 +738,17 @@ class SolidLanguageServer(ABC):
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         # * raw document symbols cache
         self._ls_specific_raw_document_symbols_cache_version = cache_version_raw_document_symbols
-        self._raw_document_symbols_cache: dict[str, tuple[str, list[DocumentSymbol] | list[SymbolInformation] | None]] = {}
-        """maps relative file paths to a tuple of (file_content_hash, raw_root_symbols)"""
+        self._raw_document_symbols_cache: dict[str, tuple[str, list[DocumentSymbol] | list[SymbolInformation] | None]] | None = (
+            self._load_raw_document_symbols_cache()
+        )
+        """maps relative file paths to a tuple of (file_content_hash, raw_root_symbols); None once a stop released it,
+        until its next use reloads it from disk"""
         self._raw_document_symbols_cache_is_modified: bool = False
-        self._load_raw_document_symbols_cache()
         # * high-level document symbols cache
-        self._document_symbols_cache: dict[str, tuple[str, DocumentSymbols]] = {}
-        """maps relative file paths to a tuple of (file_content_hash, document_symbols)"""
+        self._document_symbols_cache: dict[str, tuple[str, DocumentSymbols]] | None = self._load_document_symbols_cache()
+        """maps relative file paths to a tuple of (file_content_hash, document_symbols); None once a stop released it,
+        until its next use reloads it from disk"""
         self._document_symbols_cache_is_modified: bool = False
-        self._load_document_symbols_cache()
-        self._raw_document_symbols_cache_released: bool = False
-        """whether a stop released the raw document symbols cache, which the next start reloads"""
-        self._document_symbols_cache_released: bool = False
-        """whether a stop released the document symbols cache, which the next start reloads"""
 
         self.server_started = False
         if config.trace_lsp_communication:
@@ -2198,7 +2196,7 @@ class SolidLanguageServer(ABC):
         """
 
         def get_cached_raw_document_symbols(cache_key: str, fd: LSPFileBuffer) -> list[SymbolInformation] | list[DocumentSymbol] | None:
-            file_hash_and_result = self._raw_document_symbols_cache.get(cache_key)
+            file_hash_and_result = self._raw_document_symbols().get(cache_key)
             if file_hash_and_result is None:
                 log.debug("No cache hit for raw document symbols in %s", relative_file_path)
                 log.debug("perf: raw_document_symbols_cache MISS path=%s", relative_file_path)
@@ -2228,7 +2226,7 @@ class SolidLanguageServer(ABC):
             # has not yet finished indexing or building the project (e.g. Lean 4 before `lake build`),
             # and caching it would permanently serve stale data even after the project is ready.
             if response:
-                self._raw_document_symbols_cache[cache_key] = (fd.content_hash, response)
+                self._raw_document_symbols()[cache_key] = (fd.content_hash, response)
                 self._raw_document_symbols_cache_is_modified = True
 
             return response
@@ -2296,7 +2294,7 @@ class SolidLanguageServer(ABC):
         with self._open_file_context(relative_file_path, file_buffer, open_in_ls=False) as file_data:
             # check if the desired result is cached
             cache_key = relative_file_path
-            file_hash_and_result = self._document_symbols_cache.get(cache_key)
+            file_hash_and_result = self._document_symbols().get(cache_key)
             if file_hash_and_result is None:
                 log.debug("No cache hit for document symbols in %s", relative_file_path)
             else:
@@ -2314,7 +2312,7 @@ class SolidLanguageServer(ABC):
             content_hash = file_data.content_hash
             if document_symbols.root_symbols:
                 log.debug("Updating cached document symbols for %s (hash=%s)", relative_file_path, content_hash)
-                self._document_symbols_cache[cache_key] = (content_hash, document_symbols)
+                self._document_symbols()[cache_key] = (content_hash, document_symbols)
                 self._document_symbols_cache_is_modified = True
 
             return document_symbols
@@ -2437,7 +2435,7 @@ class SolidLanguageServer(ABC):
         Will ignore directories starting with '.', language-specific defaults
         and user-configured directories (e.g. from .gitignore).
         Ignore rules apply to unresolved paths. Discovered symbolic links are followed only in trusted projects, and each
-        real directory is entered at most once (see :class:`EnteredDirectories`), so a link back into the project adds
+        real directory is entered at most once (see :func:`walk_following_links`), so a link back into the project adds
         no file twice.
 
         :param within_relative_path: pass a relative path to only consider symbols within this path.
@@ -2445,13 +2443,12 @@ class SolidLanguageServer(ABC):
             If a directory is passed, all files within this directory will be considered.
         :return: A list of root symbols representing the top-level packages/modules in the project.
         """
-        # the links to directories discovery met, each with the package symbol of the directory holding it; a link is
-        # followed only after every directory reached without a link has been discovered, so that a directory reached
-        # both ways is named by its own path
-        deferred_links: list[tuple[os.DirEntry, ls_types.UnifiedSymbolInformation]] = []
 
-        # Helper function to recursively process directories
-        def process_directory(abs_dir_path: str) -> list[ls_types.UnifiedSymbolInformation]:
+        # Helper function to recursively process directories; the directories passed through admit (see
+        # walk_following_links) are those discovery enters, each link deferred with the package symbol holding it
+        def process_directory(
+            abs_dir_path: str, admit: Callable[[list[os.DirEntry], Any], list[os.DirEntry]]
+        ) -> list[ls_types.UnifiedSymbolInformation]:
             rel_dir_path: str | None
             try:
                 rel_dir_path = str(Path(abs_dir_path).relative_to(self.repository_root_path))
@@ -2483,21 +2480,22 @@ class SolidLanguageServer(ABC):
             )
             result.append(package_symbol)
 
-            # the contained entries discovery keeps, with their relative paths and whether they are directories
-            kept_entries: list[tuple[os.DirEntry, str, bool]] = []
             for contained_dir_or_file_entry in contained_dir_or_file_entries:
                 # skip symbolic links during discovery in untrusted projects
                 if not self.config.is_project_trusted and contained_dir_or_file_entry.is_symlink():
                     continue
 
+                contained_dir_or_file_name = contained_dir_or_file_entry.name
+                contained_dir_or_file_abs_path = contained_dir_or_file_entry.path
+
                 # obtain relative path
                 try:
-                    contained_dir_or_file_rel_path = os.path.relpath(contained_dir_or_file_entry.path, self.repository_root_path)
+                    contained_dir_or_file_rel_path = os.path.relpath(contained_dir_or_file_abs_path, self.repository_root_path)
                 except ValueError as e:
                     # Typically happens when the path is not under the repository root (e.g., symlink pointing outside)
                     log.warning(
                         "Skipping path %s; likely outside of the repository root %s [cause: %s]",
-                        contained_dir_or_file_entry.path,
+                        contained_dir_or_file_abs_path,
                         self.repository_root_path,
                         e,
                     )
@@ -2509,29 +2507,13 @@ class SolidLanguageServer(ABC):
                 ):
                     log.debug("Skipping item: %s (because it should be ignored)", contained_dir_or_file_rel_path)
                     continue
-                kept_entries.append((contained_dir_or_file_entry, contained_dir_or_file_rel_path, is_dir))
-
-            # the kept real directories whose real directory discovery has not entered yet
-            admitted_dirs = {
-                id(entry) for entry in entered.admit([entry for entry, _, is_dir in kept_entries if is_dir and not entry.is_symlink()])
-            }
-
-            for contained_dir_or_file_entry, contained_dir_or_file_rel_path, is_dir in kept_entries:
-                contained_dir_or_file_name = contained_dir_or_file_entry.name
-                contained_dir_or_file_abs_path = contained_dir_or_file_entry.path
 
                 if is_dir:
-                    if contained_dir_or_file_entry.is_symlink():
-                        # followed once every directory reached without a link has been discovered
-                        deferred_links.append((contained_dir_or_file_entry, package_symbol))
-                        continue
-                    if id(contained_dir_or_file_entry) not in admitted_dirs:
-                        log.debug("Skipping directory: %s (because its real directory was entered before)", contained_dir_or_file_rel_path)
-                        continue
-                    child_symbols = process_directory(contained_dir_or_file_abs_path)
-                    package_symbol["children"].extend(child_symbols)
-                    for child in child_symbols:
-                        child["parent"] = package_symbol
+                    for admitted_dir in admit([contained_dir_or_file_entry], package_symbol):
+                        child_symbols = process_directory(admitted_dir.path, admit)
+                        package_symbol["children"].extend(child_symbols)
+                        for child in child_symbols:
+                            child["parent"] = package_symbol
 
                 elif contained_dir_or_file_entry.is_file():
                     with self._open_file_context(contained_dir_or_file_rel_path, open_in_ls=False) as file_data:
@@ -2565,20 +2547,17 @@ class SolidLanguageServer(ABC):
 
             return result
 
-        def follow_deferred_links() -> None:
-            # the deferred links in the order met, those met inside a followed link included, each entered unless its real
-            # directory was entered before, and its directory linked into the package that holds the link
-            index = 0
-            while index < len(deferred_links):
-                link, holding_package = deferred_links[index]
-                index += 1
-                if not entered.admit([link]):
-                    log.debug("Skipping directory link: %s (because its real directory was entered before)", link.path)
-                    continue
-                child_symbols = process_directory(link.path)
-                holding_package["children"].extend(child_symbols)
-                for child in child_symbols:
-                    child["parent"] = holding_package
+        def follow_link(
+            link: os.DirEntry,
+            holding_package: ls_types.UnifiedSymbolInformation,
+            admit: Callable[[list[os.DirEntry], Any], list[os.DirEntry]],
+        ) -> list[ls_types.UnifiedSymbolInformation]:
+            # the followed link's directory linked into the package holding the link; it adds no root symbol
+            child_symbols = process_directory(link.path, admit)
+            holding_package["children"].extend(child_symbols)
+            for child in child_symbols:
+                child["parent"] = holding_package
+            return []
 
         if within_relative_path:
             within_abs_path = os.path.join(self.repository_root_path, within_relative_path)
@@ -2591,18 +2570,16 @@ class SolidLanguageServer(ABC):
                 return root_nodes
             else:
                 self.PathWorkspaceStatus.from_abs_resolved_path(Path(within_abs_path).resolve(), self).check_within_workspace_or_raise()
-                entered = EnteredDirectories(within_abs_path)
-                within_result = process_directory(within_abs_path)
-                follow_deferred_links()
-                return within_result
+                return list(walk_following_links([within_abs_path], lambda admit: process_directory(within_abs_path, admit), follow_link))
         else:
-            full_result = []
             workspace_roots = self.config.get_absolute_workspace_folders(self.repository_root_path)
-            entered = EnteredDirectories(*workspace_roots)
-            for root in workspace_roots:
-                full_result.extend(process_directory(root))
-            follow_deferred_links()
-            return full_result
+            return list(
+                walk_following_links(
+                    workspace_roots,
+                    lambda admit: [symbol for root in workspace_roots for symbol in process_directory(root, admit)],
+                    follow_link,
+                )
+            )
 
     @staticmethod
     def _get_range_from_file_content(file_content: str) -> ls_types.Range:
@@ -3525,15 +3502,18 @@ class SolidLanguageServer(ABC):
             return (*base_version, fingerprint)
         return base_version
 
-    def _load_raw_document_symbols_cache(self) -> None:
+    def _load_raw_document_symbols_cache(self) -> dict[str, tuple[str, list[DocumentSymbol] | list[SymbolInformation] | None]]:
+        """
+        :return: the raw document symbols cache saved on disk, or an empty one if none is saved or it cannot be read
+        """
         cache_file = self.cache_dir / self.RAW_DOCUMENT_SYMBOL_CACHE_FILENAME
         if cache_file.exists():
             log.info("Loading document symbols cache from %s", cache_file)
             try:
                 saved_cache = load_cache(str(cache_file), self._raw_document_symbols_cache_version(), loader=self._cache_loader)
                 if saved_cache is not None:
-                    self._raw_document_symbols_cache = saved_cache
-                    log.info(f"Loaded {len(self._raw_document_symbols_cache)} entries from raw document symbols cache.")
+                    log.info(f"Loaded {len(saved_cache)} entries from raw document symbols cache.")
+                    return saved_cache
             except Exception as e:
                 # cache can become corrupt, so just skip loading it
                 log.warning(
@@ -3541,6 +3521,15 @@ class SolidLanguageServer(ABC):
                     cache_file,
                     e,
                 )
+        return {}
+
+    def _raw_document_symbols(self) -> dict[str, tuple[str, list[DocumentSymbol] | list[SymbolInformation] | None]]:
+        """
+        :return: the raw document symbols cache, reloaded from disk if a stop released it
+        """
+        if self._raw_document_symbols_cache is None:
+            self._raw_document_symbols_cache = self._load_raw_document_symbols_cache()
+        return self._raw_document_symbols_cache
 
     def _save_document_symbols_cache(self) -> None:
         cache_file = self.cache_dir / self.DOCUMENT_SYMBOL_CACHE_FILENAME
@@ -3560,15 +3549,18 @@ class SolidLanguageServer(ABC):
                 e,
             )
 
-    def _load_document_symbols_cache(self) -> None:
+    def _load_document_symbols_cache(self) -> dict[str, tuple[str, DocumentSymbols]]:
+        """
+        :return: the document symbols cache saved on disk, or an empty one if none is saved or it cannot be read
+        """
         cache_file = self.cache_dir / self.DOCUMENT_SYMBOL_CACHE_FILENAME
         if cache_file.exists():
             log.info("Loading document symbols cache from %s", cache_file)
             try:
                 saved_cache = load_cache(str(cache_file), self._document_symbols_cache_version(), loader=self._cache_loader)
                 if saved_cache is not None:
-                    self._document_symbols_cache = saved_cache
-                    log.info(f"Loaded {len(self._document_symbols_cache)} entries from document symbols cache.")
+                    log.info(f"Loaded {len(saved_cache)} entries from document symbols cache.")
+                    return saved_cache
             except Exception as e:
                 # cache can become corrupt, so just skip loading it
                 log.warning(
@@ -3576,6 +3568,15 @@ class SolidLanguageServer(ABC):
                     cache_file,
                     e,
                 )
+        return {}
+
+    def _document_symbols(self) -> dict[str, tuple[str, DocumentSymbols]]:
+        """
+        :return: the document symbols cache, reloaded from disk if a stop released it
+        """
+        if self._document_symbols_cache is None:
+            self._document_symbols_cache = self._load_document_symbols_cache()
+        return self._document_symbols_cache
 
     def save_cache(self) -> None:
         self._save_raw_document_symbols_cache()
@@ -3724,14 +3725,6 @@ class SolidLanguageServer(ABC):
         """
         log.info(f"Starting language server {self.language_server.ls_id} for {self.language_server.repository_root_path}")
 
-        # the symbol caches a stop released, reloaded from disk
-        if self._raw_document_symbols_cache_released:
-            self._load_raw_document_symbols_cache()
-            self._raw_document_symbols_cache_released = False
-        if self._document_symbols_cache_released:
-            self._load_document_symbols_cache()
-            self._document_symbols_cache_released = False
-
         self.server_started = True
         try:
             self._start_server()
@@ -3749,7 +3742,7 @@ class SolidLanguageServer(ABC):
     def stop(self, shutdown_timeout: float = 2.0) -> None:
         """
         Stops the language server process and releases the symbol caches it holds in memory that hold no unsaved change;
-        a later start reloads released caches from disk.
+        the next use of a released cache reloads it from disk.
         This function never raises an exception (any exceptions during shutdown are logged).
 
         :param shutdown_timeout: time, in seconds, to wait for the server to shutdown gracefully before killing it
@@ -3764,16 +3757,13 @@ class SolidLanguageServer(ABC):
 
     def _release_symbol_caches(self) -> None:
         """
-        Releases the symbol caches held in memory that hold no unsaved change, leaving them empty and unmodified, so that
-        a save writes nothing over the caches on disk until they are reloaded; a cache with unsaved changes is kept, so
-        that a later save can still write them.
+        Releases the symbol caches held in memory that hold no unsaved change, so that their next use reloads them from
+        disk; a cache with unsaved changes is kept, so that a later save can still write them.
         """
         if not self._raw_document_symbols_cache_is_modified:
-            self._raw_document_symbols_cache = {}
-            self._raw_document_symbols_cache_released = True
+            self._raw_document_symbols_cache = None
         if not self._document_symbols_cache_is_modified:
-            self._document_symbols_cache = {}
-            self._document_symbols_cache_released = True
+            self._document_symbols_cache = None
         self.__dict__.pop("_symbol_range_index_cache", None)
 
     @property

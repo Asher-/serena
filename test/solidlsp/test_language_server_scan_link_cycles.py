@@ -37,6 +37,44 @@ def test_a_breadth_first_scan_yields_each_file_once_over_a_link_to_the_root(loop
     assert files == ["pkg/source.cs"]
 
 
+@pytest.mark.parametrize(
+    "scan",
+    [csharp_language_server.breadth_first_file_scan, vbnet_language_server.breadth_first_file_scan, omnisharp.breadth_first_file_scan],
+)
+def test_a_breadth_first_scan_yields_the_files_of_a_directory_two_links_alias_once(tmp_path: Path, scan) -> None:
+    # a directory outside the scanned tree, which two links in it point to
+    root = tmp_path / "root"
+    root.mkdir()
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "source.cs").write_text("class C {}\n", encoding="utf-8")
+    try:
+        (root / "first").symlink_to(shared, target_is_directory=True)
+        (root / "second").symlink_to(shared, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"Symbolic links are unavailable: {exc}")
+
+    files = [Path(path).relative_to(root).as_posix() for path in scan(str(root))]
+
+    assert files == ["first/source.cs"]
+
+
+def test_the_build_root_search_finds_a_build_root_two_links_alias_once(tmp_path: Path) -> None:
+    # a build root outside the searched tree, which two links in it point to
+    root = tmp_path / "root"
+    root.mkdir()
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "build.sbt").write_text("", encoding="utf-8")
+    try:
+        (root / "first").symlink_to(shared, target_is_directory=True)
+        (root / "second").symlink_to(shared, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"Symbolic links are unavailable: {exc}")
+
+    assert find_build_roots(str(root)) == [str(root / "first")]
+
+
 def test_the_build_root_search_finds_each_build_root_once_over_a_link_to_the_root(looped_tree: Path) -> None:
     (looped_tree / "pkg" / "build.sbt").write_text("", encoding="utf-8")
 

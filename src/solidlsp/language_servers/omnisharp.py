@@ -7,11 +7,12 @@ import json
 import logging
 import os
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Iterator
+from typing import Any
 
 from overrides import override
 
-from serena.util.file_system import EnteredDirectories
+from serena.util.file_system import walk_following_links
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.ls_exceptions import SolidLSPException
@@ -35,36 +36,34 @@ def breadth_first_file_scan(root: str) -> Iterable[str]:
     """
     This function was obtained from https://stackoverflow.com/questions/49654234/is-there-a-breadth-first-search-option-available-in-os-walk-or-equivalent-py
     It traverses the directory tree in breadth first order. Links to directories are followed, each real directory
-    entered at most once (see :class:`EnteredDirectories`).
+    entered at most once (see :func:`walk_following_links`).
     """
-    entered = EnteredDirectories(root)
-    dirs = [root]
-    # the links to directories met, followed in the order met once every directory reached without a link is scanned
-    deferred_links: list[os.DirEntry] = []
-    # while we has dirs to scan
-    while dirs or deferred_links:
-        if not dirs:
-            dirs = [link.path for link in entered.admit([deferred_links.pop(0)])]
-            continue
-        next_dirs = []
-        for parent in dirs:
-            # scan each dir: files are yielded, the admitted subdirectories are scanned in the next iteration
-            with os.scandir(parent) as scanner:
-                # in name order, so that which link names a directory does not depend on the file system's listing order
-                entries = sorted(scanner, key=lambda entry: entry.name)
-            subdirectories = []
-            for entry in entries:
-                if entry.is_dir():
-                    subdirectories.append(entry)
-                else:
-                    yield entry.path
-            deferred_links.extend(subdirectory for subdirectory in subdirectories if subdirectory.is_symlink())
-            next_dirs.extend(subdirectory.path for subdirectory in entered.admit([s for s in subdirectories if not s.is_symlink()]))
 
-        # once we've done all the current dirs then
-        # we set up the next itter as the child dirs
-        # from the current itter.
-        dirs = next_dirs
+    def scan(start: str, admit: Callable[[list[os.DirEntry], Any], list[os.DirEntry]]) -> Iterator[str]:
+        # the files below start, breadth first
+        dirs = [start]
+        # while we has dirs to scan
+        while dirs:
+            next_dirs = []
+            for parent in dirs:
+                # scan each dir: files are yielded, the admitted subdirectories are scanned in the next iteration
+                with os.scandir(parent) as scanner:
+                    # in name order, so that which link names a directory does not depend on the file system's listing order
+                    entries = sorted(scanner, key=lambda entry: entry.name)
+                subdirectories = []
+                for entry in entries:
+                    if entry.is_dir():
+                        subdirectories.append(entry)
+                    else:
+                        yield entry.path
+                next_dirs.extend(subdirectory.path for subdirectory in admit(subdirectories, None))
+
+            # once we've done all the current dirs then
+            # we set up the next itter as the child dirs
+            # from the current itter.
+            dirs = next_dirs
+
+    yield from walk_following_links([root], lambda admit: scan(root, admit), lambda link, _, admit: scan(link.path, admit))
 
 
 def find_least_depth_sln_file(root_dir: str) -> str | None:

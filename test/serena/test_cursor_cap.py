@@ -6,6 +6,7 @@ ago that was; any other id that names no held cursor is reported as an unknown o
 remembers nothing of evicted ids.
 """
 
+import logging
 import re
 import tracemalloc
 from pathlib import Path
@@ -13,11 +14,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from serena.agent import SerenaAgent
+from serena.config.serena_config import SerenaConfig
 from serena.cursor import CursorManager
+from serena.language_backend import BuiltinLanguageBackend
 from serena.symbol import LanguageServerSymbol
 from serena.tools.cursor_tools import CursorGrepTool
-from serena.util.text_utils import LineType, MatchedConsecutiveLines, TextLine
 from solidlsp import ls_types
+from solidlsp.ls_config import LanguageServerId
 
 
 @pytest.fixture
@@ -142,27 +146,43 @@ def test_an_id_with_a_leading_zero_is_not_the_generated_id_of_its_number(manager
         manager.get_cursor("c01")
 
 
+@pytest.mark.python
 @pytest.mark.parametrize("uncapped", [True, False], ids=["uncapped", "above_the_cap"])
-def test_a_grep_over_more_symbols_than_the_cap_opens_cursors_up_to_the_cap_and_keeps_every_one(
-    manager: CursorManager, uncapped: bool
-) -> None:
-    # a grep, uncapped or capped above the cursors a session holds, whose matches lie in one more symbol than that
-    max_matches = -1 if uncapped else CursorManager.MAX_CURSORS + 1
-    groups = [
-        (_symbol(line), [MatchedConsecutiveLines(lines=[TextLine(line_number=line, line_content="x", match_type=LineType.MATCH)])])
-        for line in range(CursorManager.MAX_CURSORS + 1)
-    ]
-    manager.find_pattern_with_enclosing_symbols = lambda *args, **kwargs: (groups, [])  # type: ignore[method-assign]
-    agent = MagicMock()
-    agent.get_cursor_manager.return_value = manager
-    tool = CursorGrepTool(agent)
+def test_a_grep_over_more_symbols_than_the_cap_opens_cursors_up_to_the_cap_and_keeps_every_one(tmp_path: Path, uncapped: bool) -> None:
+    # a Python project whose matches lie in one more function than the cursors a session holds
+    root = tmp_path / "project"
+    (root / ".serena").mkdir(parents=True)
+    (root / ".serena" / "project.yml").write_text(
+        f"project_name: {root.name}\nlanguage_servers:\n- {LanguageServerId.PYTHON.get_key()}\nlanguage_backend: LSP\n", encoding="utf-8"
+    )
+    (root / "module.py").write_text(
+        "".join(f"def function_{index}():\n    return 'needle'\n\n\n" for index in range(CursorManager.MAX_CURSORS + 1)), encoding="utf-8"
+    )
+    agent = SerenaAgent(
+        project=str(root),
+        serena_config=SerenaConfig(
+            gui_log_window=False, web_dashboard=False, log_level=logging.ERROR, language_backend=BuiltinLanguageBackend.LSP.get_instance()
+        ),
+    )
+    try:
+        # a grep uncapped, or capped above the cursors a session holds
+        max_matches = -1 if uncapped else CursorManager.MAX_CURSORS + 1
 
-    result = tool.apply(substring_pattern="x", because="to see the cap", max_matches=max_matches, max_answer_chars=10**8)
+        result = agent.get_tool(CursorGrepTool).apply(
+            substring_pattern="needle", because="to see the cap", max_matches=max_matches, max_answer_chars=10**8
+        )
 
-    assert f"Started {CursorManager.MAX_CURSORS} cursor(s); 1 symbol(s) deferred." in result
-    opened = re.findall(r"^\[(c\d+)\]", result, re.MULTILINE)
-    assert len(opened) == CursorManager.MAX_CURSORS
-    assert set(opened) == set(manager.list_cursors())
+        assert f"Started {CursorManager.MAX_CURSORS} cursor(s); 1 symbol(s) deferred." in result
+        opened = re.findall(r"^\[(c\d+)\]", result, re.MULTILINE)
+        assert len(opened) == CursorManager.MAX_CURSORS
+        assert set(opened) == set(agent.get_cursor_manager().list_cursors())
+
+        # a further grep, whose one cursor evicts the cursor used least recently, the first this grep opened
+        agent.get_tool(CursorGrepTool).apply(substring_pattern=r"def function_1\(", because="to see the eviction", max_answer_chars=10**8)
+        with pytest.raises(ValueError, match="was closed or evicted"):
+            agent.get_cursor_manager().get_cursor(opened[0])
+    finally:
+        agent.on_shutdown(timeout=1.0)
 
 
 def test_a_closed_cursor_frees_its_place_under_the_cap(manager: CursorManager) -> None:

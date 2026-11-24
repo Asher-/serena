@@ -10,12 +10,13 @@ import weakref
 from dataclasses import replace
 from pathlib import Path
 
+import psutil
 import pytest
 
 from solidlsp import ls_types
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.util.cache import load_pickle
-from test.conftest import start_ls_context
+from test.conftest import _create_ls, start_ls_context
 
 pytestmark = pytest.mark.python
 
@@ -105,6 +106,33 @@ def test_a_stopped_server_keeps_none_of_the_saved_symbols_it_served_alive(tmp_pa
         gc.collect()
 
         assert served() is None
+
+
+def test_a_stop_keeps_the_unsaved_symbols_a_server_served_for_a_later_save(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "main.py").write_text("def ordinary():\n    return 1\n", encoding="utf-8")
+
+    with start_ls_context(ls_id=LanguageServerId.PYTHON, repo_path=str(root)) as ls:
+        ls.request_document_symbols("main.py")
+        ls.stop()
+        ls.save_cache()
+        saved = load_pickle(str(ls.cache_dir / ls.DOCUMENT_SYMBOL_CACHE_FILENAME))["obj"]
+
+    assert list(saved) == ["main.py"]
+
+
+def test_a_server_names_the_process_it_started_and_none_before_it_starts(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "main.py").write_text("def ordinary():\n    return 1\n", encoding="utf-8")
+
+    assert _create_ls(LanguageServerId.PYTHON, repo_path=str(root)).process_id() is None
+    with start_ls_context(ls_id=LanguageServerId.PYTHON, repo_path=str(root)) as ls:
+        pid = ls.process_id()
+
+        assert pid is not None
+        assert psutil.pid_exists(pid)
 
 
 def test_a_server_started_again_after_a_stop_serves_the_symbols_of_its_files(tmp_path: Path) -> None:

@@ -130,20 +130,28 @@ def test_sessions_greps_and_finds_on_a_looped_project_keep_at_most_its_files_sym
         assert closed not in session.list_cursors()
 
 
-def test_an_idle_stop_releases_the_symbols_its_servers_served_and_the_next_call_is_served_again(tmp_path: Path) -> None:
-    root = _looped_tree(tmp_path / "project")
-    # an agent whose idle stop reports each project whose servers it stopped
-    stopped = threading.Event()
+def _idle_stopping_agent(root: Path, stopped: threading.Event) -> SerenaAgent:
+    """
+    :param root: the root of the project the agent activates, which this configures to use its Python language server
+    :param stopped: the event set each time the agent's idle stop has stopped the project's servers
+    :return: an agent on the project whose servers are stopped after :data:`_IDLE_TIMEOUT` seconds without a tool call
+    """
     # the project's own configuration, naming its Python language server, which activation by path reads
     (root / ".serena").mkdir(exist_ok=True)
     (root / ".serena" / "project.yml").write_text(
         f"project_name: {root.name}\nlanguage_servers:\n- {LanguageServerId.PYTHON.get_key()}\nlanguage_backend: LSP\n", encoding="utf-8"
     )
-    agent = SerenaAgent(
+    return SerenaAgent(
         project=str(root),
         serena_config=_config(root, idle_timeout=_IDLE_TIMEOUT),
         on_language_servers_idle_stopped=lambda _project: stopped.set(),
     )
+
+
+def test_an_idle_stop_releases_the_symbols_its_servers_served_and_the_next_call_is_served_again(tmp_path: Path) -> None:
+    root = _looped_tree(tmp_path / "project")
+    stopped = threading.Event()
+    agent = _idle_stopping_agent(root, stopped)
     project = agent.get_active_project()
     assert project is not None
     manager = project.create_language_server_manager()
@@ -170,10 +178,44 @@ def test_an_idle_stop_releases_the_symbols_its_servers_served_and_the_next_call_
         agent.on_shutdown(timeout=1.0)
 
 
-def test_stopping_a_crashed_server_saves_its_symbols_and_keeps_none_of_them_alive(looped_project: Project) -> None:
+def test_an_idle_stop_of_a_crashed_server_saves_its_symbols_and_keeps_none_of_them_alive(tmp_path: Path) -> None:
+    root = _looped_tree(tmp_path / "project")
+    stopped = threading.Event()
+    agent = _idle_stopping_agent(root, stopped)
+    project = agent.get_active_project()
+    assert project is not None
+    manager = project.create_language_server_manager()
+    try:
+        # the idle stop of the newly activated project, after which it is not stopped again until it is used
+        assert stopped.wait(_WAIT)
+        stopped.clear()
+
+        # symbols served by the restarted server, whose cache on disk is then removed
+        server = manager.get_language_server("pkg/module_0.py")
+        served = weakref.ref(server.request_document_symbols("pkg/module_0.py"))
+        saved = server.cache_dir / server.DOCUMENT_SYMBOL_CACHE_FILENAME
+        saved.unlink(missing_ok=True)
+
+        # the server's process ends on its own, then a tool call on the project, from whose end the next idle stop counts
+        pid = server.process_id()
+        assert pid is not None
+        os.kill(pid, signal.SIGKILL)
+        psutil.Process(pid).wait(timeout=_WAIT)
+        agent.get_tool(GetCurrentConfigTool).apply_ex(log_call=False)
+
+        assert stopped.wait(_WAIT)
+        gc.collect()
+        assert saved.is_file()
+        assert served() is None
+    finally:
+        manager.stop_all()
+        agent.on_shutdown(timeout=1.0)
+
+
+def test_removing_the_language_of_a_crashed_server_saves_its_symbols(looped_project: Project) -> None:
     manager = looped_project.create_language_server_manager()
     server = manager.get_language_server("pkg/module_0.py")
-    served = weakref.ref(server.request_document_symbols("pkg/module_0.py"))
+    server.request_document_symbols("pkg/module_0.py")
     saved = server.cache_dir / server.DOCUMENT_SYMBOL_CACHE_FILENAME
     saved.unlink(missing_ok=True)
 
@@ -183,8 +225,6 @@ def test_stopping_a_crashed_server_saves_its_symbols_and_keeps_none_of_them_aliv
     os.kill(pid, signal.SIGKILL)
     psutil.Process(pid).wait(timeout=_WAIT)
 
-    manager.stop_all(save_cache=True)
-    gc.collect()
+    manager.remove_language_server(LanguageServerId.PYTHON, save_cache=True)
 
     assert saved.is_file()
-    assert served() is None

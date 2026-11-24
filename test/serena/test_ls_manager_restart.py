@@ -9,6 +9,7 @@ the timeouts below only bound how long a broken implementation can hang a test.
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -67,6 +68,19 @@ def _python_manager(factory: _GatedLanguageServerFactory) -> LanguageServerManag
     manager = LanguageServerManager.from_languages([LanguageServerId.PYTHON], factory, project=None)
     assert factory.created and manager.get_active_language_server_ids() == [LanguageServerId.PYTHON]
     return manager
+
+
+def _hold_unsaved_symbols(server: SolidLanguageServer, cache_file: Path) -> None:
+    """
+    Gives a server double a symbol held only in memory, which the server's save writes to its cache file and its stop
+    drops.
+
+    :param server: the server double
+    :param cache_file: the file the server's save writes its held symbols to
+    """
+    held = ["module_symbol"]
+    server.save_cache.side_effect = lambda: cache_file.write_text("\n".join(held), encoding="utf-8")  # type: ignore[attr-defined]
+    server.stop.side_effect = lambda *args, **kwargs: held.clear()  # type: ignore[attr-defined]
 
 
 class TestConcurrentRestart:
@@ -131,30 +145,42 @@ class TestRestartStopsReplacedServer:
         assert replacement is factory.created[1]
         assert list(manager.iter_language_servers()) == [replacement]
 
-    def test_replacement_of_a_server_found_not_running_saves_its_cache_before_stopping_it(self) -> None:
-        # the held server's process has ended, its caches still held in memory
+    def test_replacement_of_a_server_found_not_running_writes_its_unsaved_symbols_to_its_cache(self, tmp_path: Path) -> None:
+        # the held server's process has ended, its symbols still held in memory
         factory = _GatedLanguageServerFactory()
         manager = _python_manager(factory)
         replaced = factory.created[0]
         replaced.is_running.return_value = False
-        order = MagicMock()
-        order.attach_mock(replaced.save_cache, "save_cache")
-        order.attach_mock(replaced.stop, "stop")
+        cache_file = tmp_path / "symbols.cache"
+        _hold_unsaved_symbols(replaced, cache_file)
 
         manager.restart_language_server(LanguageServerId.PYTHON)
 
-        # its caches were saved, then it was stopped
-        assert [entry[0] for entry in order.mock_calls] == ["save_cache", "stop"]
+        assert cache_file.read_text(encoding="utf-8") == "module_symbol"
 
-    def test_removing_a_language_whose_server_is_not_running_saves_its_cache_and_stops_it(self) -> None:
+    def test_replacement_of_a_server_whose_save_fails_stops_it_and_holds_the_replacement(self) -> None:
+        factory = _GatedLanguageServerFactory()
+        manager = _python_manager(factory)
+        replaced = factory.created[0]
+        replaced.is_running.return_value = False
+        replaced.save_cache.side_effect = OSError("disk full")  # type: ignore[attr-defined]
+
+        replacement = manager.restart_language_server(LanguageServerId.PYTHON)
+
+        replaced.stop.assert_called_once()  # type: ignore[attr-defined]
+        assert list(manager.iter_language_servers()) == [replacement]
+
+    def test_removing_a_language_whose_server_is_not_running_writes_its_unsaved_symbols_to_its_cache(self, tmp_path: Path) -> None:
         factory = _GatedLanguageServerFactory()
         manager = _python_manager(factory)
         removed = factory.created[0]
         removed.is_running.return_value = False
+        cache_file = tmp_path / "symbols.cache"
+        _hold_unsaved_symbols(removed, cache_file)
 
         manager.remove_language_server(LanguageServerId.PYTHON, save_cache=True)
 
-        removed.save_cache.assert_called_once()
+        assert cache_file.read_text(encoding="utf-8") == "module_symbol"
         removed.stop.assert_called_once()
 
     def test_replacement_of_a_server_found_not_running_stops_it(self) -> None:

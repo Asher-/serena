@@ -491,6 +491,11 @@ class AngularLanguageServer(SolidLanguageServer):
 
     def _stop_html_server(self) -> None:
         if self._html_server is not None:
+            # the companion holds its symbol caches in memory; they are saved before it is stopped and dropped
+            try:
+                self._html_server.save_cache()
+            except Exception as exc:
+                log.warning("Error saving the cache of the companion HTML server: %s", exc)
             try:
                 log.info("Stopping companion HTML server")
                 self._html_server.stop()

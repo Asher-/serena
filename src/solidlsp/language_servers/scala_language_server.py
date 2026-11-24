@@ -9,12 +9,14 @@ import shutil
 import subprocess
 import threading
 import time
+from collections.abc import Callable, Iterator
 from enum import Enum
+from typing import Any
 
 import psutil
 from overrides import override
 
-from serena.util.file_system import EnteredDirectories
+from serena.util.file_system import walk_following_links
 from solidlsp.initialize_params import DefaultInitializeParamsBuilder, InitializeParamsBuilder
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
@@ -304,24 +306,17 @@ def find_build_roots(repository_root_path: str, max_depth: int = DEFAULT_PROJECT
     if _is_build_root(repository_root_path):
         return [repository_root_path]
 
-    roots: list[str] = []
+    # symlinks to directories are followed, as Metals' own search does, each real directory entered or found as a build
+    # root at most once (see walk_following_links); a directory found as a build root counts as entered
 
-    # symlinks to directories are followed, each real directory entered or found as a build root at most once: only the
-    # directories the scan enters or finds are recorded, and links are followed only once every directory reached without
-    # a link has been scanned, so a directory reached both ways is named by its own path, and a link to one the scan skips
-    # or never reaches is followed
-    entered = EnteredDirectories(repository_root_path)
-    # the links met, each with the depth of the scan that met it, in the order met
-    deferred_links: list[tuple[os.DirEntry, int]] = []
-
-    def visit(entry: os.DirEntry, depth: int) -> None:
+    def visit(entry: os.DirEntry, depth: int, admit: Callable[[list[os.DirEntry], Any], list[os.DirEntry]]) -> Iterator[str]:
         # a subdirectory the scan of the given depth admitted: a build root found, or a directory entered
         if _is_build_root(entry.path):
-            roots.append(entry.path)
+            yield entry.path
         elif entry.name not in BUILD_ROOT_SCAN_SKIP_DIRS:
-            scan(entry.path, depth + 1)
+            yield from scan(entry.path, depth + 1, admit)
 
-    def scan(directory: str, depth: int) -> None:
+    def scan(directory: str, depth: int, admit: Callable[[list[os.DirEntry], Any], list[os.DirEntry]]) -> Iterator[str]:
         if depth > max_depth:
             return
         try:
@@ -336,17 +331,10 @@ def find_build_roots(repository_root_path: str, max_depth: int = DEFAULT_PROJECT
             and entry.is_dir()
             and (_is_build_root(entry.path) or (entry.name not in BUILD_ROOT_SCAN_SKIP_DIRS and depth + 1 <= max_depth))
         ]
-        deferred_links.extend((entry, depth) for entry in subdirectories if entry.is_symlink())
-        for entry in entered.admit([entry for entry in subdirectories if not entry.is_symlink()]):
-            visit(entry, depth)
+        for entry in admit(subdirectories, depth):
+            yield from visit(entry, depth, admit)
 
-    scan(repository_root_path, 1)
-    index = 0
-    while index < len(deferred_links):
-        link, depth = deferred_links[index]
-        index += 1
-        for entry in entered.admit([link]):
-            visit(entry, depth)
+    roots = list(walk_following_links([repository_root_path], lambda admit: scan(repository_root_path, 1, admit), visit))
     return roots or [repository_root_path]
 
 
