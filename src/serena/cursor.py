@@ -534,7 +534,9 @@ class _FileSymbolTree:
 class _PatternSearch:
     """A regex search over a scope of the project, with each parameter as :meth:`CursorGrepTool.apply` describes it.
 
-    The globs are kept as the caller sent them.
+    The pattern has the semantics of ``search_for_pattern``. An absent or empty relative path searches every non-ignored
+    file of the project. Matches whose context windows share a line form one hit block. The globs are kept as the caller
+    sent them.
     """
 
     pattern: str
@@ -2015,7 +2017,8 @@ class CursorManager:
         context_lines_after: int = 0,
         skipped_links: list[str] | None = None,
     ) -> tuple[list[tuple[LanguageServerSymbol, list[MatchedConsecutiveLines]]], list[tuple[str, list[MatchedConsecutiveLines]]]]:
-        """Find regex matches grouped by enclosing symbol, each parameter as CursorGrepTool.apply describes it.
+        """Find regex matches grouped by enclosing symbol, each search parameter as :class:`_PatternSearch` describes
+        it, ``restrict_to_code_files`` and ``skipped_links`` as :meth:`_find_pattern` does.
 
         Returns ``(groups, unsymboled)`` as :meth:`_group_by_enclosing_symbol` does. Raises FileNotFoundError for a
         missing scope, and ValueError for a non-code-file scope, a malformed glob, or matches outside code files only.
