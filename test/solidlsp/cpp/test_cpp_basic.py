@@ -15,10 +15,12 @@ from unittest import mock
 import pytest
 
 from solidlsp import SolidLanguageServer
+from solidlsp.language_servers.clangd_language_server import ClangdLanguageServer
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_utils import SymbolUtils
 from test.conftest import get_repo_path, language_server_tests_enabled, start_ls_context
 from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name, request_all_symbols
+from test.solidlsp.util.scripted_process import function_symbol, scripted_process
 
 _cpp_servers: list[LanguageServerId] = [LanguageServerId.CPP]
 if language_server_tests_enabled(LanguageServerId.CPP_CCLS):
@@ -188,26 +190,21 @@ class TestCppDocumentSymbolCache:
 
         main_cpp = os.path.join("a.cpp")
 
-        def _language_server_requests(ls: SolidLanguageServer) -> int:
-            """:return: how many times serving a.cpp's symbols asks the language server for them"""
-            request = type(ls)._request_raw_document_symbols
-            with mock.patch.object(type(ls), "_request_raw_document_symbols", autospec=True, side_effect=request) as counted:
+        def _served_by(requested: mock.Mock, ls_specific_settings: dict | None = None) -> int:
+            """:return: how many times a new server asks the language server for a.cpp's symbols to serve them"""
+            before = requested.call_count
+            with start_ls_context(
+                LanguageServerId.CPP, repo_path=str(repo_path), ls_specific_settings=ls_specific_settings, solidlsp_dir=tmp_path
+            ) as ls:
                 ls.request_document_symbols(main_cpp)
-            return counted.call_count
+            return requested.call_count - before
 
-        # the symbols are asked of the language server and persisted at the stop
-        with start_ls_context(LanguageServerId.CPP, repo_path=str(repo_path), solidlsp_dir=tmp_path) as ls_default:
-            assert _language_server_requests(ls_default) == 1
+        with scripted_process(ClangdLanguageServer, lambda _path: [function_symbol("main")]) as requested:
+            # the symbols are asked of the language server and persisted at the stop
+            assert _served_by(requested) == 1
 
-        # the persisted symbols are served without asking the language server
-        with start_ls_context(LanguageServerId.CPP, repo_path=str(repo_path), solidlsp_dir=tmp_path) as ls_default_again:
-            assert _language_server_requests(ls_default_again) == 0
+            # the persisted symbols are served without asking the language server
+            assert _served_by(requested) == 0
 
-        # the persisted symbols of the default clangd context are not served in another
-        with start_ls_context(
-            LanguageServerId.CPP,
-            repo_path=str(repo_path),
-            ls_specific_settings=ls_settings_alt,
-            solidlsp_dir=tmp_path,
-        ) as ls_alt:
-            assert _language_server_requests(ls_alt) == 1
+            # the persisted symbols of the default clangd context are not served in another
+            assert _served_by(requested, ls_settings_alt) == 1

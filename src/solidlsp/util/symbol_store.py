@@ -58,8 +58,8 @@ class SymbolStore:
         self._loader = loader
         self._pending: dict[str, _Row] = {}
         """the rows put and not yet handed to a write"""
-        self._in_flight: dict[str, _Row] = {}
-        """the rows handed to a write that has not yet ended"""
+        self._unwritten: dict[str, _Row] = {}
+        """the newest row of each file whose write has not yet ended, which reads are served from"""
         self._writer = _Writer(self)
 
     def get(self, key: str) -> tuple[str, Any] | None:
@@ -68,7 +68,7 @@ class SymbolStore:
         :return: the hash of the content the file's entry was cached for and the entry, or None if no entry is held or
             the store cannot be read now
         """
-        row = self._pending.get(key) or self._in_flight.get(key)
+        row = self._unwritten.get(key)
         if row is not None:
             return row.content_hash, self._loader.loads(row.data)
 
@@ -107,7 +107,9 @@ class SymbolStore:
         :param content_hash: the hash of the file content the entry was cached for
         :param entry: the entry
         """
-        self._pending[key] = _Row(content_hash, pickle.dumps(entry))
+        row = _Row(content_hash, pickle.dumps(entry))
+        self._unwritten[key] = row
+        self._pending[key] = row
 
     def submit(self) -> None:
         """
@@ -138,13 +140,12 @@ class SymbolStore:
 
     def _take_pending(self) -> dict[str, _Row]:
         """
-        :return: the pending rows, moved to the rows in flight; a row put meanwhile stays pending
+        :return: the pending rows, which are pending no longer; a row put meanwhile stays pending
         """
         batch: dict[str, _Row] = {}
         for key in list(self._pending):
             row = self._pending.pop(key, None)
             if row is not None:
-                self._in_flight[key] = row
                 batch[key] = row
         return batch
 
@@ -164,12 +165,13 @@ class SymbolStore:
     def _write(self, batch: dict[str, _Row], connection: sqlite3.Connection | None = None) -> None:
         """
         Writes the rows in one transaction, without waiting for a database another connection holds. Rows not written
-        as the database was held go back to the pending rows, unless a newer row of the file is pending.
+        as the database was held go back to the pending rows, unless a newer row of the file was put.
 
         :param batch: the rows to write
         :param connection: the connection to write through, which stays open; None to open one for this write only
         """
         written = False
+        deferred = False
         try:
             own_connection = connection is None
             if connection is None:
@@ -201,16 +203,19 @@ class SymbolStore:
         except sqlite3.OperationalError as error:
             if _is_busy(error):
                 log.info("Deferring %d rows to the next save of %s, which another connection holds", len(batch), self._path)
-                for key, row in batch.items():
-                    self._pending.setdefault(key, row)
+                deferred = True
             else:
                 log.error("Failed to save %d document symbol entries to %s: %s", len(batch), self._path, error)
         except (sqlite3.Error, OSError) as error:
             log.error("Failed to save %d document symbol entries to %s: %s", len(batch), self._path, error)
         finally:
             for key, row in batch.items():
-                if self._in_flight.get(key) is row:
-                    self._in_flight.pop(key, None)
+                if self._unwritten.get(key) is not row:
+                    continue
+                if deferred:
+                    self._pending.setdefault(key, row)
+                else:
+                    self._unwritten.pop(key, None)
         if written:
             log.debug("Saved %d document symbol entries to %s", len(batch), self._path)
 
@@ -292,7 +297,6 @@ class _Writer:
     """
     The thread writing a store's rows, fed by a queue, started by the first batch sent to it and ended by a stop.
     """
-
 
     def __init__(self, store: SymbolStore) -> None:
         self._store = store

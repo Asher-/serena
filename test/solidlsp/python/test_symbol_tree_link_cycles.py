@@ -10,14 +10,16 @@ import logging
 import weakref
 from dataclasses import replace
 from pathlib import Path
-from unittest import mock
+from typing import Any
 
 import psutil
 import pytest
 
 from solidlsp import ls_types
+from solidlsp.language_servers.pyright_server import PyrightServer
 from solidlsp.ls_config import LanguageServerId
 from test.conftest import _create_ls, start_ls_context
+from test.solidlsp.util.scripted_process import function_symbol, scripted_process
 
 pytestmark = pytest.mark.python
 
@@ -33,6 +35,14 @@ def _link(link: Path, target: Path) -> None:
         link.symlink_to(target, target_is_directory=True)
     except OSError as exc:
         pytest.skip(f"Symbolic links are unavailable: {exc}")
+
+
+def _answer(path: Path) -> list[dict[str, Any]]:
+    """
+    :return: the function the file defines in its first line, as a language server answers it
+    """
+    definition = path.read_text(encoding="utf-8").splitlines()[0]
+    return [function_symbol(definition.removeprefix("def ").removesuffix("():"))]
 
 
 def _file_paths(nodes: list[ls_types.UnifiedSymbolInformation]) -> list[str]:
@@ -62,11 +72,9 @@ def test_a_trusted_projects_symbol_tree_holds_each_file_once_over_looping_and_al
     _link(root / "first", shared)
     _link(root / "second", shared)
 
-    with start_ls_context(ls_id=LanguageServerId.PYTHON, repo_path=str(root)) as ls:
+    with scripted_process(PyrightServer, _answer) as requested, start_ls_context(ls_id=LanguageServerId.PYTHON, repo_path=str(root)) as ls:
         ls.config = replace(ls.config, is_project_trusted=True)
-        request = type(ls)._request_raw_document_symbols
-        with mock.patch.object(type(ls), "_request_raw_document_symbols", autospec=True, side_effect=request) as requested:
-            paths = _file_paths(ls.request_full_symbol_tree())
+        paths = _file_paths(ls.request_full_symbol_tree())
 
     assert len(paths) == 3
     assert {"main.py", "pkg/module.py"} <= set(paths)
@@ -113,15 +121,13 @@ def test_a_save_after_a_stop_loses_none_of_the_symbols_the_server_served(tmp_pat
     root.mkdir()
     (root / "main.py").write_text("def ordinary():\n    return 1\n", encoding="utf-8")
 
-    with start_ls_context(ls_id=LanguageServerId.PYTHON, repo_path=str(root)) as ls:
+    with scripted_process(PyrightServer, _answer), start_ls_context(ls_id=LanguageServerId.PYTHON, repo_path=str(root)) as ls:
         ls.request_document_symbols("main.py")
         ls.stop()
         ls.save_cache()
 
-    with start_ls_context(ls_id=LanguageServerId.PYTHON, repo_path=str(root)) as ls:
-        request = type(ls)._request_raw_document_symbols
-        with mock.patch.object(type(ls), "_request_raw_document_symbols", autospec=True, side_effect=request) as requested:
-            names = [symbol["name"] for symbol in ls.request_document_symbols("main.py").root_symbols]
+    with scripted_process(PyrightServer, _answer) as requested, start_ls_context(ls_id=LanguageServerId.PYTHON, repo_path=str(root)) as ls:
+        names = [symbol["name"] for symbol in ls.request_document_symbols("main.py").root_symbols]
 
     assert names == ["ordinary"]
     assert requested.call_count == 0
@@ -134,7 +140,7 @@ def test_a_save_whose_cache_file_cannot_be_written_logs_the_failure_and_raises_n
     root.mkdir()
     (root / "main.py").write_text("def ordinary():\n    return 1\n", encoding="utf-8")
 
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.ERROR), scripted_process(PyrightServer, _answer):
         with start_ls_context(ls_id=LanguageServerId.PYTHON, repo_path=str(root)) as ls:
             ls.request_document_symbols("main.py")
             # a directory where the cache file would be written, so that no write can succeed

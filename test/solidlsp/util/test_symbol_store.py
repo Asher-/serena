@@ -7,7 +7,8 @@ import gc
 import sqlite3
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from pathlib import Path
 
@@ -221,32 +222,50 @@ def test_a_read_racing_writes_of_its_row_returns_the_old_or_the_new_row(tmp_path
     # a store of another process, which reads only what the writer's store has written, and has read before
     reader = SymbolStore(path, version=(1,), loader=_LOADER)
     assert reader.get("a.py") == ("hash-old", _entry("old"))
-    writes_done = threading.Event()
-    errors: list[BaseException] = []
-
-    def write_repeatedly() -> None:
-        try:
-            for index in range(200):
-                writer.put("a.py", "hash-new", _entry("new"))
-                writer.put(f"other_{index}.py", "hash-other", _entry("other"))
-                writer.submit()
-            writer.close()
-        except BaseException as error:
-            errors.append(error)
-        finally:
-            writes_done.set()
-
-    thread = threading.Thread(target=write_repeatedly)
-    thread.start()
     read = []
-    while not writes_done.is_set():
-        read.append(reader.get("a.py"))
-    thread.join()
+    for index in range(200):
+        writer.put("a.py", "hash-new", _entry("new"))
+        writer.put(f"other_{index}.py", "hash-other", _entry("other"))
+        # the writer's thread writes the rows while the reads that follow are made
+        writer.submit()
+        read.extend(reader.get("a.py") for _ in range(5))
+    writer.close()
     read.append(reader.get("a.py"))
 
-    assert errors == []
     assert set(map(repr, read)) <= {repr(("hash-old", _entry("old"))), repr(("hash-new", _entry("new")))}
     assert read[-1] == ("hash-new", _entry("new"))
+
+
+class _SteppedKey(str):
+    """
+    A key whose every lookup runs a step first and goes on only once the step has ended.
+    """
+
+    step: Callable[[], None] | None = None
+
+    __eq__ = str.__eq__
+
+    def __hash__(self) -> int:
+        if self.step is not None:
+            self.step()
+        return super().__hash__()
+
+
+def test_a_read_at_any_step_of_the_first_save_of_its_row_finds_it(tmp_path: Path) -> None:
+    store = SymbolStore(tmp_path / "store.sqlite", version=(1,), loader=_LOADER)
+    key = _SteppedKey("a.py")
+    store.put(key, "hash-a", _entry("a"))
+    reads: list[object] = []
+
+    with ThreadPoolExecutor(1) as reader:
+        # each lookup of the row by the save waits for another thread's read of the row to end
+        key.step = lambda: reads.append(reader.submit(store.get, "a.py").result())
+        store.submit()
+        store.close()
+        key.step = None
+
+    assert reads
+    assert [read for read in reads if read != ("hash-a", _entry("a"))] == []
 
 
 def _open_connections(path: Path) -> int:
@@ -322,6 +341,8 @@ def test_more_concurrent_readers_than_the_pool_holds_leave_no_connection_beyond_
     store.close()
 
     connections_before = _open_sqlite_connections()
+    # one connection open throughout, as the first to open a database in WAL mode holds it, which makes other reads misses
+    assert store.get("a.py") == ("hash-a", _entry("a"))
     results = _read_concurrently(store, "a.py", readers=12, reads=50)
     connections_after_reads = _open_sqlite_connections()
     store.close()
@@ -337,16 +358,19 @@ def test_a_close_while_reads_are_in_flight_on_several_threads_leaves_none_of_the
     store = SymbolStore(path, version=(1,), loader=_LOADER)
     store.put("a.py", "hash-a", _entry("a"))
     store.close()
+    # one connection open before the threads read, as for the concurrent readers above
+    assert store.get("a.py") == ("hash-a", _entry("a"))
     reading = threading.Barrier(9)
     closed = threading.Event()
-    results: list[object] = []
+    read_before: list[object] = []
+    read_through: list[object] = []
 
     def read_until_closed() -> None:
         # one read each before the close, after which the threads read on through it
-        results.append(store.get("a.py"))
+        read_before.append(store.get("a.py"))
         reading.wait()
         while not closed.is_set():
-            results.append(store.get("a.py"))
+            read_through.append(store.get("a.py"))
 
     threads = [threading.Thread(target=read_until_closed) for _ in range(8)]
     for thread in threads:
@@ -359,7 +383,9 @@ def test_a_close_while_reads_are_in_flight_on_several_threads_leaves_none_of_the
     # the reads that began after the close opened the store's next reading connections, which its next close closes
     store.close()
 
-    assert set(map(repr, results)) == {repr(("hash-a", _entry("a")))}
+    assert read_before == [("hash-a", _entry("a"))] * 8
+    # a read meeting the last connection's close, which holds the database, is a miss
+    assert [read for read in read_through if read not in (("hash-a", _entry("a")), None)] == []
     assert _open_connections(path) == 0
 
 
