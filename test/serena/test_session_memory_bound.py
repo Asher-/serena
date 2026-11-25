@@ -194,7 +194,7 @@ def test_an_idle_stop_of_a_crashed_server_saves_its_symbols_and_keeps_none_of_th
         # symbols served by the restarted server, whose cache on disk is then removed
         server = manager.get_language_server("pkg/module_0.py")
         served = weakref.ref(server.request_document_symbols("pkg/module_0.py"))
-        saved = server.cache_dir / server.DOCUMENT_SYMBOL_CACHE_FILENAME
+        saved = server.cache_dir / server.RAW_DOCUMENT_SYMBOL_STORE_FILENAME
         saved.unlink(missing_ok=True)
 
         # the server's process ends on its own, then a tool call on the project, from whose end the next idle stop counts
@@ -217,7 +217,7 @@ def test_removing_the_language_of_a_crashed_server_saves_its_symbols(looped_proj
     manager = looped_project.create_language_server_manager()
     server = manager.get_language_server("pkg/module_0.py")
     server.request_document_symbols("pkg/module_0.py")
-    saved = server.cache_dir / server.DOCUMENT_SYMBOL_CACHE_FILENAME
+    saved = server.cache_dir / server.RAW_DOCUMENT_SYMBOL_STORE_FILENAME
     saved.unlink(missing_ok=True)
 
     # the server's process ends on its own
@@ -237,7 +237,7 @@ def test_restarting_the_language_of_a_crashed_server_saves_its_symbols_and_holds
     manager = looped_project.create_language_server_manager()
     server = manager.get_language_server("pkg/module_0.py")
     server.request_document_symbols("pkg/module_0.py")
-    saved = server.cache_dir / server.DOCUMENT_SYMBOL_CACHE_FILENAME
+    saved = server.cache_dir / server.RAW_DOCUMENT_SYMBOL_STORE_FILENAME
     saved.unlink(missing_ok=True)
 
     # the server's process ends on its own

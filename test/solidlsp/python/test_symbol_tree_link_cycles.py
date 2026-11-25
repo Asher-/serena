@@ -10,13 +10,13 @@ import logging
 import weakref
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 import psutil
 import pytest
 
 from solidlsp import ls_types
 from solidlsp.ls_config import LanguageServerId
-from solidlsp.util.cache import load_pickle
 from test.conftest import _create_ls, start_ls_context
 
 pytestmark = pytest.mark.python
@@ -64,16 +64,15 @@ def test_a_trusted_projects_symbol_tree_holds_each_file_once_over_looping_and_al
 
     with start_ls_context(ls_id=LanguageServerId.PYTHON, repo_path=str(root)) as ls:
         ls.config = replace(ls.config, is_project_trusted=True)
-        paths = _file_paths(ls.request_full_symbol_tree())
-        # the document symbols the server holds, as its public save writes them
-        ls.save_cache()
-        saved = load_pickle(str(ls.cache_dir / ls.DOCUMENT_SYMBOL_CACHE_FILENAME))["obj"]
+        request = type(ls)._request_raw_document_symbols
+        with mock.patch.object(type(ls), "_request_raw_document_symbols", autospec=True, side_effect=request) as requested:
+            paths = _file_paths(ls.request_full_symbol_tree())
 
     assert len(paths) == 3
     assert {"main.py", "pkg/module.py"} <= set(paths)
     assert len([p for p in paths if p.endswith("linked.py")]) == 1
-    # at most one entry per distinct real file: main.py, pkg/module.py and the shared linked.py
-    assert 0 < len(saved) <= 3
+    # the symbols cached are asked for at most once per distinct real file: main.py, pkg/module.py and the shared linked.py
+    assert 0 < requested.call_count <= 3
 
 
 @pytest.mark.parametrize("alias_inside_project", [False, True], ids=["alias_outside_the_project", "alias_inside_the_project"])
@@ -109,7 +108,7 @@ def test_a_stopped_server_keeps_none_of_the_saved_symbols_it_served_alive(tmp_pa
         assert served() is None
 
 
-def test_a_stop_keeps_the_unsaved_symbols_a_server_served_for_a_later_save(tmp_path: Path) -> None:
+def test_a_save_after_a_stop_loses_none_of_the_symbols_the_server_served(tmp_path: Path) -> None:
     root = tmp_path / "project"
     root.mkdir()
     (root / "main.py").write_text("def ordinary():\n    return 1\n", encoding="utf-8")
@@ -118,29 +117,31 @@ def test_a_stop_keeps_the_unsaved_symbols_a_server_served_for_a_later_save(tmp_p
         ls.request_document_symbols("main.py")
         ls.stop()
         ls.save_cache()
-        saved = load_pickle(str(ls.cache_dir / ls.DOCUMENT_SYMBOL_CACHE_FILENAME))["obj"]
 
-    assert list(saved) == ["main.py"]
+    with start_ls_context(ls_id=LanguageServerId.PYTHON, repo_path=str(root)) as ls:
+        request = type(ls)._request_raw_document_symbols
+        with mock.patch.object(type(ls), "_request_raw_document_symbols", autospec=True, side_effect=request) as requested:
+            names = [symbol["name"] for symbol in ls.request_document_symbols("main.py").root_symbols]
+
+    assert names == ["ordinary"]
+    assert requested.call_count == 0
 
 
-def test_a_save_whose_cache_files_cannot_be_written_logs_the_failure_and_raises_nothing(
+def test_a_save_whose_cache_file_cannot_be_written_logs_the_failure_and_raises_nothing(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     root = tmp_path / "project"
     root.mkdir()
     (root / "main.py").write_text("def ordinary():\n    return 1\n", encoding="utf-8")
 
-    with start_ls_context(ls_id=LanguageServerId.PYTHON, repo_path=str(root)) as ls:
-        ls.request_document_symbols("main.py")
-        # directories where the cache files would be written, so that neither write can succeed
-        (ls.cache_dir / ls.RAW_DOCUMENT_SYMBOL_CACHE_FILENAME).mkdir(parents=True, exist_ok=True)
-        (ls.cache_dir / ls.DOCUMENT_SYMBOL_CACHE_FILENAME).mkdir(parents=True, exist_ok=True)
-
-        with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.ERROR):
+        with start_ls_context(ls_id=LanguageServerId.PYTHON, repo_path=str(root)) as ls:
+            ls.request_document_symbols("main.py")
+            # a directory where the cache file would be written, so that no write can succeed
+            (ls.cache_dir / ls.RAW_DOCUMENT_SYMBOL_STORE_FILENAME).mkdir(parents=True, exist_ok=True)
             ls.save_cache()
 
-    assert "Failed to save raw document symbols cache" in caplog.text
-    assert "Failed to save document symbols cache" in caplog.text
+    assert "Failed to save" in caplog.text
 
 
 def test_a_server_names_the_process_it_started_and_none_before_it_starts(tmp_path: Path) -> None:

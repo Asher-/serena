@@ -34,7 +34,7 @@ def test_a_stop_writes_the_symbols_the_companion_served_to_the_companion_cache(t
         / SERENA_MANAGED_DIR_NAME
         / SolidLanguageServer.CACHE_FOLDER_NAME
         / LanguageServerId.TYPESCRIPT.get_key()
-        / SolidLanguageServer.DOCUMENT_SYMBOL_CACHE_FILENAME
+        / SolidLanguageServer.RAW_DOCUMENT_SYMBOL_STORE_FILENAME
     )
 
     with start_ls_context(LanguageServerId.ASTRO, repo_path=str(repo)) as language_server:

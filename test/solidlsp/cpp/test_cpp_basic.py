@@ -10,6 +10,7 @@ import os
 import pathlib
 import shutil
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -187,52 +188,26 @@ class TestCppDocumentSymbolCache:
 
         main_cpp = os.path.join("a.cpp")
 
-        def _assert_caches_loaded_and_clean(ls: SolidLanguageServer) -> None:
-            assert ls._raw_document_symbols_cache, "Expected raw document-symbol cache to load from disk"
-            assert ls._document_symbols_cache, "Expected document-symbol cache to load from disk"
-            assert not ls._raw_document_symbols_cache_is_modified
-            assert not ls._document_symbols_cache_is_modified
+        def _language_server_requests(ls: SolidLanguageServer) -> int:
+            """:return: how many times serving a.cpp's symbols asks the language server for them"""
+            request = type(ls)._request_raw_document_symbols
+            with mock.patch.object(type(ls), "_request_raw_document_symbols", autospec=True, side_effect=request) as counted:
+                ls.request_document_symbols(main_cpp)
+            return counted.call_count
 
-        def _assert_caches_empty(ls: SolidLanguageServer) -> None:
-            assert ls._raw_document_symbols_cache == {}
-            assert ls._document_symbols_cache == {}
-
-        def _assert_caches_modified(ls: SolidLanguageServer) -> None:
-            assert ls._raw_document_symbols_cache_is_modified
-            assert ls._document_symbols_cache_is_modified
-
+        # the symbols are asked of the language server and persisted at the stop
         with start_ls_context(LanguageServerId.CPP, repo_path=str(repo_path), solidlsp_dir=tmp_path) as ls_default:
-            _ = ls_default.request_document_symbols(main_cpp)
+            assert _language_server_requests(ls_default) == 1
 
-            default_raw_cache_version = ls_default._raw_document_symbols_cache_version()
-            default_doc_cache_version = ls_default._document_symbols_cache_version()
-
-            ls_default.save_cache()
-            cache_dir = ls_default.cache_dir
-            cache_files = [p for p in cache_dir.rglob("*") if p.is_file()]
-            assert cache_files, f"Expected SolidLSP to create cache artifacts under {cache_dir}"
-
+        # the persisted symbols are served without asking the language server
         with start_ls_context(LanguageServerId.CPP, repo_path=str(repo_path), solidlsp_dir=tmp_path) as ls_default_again:
-            assert ls_default_again.cache_dir == cache_dir
-            _assert_caches_loaded_and_clean(ls_default_again)
-            _ = ls_default_again.request_document_symbols(main_cpp)
-            assert not ls_default_again._raw_document_symbols_cache_is_modified
-            assert not ls_default_again._document_symbols_cache_is_modified
+            assert _language_server_requests(ls_default_again) == 0
 
+        # the persisted symbols of the default clangd context are not served in another
         with start_ls_context(
             LanguageServerId.CPP,
             repo_path=str(repo_path),
             ls_specific_settings=ls_settings_alt,
             solidlsp_dir=tmp_path,
         ) as ls_alt:
-            assert ls_alt.cache_dir == cache_dir
-            alt_raw_cache_version = ls_alt._raw_document_symbols_cache_version()
-            alt_doc_cache_version = ls_alt._document_symbols_cache_version()
-
-            assert alt_raw_cache_version != default_raw_cache_version
-            assert alt_doc_cache_version != default_doc_cache_version
-
-            _assert_caches_empty(ls_alt)
-
-            _ = ls_alt.request_document_symbols(main_cpp)
-            _assert_caches_modified(ls_alt)
+            assert _language_server_requests(ls_alt) == 1

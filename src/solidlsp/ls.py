@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -9,18 +10,16 @@ import pathlib
 import shutil
 import threading
 from abc import ABC, abstractmethod
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Hashable, Iterator, Sequence
 from contextlib import contextmanager
 from copy import copy
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 from time import monotonic, perf_counter, sleep
-from typing import Any, Self, Union, cast
+from typing import Any, Generic, Self, TypeVar, Union, cast
 
-from ruamel.yaml.scalarstring import DoubleQuotedScalarString, SingleQuotedScalarString
 from sensai.util.helper import mark_used
-from sensai.util.pickle import getstate
 from sensai.util.string import ToStringMixin
 
 from serena.util.file_system import match_path, walk_following_links
@@ -58,8 +57,8 @@ from solidlsp.lsp_protocol_handler.server import (
     StringDict,
 )
 from solidlsp.settings import SolidLSPSettings
-from solidlsp.util.cache import load_cache, save_cache
 from solidlsp.util.pickle_util import SafePickleLoader
+from solidlsp.util.symbol_store import SymbolStore
 
 RawDocumentSymbol = Union[DocumentSymbol, SymbolInformation]
 """
@@ -315,7 +314,15 @@ class SymbolBody(ToStringMixin):
     i.e. a core representation of only about 40 bytes per body.
     """
 
-    def __init__(self, lines: list[str], start_line: int, start_col: int, end_line: int, end_col: int) -> None:
+    def __init__(self, lines: list[str] | None, start_line: int, start_col: int, end_line: int, end_col: int) -> None:
+        """
+        :param lines: the lines of the file the body is in, or None for a body that holds only its range, whose text
+            cannot be extracted until it is bound to the lines with :meth:`bound_to`
+        :param start_line: the body's first line
+        :param start_col: the column at which the body starts in its first line
+        :param end_line: the body's last line
+        :param end_col: the column at which the body ends in its last line
+        """
         self._lines = lines
         self._start_line = start_line
         self._start_col = start_col
@@ -325,7 +332,21 @@ class SymbolBody(ToStringMixin):
     def _tostring_excludes(self) -> list[str]:
         return ["_lines"]
 
+    def unbound(self) -> "SymbolBody":
+        """
+        :return: a body of the same range that holds none of the file's lines
+        """
+        return SymbolBody(None, self._start_line, self._start_col, self._end_line, self._end_col)
+
+    def bound_to(self, lines: list[str]) -> "SymbolBody":
+        """
+        :param lines: the lines of the file the body's range is in
+        :return: a body of the same range whose text is extracted from the given lines
+        """
+        return SymbolBody(lines, self._start_line, self._start_col, self._end_line, self._end_col)
+
     def get_text(self) -> str:
+        assert self._lines is not None, "the text of a body holding only its range cannot be extracted"
         end_line = self._end_line
         end_col = self._end_col
         if end_line >= len(self._lines):
@@ -386,14 +407,68 @@ class SymbolBodyFactory:
 
 
 class DocumentSymbols:
-    # IMPORTANT: Instances of this class are persisted in the high-level document symbol cache
-
     def __init__(self, root_symbols: list[ls_types.UnifiedSymbolInformation]):
         self.root_symbols = root_symbols
         self._all_symbols: list[ls_types.UnifiedSymbolInformation] | None = None
 
-    def __getstate__(self) -> dict:
-        return getstate(DocumentSymbols, self, transient_properties=["_all_symbols"])
+    def slim(self) -> "DocumentSymbols":
+        """
+        :return: a copy of the symbol tree that holds none of the file's text and none of its paths but the relative
+            one: each body holds only its range, and each location lacks ``absolutePath`` and ``uri``. Symbols of the
+            copy are new dictionaries; their other values are shared with this tree.
+        """
+
+        def slim_symbol(symbol: ls_types.UnifiedSymbolInformation) -> None:
+            body = symbol.get("body")
+            if isinstance(body, SymbolBody):
+                symbol["body"] = body.unbound()
+            location = symbol.get("location")
+            if location is not None:
+                slim_location = dict(location)
+                slim_location.pop("absolutePath", None)
+                slim_location.pop("uri", None)
+                symbol["location"] = cast(ls_types.Location, slim_location)
+
+        return DocumentSymbols(self._copy_tree(slim_symbol))
+
+    def bound(self, lines: list[str], absolute_path: str, uri: str) -> "DocumentSymbols":
+        """
+        :param lines: the lines of the file the symbols are in
+        :param absolute_path: the absolute path of the file
+        :param uri: the URI of the file
+        :return: a copy of the symbol tree whose bodies extract their text from the given lines and whose locations
+            carry the given absolute path and URI. Symbols of the copy are new dictionaries; their other values are
+            shared with this tree.
+        """
+
+        def bind_symbol(symbol: ls_types.UnifiedSymbolInformation) -> None:
+            body = symbol.get("body")
+            if isinstance(body, SymbolBody):
+                symbol["body"] = body.bound_to(lines)
+            location = symbol.get("location")
+            if location is not None:
+                symbol["location"] = ls_types.Location(**{**location, "absolutePath": absolute_path, "uri": uri})  # type: ignore[typeddict-item]
+
+        return DocumentSymbols(self._copy_tree(bind_symbol))
+
+    def _copy_tree(self, adapt: Callable[[ls_types.UnifiedSymbolInformation], None]) -> list[ls_types.UnifiedSymbolInformation]:
+        """
+        :param adapt: a function changing a copied symbol in place, applied to every copy
+        :return: copies of the root symbols, each linked to copies of its children, whose parent is the copy of their
+            parent; the parent of each root copy is None
+        """
+
+        def copy_symbol(
+            symbol: ls_types.UnifiedSymbolInformation, parent: ls_types.UnifiedSymbolInformation | None
+        ) -> ls_types.UnifiedSymbolInformation:
+            copied = cast(ls_types.UnifiedSymbolInformation, dict(symbol))
+            copied["parent"] = parent
+            adapt(copied)
+            if "children" in symbol:
+                copied["children"] = [copy_symbol(child, copied) for child in symbol["children"]]
+            return copied
+
+        return [copy_symbol(root_symbol, None) for root_symbol in self.root_symbols]
 
     def iter_symbols(self) -> Iterator[ls_types.UnifiedSymbolInformation]:
         """
@@ -519,6 +594,57 @@ class SymbolRangeIndex:
         return best
 
 
+_Held = TypeVar("_Held")
+
+
+class _PerFileCache(Generic[_Held]):
+    """
+    An in-memory map from the relative path of a file to a value derived from the file's content, holding the values of
+    at most a fixed number of files: putting the value of a file not held lets go of the value used least recently.
+    A value is served only for the content hash it was put for. Each operation is a single atomic step of the
+    underlying ordered map or tolerates another thread's step in between, so the map takes no lock; a put racing a
+    put of another file in another thread may let the map hold one value more than its maximum until the next put.
+    """
+
+    def __init__(self, max_entries: int) -> None:
+        """
+        :param max_entries: the number of files whose values are held at most; at least 1
+        """
+        if max_entries < 1:
+            raise ValueError(f"A per-file cache must hold at least one file's value, not {max_entries}")
+        self._max_entries = max_entries
+        self._entries: OrderedDict[str, tuple[str, _Held]] = OrderedDict()
+
+    def get(self, relative_path: str, content_hash: str) -> _Held | None:
+        """
+        :param relative_path: the file's relative path
+        :param content_hash: the hash of the file's current content
+        :return: the value held for the file, if it was put for that content, marked as used most recently; else None
+        """
+        entry = self._entries.get(relative_path)
+        if entry is None or entry[0] != content_hash:
+            return None
+        with contextlib.suppress(KeyError):
+            self._entries.move_to_end(relative_path)
+        return entry[1]
+
+    def put(self, relative_path: str, content_hash: str, value: _Held) -> None:
+        """
+        :param relative_path: the file's relative path
+        :param content_hash: the hash of the file content the value derives from
+        :param value: the value
+        """
+        if relative_path not in self._entries:
+            while len(self._entries) >= self._max_entries:
+                try:
+                    self._entries.popitem(last=False)
+                except KeyError:
+                    break
+        self._entries[relative_path] = (content_hash, value)
+        with contextlib.suppress(KeyError):
+            self._entries.move_to_end(relative_path)
+
+
 class SolidLanguageServer(ABC):
     """
     High-level abstraction for language server interaction, which wraps the underlying low-level LSP interface
@@ -532,15 +658,10 @@ class SolidLanguageServer(ABC):
     If the result of a language server changes in a way that affects the raw document symbols,
     the LS-specific version should be incremented instead.
     """
-    RAW_DOCUMENT_SYMBOL_CACHE_FILENAME = "raw_document_symbols.pkl"
-    DOCUMENT_SYMBOL_CACHE_VERSION = 6
-    """
-    defines the version of the high-level document symbol format.
-    This should be incremented whenever there is a change in the way document symbols are stored.
-    For changes that affect the symbols of a particular language server implementation (subclass),
-    change :meth:`_document_symbols_cache_fingerprint` instead.
-    """
-    DOCUMENT_SYMBOL_CACHE_FILENAME = "document_symbols.pkl"
+    RAW_DOCUMENT_SYMBOL_STORE_FILENAME = "raw_document_symbols.sqlite"
+    """the name, in the cache directory, of the store of the raw document symbols of the project's files"""
+    _LEGACY_CACHE_FILENAMES = ("raw_document_symbols.pkl", "document_symbols.pkl")
+    """the names of the whole-file caches of former versions, which are removed without being read"""
 
     # Directories that should always be ignored regardless of language:
     # VCS internals, virtual environments, caches, and serena's own data.
@@ -564,16 +685,8 @@ class SolidLanguageServer(ABC):
         }
     )
 
-    _SYMBOL_CACHE_TYPES = [DocumentSymbols, SymbolBody, SymbolKind]
-    """
-    data types used in document symbol caches 
-    """
-    _LS_SPECIFIC_SETTINGS_TYPES = [SingleQuotedScalarString, DoubleQuotedScalarString]
-    """
-    types that may appear in LS-specific settings read from YAML files and which therefore
-    may appear in persisted cache keys.
-    """
-    _cache_loader = SafePickleLoader(allowed_classes=[*_SYMBOL_CACHE_TYPES, *_LS_SPECIFIC_SETTINGS_TYPES])
+    _cache_loader = SafePickleLoader()
+    """the loader of the entries of the raw document symbols store, which hold only built-in types"""
 
     # To be overridden and extended by subclasses
     def is_ignored_dirname(self, dirname: str) -> bool:
@@ -736,19 +849,19 @@ class SolidLanguageServer(ABC):
         # initialise symbol caches
         self.cache_dir = Path(self._solidlsp_settings.project_data_path) / self.CACHE_FOLDER_NAME / self.ls_id.get_key()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        # * raw document symbols cache
+        self._remove_legacy_caches()
+        # * raw document symbols, persisted one file at a time
         self._ls_specific_raw_document_symbols_cache_version = cache_version_raw_document_symbols
-        self._raw_document_symbols_cache: dict[str, tuple[str, list[DocumentSymbol] | list[SymbolInformation] | None]] | None = (
-            self._load_raw_document_symbols_cache()
+        self._raw_document_symbols_store = SymbolStore(
+            self.cache_dir / self.RAW_DOCUMENT_SYMBOL_STORE_FILENAME, self._raw_document_symbols_cache_version(), self._cache_loader
         )
-        """maps relative file paths to a tuple of (file_content_hash, raw_root_symbols); None once a stop released it,
-        until its next use reloads it from disk"""
-        self._raw_document_symbols_cache_is_modified: bool = False
-        # * high-level document symbols cache
-        self._document_symbols_cache: dict[str, tuple[str, DocumentSymbols]] | None = self._load_document_symbols_cache()
-        """maps relative file paths to a tuple of (file_content_hash, document_symbols); None once a stop released it,
-        until its next use reloads it from disk"""
-        self._document_symbols_cache_is_modified: bool = False
+        """maps relative file paths to (file_content_hash, raw_root_symbols)"""
+        # * high-level document symbols and the range indices built on them, held in memory for a bounded number of files
+        max_cached_files = self._solidlsp_settings.document_symbols_cache_max_entries
+        self._document_symbols_cache: _PerFileCache[DocumentSymbols] = _PerFileCache(max_cached_files)
+        """maps relative file paths to the slim document symbols of their content"""
+        self._symbol_range_index_cache: _PerFileCache[SymbolRangeIndex] = _PerFileCache(max_cached_files)
+        """maps relative file paths to the range index of their content's document symbols"""
 
         self.server_started = False
         if config.trace_lsp_communication:
@@ -2196,7 +2309,7 @@ class SolidLanguageServer(ABC):
         """
 
         def get_cached_raw_document_symbols(cache_key: str, fd: LSPFileBuffer) -> list[SymbolInformation] | list[DocumentSymbol] | None:
-            file_hash_and_result = self._raw_document_symbols().get(cache_key)
+            file_hash_and_result = self._raw_document_symbols_store.get(cache_key)
             if file_hash_and_result is None:
                 log.debug("No cache hit for raw document symbols in %s", relative_file_path)
                 log.debug("perf: raw_document_symbols_cache MISS path=%s", relative_file_path)
@@ -2226,8 +2339,7 @@ class SolidLanguageServer(ABC):
             # has not yet finished indexing or building the project (e.g. Lean 4 before `lake build`),
             # and caching it would permanently serve stale data even after the project is ready.
             if response:
-                self._raw_document_symbols()[cache_key] = (fd.content_hash, response)
-                self._raw_document_symbols_cache_is_modified = True
+                self._raw_document_symbols_store.put(cache_key, fd.content_hash, response)
 
             return response
 
@@ -2294,26 +2406,20 @@ class SolidLanguageServer(ABC):
         with self._open_file_context(relative_file_path, file_buffer, open_in_ls=False) as file_data:
             # check if the desired result is cached
             cache_key = relative_file_path
-            file_hash_and_result = self._document_symbols().get(cache_key)
-            if file_hash_and_result is None:
-                log.debug("No cache hit for document symbols in %s", relative_file_path)
-            else:
-                file_hash, document_symbols = file_hash_and_result
-                if file_hash == file_data.content_hash:
-                    log.debug("Returning cached document symbols for %s (hash=%s)", relative_file_path, file_hash)
-                    return document_symbols
+            content_hash = file_data.content_hash
+            held = self._document_symbols_cache.get(cache_key, content_hash)
+            if held is not None:
+                log.debug("Returning cached document symbols for %s (hash=%s)", relative_file_path, content_hash)
+                absolute_path = os.path.join(self.repository_root_path, relative_file_path)
+                return held.bound(file_data.split_lines(), absolute_path, pathlib.Path(absolute_path).as_uri())
 
-                log.debug("Cached document symbol content for %s has changed (old hash=%s)", relative_file_path, file_hash)
-
-            # no cached result: get the raw root symbols from the language server
+            # no cached result: build them from the raw root symbols
             document_symbols = self._build_document_symbols_from_raw_symbols(relative_file_path, file_buffer=file_data)
 
             # update cache (only cache non-empty results to avoid permanently caching unindexed responses)
-            content_hash = file_data.content_hash
             if document_symbols.root_symbols:
                 log.debug("Updating cached document symbols for %s (hash=%s)", relative_file_path, content_hash)
-                self._document_symbols()[cache_key] = (content_hash, document_symbols)
-                self._document_symbols_cache_is_modified = True
+                self._document_symbols_cache.put(cache_key, content_hash, document_symbols.slim())
 
             return document_symbols
 
@@ -3021,10 +3127,7 @@ class SolidLanguageServer(ABC):
         """
         ... return a cached :py:class:`SymbolRangeIndex` for the file, rebuilding on content change.
 
-        The cache is lazy-initialised on the first lookup to avoid adding a
-        new attribute to ``__init__`` (which is customised by every
-        language-server subclass). Staleness is detected via the same
-        ``content_hash`` comparison used by
+        Staleness is detected via the same ``content_hash`` comparison used by
         :py:attr:`_document_symbols_cache`, so content mutations signalled via
         ``didChange`` invalidate the entry on next access.
 
@@ -3033,15 +3136,10 @@ class SolidLanguageServer(ABC):
             content-hash lookup and to avoid re-reading the file from disk.
         :return: the cached or newly built ``SymbolRangeIndex`` for the file.
         """
-        # lazy-init the cache dict so this method is safe to add without touching __init__
-        cache: dict[str, tuple[str, SymbolRangeIndex]] = self.__dict__.setdefault("_symbol_range_index_cache", {})
-
         # cache lookup: same hash → return cached index, else rebuild
-        entry = cache.get(relative_file_path)
-        if entry is not None:
-            cached_hash, cached_index = entry
-            if cached_hash == file_data.content_hash:
-                return cached_index
+        cached_index = self._symbol_range_index_cache.get(relative_file_path, file_data.content_hash)
+        if cached_index is not None:
+            return cached_index
 
         # cache miss: rebuild after normalising each symbol's location to the current workspace path
         document_symbols = self.request_document_symbols(relative_file_path, file_buffer=file_data)
@@ -3064,7 +3162,7 @@ class SolidLanguageServer(ABC):
 
         container_symbol_kinds = {kind for kind in ls_types.SymbolKind if SymbolKind.is_container(kind)}
         index = SymbolRangeIndex(document_symbols, container_symbol_kinds)
-        cache[relative_file_path] = (file_data.content_hash, index)
+        self._symbol_range_index_cache.put(relative_file_path, file_data.content_hash, index)
         return index
 
     def request_containing_symbol(
@@ -3441,37 +3539,6 @@ class SolidLanguageServer(ABC):
         """
         return None
 
-    def _document_symbols_cache_version(self) -> Hashable:
-        """
-        Return the version for the document symbols cache.
-
-        Incorporates cache fingerprints if provided by the language server.
-        """
-        version: list[Hashable] = [self.DOCUMENT_SYMBOL_CACHE_VERSION]
-        high_level_fingerprint = self._document_symbols_cache_fingerprint()
-        if high_level_fingerprint is not None:
-            version.append(high_level_fingerprint)
-        version.append(self._raw_document_symbols_cache_version())
-        return tuple(version)
-
-    def _save_raw_document_symbols_cache(self) -> None:
-        cache_file = self.cache_dir / self.RAW_DOCUMENT_SYMBOL_CACHE_FILENAME
-
-        if not self._raw_document_symbols_cache_is_modified:
-            log.debug("No changes to raw document symbols cache, skipping save")
-            return
-
-        log.info("Saving updated raw document symbols cache to %s", cache_file)
-        try:
-            save_cache(str(cache_file), self._raw_document_symbols_cache_version(), self._raw_document_symbols_cache)
-            self._raw_document_symbols_cache_is_modified = False
-        except Exception as e:
-            log.error(
-                "Failed to save raw document symbols cache to %s: %s. Note: this may have resulted in a corrupted cache file.",
-                cache_file,
-                e,
-            )
-
     def _raw_document_symbols_cache_fingerprint(self) -> Hashable | None:
         """
         Returns a fingerprint of any language server-specific aspects that result in changes
@@ -3502,91 +3569,33 @@ class SolidLanguageServer(ABC):
             return (*base_version, fingerprint)
         return base_version
 
-    def _load_raw_document_symbols_cache(self) -> dict[str, tuple[str, list[DocumentSymbol] | list[SymbolInformation] | None]]:
+    def _remove_legacy_caches(self) -> None:
         """
-        :return: the raw document symbols cache saved on disk, or an empty one if none is saved or it cannot be read
+        Removes the whole-file caches of former versions from the cache directory without reading them, logging each
+        removal with the file's size; a file that cannot be removed is logged and left.
         """
-        cache_file = self.cache_dir / self.RAW_DOCUMENT_SYMBOL_CACHE_FILENAME
-        if cache_file.exists():
-            log.info("Loading document symbols cache from %s", cache_file)
+        for file_name in self._LEGACY_CACHE_FILENAMES:
+            legacy_file = self.cache_dir / file_name
             try:
-                saved_cache = load_cache(str(cache_file), self._raw_document_symbols_cache_version(), loader=self._cache_loader)
-                if saved_cache is not None:
-                    log.info(f"Loaded {len(saved_cache)} entries from raw document symbols cache.")
-                    return saved_cache
-            except Exception as e:
-                # cache can become corrupt, so just skip loading it
-                log.warning(
-                    "Failed to load raw document symbols cache from %s (%s); Ignoring cache.",
-                    cache_file,
-                    e,
-                )
-        return {}
-
-    def _raw_document_symbols(self) -> dict[str, tuple[str, list[DocumentSymbol] | list[SymbolInformation] | None]]:
-        """
-        :return: the raw document symbols cache, reloaded from disk if a stop released it
-        """
-        # read once, so that a stop releasing the cache meanwhile cannot make this return None
-        cache = self._raw_document_symbols_cache
-        if cache is None:
-            cache = self._load_raw_document_symbols_cache()
-            self._raw_document_symbols_cache = cache
-        return cache
-
-    def _save_document_symbols_cache(self) -> None:
-        cache_file = self.cache_dir / self.DOCUMENT_SYMBOL_CACHE_FILENAME
-
-        if not self._document_symbols_cache_is_modified:
-            log.debug("No changes to document symbols cache, skipping save")
-            return
-
-        log.info("Saving updated document symbols cache to %s", cache_file)
-        try:
-            save_cache(str(cache_file), self._document_symbols_cache_version(), self._document_symbols_cache)
-            self._document_symbols_cache_is_modified = False
-        except Exception as e:
-            log.error(
-                "Failed to save document symbols cache to %s: %s. Note: this may have resulted in a corrupted cache file.",
-                cache_file,
-                e,
-            )
-
-    def _load_document_symbols_cache(self) -> dict[str, tuple[str, DocumentSymbols]]:
-        """
-        :return: the document symbols cache saved on disk, or an empty one if none is saved or it cannot be read
-        """
-        cache_file = self.cache_dir / self.DOCUMENT_SYMBOL_CACHE_FILENAME
-        if cache_file.exists():
-            log.info("Loading document symbols cache from %s", cache_file)
-            try:
-                saved_cache = load_cache(str(cache_file), self._document_symbols_cache_version(), loader=self._cache_loader)
-                if saved_cache is not None:
-                    log.info(f"Loaded {len(saved_cache)} entries from document symbols cache.")
-                    return saved_cache
-            except Exception as e:
-                # cache can become corrupt, so just skip loading it
-                log.warning(
-                    "Failed to load document symbols cache from %s (%s); Ignoring cache.",
-                    cache_file,
-                    e,
-                )
-        return {}
-
-    def _document_symbols(self) -> dict[str, tuple[str, DocumentSymbols]]:
-        """
-        :return: the document symbols cache, reloaded from disk if a stop released it
-        """
-        # read once, so that a stop releasing the cache meanwhile cannot make this return None
-        cache = self._document_symbols_cache
-        if cache is None:
-            cache = self._load_document_symbols_cache()
-            self._document_symbols_cache = cache
-        return cache
+                size = legacy_file.stat().st_size
+                legacy_file.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as e:
+                log.warning("Failed to remove the former cache file %s: %s", legacy_file, e)
+                continue
+            log.info("Removed the former cache file %s (%d bytes) without reading it", legacy_file, size)
 
     def save_cache(self) -> None:
-        self._save_raw_document_symbols_cache()
-        self._save_document_symbols_cache()
+        """
+        Saves the raw document symbols served since the last save. While the server runs, they are handed to the
+        cache's writer and this returns without waiting for them to be written; once it is stopped, they are written
+        before this returns.
+        """
+        if self.server_started and self.is_running():
+            self._raw_document_symbols_store.submit()
+        else:
+            self._raw_document_symbols_store.close()
 
     def request_workspace_symbol(self, query: str) -> list[ls_types.UnifiedSymbolInformation] | None:
         """
@@ -3746,8 +3755,8 @@ class SolidLanguageServer(ABC):
 
     def stop(self, shutdown_timeout: float = 2.0) -> None:
         """
-        Stops the language server process and releases the symbol caches it holds in memory that hold no unsaved change;
-        the next use of a released cache reloads it from disk.
+        Stops the language server process, writes the raw document symbols served since the last save and waits for them
+        to be written, which ends the cache's writer, and releases the symbols held in memory.
         This function never raises an exception (any exceptions during shutdown are logged).
 
         :param shutdown_timeout: time, in seconds, to wait for the server to shutdown gracefully before killing it
@@ -3762,14 +3771,16 @@ class SolidLanguageServer(ABC):
 
     def _release_symbol_caches(self) -> None:
         """
-        Releases the symbol caches held in memory that hold no unsaved change, so that their next use reloads them from
-        disk; a cache with unsaved changes is kept, so that a later save can still write them.
+        Writes the raw document symbols not yet saved, waiting for them to be written, and releases the high-level
+        document symbols and range indices held in memory.
         """
-        if not self._raw_document_symbols_cache_is_modified:
-            self._raw_document_symbols_cache = None
-        if not self._document_symbols_cache_is_modified:
-            self._document_symbols_cache = None
-        self.__dict__.pop("_symbol_range_index_cache", None)
+        try:
+            self._raw_document_symbols_store.close()
+        except Exception as e:
+            log.error(f"Failed to save the raw document symbols cache to {self.cache_dir}: {e}", exc_info=e)
+        max_cached_files = self._solidlsp_settings.document_symbols_cache_max_entries
+        self._document_symbols_cache = _PerFileCache(max_cached_files)
+        self._symbol_range_index_cache = _PerFileCache(max_cached_files)
 
     @property
     def language_server(self) -> Self:
