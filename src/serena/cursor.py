@@ -482,13 +482,12 @@ class _FileSymbolTree:
     that covers it, and by no symbol when no root symbol covers it.
     """
 
-    _CONTAINER_KINDS = frozenset(kind for kind in SymbolKind if SymbolKind.is_container(kind))
-
     def __init__(self, document_symbols: DocumentSymbols) -> None:
         """
         :param document_symbols: the file's document symbols.
         """
-        self._index = SymbolRangeIndex(document_symbols, set(self._CONTAINER_KINDS))
+        container_kinds = {symbol["kind"] for symbol in document_symbols.iter_symbols() if SymbolKind.is_container(symbol["kind"])}
+        self._index = SymbolRangeIndex(document_symbols, container_kinds)
         self._root_symbols = [LanguageServerSymbol(symbol) for symbol in document_symbols.root_symbols]
 
     def enclosing_symbol(self, line: TextLine) -> LanguageServerSymbol | None:

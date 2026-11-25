@@ -79,6 +79,12 @@ def _lines(hits: list[MatchedConsecutiveLines]) -> list[int]:
             [("test_repo/variables.py", [0, 1, 3, 4, 5, 6, 7, 8, 10, 12, 16, 18, 82, 84, 86, 90, 92])],
             id="hits outside any symbol",
         ),
+        pytest.param(
+            "test_repo/one_line_symbols.py",
+            [("Marker", [5]), ("noop", [8])],
+            [("test_repo/one_line_symbols.py", [0, 1, 2])],
+            id="single-line top-level symbols",
+        ),
     ],
 )
 def test_a_grep_groups_every_hit_under_its_enclosing_symbol(
