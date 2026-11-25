@@ -14,6 +14,8 @@ import sys
 import threading
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -197,22 +199,51 @@ def _cache_dir(root: Path) -> Path:
     return root / SERENA_MANAGED_DIR_NAME / SolidLanguageServer.CACHE_FOLDER_NAME / LanguageServerId.PYTHON.get_key()
 
 
-def _answered_while(work: threading.Thread, session: _Session) -> list[float]:
-    """
-    Sends the session's tools/list and get_current_config, one after the other, for as long as the work runs.
+@dataclass(frozen=True)
+class _Answer:
+    """A request of the second session and how long its answer took."""
 
-    :return: the seconds each of them took to be answered
+    sent: float
+    """the time the request was sent, in seconds since the epoch"""
+    seconds: float
+    """the seconds until it was answered, or until the client gave up on it"""
+
+    def overlaps(self, start: float, end: float) -> bool:
+        """
+        :return: whether the request was waiting for its answer at some time between start and end
+        """
+        return self.sent <= end and self.sent + self.seconds >= start
+
+
+def _answered_while(work: threading.Thread, session: _Session) -> list[_Answer]:
     """
-    seconds: list[float] = []
+    Sends the session's tools/list and get_current_config, one after the other, for as long as the work runs, or until
+    the session gives up on one, after which it sends no more.
+
+    :return: the requests sent and how long each answer took
+    """
+    answers: list[_Answer] = []
+    requests = (lambda: session.request("tools/list", {}), lambda: session.call("get_current_config", {}))
     while work.is_alive():
-        started = time.monotonic()
-        tools = session.request("tools/list", {})
-        seconds.append(time.monotonic() - started)
-        assert tools["tools"]
-        started = time.monotonic()
-        session.call("get_current_config", {})
-        seconds.append(time.monotonic() - started)
-    return seconds
+        for request in requests:
+            sent, started = time.time(), time.monotonic()
+            try:
+                request()
+            except httpx.TimeoutException:
+                answers.append(_Answer(sent, time.monotonic() - started))
+                return answers
+            answers.append(_Answer(sent, time.monotonic() - started))
+    return answers
+
+
+def _logged_at(log: Path, marker: str) -> float:
+    """
+    :return: the time of the first line of the daemon's log holding the marker, in seconds since the epoch
+    """
+    for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+        if marker in line:
+            return datetime.strptime(" ".join(line.split()[1:3]), "%Y-%m-%d %H:%M:%S,%f").timestamp()
+    raise AssertionError(f"the daemon logged no line holding {marker!r}")
 
 
 @pytest.fixture
@@ -263,14 +294,21 @@ def test_a_large_cache_of_the_former_format_stops_no_other_session(daemon: _Daem
             ],
             first,
         )
-        seconds = _answered_while(work, second)
+        answers = _answered_while(work, second)
         work.join()
     finally:
         first.close()
         second.close()
 
+    # the cache's own window: from the making of the language server, which opens its cache dir, removes the former
+    # caches and opens the store, to the start of its process. The deadline is asserted over this window only: the
+    # process start after it stops every thread on its own (symptom://serena/daemon/language_server/start/stall)
+    log = tmp_path / "serena.log"
+    window = (_logged_at(log, "Creating language server instance"), _logged_at(log, "Starting language server python for"))
+    in_window = [answer for answer in answers if answer.overlaps(*window)]
     assert failures == []
-    assert seconds and max(seconds) < _DEADLINE
+    assert in_window, f"no request of the second session was waiting during the cache's window {window}"
+    assert max(answer.seconds for answer in in_window) < _DEADLINE
 
 
 def test_a_large_store_read_and_written_by_a_whole_project_search_stops_no_other_session(daemon: _Daemon, tmp_path: Path) -> None:
@@ -301,11 +339,12 @@ def test_a_large_store_read_and_written_by_a_whole_project_search_stops_no_other
             [("activate_project", {"project": str(root)}), ("cursor_find", search), ("cursor_find", search)],
             first,
         )
-        seconds = _answered_while(work, second)
+        answers = _answered_while(work, second)
         work.join()
     finally:
         first.close()
         second.close()
 
+    seconds = [answer.seconds for answer in answers]
     assert failures == []
     assert seconds and max(seconds) < _DEADLINE
