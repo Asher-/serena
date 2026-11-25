@@ -88,12 +88,6 @@ dev = [
   "types-pyyaml==6.0.12.20250516",
   "syrupy==4.9.1",
   "types-requests==2.32.4.20250809",
-  # docs
-  "sphinx==7.4.7",
-  "sphinx_rtd_theme==2.0.0",
-  "sphinx_book_theme==1.1.4",
-  "sphinx-toolbox==3.7.0",
-  "jupyter-book==1.0.4.post1",
   "pyinstrument==5.1.1",
   "pytest-timeout==2.4.0",
   # Transitive dev deps pinned for security (dependabot alerts).
@@ -103,7 +97,16 @@ dev = [
   "pyasn1==0.6.4",
   "PyJWT==2.13.0",
 ]
-agno = ["agno==2.6.6", "sqlalchemy==2.0.41"]  # agno bumped for session state overwrite CVE
+# Separate from dev: sphinx-toolbox pulls in sphinx-jinja2-compat, whose .pth file imports Sphinx at every
+# interpreter start of the environment it is installed in.
+docs = [
+  "sphinx==7.4.7",
+  "sphinx_rtd_theme==2.0.0",
+  "sphinx_book_theme==1.1.4",
+  "sphinx-toolbox==3.7.0",
+  "jupyter-book==1.0.4.post1",
+]
+agno =["agno==2.6.6", "sqlalchemy==2.0.41"]  # agno bumped for session state overwrite CVE
 google = ["google-genai==1.27.0"]
 
 [project.urls]

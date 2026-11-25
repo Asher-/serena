@@ -74,6 +74,7 @@ You can install a virtual environment with the required as follows
     * On Linux/Unix/macOS or Windows with Git Bash: `source .venv/bin/activate`
     * On Windows outside of Git Bash: `.venv\Scripts\activate.bat` (in cmd/ps) or `source .venv/Scripts/activate` (in git-bash) 
 3. Install the required packages with all extras: `uv sync --extra dev`
+4. To build the documentation (`poe doc-build`), add the docs extra: `uv sync --extra dev --extra docs`
 
 ## Local Installation as Tool
 
