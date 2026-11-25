@@ -22,8 +22,8 @@ Here's how it works:
 
 2. Install serena with the optional requirements:
    ```shell
-   # You can also only select agno,google or agno,anthropic instead of all-extras
-   uv pip install --all-extras -r pyproject.toml -e .
+   # Select only the extras the agent needs, e.g. agno or agno,google (docs is for building the documentation)
+   uv pip install -r pyproject.toml -e ".[agno,google]"
    ```
    
 3. Copy `.env.example` to `.env` and fill in the API keys for the provider(s) you
