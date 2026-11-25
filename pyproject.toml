@@ -106,7 +106,7 @@ docs = [
   "sphinx-toolbox==3.7.0",
   "jupyter-book==1.0.4.post1",
 ]
-agno =["agno==2.6.6", "sqlalchemy==2.0.41"]  # agno bumped for session state overwrite CVE
+agno = ["agno==2.6.6", "sqlalchemy==2.0.41"]  # agno bumped for session state overwrite CVE
 google = ["google-genai==1.27.0"]
 
 [project.urls]
