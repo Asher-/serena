@@ -6,13 +6,16 @@ changed and never waits on a database another connection holds, and closing the 
 import gc
 import logging
 import os
+import queue
 import sqlite3
 import threading
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
+from fractions import Fraction
 from pathlib import Path
+from unittest import mock
 
 import psutil
 import pytest
@@ -24,6 +27,9 @@ _LOADER = SafePickleLoader()
 
 # the most a call that must not wait may take, far below any timeout a waiting call would run into
 _PROMPT = 1.0
+
+# the seconds a step gives another thread to end in, when that thread may instead wait for the step
+_PAUSE = 0.2
 
 
 def _entry(name: str) -> list[dict]:
@@ -478,3 +484,180 @@ def test_a_row_put_while_a_save_writes_an_older_row_of_its_file_is_read_and_writ
         assert reopened.get("a.py") == rows[-1]
     finally:
         reopened.close()
+
+
+def _read_back(path: Path, key: str) -> object:
+    """
+    :return: what a new store on the file reads for the key
+    """
+    reader = SymbolStore(path, version=(1,), loader=_LOADER)
+    try:
+        return reader.get(key)
+    finally:
+        reader.close()
+
+
+@contextmanager
+def _before_writer_starts(action: Callable[[], None]) -> Iterator[None]:
+    """
+    Runs the action when a store's writer thread is about to be started, which is started once the action has returned.
+    """
+    start = threading.Thread.start
+
+    def act_and_start(thread: threading.Thread) -> None:
+        if thread.name.startswith(SymbolStore.WRITER_THREAD_NAME_PREFIX):
+            action()
+        start(thread)
+
+    with mock.patch.object(threading.Thread, "start", act_and_start):
+        yield
+
+
+def test_a_close_meeting_a_writer_not_yet_started_returns_once_its_rows_are_written(tmp_path: Path) -> None:
+    path = tmp_path / "store.sqlite"
+    store = SymbolStore(path, version=(1,), loader=_LOADER)
+    store.put("a.py", "hash-a", _entry("a"))
+    read_after_close: list[object] = []
+
+    def close_and_read() -> None:
+        store.close()
+        read_after_close.append(_read_back(path, "a.py"))
+
+    closer = threading.Thread(target=close_and_read)
+
+    def close_meanwhile() -> None:
+        closer.start()
+        # a close that does not wait for the writer ends here; one that waits for it ends once the writer has started
+        closer.join(_PAUSE)
+
+    with _before_writer_starts(close_meanwhile):
+        store.submit()
+    closer.join()
+    assert read_after_close == [("hash-a", _entry("a"))]
+
+
+def test_a_submit_overtaken_by_a_close_while_it_hands_its_rows_over_loses_none_of_them(tmp_path: Path) -> None:
+    path = tmp_path / "store.sqlite"
+    armed: list[Callable[[], None]] = []
+
+    class _OvertakenQueue(queue.SimpleQueue):  # type: ignore[type-arg]
+        def put(self, *args: object, **kwargs: object) -> None:
+            if armed:
+                armed.pop()()
+            super().put(*args, **kwargs)  # type: ignore[arg-type]
+
+    with mock.patch.object(queue, "SimpleQueue", _OvertakenQueue):
+        store = SymbolStore(path, version=(1,), loader=_LOADER)
+        store.put("a.py", "hash-a", _entry("a"))
+        closer = threading.Thread(target=store.close)
+
+        def close_meanwhile() -> None:
+            closer.start()
+            closer.join(_PAUSE)
+
+        armed.append(close_meanwhile)
+        store.submit()
+        closer.join()
+    assert _read_back(path, "a.py") == ("hash-a", _entry("a"))
+
+
+def test_a_submit_after_a_close_writes_in_the_caller_and_starts_no_writer(tmp_path: Path) -> None:
+    path = tmp_path / "store.sqlite"
+    writers_before = set(_writer_threads())
+    store = SymbolStore(path, version=(1,), loader=_LOADER)
+    store.close()
+    store.put("a.py", "hash-a", _entry("a"))
+    store.submit()
+
+    assert [thread for thread in _writer_threads() if thread not in writers_before] == []
+    assert _read_back(path, "a.py") == ("hash-a", _entry("a"))
+
+
+def test_a_store_whose_writer_thread_cannot_start_writes_its_rows_and_is_closed(tmp_path: Path) -> None:
+    path = tmp_path / "store.sqlite"
+    store = SymbolStore(path, version=(1,), loader=_LOADER)
+
+    def refuse() -> None:
+        raise RuntimeError("can't start new thread")
+
+    with _before_writer_starts(refuse):
+        for name in ("a", "b"):
+            store.put(f"{name}.py", f"hash-{name}", _entry(name))
+            store.submit()
+            assert _read_back(path, f"{name}.py") == (f"hash-{name}", _entry(name))
+    store.close()
+
+
+def test_a_store_reopened_twice_after_its_close_has_one_writer(tmp_path: Path) -> None:
+    writers_before = set(_writer_threads())
+    store = SymbolStore(tmp_path / "store.sqlite", version=(1,), loader=_LOADER)
+    store.close()
+    for name in ("a", "b"):
+        store.reopen()
+        store.put(f"{name}.py", f"hash-{name}", _entry(name))
+        store.submit()
+    assert len(set(_writer_threads()) - writers_before) == 1
+    store.close()
+    assert set(_writer_threads()) <= writers_before
+
+
+def test_a_reopen_before_a_close_keeps_the_writer_the_close_ends(tmp_path: Path) -> None:
+    writers_before = set(_writer_threads())
+    path = tmp_path / "store.sqlite"
+    store = SymbolStore(path, version=(1,), loader=_LOADER)
+    store.put("a.py", "hash-a", _entry("a"))
+    store.submit()
+    store.reopen()
+    store.close()
+    assert set(_writer_threads()) <= writers_before
+    assert _read_back(path, "a.py") == ("hash-a", _entry("a"))
+
+
+def test_two_reopens_racing_install_one_writer(tmp_path: Path) -> None:
+    writers_before = set(_writer_threads())
+    store = SymbolStore(tmp_path / "store.sqlite", version=(1,), loader=_LOADER)
+    store.close()
+    nested: list[Callable[[], None]] = [store.reopen]
+    create = threading.Thread.__init__
+
+    def reopen_within(thread: threading.Thread, *args: object, **kwargs: object) -> None:
+        create(thread, *args, **kwargs)  # type: ignore[arg-type]
+        # the other start reopens the store, and saves, after the first has found its writer ended
+        if nested:
+            nested.pop()()
+            store.put("a.py", "hash-a", _entry("a"))
+            store.submit()
+
+    with mock.patch.object(threading.Thread, "__init__", reopen_within):
+        store.reopen()
+    store.put("b.py", "hash-b", _entry("b"))
+    store.submit()
+    assert len(set(_writer_threads()) - writers_before) == 1
+    store.close()
+    assert set(_writer_threads()) <= writers_before
+
+
+def test_rows_whose_write_raises_stay_dirty_and_the_writer_ends_at_the_close(tmp_path: Path) -> None:
+    path = tmp_path / "store.sqlite"
+    writers_before = set(_writer_threads())
+    store = SymbolStore(path, version=(1,), loader=_LOADER)
+    # a file name no database text holds, whose write raises an error other than a database's
+    store.put("\udc80.py", "hash-a", _entry("a"))
+    store.submit()
+    with pytest.raises(UnicodeEncodeError):
+        store.close()
+
+    assert set(_writer_threads()) <= writers_before
+    assert store.get("\udc80.py") == ("hash-a", _entry("a"))
+    with pytest.raises(UnicodeEncodeError):
+        store.close()
+    assert _open_connections(path) == 0
+
+
+def test_an_unwritten_entry_its_loader_refuses_is_a_miss(tmp_path: Path) -> None:
+    store = SymbolStore(tmp_path / "store.sqlite", version=(1,), loader=_LOADER)
+    store.put("a.py", "hash-a", [{"detail": Fraction(1, 2)}])
+    try:
+        assert store.get("a.py") is None
+    finally:
+        store.close()

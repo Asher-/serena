@@ -51,6 +51,8 @@ class _ScriptedLanguageServer(SolidLanguageServer):
         self._details = details
         self._running = False
         self._requests = 0
+        self.children: list[dict[str, Any]] = []
+        """the children of every symbol the double answers"""
         config = LanguageServerConfig(
             ls_id=LanguageServerId.PYTHON, ignore_spec_of=IgnoreSpecs(str(root), [], read_gitignore_files=True).spec_of
         )
@@ -76,7 +78,7 @@ class _ScriptedLanguageServer(SolidLanguageServer):
             "kind": ls_types.SymbolKind.Function.value,
             "range": {"start": {"line": 0, "character": 0}, "end": {"line": 1, "character": len(body)}},
             "selectionRange": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 4 + len(name)}},
-            "children": [],
+            "children": self.children,
         }
         if path.name in self._details:
             symbol["detail"] = self._details[path.name]
@@ -378,3 +380,52 @@ def test_a_change_one_caller_makes_to_the_symbols_it_was_served_is_not_served_to
     assert contained is not None
     assert contained["name"] == "function_0"
     assert contained["location"]["relativePath"] == "module_0.py"
+
+
+def _displace(symbol: Any) -> None:
+    """
+    Changes every nested value of the symbol's ranges and locations in place, as a caller may.
+    """
+    for nested in (symbol["range"], symbol["selectionRange"], symbol["location"]["range"]):
+        nested["start"]["line"] = 99
+
+
+def _start_lines(symbol: Any) -> list[int]:
+    return [nested["start"]["line"] for nested in (symbol["range"], symbol["selectionRange"], symbol["location"]["range"])]
+
+
+def test_a_change_of_nested_ranges_a_caller_makes_is_not_served_to_the_next(tmp_path: Path) -> None:
+    root = _project(tmp_path / "project", 1)
+    with _running(root) as server:
+        for _ in range(3):
+            [served] = server.request_document_symbols("module_0.py").root_symbols
+            assert _start_lines(served) == [0, 0, 0]
+            _displace(served)
+
+
+def test_a_change_of_a_contained_symbol_and_those_around_it_is_not_served_to_the_next(tmp_path: Path) -> None:
+    root = _project(tmp_path / "project", 1)
+    inner = {"start": {"line": 1, "character": 4}, "end": {"line": 1, "character": 12}}
+    with _running(root) as server:
+        kind = ls_types.SymbolKind.Function.value
+        server.children = [{"name": "inner", "kind": kind, "range": inner, "selectionRange": inner, "children": []}]
+        for _ in range(2):
+            outer = server.request_containing_symbol("module_0.py", 0, 5)
+            assert outer is not None
+            assert _start_lines(outer) == [0, 0, 0]
+            assert [(child["name"], child["parent"] is outer) for child in outer["children"]] == [("inner", True)]
+            _displace(outer)
+            outer["children"][0]["name"] = "changed"
+
+
+def test_the_store_grows_with_the_number_of_files(tmp_path: Path) -> None:
+    sizes = []
+    for count in (1, 200):
+        root = _project(tmp_path / f"project_{count}", count)
+        with _running(root) as server:
+            for index in range(count):
+                _names(server, f"module_{index}.py")
+            cache_dir = server.cache_dir
+        sizes.append(_bytes_in(cache_dir))
+    # each of the 199 further entries holds at least its symbol's name and ranges
+    assert sizes[1] - sizes[0] > 199 * 100
