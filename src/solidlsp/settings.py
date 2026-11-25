@@ -46,6 +46,12 @@ class SolidLSPSettings:
     See constructors of the corresponding LS implementations within SolidLSP to see which options are available.
     Some options are centrally supported. See Serena's documentation for details.
     """
+    document_symbols_cache_max_entries: int = 1000
+    """
+    The number of files whose high-level document symbols a language server holds in memory at most; the symbols of
+    the file used least recently are let go of first, and are built again from the persisted raw symbols when next
+    requested.
+    """
 
     def __post_init__(self) -> None:
         os.makedirs(str(self.solidlsp_dir), exist_ok=True)

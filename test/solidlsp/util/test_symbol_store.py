@@ -10,6 +10,7 @@ from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
 
+import psutil
 import pytest
 
 from solidlsp.util.pickle_util import SafePickleLoader
@@ -177,7 +178,10 @@ def test_concurrent_saves_of_one_file_by_several_stores_leave_every_row_readable
         thread.start()
     for thread in threads:
         thread.join()
-    # rows a save deferred, as another store held the file, are written by the next save
+    # every writer ended, after which no store holds the file: the rows a save deferred, as another store held it, are
+    # written by the next save
+    for store in stores:
+        store.close()
     for store in stores:
         store.close()
 
@@ -204,6 +208,73 @@ def test_an_entry_that_cannot_be_pickled_is_refused_and_leaves_the_saved_rows_as
     reopened = SymbolStore(path, version=(1,), loader=_LOADER)
     try:
         assert reopened.get("a.py") == ("hash-a", _entry("a"))
+    finally:
+        reopened.close()
+
+
+def test_a_read_racing_writes_of_its_row_returns_the_old_or_the_new_row(tmp_path: Path) -> None:
+    path = tmp_path / "store.sqlite"
+    writer = SymbolStore(path, version=(1,), loader=_LOADER)
+    writer.put("a.py", "hash-old", _entry("old"))
+    writer.close()
+    # a store of another process, which reads only what the writer's store has written
+    reader = SymbolStore(path, version=(1,), loader=_LOADER)
+    writes_done = threading.Event()
+    errors: list[BaseException] = []
+
+    def write_repeatedly() -> None:
+        try:
+            for index in range(200):
+                writer.put("a.py", "hash-new", _entry("new"))
+                writer.put(f"other_{index}.py", "hash-other", _entry("other"))
+                writer.submit()
+            writer.close()
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            writes_done.set()
+
+    thread = threading.Thread(target=write_repeatedly)
+    thread.start()
+    read = []
+    while not writes_done.is_set():
+        read.append(reader.get("a.py"))
+    thread.join()
+    read.append(reader.get("a.py"))
+
+    assert errors == []
+    assert set(map(repr, read)) <= {repr(("hash-old", _entry("old"))), repr(("hash-new", _entry("new")))}
+    assert read[-1] == ("hash-new", _entry("new"))
+
+
+def test_a_closed_store_leaves_no_connection_to_its_file_open(tmp_path: Path) -> None:
+    path = tmp_path / "store.sqlite"
+    store = SymbolStore(path, version=(1,), loader=_LOADER)
+    store.put("a.py", "hash-a", _entry("a"))
+    store.submit()
+    assert store.get("a.py") == ("hash-a", _entry("a"))
+    store.close()
+    assert store.get("a.py") == ("hash-a", _entry("a"))
+
+    open_paths = {Path(opened.path).resolve() for opened in psutil.Process().open_files()}
+    assert not {path.resolve(), Path(f"{path}-wal").resolve(), Path(f"{path}-shm").resolve()} & open_paths
+
+
+def test_a_save_after_a_close_writes_in_the_caller_and_starts_no_writer(tmp_path: Path) -> None:
+    path = tmp_path / "store.sqlite"
+    writers_before = set(_writer_threads())
+    store = SymbolStore(path, version=(1,), loader=_LOADER)
+    store.put("a.py", "hash-a", _entry("a"))
+    store.close()
+
+    store.put("b.py", "hash-b", _entry("b"))
+    store.close()
+    store.close()
+
+    assert [thread for thread in _writer_threads() if thread not in writers_before] == []
+    reopened = SymbolStore(path, version=(1,), loader=_LOADER)
+    try:
+        assert reopened.get("b.py") == ("hash-b", _entry("b"))
     finally:
         reopened.close()
 

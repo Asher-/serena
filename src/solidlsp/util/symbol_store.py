@@ -31,13 +31,13 @@ class SymbolStore:
     A persistent map from the relative path of a file to the hash of the content its entry was cached for and the entry
     itself, held as one row per file in a sqlite database in WAL mode.
 
-    A read reads one row and unpickles one entry; a save writes only the rows put since the last save. Reads go through
-    one connection per reading thread, and a read that meets a database another connection holds, or any other database
-    error, is a miss. All writes of the store in a process go through one writer thread the store owns, fed by a queue
-    and started by the first save that has rows to write; a write that meets a database another connection holds keeps
-    its rows for the next save and does not wait. Closing the store writes what is left, ends the writer and closes
-    every reading connection. Rows of another version than the store's are never read, and the first write of the store
-    removes them.
+    A read opens a connection of its own, reads one row, closes the connection and unpickles one entry; a read that
+    meets a database another connection holds, or any other database error, is a miss. A save writes only the rows put
+    since the last save. All writes of the store in a process go through one writer thread the store owns, fed by a
+    queue and started by the first save that has rows to write; a write that meets a database another connection holds
+    keeps its rows for the next save and does not wait. Closing the store writes what is left in the calling thread and
+    ends the writer, leaving no thread and no connection open. Rows of another version than the store's are never read,
+    and the first write of the store removes them.
     """
 
     WRITER_THREAD_NAME_PREFIX = "SymbolStoreWriter"
@@ -50,13 +50,14 @@ class SymbolStore:
         :param loader: the loader every entry is unpickled with
         """
         self._path = Path(path)
+        self._read_uri = f"file:{urllib.parse.quote(str(self._path))}?mode=rw"
+        """the URI a read opens the database with, which never creates it"""
         self._version = pickle.dumps(version)
         self._loader = loader
         self._pending: dict[str, _Row] = {}
         """the rows put and not yet handed to a write"""
         self._in_flight: dict[str, _Row] = {}
         """the rows handed to a write that has not yet ended"""
-        self._readers = _Readers(self._path)
         self._writer = _Writer(self)
 
     def get(self, key: str) -> tuple[str, Any] | None:
@@ -69,14 +70,18 @@ class SymbolStore:
         if row is not None:
             return row.content_hash, self._loader.loads(row.data)
 
-        connection = self._readers.connection()
-        if connection is None:
+        if not self._path.is_file():
             return None
         try:
-            found = connection.execute(
-                "SELECT e.content_hash, e.entry FROM entries e, meta m WHERE e.key = ? AND m.key = 'version' AND m.value = ?",
-                (key, self._version),
-            ).fetchone()
+            connection = sqlite3.connect(self._read_uri, uri=True, isolation_level=None)
+            try:
+                connection.execute("PRAGMA busy_timeout = 0")
+                found = connection.execute(
+                    "SELECT e.content_hash, e.entry FROM entries e, meta m WHERE e.key = ? AND m.key = 'version' AND m.value = ?",
+                    (key, self._version),
+                ).fetchone()
+            finally:
+                connection.close()
         except sqlite3.Error as error:
             log.debug("Reading %s from %s missed: %s", key, self._path, error)
             return None
@@ -109,18 +114,16 @@ class SymbolStore:
 
     def close(self) -> None:
         """
-        Writes the rows put since the last save and waits for them to be written, then ends the writer and closes every
-        reading connection. Rows a write could not write, as another connection held the database, are kept for the
-        next save. The store can be used again afterwards, starting a new writer on its next save.
+        Ends the writer once it has written every batch handed to it, then writes the rows put since the last save in
+        the calling thread; with no such rows, it writes nothing. Rows a write could not write, as another connection
+        held the database, are kept for the next save. The store can be used again afterwards, starting a new writer on
+        its next submit.
         """
         writer, self._writer = self._writer, _Writer(self)
         writer.stop()
         batch = self._take_pending()
         if batch:
             self._write(batch)
-
-        readers, self._readers = self._readers, _Readers(self._path)
-        readers.close()
 
     def _take_pending(self) -> dict[str, _Row]:
         """
@@ -195,42 +198,6 @@ def _is_busy(error: sqlite3.OperationalError) -> bool:
         return code & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
     message = str(error)
     return "locked" in message or "busy" in message
-
-
-class _Readers:
-    """The reading connections of a store, one per reading thread, until they are closed."""
-
-    def __init__(self, path: Path) -> None:
-        self._path = path
-        self._local = threading.local()
-        self._connections: list[sqlite3.Connection] = []
-
-    def connection(self) -> sqlite3.Connection | None:
-        """
-        :return: the calling thread's connection, opened on its first use, or None if the database does not exist or
-            cannot be opened
-        """
-        connection = getattr(self._local, "connection", None)
-        if connection is None:
-            if not self._path.is_file():
-                return None
-            try:
-                uri = f"file:{urllib.parse.quote(str(self._path))}?mode=rw"
-                connection = sqlite3.connect(uri, uri=True, isolation_level=None, check_same_thread=False)
-                connection.execute("PRAGMA busy_timeout = 0")
-            except sqlite3.Error as error:
-                log.debug("Cannot open %s for reading: %s", self._path, error)
-                return None
-            self._local.connection = connection
-            self._connections.append(connection)
-        return connection
-
-    def close(self) -> None:
-        """
-        Closes every connection opened.
-        """
-        for connection in self._connections:
-            connection.close()
 
 
 class _Writer:

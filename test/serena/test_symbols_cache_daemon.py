@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 import pytest
 
+from serena.call_journal import daemon_owner
 from serena.config.serena_config import SerenaPaths
 from serena.constants import SERENA_MANAGED_DIR_NAME
 from serena.util.file_system import IgnoreSpecs
@@ -90,13 +91,17 @@ class _Session:
 
 
 class _Daemon:
-    """A ``serena start-mcp-server`` over streamable HTTP, with a home directory of its own."""
+    """
+    A ``serena start-mcp-server`` over streamable HTTP, with a home directory of its own and a directory of its own for
+    the records of the processes it starts.
+    """
 
-    def __init__(self, home: Path, log: Path) -> None:
+    def __init__(self, home: Path, records: Path, log: Path) -> None:
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
         self.url = f"http://127.0.0.1:{port}/mcp"
+        self._process_records = records / daemon_owner(port) / "process"
         command = [
             sys.executable,
             "-c",
@@ -116,7 +121,7 @@ class _Daemon:
         with log.open("ab") as output:
             self.process = subprocess.Popen(
                 command,
-                env={**os.environ, "SERENA_HOME": str(home)},
+                env={**os.environ, "SERENA_HOME": str(home), supervise.ROOT_ENV: str(records)},
                 stdout=output,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
@@ -139,6 +144,9 @@ class _Daemon:
                 time.sleep(0.05)
 
     def close(self) -> None:
+        """
+        Ends the daemon, then every process it started that its end did not end.
+        """
         if self.process.poll() is None:
             os.killpg(self.process.pid, signal.SIGTERM)
             try:
@@ -146,6 +154,9 @@ class _Daemon:
             except subprocess.TimeoutExpired:
                 os.killpg(self.process.pid, signal.SIGKILL)
                 self.process.wait()
+        for record in self._process_records.glob("*.json"):
+            if "ended_at" not in json.loads(record.read_text()):
+                subprocess.run([supervise.program(), "stop", "-signal", "SIGKILL", str(record)], check=False, stderr=subprocess.DEVNULL)
 
 
 def _project(root: Path, file_count: int) -> Path:
@@ -208,7 +219,7 @@ def _answered_while(work: threading.Thread, session: _Session) -> list[float]:
 def daemon(tmp_path: Path) -> Iterator[_Daemon]:
     home = tmp_path / "home"
     home.mkdir()
-    started = _Daemon(home, tmp_path / "serena.log")
+    started = _Daemon(home, tmp_path / "records", tmp_path / "serena.log")
     yield started
     started.close()
 

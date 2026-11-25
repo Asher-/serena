@@ -3213,9 +3213,14 @@ class SolidLanguageServer(ABC):
 
             # delegate the lookup to the cached per-file range index (O(candidates-up-to-line) per call)
             index = self._get_symbol_range_index(relative_file_path, file_data)
-            containing_symbol = index.find_innermost_container(line, column, strict)
-            if containing_symbol is None:
+            indexed_symbol = index.find_innermost_container(line, column, strict)
+            if indexed_symbol is None:
                 return None
+
+            # a copy, so that no change of the caller's reaches the symbol the cached index holds
+            containing_symbol = cast(ls_types.UnifiedSymbolInformation, dict(indexed_symbol))
+            if "location" in indexed_symbol:
+                containing_symbol["location"] = cast(ls_types.Location, dict(indexed_symbol["location"]))
 
             # symbol-body materialisation happens under the open-file context so the underlying
             # buffer is still readable for SymbolBodyFactory.

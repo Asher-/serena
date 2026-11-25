@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
+import psutil
 import pytest
 
 from serena.config.serena_config import SerenaPaths
@@ -222,7 +223,7 @@ def test_the_symbols_served_carry_the_text_and_paths_of_their_file(tmp_path: Pat
     assert Path(symbol["location"]["uri"].removeprefix("file://")).resolve() == (root / "module_0.py").resolve()
 
 
-def test_a_stop_leaves_no_writer_of_the_cache_behind(tmp_path: Path) -> None:
+def test_a_stop_leaves_no_writer_and_no_connection_of_the_cache_behind(tmp_path: Path) -> None:
     root = _project(tmp_path / "project", 2)
     writers_before = {thread for thread in threading.enumerate() if thread.name.startswith("SymbolStoreWriter")}
     with _running(root) as server:
@@ -230,5 +231,31 @@ def test_a_stop_leaves_no_writer_of_the_cache_behind(tmp_path: Path) -> None:
         server.save_cache()
         _names(server, "module_1.py")
         server.save_cache()
+        cache_dir = Path(server.cache_dir).resolve()
 
     assert [t for t in threading.enumerate() if t.name.startswith("SymbolStoreWriter") and t not in writers_before] == []
+    assert [opened.path for opened in psutil.Process().open_files() if Path(opened.path).resolve().is_relative_to(cache_dir)] == []
+
+
+def test_a_change_one_caller_makes_to_the_symbols_it_was_served_is_not_served_to_the_next(tmp_path: Path) -> None:
+    root = _project(tmp_path / "project", 1)
+    with _running(root) as server:
+        for _ in range(2):
+            [served] = server.request_document_symbols("module_0.py").root_symbols
+            served["name"] = "changed"
+            served["location"]["relativePath"] = "changed.py"
+            served["body"] = None
+            contained = server.request_containing_symbol("module_0.py", 1, 4)
+            assert contained is not None
+            contained["name"] = "changed"
+            contained["location"]["relativePath"] = "changed.py"
+
+        [symbol] = server.request_document_symbols("module_0.py").root_symbols
+        contained = server.request_containing_symbol("module_0.py", 1, 4)
+
+    assert symbol["name"] == "function_0"
+    assert symbol["location"]["relativePath"] == "module_0.py"
+    assert symbol["body"].get_text() == "def function_0():\n    return 0"
+    assert contained is not None
+    assert contained["name"] == "function_0"
+    assert contained["location"]["relativePath"] == "module_0.py"

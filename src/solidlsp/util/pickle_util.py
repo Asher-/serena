@@ -1,4 +1,5 @@
 import builtins
+import io
 import pickle
 from collections.abc import Sequence
 from typing import Any
@@ -48,3 +49,10 @@ class SafePickleLoader:
         with open(path, "rb") as f:
             unpickler = _SafeUnpickler(f, self._allowed_classes)
             return unpickler.load()
+
+    def loads(self, data: bytes) -> Any:
+        """
+        :param data: a pickled object
+        :return: the object, unpickled as :meth:`load` unpickles a file's content
+        """
+        return _SafeUnpickler(io.BytesIO(data), self._allowed_classes).load()
