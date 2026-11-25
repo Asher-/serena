@@ -39,7 +39,7 @@ _LEGACY_CACHE_FILES = ("document_symbols.pkl", "raw_document_symbols.pkl")
 class _ScriptedLanguageServer(SolidLanguageServer):
     """
     A language server whose process is replaced by a double, which answers a documentSymbol request with the function a
-    file defines in its first two lines.
+    file defines in its first two lines, and with nothing for a file of fewer lines.
     """
 
     def __init__(self, root: Path, settings: SolidLSPSettings, details: dict[str, object]) -> None:
@@ -66,7 +66,10 @@ class _ScriptedLanguageServer(SolidLanguageServer):
 
     def _answer(self, path: Path) -> list[dict[str, Any]]:
         self._requests += 1
-        definition, body = path.read_text(encoding="utf-8").splitlines()[:2]
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if len(lines) < 2:
+            return []
+        definition, body = lines[:2]
         name = definition.removeprefix("def ").removesuffix("():")
         symbol: dict[str, Any] = {
             "name": name,
@@ -212,6 +215,16 @@ def test_a_changed_file_is_asked_of_the_language_server_again(tmp_path: Path) ->
     assert counts["requests"] == 1
 
 
+def test_a_file_the_language_server_answers_nothing_for_is_asked_again(tmp_path: Path) -> None:
+    root = _project(tmp_path / "project", 1)
+    (root / "module_0.py").write_text("# no symbol\n", encoding="utf-8")
+
+    with _running(root) as server, _counting(server) as counts:
+        assert _names(server, "module_0.py") == []
+        assert _names(server, "module_0.py") == []
+    assert counts == {"requests": 2, "builds": 2}
+
+
 def test_a_files_persisted_symbols_are_served_while_another_files_persisted_entry_cannot_be_loaded(tmp_path: Path) -> None:
     root = _project(tmp_path / "project", 2)
     # a value of a class the cache's loader refuses, so that the entry holding it is saved and cannot be loaded
@@ -260,6 +273,24 @@ def test_a_cache_in_the_former_whole_file_format_is_removed_unread_and_its_remov
             name in record.getMessage() and str(len(b"not a pickle") * (100 + index)) in record.getMessage() for record in caplog.records
         )
     assert "Failed to load" not in caplog.text
+
+
+def test_a_cache_in_the_former_whole_file_format_that_cannot_be_removed_is_logged_and_left(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = _project(tmp_path / "project", 1)
+    cache_dir = Path(_create(root).cache_dir)
+    # a directory, which no removal of a file removes, where the first of the former files would be
+    unremovable, removable = (cache_dir / name for name in _LEGACY_CACHE_FILES)
+    unremovable.mkdir()
+    removable.write_bytes(b"not a pickle")
+
+    with caplog.at_level(logging.WARNING), _running(root) as server:
+        assert _names(server, "module_0.py") == ["function_0"]
+
+    assert unremovable.is_dir()
+    assert not removable.exists()
+    assert any("Failed to remove" in record.getMessage() and unremovable.name in record.getMessage() for record in caplog.records)
 
 
 def test_a_file_whose_symbols_are_held_is_served_without_building_them_again(tmp_path: Path) -> None:

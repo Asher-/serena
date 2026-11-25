@@ -4,6 +4,8 @@ changed and never waits on a database another connection holds, and closing the 
 """
 
 import gc
+import logging
+import os
 import sqlite3
 import threading
 import time
@@ -418,3 +420,61 @@ def test_a_store_that_never_wrote_starts_no_writer_and_creates_no_file(tmp_path:
 
     assert [thread for thread in _writer_threads() if thread not in writers_before] == []
     assert not path.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="the file mode keeps no such user out")
+def test_a_read_of_a_database_that_cannot_be_opened_is_a_miss(tmp_path: Path) -> None:
+    path = tmp_path / "store.sqlite"
+    store = SymbolStore(path, version=(1,), loader=_LOADER)
+    store.put("a.py", "hash-a", _entry("a"))
+    store.close()
+
+    path.chmod(0)
+    try:
+        assert store.get("a.py") is None
+    finally:
+        path.chmod(0o600)
+    assert store.get("a.py") == ("hash-a", _entry("a"))
+    store.close()
+
+
+def test_a_store_over_a_file_that_is_no_database_misses_every_read_and_logs_its_failed_save(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = tmp_path / "store.sqlite"
+    path.write_bytes(b"not a database" * 100)
+    store = SymbolStore(path, version=(1,), loader=_LOADER)
+    assert store.get("a.py") is None
+
+    store.put("a.py", "hash-a", _entry("a"))
+    with caplog.at_level(logging.ERROR):
+        store.close()
+
+    assert "Failed to save" in caplog.text
+    assert store.get("a.py") is None
+    store.close()
+
+
+def test_a_row_put_while_a_save_writes_an_older_row_of_its_file_is_read_and_written_by_the_next_save(tmp_path: Path) -> None:
+    path = tmp_path / "store.sqlite"
+    store = SymbolStore(path, version=(1,), loader=_LOADER)
+    key = _SteppedKey("a.py")
+    store.put(key, "hash-old", _entry("old"))
+    rows: list[tuple[str, object]] = []
+
+    def put_newer() -> None:
+        rows.append((f"hash-{len(rows)}", _entry(f"new_{len(rows)}")))
+        store.put("a.py", *rows[-1])
+
+    # each lookup of the row by the save puts a newer row of the file first, the last one after the write
+    key.step = put_newer
+    store.close()
+    key.step = None
+
+    assert store.get("a.py") == rows[-1]
+    store.close()
+    reopened = SymbolStore(path, version=(1,), loader=_LOADER)
+    try:
+        assert reopened.get("a.py") == rows[-1]
+    finally:
+        reopened.close()
