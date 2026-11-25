@@ -558,7 +558,7 @@ class _EnclosingSymbolGroups:
     """Grep hits grouped in discovery order: under their enclosing symbol, or per file when no symbol encloses them.
 
     A hit no symbol encloses -- in a file no language server reads, or in a comment, import or blank line of one --
-    keeps its matched line and context in its file's block (spec-v2 §5.1/§5.3) rather than being reduced to a count.
+    keeps its matched line, line number and context in its file's block (spec-v2 §5.1/§5.3) rather than being reduced to a count.
     The first symbol found for a ``(relative_path, name_path)`` anchors that group.
     """
 
@@ -2034,7 +2034,8 @@ class CursorManager:
         """
         :param search: the search.
         :param restrict_to_code_files: whether only code files are searched.
-        :param skipped_links: a list receiving the path of every symbolic link to a directory the search does not enter.
+        :param skipped_links: a list receiving the project-relative path of every symbolic link to a directory the search
+            did not enter.
         :return: the matches grouped as :meth:`_group_by_enclosing_symbol` groups them.
         """
         abs_path = self._validated_search_scope(search, restrict_to_code_files)
