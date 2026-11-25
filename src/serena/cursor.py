@@ -495,27 +495,100 @@ class _FileSymbolTree:
         :param line: a line of the file.
         :return: the symbol enclosing the line, or ``None`` for a line outside every symbol.
         """
-        # the innermost container or variable holding the line's first non-whitespace column
+        container = self._innermost_container(line)
+        return container if container is not None else self._narrowest_root_symbol(line.line_number)
+
+    def _innermost_container(self, line: TextLine) -> LanguageServerSymbol | None:
+        """
+        :param line: a line of the file.
+        :return: the innermost container or variable holding the line's first non-whitespace column, or ``None`` for
+            a blank line and for a line no indexed symbol holds.
+        """
         content = line.line_content or ""
         code = content.lstrip()
-        if code.strip():
-            container = self._index.find_innermost_container(line.line_number, len(content) - len(code), strict=False)
-            if container is not None:
-                return LanguageServerSymbol(container)
+        if not code.strip():
+            return None
+        container = self._index.find_innermost_container(line.line_number, len(content) - len(code), strict=False)
+        return LanguageServerSymbol(container) if container is not None else None
 
-        # the narrowest root symbol covering the line
+    def _narrowest_root_symbol(self, line_number: int) -> LanguageServerSymbol | None:
+        """
+        :param line_number: a 0-based line of the file.
+        :return: the root symbol of narrowest line span covering the line (the first of equally narrow ones), or
+            ``None`` when no root symbol covers it.
+        """
         best: LanguageServerSymbol | None = None
         best_span: int | None = None
         for symbol in self._root_symbols:
             start = symbol.get_body_start_position()
             end = symbol.get_body_end_position()
-            if start is None or end is None or not start.line <= line.line_number <= end.line:
+            if start is None or end is None or not start.line <= line_number <= end.line:
                 continue
-            span = end.line - start.line
-            if best_span is None or span < best_span:
+            if best_span is None or end.line - start.line < best_span:
                 best = symbol
-                best_span = span
+                best_span = end.line - start.line
         return best
+
+
+@dataclass(frozen=True)
+class _PatternSearch:
+    """A regex search over a scope of the project, with each parameter as :meth:`CursorGrepTool.apply` describes it.
+
+    The globs are kept as the caller sent them.
+    """
+
+    pattern: str
+    relative_path: str | None
+    include_glob: str
+    exclude_glob: str
+    context_lines_before: int
+    context_lines_after: int
+
+    @property
+    def scope(self) -> str:
+        """
+        :return: the search scope relative to the project root, the empty path for the whole project.
+        """
+        return self.relative_path or ""
+
+
+class _EnclosingSymbolGroups:
+    """Grep hits grouped in discovery order: under their enclosing symbol, or per file when no symbol encloses them.
+
+    A hit no symbol encloses -- in a file no language server reads, or in a comment, import or blank line of one --
+    keeps its matched line and context in its file's block (spec-v2 §5.1/§5.3) rather than being reduced to a count.
+    The first symbol found for a ``(relative_path, name_path)`` anchors that group.
+    """
+
+    def __init__(self) -> None:
+        self._anchors: dict[tuple[str, str], LanguageServerSymbol] = {}
+        self._symboled: dict[tuple[str, str], list[MatchedConsecutiveLines]] = {}
+        self._unsymboled: dict[str, list[MatchedConsecutiveLines]] = {}
+
+    def add(self, relative_path: str, symbol: LanguageServerSymbol | None, hit: MatchedConsecutiveLines) -> None:
+        """
+        :param relative_path: the file the hit is in.
+        :param symbol: the symbol enclosing the hit, or ``None`` when no symbol encloses it.
+        :param hit: the hit.
+        """
+        if symbol is None:
+            self._unsymboled.setdefault(relative_path, []).append(hit)
+            return
+        key = (relative_path, symbol.get_name_path())
+        self._anchors.setdefault(key, symbol)
+        self._symboled.setdefault(key, []).append(hit)
+
+    def result(
+        self,
+    ) -> tuple[list[tuple[LanguageServerSymbol, list[MatchedConsecutiveLines]]], list[tuple[str, list[MatchedConsecutiveLines]]]]:
+        """
+        :return: the symbol-anchored groups and the per-file blocks, each in discovery order, with hits whose context
+            windows share a line merged into one block.
+        """
+        return (
+            [(self._anchors[key], MatchedConsecutiveLines.merge_overlapping(hits)) for key, hits in self._symboled.items()],
+            [(path, MatchedConsecutiveLines.merge_overlapping(hits)) for path, hits in self._unsymboled.items()],
+        )
 
 
 class CursorManager:
@@ -1942,147 +2015,156 @@ class CursorManager:
         context_lines_after: int = 0,
         skipped_links: list[str] | None = None,
     ) -> tuple[list[tuple[LanguageServerSymbol, list[MatchedConsecutiveLines]]], list[tuple[str, list[MatchedConsecutiveLines]]]]:
-        """Find regex matches grouped by their enclosing LSP symbol.
+        """Find regex matches grouped by enclosing symbol, each parameter as CursorGrepTool.apply describes it.
 
-        Each match is associated with the smallest LSP symbol that contains
-        its hit line. Matches that fall outside any addressable LSP symbol
-        -- a hit in a non-LSP file (yaml/LICENSE/...) or in a genuine
-        non-symbol region (comment/import/blank line) of an LSP file -- are
-        NOT dropped: they are surfaced as file-level blocks carrying their
-        matched line + number + context (spec-v2 §5.1/§5.3), so the cursor
-        surface serves the read itself instead of deferring to another tool.
-
-        :param substring_pattern: regular expression compiled with
-            ``re.DOTALL``; mirrors :class:`~serena.tools.file_tools.SearchForPatternTool`
-            semantics.
-        :param relative_path: search root relative to the project. ``None``
-            (the default) searches every non-ignored file.
-        :param paths_include_glob: glob pattern restricting the file set,
-            matched against each file's path relative to ``relative_path``
-            when that is a directory, and relative to the project root
-            otherwise. Empty disables include filtering.
-        :param paths_exclude_glob: glob pattern excluding files, matched like
-            ``paths_include_glob``; takes precedence over it. Empty disables
-            exclude.
-        :param restrict_to_code_files: when ``True`` (the default), the
-            search is confined to files an analyser can address
-            symbolically -- the only files where enclosing-symbol grouping
-            is meaningful.
-        :param context_lines_before: extra lines rendered alongside each
-            hit's matched line in the returned display strings.
-        :param context_lines_after: extra lines rendered alongside each
-            hit's matched line in the returned display strings.
-        :param skipped_links: a list to which the project-relative path of
-            every symbolic link to a directory the search did not enter is
-            appended.
-        :return: a 2-tuple ``(groups, unsymboled)``. ``groups`` is a list
-            of ``(enclosing_symbol, hit_blocks)`` tuples in discovery order --
-            one tuple per unique enclosing symbol (each anchors a cursor).
-            ``unsymboled`` is a list of ``(relative_path, hit_blocks)`` tuples
-            in discovery order -- one per file with matches outside any
-            addressable LSP symbol; their matched lines are surfaced verbatim
-            rather than reduced to a count. Within a tuple, matches whose
-            context windows share a line form one hit block.
-        :raises FileNotFoundError: when ``relative_path`` does not exist
-            on disk.
-        :raises ValueError: when ``restrict_to_code_files`` is set and
-            ``relative_path`` names a file that is not a code file.
+        Returns ``(groups, unsymboled)`` as :meth:`_group_by_enclosing_symbol` does. Raises FileNotFoundError for a
+        missing scope, and ValueError for a non-code-file scope, a malformed glob, or matches outside code files only.
         """
-        # locate and validate the search scope
-        rel = relative_path or ""
-        abs_path = os.path.join(self._project.project_root, rel)
+        search = _PatternSearch(
+            substring_pattern, relative_path, paths_include_glob, paths_exclude_glob, context_lines_before, context_lines_after
+        )
+        return self._find_pattern(search, restrict_to_code_files, skipped_links)
+
+    def _find_pattern(
+        self, search: _PatternSearch, restrict_to_code_files: bool, skipped_links: list[str] | None
+    ) -> tuple[list[tuple[LanguageServerSymbol, list[MatchedConsecutiveLines]]], list[tuple[str, list[MatchedConsecutiveLines]]]]:
+        """
+        :param search: the search.
+        :param restrict_to_code_files: whether only code files are searched.
+        :param skipped_links: a list receiving the path of every symbolic link to a directory the search does not enter.
+        :return: the matches grouped as :meth:`_group_by_enclosing_symbol` groups them.
+        """
+        abs_path = self._validated_search_scope(search, restrict_to_code_files)
+        if restrict_to_code_files:
+            matches = self._search_code_files(search, abs_path, skipped_links)
+        else:
+            matches = self._search_all_files(search, abs_path, skipped_links)
+        if restrict_to_code_files and not matches and os.path.isdir(abs_path):
+            self._refuse_matches_outside_code_files(search)
+        return self._group_by_enclosing_symbol(matches)
+
+    def _validated_search_scope(self, search: _PatternSearch, restrict_to_code_files: bool) -> str:
+        """
+        :param search: the search.
+        :param restrict_to_code_files: whether only code files are searched.
+        :return: the absolute path of the search scope.
+        :raises FileNotFoundError: when the scope does not exist.
+        :raises ValueError: when code files only are searched and the scope is a file that is not one, or when a glob
+            is malformed (naming it as the caller sent it).
+        """
+        abs_path = os.path.join(self._project.project_root, search.scope)
         if not os.path.exists(abs_path):
-            raise FileNotFoundError(f"Relative path '{rel}' does not exist.")
+            raise FileNotFoundError(f"Relative path '{search.scope}' does not exist.")
         if (
             restrict_to_code_files
             and os.path.isfile(abs_path)
-            and not self._project.gather_project_files(relative_path=rel, code_files_only=True, skip_ignored_files=True)
+            and not self._project.gather_project_files(relative_path=search.scope, code_files_only=True, skip_ignored_files=True)
         ):
-            raise ValueError(f"'{rel}' is not a code file of this project; set restrict_to_code_files=False to search it.")
-
-        # a malformed glob is refused naming it as the caller sent it, before it is rewritten below
-        for sent_glob in (paths_include_glob.strip(), paths_exclude_glob.strip()):
+            raise ValueError(f"'{search.scope}' is not a code file of this project; set restrict_to_code_files=False to search it.")
+        for sent_glob in (search.include_glob.strip(), search.exclude_glob.strip()):
             if sent_glob:
                 expand_braces(sent_glob)
+        return abs_path
 
-        # globs are written relative to a directory scope; the search machinery matches project-relative paths
-        include_glob = self._scope_glob(rel, abs_path, paths_include_glob.strip())
-        exclude_glob = self._scope_glob(rel, abs_path, paths_exclude_glob.strip())
+    def _scoped_globs(self, search: _PatternSearch, abs_path: str) -> tuple[str | None, str | None]:
+        """
+        :param search: the search.
+        :param abs_path: the absolute path of the search scope.
+        :return: the include and exclude globs rewritten to match project-relative paths, ``None`` for an empty one.
+        """
+        return self._scope_glob(search.scope, abs_path, search.include_glob.strip()), self._scope_glob(
+            search.scope, abs_path, search.exclude_glob.strip()
+        )
 
-        # delegate the regex pass to the project search machinery so the
-        # result set matches what SearchForPatternTool would surface
-        if restrict_to_code_files:
-            matches = self._project.search_project_files_for_pattern(
-                pattern=substring_pattern,
-                relative_path=rel,
-                context_lines_before=context_lines_before,
-                context_lines_after=context_lines_after,
-                paths_include_glob=include_glob,
-                paths_exclude_glob=exclude_glob,
-                skipped_links=skipped_links,
+    def _search_code_files(self, search: _PatternSearch, abs_path: str, skipped_links: list[str] | None) -> list[MatchedConsecutiveLines]:
+        """
+        :param search: the search.
+        :param abs_path: the absolute path of the search scope.
+        :param skipped_links: a list receiving the path of every symbolic link to a directory the search does not enter.
+        :return: the matches in the scope's code files, as the project search machinery (and so SearchForPatternTool)
+            finds them.
+        """
+        include_glob, exclude_glob = self._scoped_globs(search, abs_path)
+        return self._project.search_project_files_for_pattern(
+            pattern=search.pattern,
+            relative_path=search.scope,
+            context_lines_before=search.context_lines_before,
+            context_lines_after=search.context_lines_after,
+            paths_include_glob=include_glob,
+            paths_exclude_glob=exclude_glob,
+            skipped_links=skipped_links,
+        )
+
+    def _search_all_files(self, search: _PatternSearch, abs_path: str, skipped_links: list[str] | None) -> list[MatchedConsecutiveLines]:
+        """
+        :param search: the search.
+        :param abs_path: the absolute path of the search scope.
+        :param skipped_links: a list receiving the path of every symbolic link to a directory the search does not enter.
+        :return: the matches in every non-ignored file of the scope.
+        """
+        from serena.util.text_utils import search_files
+
+        include_glob, exclude_glob = self._scoped_globs(search, abs_path)
+        return search_files(
+            relative_file_paths=self._files_in_scope(search, abs_path, skipped_links),
+            pattern=search.pattern,
+            context_lines_before=search.context_lines_before,
+            context_lines_after=search.context_lines_after,
+            file_reader=self._project.read_file,
+            root_path=self._project.project_root,
+            paths_include_glob=include_glob,
+            paths_exclude_glob=exclude_glob,
+        )
+
+    def _files_in_scope(self, search: _PatternSearch, abs_path: str, skipped_links: list[str] | None) -> list[str]:
+        """
+        :param search: the search.
+        :param abs_path: the absolute path of the search scope.
+        :param skipped_links: a list receiving the path of every symbolic link to a directory the walk does not enter.
+        :return: the project-relative paths of the scope's non-ignored files: the scope itself when it is a file.
+        """
+        from serena.util.file_system import scan_directory
+
+        if os.path.isfile(abs_path):
+            return [search.scope]
+        _dirs, files = scan_directory(
+            path=abs_path,
+            recursive=True,
+            is_ignored_dir=self._project.is_ignored_path,
+            is_ignored_file=self._project.is_ignored_path,
+            relative_to=self._project.project_root,
+            skipped_links=skipped_links,
+        )
+        return files
+
+    def _refuse_matches_outside_code_files(self, search: _PatternSearch) -> None:
+        """
+        :param search: a search whose pattern matches no code file of its scope.
+        :raises ValueError: when the pattern matches files of the scope that are not code files, naming the restriction.
+        """
+        other_groups, other_unsymboled = self.find_pattern_with_enclosing_symbols(
+            substring_pattern=search.pattern,
+            relative_path=search.relative_path,
+            paths_include_glob=search.include_glob,
+            paths_exclude_glob=search.exclude_glob,
+            restrict_to_code_files=False,
+        )
+        if other_groups or other_unsymboled:
+            raise ValueError(
+                f"'{search.pattern}' matches only files under '{search.scope}' that are not code files of this project; "
+                "set restrict_to_code_files=False to search them."
             )
-        else:
-            from serena.util.file_system import scan_directory
-            from serena.util.text_utils import search_files
 
-            if os.path.isfile(abs_path):
-                rel_paths_to_search = [rel]
-            else:
-                _dirs, rel_paths_to_search = scan_directory(
-                    path=abs_path,
-                    recursive=True,
-                    is_ignored_dir=self._project.is_ignored_path,
-                    is_ignored_file=self._project.is_ignored_path,
-                    relative_to=self._project.project_root,
-                    skipped_links=skipped_links,
-                )
-            matches = search_files(
-                relative_file_paths=rel_paths_to_search,
-                pattern=substring_pattern,
-                context_lines_before=context_lines_before,
-                context_lines_after=context_lines_after,
-                file_reader=self._project.read_file,
-                root_path=self._project.project_root,
-                paths_include_glob=include_glob,
-                paths_exclude_glob=exclude_glob,
-            )
-
-        # a miss among the code files of a directory that its other files would answer names the restriction
-        if restrict_to_code_files and not matches and os.path.isdir(abs_path):
-            other_groups, other_unsymboled = self.find_pattern_with_enclosing_symbols(
-                substring_pattern=substring_pattern,
-                relative_path=relative_path,
-                paths_include_glob=paths_include_glob,
-                paths_exclude_glob=paths_exclude_glob,
-                restrict_to_code_files=False,
-            )
-            if other_groups or other_unsymboled:
-                raise ValueError(
-                    f"'{substring_pattern}' matches only files under '{rel}' that are not code files of this project; "
-                    "set restrict_to_code_files=False to search them."
-                )
-
-        # resolve enclosing LSP symbol per match; first occurrence per
-        # (rel_path, name_path) becomes the group's anchor symbol so the
-        # caller can register a cursor at it
-        groups: dict[tuple[str, str], LanguageServerSymbol] = {}
-        hits_per_group: dict[tuple[str, str], list[MatchedConsecutiveLines]] = {}
-        group_order: list[tuple[str, str]] = []
-        # non-symbol hits are SURFACED as file-level blocks rather than dropped
-        # (spec-v2 §5.1/§5.3): a hit in a non-LSP file (yaml/LICENSE/...) or in a
-        # genuine non-symbol region (comment/import/blank) of an LSP file keeps
-        # its matched line+number+context instead of being reduced to a count.
-        unsymboled: dict[str, list[MatchedConsecutiveLines]] = {}
-        unsymboled_order: list[str] = []
-
-        def _record_unsymboled(path: str, hit: MatchedConsecutiveLines) -> None:
-            if path not in unsymboled:
-                unsymboled[path] = []
-                unsymboled_order.append(path)
-            unsymboled[path].append(hit)
-
-        # each file's symbol tree, requested once for all of that file's matches; None for a file whose hits no
-        # symbol can anchor
+    def _group_by_enclosing_symbol(
+        self, matches: list[MatchedConsecutiveLines]
+    ) -> tuple[list[tuple[LanguageServerSymbol, list[MatchedConsecutiveLines]]], list[tuple[str, list[MatchedConsecutiveLines]]]]:
+        """
+        :param matches: the matches of a search.
+        :return: ``(groups, unsymboled)``: one ``(enclosing_symbol, hit_blocks)`` per enclosing symbol, which anchors a
+            cursor, and one ``(relative_path, hit_blocks)`` per file with matches no symbol encloses, their lines
+            surfaced verbatim; both in discovery order. Each file's symbol tree is requested once.
+        """
+        groups = _EnclosingSymbolGroups()
         trees: dict[str, _FileSymbolTree | None] = {}
         for match in matches:
             assert match.source_file_path is not None
@@ -2090,23 +2172,8 @@ class CursorManager:
             if rel_path not in trees:
                 trees[rel_path] = self._file_symbol_tree(rel_path)
             tree = trees[rel_path]
-            sym = tree.enclosing_symbol(match.matched_lines[0]) if tree is not None else None
-            if sym is None:
-                _record_unsymboled(rel_path, match)
-                continue
-            key = (rel_path, sym.get_name_path())
-            if key not in groups:
-                groups[key] = sym
-                hits_per_group[key] = []
-                group_order.append(key)
-            hits_per_group[key].append(match)
-
-        # build the ordered results preserving discovery order for both the
-        # symbol-anchored groups and the file-level non-symbol blocks
-        return (
-            [(groups[k], MatchedConsecutiveLines.merge_overlapping(hits_per_group[k])) for k in group_order],
-            [(p, MatchedConsecutiveLines.merge_overlapping(unsymboled[p])) for p in unsymboled_order],
-        )
+            groups.add(rel_path, tree.enclosing_symbol(match.matched_lines[0]) if tree is not None else None, match)
+        return groups.result()
 
     @staticmethod
     def _scope_glob(relative_path: str, abs_path: str, glob: str) -> str | None:

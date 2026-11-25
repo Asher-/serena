@@ -643,13 +643,14 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoot):
         ✗ "looking for ValueError" (no semantic question)
 
         :param substring_pattern: regular expression for a substring pattern
-            to search for.
+            to search for, with the semantics of ``search_for_pattern``.
         :param because: your **goal in understanding** for this search --
             the semantic question the result lets you answer. Required.
             Recorded on every opened cursor.
         :param relative_path: only sub-paths of this path (relative to the
             project root) are searched. Pointing at a single file restricts
-            the search to that file. Must exist.
+            the search to that file. Must exist. Empty searches every
+            non-ignored file of the project.
         :param paths_include_glob: glob pattern restricting which files to
             include in the search, matched against each file's path relative
             to ``relative_path`` when that is a directory, and relative to the
@@ -664,14 +665,17 @@ class CursorGrepTool(Tool, ToolMarkerSymbolicRead, ToolMarkerNamesProjectRoot):
             unique enclosing symbol). Additional groups beyond this cap are
             listed without cursor IDs. ``-1`` means no cap beyond the cursors a session holds (:attr:`CursorManager.MAX_CURSORS`).
         :param context_lines_before: number of lines of context to include
-            before each match in the report.
+            before each match in the report. Matches whose context windows
+            share a line form one hit block.
         :param context_lines_after: number of lines of context to include
             after each match in the report.
         :param max_answer_chars: maximum characters for the returned output;
             ``-1`` uses the configured default.
         :return: a multi-cursor report listing each opened cursor's anchor
             and hit count, plus any deferred symbols that would have
-            received a cursor if not for ``max_matches``.
+            received a cursor if not for ``max_matches``, the matched lines
+            of hits outside every symbol per file, and the symbolic links to
+            directories the search did not enter.
 
         """
         manager = self.agent.get_cursor_manager()

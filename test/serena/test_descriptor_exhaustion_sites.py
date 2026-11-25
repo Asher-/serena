@@ -583,7 +583,6 @@ def test_a_search_hit_whose_containing_symbol_cannot_be_resolved_for_want_of_des
     (tmp_path / "main.go").write_text("package main\n")
     retriever = MagicMock()
     retriever.get_language_server.side_effect = _exhausted
-    retriever.get_symbol_overview.return_value = {}
     monkeypatch.setattr(CursorManager, "_retriever", property(lambda _self: retriever))
     project = MagicMock()
     project.project_root = str(tmp_path)
