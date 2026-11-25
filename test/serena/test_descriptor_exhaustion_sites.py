@@ -509,7 +509,6 @@ def _manager_whose_retriever_fails_for_want_of_descriptors(tmp_path: Path, monke
     """A cursor manager whose symbol retriever answers every lookup with descriptor exhaustion."""
     retriever = MagicMock()
     retriever.find_by_location.side_effect = _exhausted
-    retriever.get_symbol_overview.side_effect = _exhausted
     monkeypatch.setattr(CursorManager, "_retriever", property(lambda _self: retriever))
     project = MagicMock()
     project.project_root = str(tmp_path)
@@ -523,16 +522,6 @@ def test_a_symbol_name_that_cannot_be_resolved_for_want_of_descriptors_ends_the_
     manager = _manager_whose_retriever_fails_for_want_of_descriptors(tmp_path, monkeypatch)
 
     assert manager._symbol_name_at("main.go", 0, 0) == "main.go:1"
-    _assert_ended(ending)
-
-
-def test_a_symbol_overview_that_cannot_be_loaded_for_want_of_descriptors_ends_the_daemon(
-    ending: _Ending, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A file's symbol overview that cannot be loaded for want of file descriptors covers no line, and the daemon is ended."""
-    manager = _manager_whose_retriever_fails_for_want_of_descriptors(tmp_path, monkeypatch)
-
-    assert manager._top_level_symbol_covering_line("main.go", 0) is None
     _assert_ended(ending)
 
 

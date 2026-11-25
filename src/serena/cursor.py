@@ -10,7 +10,6 @@ import os
 import re
 import time
 from collections.abc import Sequence
-from contextlib import ExitStack
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -21,8 +20,9 @@ from serena.symbol import LanguageServerSymbol, LanguageServerSymbolLocation, La
 from serena.util.file_lifecycle import AtomicFileWriter, WritePrecondition
 from serena.util.line_numbers import format_line_range, to_display_line, to_internal_line
 from serena.util.staleness import check_stale, read_file_version
-from serena.util.text_utils import MatchedConsecutiveLines, expand_braces
+from serena.util.text_utils import MatchedConsecutiveLines, TextLine, expand_braces
 from serena.util.windowing import InvalidContinuation, WindowRequest, decode_continuation, window_body
+from solidlsp.ls import DocumentSymbols, SymbolRangeIndex
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_utils import PathUtils
 from solidlsp.lsp_protocol_handler.lsp_types import (
@@ -471,6 +471,52 @@ def _gist_from_body(body: str | None) -> str | None:
             continue
         return cleaned[:_GIST_MAX_CHARS]
     return None
+
+
+class _FileSymbolTree:
+    """The document-symbol tree of one file, resolving the symbol that encloses any line of that file.
+
+    A line's enclosing symbol is the innermost container or variable whose range holds the line's first
+    non-whitespace column. A line no such symbol holds -- a blank line, or the declaration line of a single-line
+    top-level symbol, which the container index leaves out -- is enclosed by the root symbol of narrowest line span
+    that covers it, and by no symbol when no root symbol covers it.
+    """
+
+    _CONTAINER_KINDS = frozenset(kind for kind in SymbolKind if SymbolKind.is_container(kind))
+
+    def __init__(self, document_symbols: DocumentSymbols) -> None:
+        """
+        :param document_symbols: the file's document symbols.
+        """
+        self._index = SymbolRangeIndex(document_symbols, set(self._CONTAINER_KINDS))
+        self._root_symbols = [LanguageServerSymbol(symbol) for symbol in document_symbols.root_symbols]
+
+    def enclosing_symbol(self, line: TextLine) -> LanguageServerSymbol | None:
+        """
+        :param line: a line of the file.
+        :return: the symbol enclosing the line, or ``None`` for a line outside every symbol.
+        """
+        # the innermost container or variable holding the line's first non-whitespace column
+        content = line.line_content or ""
+        code = content.lstrip()
+        if code.strip():
+            container = self._index.find_innermost_container(line.line_number, len(content) - len(code), strict=False)
+            if container is not None:
+                return LanguageServerSymbol(container)
+
+        # the narrowest root symbol covering the line
+        best: LanguageServerSymbol | None = None
+        best_span: int | None = None
+        for symbol in self._root_symbols:
+            start = symbol.get_body_start_position()
+            end = symbol.get_body_end_position()
+            if start is None or end is None or not start.line <= line.line_number <= end.line:
+                continue
+            span = end.line - start.line
+            if best_span is None or span < best_span:
+                best = symbol
+                best_span = span
+        return best
 
 
 class CursorManager:
@@ -2020,7 +2066,6 @@ class CursorManager:
         # resolve enclosing LSP symbol per match; first occurrence per
         # (rel_path, name_path) becomes the group's anchor symbol so the
         # caller can register a cursor at it
-        retriever = self._retriever
         groups: dict[tuple[str, str], LanguageServerSymbol] = {}
         hits_per_group: dict[tuple[str, str], list[MatchedConsecutiveLines]] = {}
         group_order: list[tuple[str, str]] = []
@@ -2037,66 +2082,25 @@ class CursorManager:
                 unsymboled_order.append(path)
             unsymboled[path].append(hit)
 
-        # the language server's open document of the file whose matches are being resolved, held across all of
-        # that file's matches: each resolution opens the file, and a file nothing else holds open would be sent to
-        # the server whole once per match
-        with ExitStack() as held_file:
-            held_path: str | None = None
-            for match in matches:
-                assert match.source_file_path is not None
-                rel_path = match.source_file_path
-                # MatchedConsecutiveLines.line_number is already 0-indexed --
-                # same convention as the LSP query, so no conversion is needed
-                matched_line = match.matched_lines[0]
-                line_0idx = matched_line.line_number
-                # query at the first non-whitespace column so the LSP's
-                # innermost-container lookup lands on actual code -- column 0
-                # of an indented line falls in the leading-whitespace gutter
-                # and some LSP implementations return None for it
-                line_content = matched_line.line_content or ""
-                stripped = line_content.lstrip()
-                col_0idx = len(line_content) - len(stripped) if stripped else 0
-                # rung check via the ONE ladder resolver: only the LSP rung can
-                # anchor a hit to an enclosing symbol. A structural/plaintext file
-                # still surfaces its matched line as a file-level hit (spec §5.1/§5.3).
-                if self.resolve_read_rung(rel_path, retriever=retriever) is not ReadRung.LSP:
-                    _record_unsymboled(rel_path, match)
-                    continue
-                try:
-                    ls = retriever.get_language_server(rel_path)
-                    if held_path != rel_path:
-                        held_file.close()
-                        held_file.enter_context(ls.open_file(rel_path))
-                        held_path = rel_path
-                    sym_dict = ls.request_containing_symbol(rel_path, line_0idx, col_0idx, strict=False)
-                except Exception as e:
-                    # rendering is best-effort: when the LSP cannot answer the
-                    # containment query for one file, skip the hit rather than
-                    # fail the whole search
-                    DescriptorExhaustion.report(e, f"resolving the containing symbol of {rel_path}:{line_0idx}")
-                    log.debug(f"Could not resolve containing symbol for {rel_path}:{line_0idx}: {e}")
-                    sym_dict = None
-                if sym_dict is None:
-                    # request_containing_symbol(strict=False) returns None for a hit on a
-                    # top-level symbol's OWN declaration line: it is not inside any deeper
-                    # container. Recover that symbol from the file overview so the hit
-                    # attaches to it instead of being counted as unsymboled.
-                    # bug://serena/cursor-grep-skips-package-level-symbol-declarations
-                    sym = self._top_level_symbol_covering_line(rel_path, line_0idx)
-                    if sym is None:
-                        # genuine non-symbol region inside an LSP file (comment,
-                        # import, blank line): surface the matched line, don't drop it
-                        _record_unsymboled(rel_path, match)
-                        continue
-                else:
-                    sym = LanguageServerSymbol(sym_dict)
-                name_path = sym.get_name_path()
-                key = (rel_path, name_path)
-                if key not in groups:
-                    groups[key] = sym
-                    hits_per_group[key] = []
-                    group_order.append(key)
-                hits_per_group[key].append(match)
+        # each file's symbol tree, requested once for all of that file's matches; None for a file whose hits no
+        # symbol can anchor
+        trees: dict[str, _FileSymbolTree | None] = {}
+        for match in matches:
+            assert match.source_file_path is not None
+            rel_path = match.source_file_path
+            if rel_path not in trees:
+                trees[rel_path] = self._file_symbol_tree(rel_path)
+            tree = trees[rel_path]
+            sym = tree.enclosing_symbol(match.matched_lines[0]) if tree is not None else None
+            if sym is None:
+                _record_unsymboled(rel_path, match)
+                continue
+            key = (rel_path, sym.get_name_path())
+            if key not in groups:
+                groups[key] = sym
+                hits_per_group[key] = []
+                group_order.append(key)
+            hits_per_group[key].append(match)
 
         # build the ordered results preserving discovery order for both the
         # symbol-anchored groups and the file-level non-symbol blocks
@@ -2122,43 +2126,26 @@ class CursorManager:
         literal_scope = re.sub(r"[][{}*?]", lambda m: f"[{m.group()}]", scope)
         return f"{literal_scope}/{glob.lstrip('/')}"
 
-    def _top_level_symbol_covering_line(self, relative_path: str, line_0idx: int) -> LanguageServerSymbol | None:
-        """Recover the top-level symbol whose extent covers a 0-based line.
+    def _file_symbol_tree(self, relative_path: str) -> "_FileSymbolTree | None":
+        """Request a file's symbol tree from its language server.
 
-        ``request_containing_symbol(strict=False)`` returns ``None`` for a regex hit
-        landing on a package-level (top-level) symbol's own declaration line -- the
-        line is the symbol's own extent, not the interior of any deeper container, so
-        the LSP reports no *containing* symbol. This fallback consults the file
-        overview and returns the narrowest top-level symbol whose body extent contains
-        the line, letting :meth:`find_pattern_with_enclosing_symbols` anchor a cursor
-        on a top-level var/const/type declaration instead of dropping the hit.
-
-        :param relative_path: the file the hit is in (relative to the project root).
-        :param line_0idx: the 0-based line of the hit.
-        :return: the covering top-level symbol, or ``None`` when none covers the line
-            (a genuine non-symbol region such as a comment or import).
+        :param relative_path: the file, relative to the project root.
+        :return: the file's symbol tree, or ``None`` when the file is not read on the LSP rung or its language
+            server cannot report its symbols. Only the LSP rung can anchor a hit to an enclosing symbol.
         """
-        try:
-            overview = self._retriever.get_symbol_overview(relative_path)
-        except Exception as e:
-            # best-effort, mirroring the containment-query handling in the caller
-            DescriptorExhaustion.report(e, f"the symbol overview of {relative_path}")
-            log.debug(f"Could not load symbol overview for {relative_path}: {e}")
+        retriever = self._retriever
+        if self.resolve_read_rung(relative_path, retriever=retriever) is not ReadRung.LSP:
             return None
-        best: LanguageServerSymbol | None = None
-        best_span: int | None = None
-        for symbols in overview.values():
-            for sym in symbols:
-                start = sym.get_body_start_position()
-                end = sym.get_body_end_position()
-                if start is None or end is None:
-                    continue
-                if start.line <= line_0idx <= end.line:
-                    span = end.line - start.line
-                    if best is None or (best_span is not None and span < best_span):
-                        best = sym
-                        best_span = span
-        return best
+        try:
+            ls = retriever.get_language_server(relative_path)
+            with ls.open_file(relative_path) as file_buffer:
+                return _FileSymbolTree(ls.request_document_symbols(relative_path, file_buffer=file_buffer))
+        except Exception as e:
+            # best-effort: a file whose symbols cannot be reported surfaces its hits as file-level hits rather than
+            # failing the whole search
+            DescriptorExhaustion.report(e, f"the document symbols of {relative_path}")
+            log.debug(f"Could not request the document symbols of {relative_path}: {e}")
+            return None
 
     def register_cursor_at_symbol(
         self,
