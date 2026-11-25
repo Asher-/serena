@@ -18,6 +18,9 @@ class _Allowed:
     def __eq__(self, other: object) -> bool:
         return isinstance(other, _Allowed) and other.value == self.value
 
+    def __hash__(self) -> int:
+        return hash(self.value)
+
 
 def test_loads_returns_an_entry_of_allowed_types() -> None:
     entry = {"symbols": [{"name": "f", "kind": 12}], "allowed": _Allowed(3)}

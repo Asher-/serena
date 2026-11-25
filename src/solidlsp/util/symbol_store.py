@@ -31,8 +31,9 @@ class SymbolStore:
     A persistent map from the relative path of a file to the hash of the content its entry was cached for and the entry
     itself, held as one row per file in a sqlite database in WAL mode.
 
-    A read opens a connection of its own, reads one row, closes the connection and unpickles one entry; a read that
-    meets a database another connection holds, or any other database error, is a miss. A save writes only the rows put
+    A read takes a connection from a bounded pool of reading connections that belong to no thread, reads one row, gives
+    the connection back and unpickles one entry; a read that meets a database another connection holds, or any other
+    database error, is a miss. A save writes only the rows put
     since the last save. All writes of the store in a process go through one writer thread the store owns, fed by a
     queue and started by the first save that has rows to write; a write that meets a database another connection holds
     keeps its rows for the next save and does not wait. Closing the store writes what is left in the calling thread and
@@ -52,6 +53,7 @@ class SymbolStore:
         self._path = Path(path)
         self._read_uri = f"file:{urllib.parse.quote(str(self._path))}?mode=rw"
         """the URI a read opens the database with, which never creates it"""
+        self._readers = _ReadPool(self._read_uri)
         self._version = pickle.dumps(version)
         self._loader = loader
         self._pending: dict[str, _Row] = {}
@@ -72,19 +74,22 @@ class SymbolStore:
 
         if not self._path.is_file():
             return None
+        pool = self._readers
         try:
-            connection = sqlite3.connect(self._read_uri, uri=True, isolation_level=None)
-            try:
-                connection.execute("PRAGMA busy_timeout = 0")
-                found = connection.execute(
-                    "SELECT e.content_hash, e.entry FROM entries e, meta m WHERE e.key = ? AND m.key = 'version' AND m.value = ?",
-                    (key, self._version),
-                ).fetchone()
-            finally:
-                connection.close()
+            connection = pool.take()
+        except sqlite3.Error as error:
+            log.debug("Opening %s for reading missed: %s", self._path, error)
+            return None
+        try:
+            found = connection.execute(
+                "SELECT e.content_hash, e.entry FROM entries e, meta m WHERE e.key = ? AND m.key = 'version' AND m.value = ?",
+                (key, self._version),
+            ).fetchone()
         except sqlite3.Error as error:
             log.debug("Reading %s from %s missed: %s", key, self._path, error)
             return None
+        finally:
+            pool.give_back(connection)
         if found is None:
             return None
         try:
@@ -116,14 +121,20 @@ class SymbolStore:
         """
         Ends the writer once it has written every batch handed to it, then writes the rows put since the last save in
         the calling thread; with no such rows, it writes nothing. Rows a write could not write, as another connection
-        held the database, are kept for the next save. The store can be used again afterwards, starting a new writer on
-        its next submit.
+        held the database, are kept for the next save. Then it closes the reading connections, those of reads still in
+        flight as they end. The store can be used again afterwards, starting a new writer on its next submit and new
+        reading connections on its next read.
         """
         writer, self._writer = self._writer, _Writer(self)
         writer.stop()
         batch = self._take_pending()
         if batch:
             self._write(batch)
+
+        readers = self._readers
+        readers.closed = True
+        self._readers = _ReadPool(self._read_uri)
+        readers.drain()
 
     def _take_pending(self) -> dict[str, _Row]:
         """
@@ -137,19 +148,33 @@ class SymbolStore:
                 batch[key] = row
         return batch
 
-    def _write(self, batch: dict[str, _Row]) -> None:
+    def _open_for_writing(self) -> sqlite3.Connection:
+        """
+        :return: a new connection writing the database, which it creates if it does not exist, in WAL mode
+        """
+        connection = sqlite3.connect(str(self._path), isolation_level=None, check_same_thread=False)
+        try:
+            connection.execute("PRAGMA busy_timeout = 0")
+            connection.execute("PRAGMA journal_mode = WAL")
+        except BaseException:
+            connection.close()
+            raise
+        return connection
+
+    def _write(self, batch: dict[str, _Row], connection: sqlite3.Connection | None = None) -> None:
         """
         Writes the rows in one transaction, without waiting for a database another connection holds. Rows not written
         as the database was held go back to the pending rows, unless a newer row of the file is pending.
 
         :param batch: the rows to write
+        :param connection: the connection to write through, which stays open; None to open one for this write only
         """
         written = False
         try:
-            connection = sqlite3.connect(str(self._path), isolation_level=None)
+            own_connection = connection is None
+            if connection is None:
+                connection = self._open_for_writing()
             try:
-                connection.execute("PRAGMA busy_timeout = 0")
-                connection.execute("PRAGMA journal_mode = WAL")
                 connection.execute("BEGIN IMMEDIATE")
                 try:
                     connection.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value BLOB NOT NULL)")
@@ -171,7 +196,8 @@ class SymbolStore:
                         connection.execute("ROLLBACK")
                     raise
             finally:
-                connection.close()
+                if own_connection:
+                    connection.close()
         except sqlite3.OperationalError as error:
             if _is_busy(error):
                 log.info("Deferring %d rows to the next save of %s, which another connection holds", len(batch), self._path)
@@ -200,12 +226,73 @@ def _is_busy(error: sqlite3.OperationalError) -> bool:
     return "locked" in message or "busy" in message
 
 
+class _ReadPool:
+    """
+    The idle reading connections of a store, at most :data:`SIZE` of them, which belong to no thread: a read takes one,
+    or opens one when none is idle, and gives it back afterwards, closing it when the pool is full. A pool marked closed
+    is drained and its connections closed, by its closer and by every reader giving a connection back to it, so that a
+    connection given back while the pool closes is closed as well.
+    """
+
+    SIZE = 4
+
+    def __init__(self, uri: str) -> None:
+        """
+        :param uri: the URI the connections open the database with
+        """
+        self._uri = uri
+        self._idle: queue.SimpleQueue[sqlite3.Connection] = queue.SimpleQueue()
+        self.closed = False
+        """whether the pool is closed, after which every connection given back to it is closed"""
+
+    def take(self) -> sqlite3.Connection:
+        """
+        :return: an idle connection, or a new one when none is idle
+        """
+        try:
+            return self._idle.get_nowait()
+        except queue.Empty:
+            connection = sqlite3.connect(self._uri, uri=True, isolation_level=None, check_same_thread=False)
+            try:
+                connection.execute("PRAGMA busy_timeout = 0")
+            except BaseException:
+                connection.close()
+                raise
+            return connection
+
+    def give_back(self, connection: sqlite3.Connection) -> None:
+        """
+        :param connection: a connection taken from the pool, which is closed when the pool is full or closed
+        """
+        self._idle.put(connection)
+        if self.closed:
+            self.drain()
+            return
+        # each giver trims the pool back to its size after its own put, so that no put racing another leaves it larger
+        while self._idle.qsize() > self.SIZE:
+            try:
+                surplus = self._idle.get_nowait()
+            except queue.Empty:
+                return
+            surplus.close()
+
+    def drain(self) -> None:
+        """
+        Closes every idle connection.
+        """
+        while True:
+            try:
+                connection = self._idle.get_nowait()
+            except queue.Empty:
+                return
+            connection.close()
+
+
 class _Writer:
     """
     The thread writing a store's rows, fed by a queue, started by the first batch sent to it and ended by a stop.
     """
 
-    _STOP = None
 
     def __init__(self, store: SymbolStore) -> None:
         self._store = store
@@ -231,7 +318,7 @@ class _Writer:
         """
         if next(self._tickets) == 0:
             return
-        self._queue.put(self._STOP)
+        self._queue.put(None)
         try:
             self._thread.join()
         except RuntimeError:
@@ -240,5 +327,17 @@ class _Writer:
             log.debug("The writer of %s is ending on its own", self._store._path)
 
     def _run(self) -> None:
-        while (batch := self._queue.get()) is not self._STOP:
-            self._store._write(batch)
+        # one connection for the thread's life, so that no batch's end is the last close of the database, which would
+        # hold it while checkpointing; a connection that cannot be opened leaves each batch to open its own
+        connection: sqlite3.Connection | None = None
+        try:
+            while (batch := self._queue.get()) is not None:
+                if connection is None:
+                    try:
+                        connection = self._store._open_for_writing()
+                    except sqlite3.Error as error:
+                        log.debug("Cannot keep %s open for writing: %s", self._store._path, error)
+                self._store._write(batch, connection)
+        finally:
+            if connection is not None:
+                connection.close()

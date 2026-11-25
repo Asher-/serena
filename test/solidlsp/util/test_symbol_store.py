@@ -3,6 +3,7 @@ A symbol store persists one row per file: a row is read without reading any othe
 changed and never waits on a database another connection holds, and closing the store ends its writer.
 """
 
+import gc
 import sqlite3
 import threading
 import time
@@ -217,8 +218,9 @@ def test_a_read_racing_writes_of_its_row_returns_the_old_or_the_new_row(tmp_path
     writer = SymbolStore(path, version=(1,), loader=_LOADER)
     writer.put("a.py", "hash-old", _entry("old"))
     writer.close()
-    # a store of another process, which reads only what the writer's store has written
+    # a store of another process, which reads only what the writer's store has written, and has read before
     reader = SymbolStore(path, version=(1,), loader=_LOADER)
+    assert reader.get("a.py") == ("hash-old", _entry("old"))
     writes_done = threading.Event()
     errors: list[BaseException] = []
 
@@ -247,17 +249,118 @@ def test_a_read_racing_writes_of_its_row_returns_the_old_or_the_new_row(tmp_path
     assert read[-1] == ("hash-new", _entry("new"))
 
 
-def test_a_closed_store_leaves_no_connection_to_its_file_open(tmp_path: Path) -> None:
+def _open_connections(path: Path) -> int:
+    """
+    :return: the number of this process's open descriptors of the database file, one per open connection
+    """
+    resolved = path.resolve()
+    return sum(1 for opened in psutil.Process().open_files() if Path(opened.path).resolve() == resolved)
+
+
+def _open_sqlite_connections() -> int:
+    """
+    :return: the number of sqlite connections of this process that are open. A file descriptor does not count them:
+        sqlite keeps the descriptor of a closed connection open while another connection of the process holds a lock
+        on the file.
+    """
+    gc.collect()
+    count = 0
+    for candidate in gc.get_objects():
+        if isinstance(candidate, sqlite3.Connection):
+            try:
+                _ = candidate.total_changes
+            except sqlite3.ProgrammingError:
+                continue
+            count += 1
+    return count
+
+
+def _read_concurrently(store: SymbolStore, key: str, readers: int, reads: int) -> list[object]:
+    """
+    Reads the key from the store in several threads at once, each starting its reads together with the others.
+
+    :return: every read's result, and every exception a read raised
+    """
+    start = threading.Barrier(readers)
+    results: list[object] = []
+
+    def read() -> None:
+        start.wait()
+        for _ in range(reads):
+            try:
+                results.append(store.get(key))
+            except BaseException as error:
+                results.append(error)
+
+    threads = [threading.Thread(target=read) for _ in range(readers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    return results
+
+
+def test_a_closed_store_leaves_no_connection_to_its_file_open_and_reads_again_afterwards(tmp_path: Path) -> None:
     path = tmp_path / "store.sqlite"
     store = SymbolStore(path, version=(1,), loader=_LOADER)
     store.put("a.py", "hash-a", _entry("a"))
-    store.submit()
-    assert store.get("a.py") == ("hash-a", _entry("a"))
     store.close()
     assert store.get("a.py") == ("hash-a", _entry("a"))
+    assert _open_connections(path) > 0
+    store.close()
+    assert _open_connections(path) == 0
 
-    open_paths = {Path(opened.path).resolve() for opened in psutil.Process().open_files()}
-    assert not {path.resolve(), Path(f"{path}-wal").resolve(), Path(f"{path}-shm").resolve()} & open_paths
+    assert store.get("a.py") == ("hash-a", _entry("a"))
+    store.close()
+    assert _open_connections(path) == 0
+
+
+def test_more_concurrent_readers_than_the_pool_holds_leave_no_connection_beyond_it_open(tmp_path: Path) -> None:
+    path = tmp_path / "store.sqlite"
+    store = SymbolStore(path, version=(1,), loader=_LOADER)
+    store.put("a.py", "hash-a", _entry("a"))
+    store.close()
+
+    connections_before = _open_sqlite_connections()
+    results = _read_concurrently(store, "a.py", readers=12, reads=50)
+    connections_after_reads = _open_sqlite_connections()
+    store.close()
+
+    assert results == [("hash-a", _entry("a"))] * 600
+    assert 0 < connections_after_reads - connections_before <= 4
+    assert _open_sqlite_connections() == connections_before
+    assert _open_connections(path) == 0
+
+
+def test_a_close_while_reads_are_in_flight_on_several_threads_leaves_none_of_their_connections_open(tmp_path: Path) -> None:
+    path = tmp_path / "store.sqlite"
+    store = SymbolStore(path, version=(1,), loader=_LOADER)
+    store.put("a.py", "hash-a", _entry("a"))
+    store.close()
+    reading = threading.Barrier(9)
+    closed = threading.Event()
+    results: list[object] = []
+
+    def read_until_closed() -> None:
+        # one read each before the close, after which the threads read on through it
+        results.append(store.get("a.py"))
+        reading.wait()
+        while not closed.is_set():
+            results.append(store.get("a.py"))
+
+    threads = [threading.Thread(target=read_until_closed) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    reading.wait()
+    store.close()
+    closed.set()
+    for thread in threads:
+        thread.join()
+    # the reads that began after the close opened the store's next reading connections, which its next close closes
+    store.close()
+
+    assert set(map(repr, results)) == {repr(("hash-a", _entry("a")))}
+    assert _open_connections(path) == 0
 
 
 def test_a_save_after_a_close_writes_in_the_caller_and_starts_no_writer(tmp_path: Path) -> None:
