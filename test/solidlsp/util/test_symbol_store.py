@@ -637,20 +637,29 @@ def test_two_reopens_racing_install_one_writer(tmp_path: Path) -> None:
     assert set(_writer_threads()) <= writers_before
 
 
-def test_rows_whose_write_raises_stay_dirty_and_the_writer_ends_at_the_close(tmp_path: Path) -> None:
+def test_a_key_no_utf8_text_holds_is_refused_at_put_and_every_other_row_is_written(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     path = tmp_path / "store.sqlite"
     writers_before = set(_writer_threads())
     store = SymbolStore(path, version=(1,), loader=_LOADER)
-    # a file name no database text holds, whose write raises an error other than a database's
-    store.put("\udc80.py", "hash-a", _entry("a"))
+    # a file name holding a lone surrogate, which no UTF-8 text holds
+    unencodable = "\udc80.py"
+    with caplog.at_level(logging.WARNING, logger="solidlsp.util.symbol_store"):
+        store.put(unencodable, "hash-u", _entry("u"))
+    assert any(repr(unencodable) in record.getMessage() for record in caplog.records)
+    store.put("a.py", "hash-a", _entry("a"))
     store.submit()
-    with pytest.raises(UnicodeEncodeError):
-        store.close()
+    store.close()
 
     assert set(_writer_threads()) <= writers_before
-    assert store.get("\udc80.py") == ("hash-a", _entry("a"))
-    with pytest.raises(UnicodeEncodeError):
-        store.close()
+    assert store.get(unencodable) is None
+    reopened = SymbolStore(path, version=(1,), loader=_LOADER)
+    try:
+        assert reopened.get("a.py") == ("hash-a", _entry("a"))
+        assert reopened.get(unencodable) is None
+    finally:
+        reopened.close()
     assert _open_connections(path) == 0
 
 
@@ -658,6 +667,11 @@ def test_an_unwritten_entry_its_loader_refuses_is_a_miss(tmp_path: Path) -> None
     store = SymbolStore(tmp_path / "store.sqlite", version=(1,), loader=_LOADER)
     store.put("a.py", "hash-a", [{"detail": Fraction(1, 2)}])
     try:
-        assert store.get("a.py") is None
+        found: object
+        try:
+            found = store.get("a.py")
+        except Exception as error:
+            found = error
+        assert found is None
     finally:
         store.close()

@@ -2413,9 +2413,6 @@ class SolidLanguageServer(ABC):
         Normalizes the name of the given symbol, e.g. by removing parameter lists from method symbols.
 
         Override this method in subclasses to implement language-specific normalization logic.
-        NOTE: When changing the override of this method after the initial LS implementation,
-              be sure to also override `_document_symbols_cache_fingerprint` in order to ensure that
-              the caches are invalidated appropriately.
         NOTE: The returned name must not contain '/', which separates the components of a name path
               (see :class:`serena.symbol.NamePathMatcher`). A symbol whose name contains it cannot be
               addressed by any tool taking an exact name path, not even via the name path that is
@@ -2459,8 +2456,6 @@ class SolidLanguageServer(ABC):
         Requests the raw symbols from the language server and builds the collection of (high-level) symbols from them.
 
         NOTE: This method can be overridden in subclasses to post-process the results.
-              When doing so after the initial LS implementation, be sure to also override `_document_symbols_cache_fingerprint`
-              to ensure that the caches are invalidated appropriately.
               DO NOT override this method to modify symbol names; override `_normalize_symbol_name` instead.
 
         :param relative_file_path: the relative path of the file
@@ -3527,29 +3522,6 @@ class SolidLanguageServer(ABC):
             result.append(implementing_symbol)
 
         return result
-
-    def _document_symbols_cache_fingerprint(self) -> Hashable | None:
-        """
-        Returns a fingerprint of any language server-specific aspects that result in changes
-        to the high-level document symbol information.
-
-        Language servers must implement this method/change the return value if
-        the `_build_document_symbols_from_raw_symbols` implementation (or any of the methods called by it)
-        are changed to modify the returned content.
-
-        Whenever the value changes, the high-level document symbols cache will be invalidated and re-populated.
-
-        Note: For aspects that change the values returned by the language server itself,
-        change `_raw_document_symbols_cache_fingerprint` instead.
-
-        The value must be hashable and safe for inclusion in cache version tuples.
-        E.g. use an integer, a string or a tuple of integers/strings.
-
-        For example, if there is a single aspect being considered, use an integer to reflect the version
-        of this aspect (incrementing it whenever the implementation changes).
-        If multiple versioned aspects exist, use a tuple of versions, etc.
-        """
-        return None
 
     def _raw_document_symbols_cache_fingerprint(self) -> Hashable | None:
         """

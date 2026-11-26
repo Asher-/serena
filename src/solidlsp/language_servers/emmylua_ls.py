@@ -14,7 +14,6 @@ You can pass the following entries in ``ls_specific_settings["lua_emmylua"]``:
 import logging
 import os
 import re
-from collections.abc import Hashable
 from typing import ClassVar
 
 from overrides import override
@@ -135,11 +134,6 @@ class EmmyLuaLanguageServer(SolidLanguageServer):
         # - lua_modules: local dependencies
         # - node_modules: if the project has JavaScript components
         return super().is_ignored_dirname(dirname) or dirname in [".luarocks", "lua_modules", "node_modules", "build", "dist", ".cache"]
-
-    @override
-    def _document_symbols_cache_fingerprint(self) -> Hashable:
-        normalize_symbol_name_version = 1
-        return normalize_symbol_name_version
 
     @override
     def _normalize_symbol_name(self, symbol: RawDocumentSymbol, relative_file_path: str) -> str:

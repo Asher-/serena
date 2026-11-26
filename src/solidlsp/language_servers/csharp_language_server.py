@@ -9,7 +9,7 @@ import platform
 import shutil
 import tempfile
 import threading
-from collections.abc import Callable, Hashable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -273,10 +273,6 @@ class CSharpLanguageServer(SolidLanguageServer):
                 contents["value"] = prefix + contents["value"]
 
         return hover
-
-    def _document_symbols_cache_fingerprint(self) -> Hashable | None:
-        normalize_symbol_name_version = 2
-        return normalize_symbol_name_version
 
     def _normalize_symbol_name(self, symbol: RawDocumentSymbol, relative_file_path: str) -> str:
         # Roslyn 5.5.0+ returns symbol names with type annotations:

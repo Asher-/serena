@@ -66,9 +66,11 @@ class SymbolStore:
     def get(self, key: str) -> tuple[str, Any] | None:
         """
         :param key: the relative path of the file
-        :return: the hash of the content the file's entry was cached for and the entry, or None if no entry is held or
-            the store cannot be read now
+        :return: the hash of the content the file's entry was cached for and the entry, or None if no entry is held, the
+            key is one no UTF-8 text holds, or the store cannot be read now
         """
+        if not self._is_storable(key):
+            return None
         row = self._unwritten.get(key) or self._read_row(key)
         if row is None:
             return None
@@ -81,15 +83,31 @@ class SymbolStore:
     def put(self, key: str, content_hash: str, entry: Any) -> None:
         """
         Holds the file's entry, to be written by the next save. The entry is pickled at once, so that a later change of
-        the object does not change what is written.
+        the object does not change what is written. A key that no UTF-8 text holds, which the database cannot store, is
+        refused with a log line, and nothing is held for it.
 
         :param key: the relative path of the file
         :param content_hash: the hash of the file content the entry was cached for
         :param entry: the entry
         """
+        if not self._is_storable(key):
+            log.warning("Not caching the symbols of %r in %s, as no UTF-8 text holds its name", key, self._path)
+            return
         row = _Row(content_hash, pickle.dumps(entry))
         self._unwritten[key] = row
         self._pending[key] = row
+
+    @staticmethod
+    def _is_storable(key: str) -> bool:
+        """
+        :param key: the relative path of a file
+        :return: whether UTF-8 text holds the key, as the database's keys must
+        """
+        try:
+            key.encode("utf-8")
+        except UnicodeEncodeError:
+            return False
+        return True
 
     def submit(self) -> None:
         """

@@ -1010,7 +1010,6 @@ class ALLanguageServer(SolidLanguageServer):
 
     def _normalize_symbol_name(self, symbol: RawDocumentSymbol, relative_file_path: str) -> str:
         # Override to normalize AL symbol names by stripping object type and ID metadata.
-        # IMPORTANT: Update _document_symbols_cache_fingerprint if this normalization logic changes.
         #
         # AL Language Server returns symbol names with full object format like
         # 'Table 50000 "TEST Customer"', but symbol names should be pure without metadata.
@@ -1042,11 +1041,6 @@ class ALLanguageServer(SolidLanguageServer):
                     self._al_original_names[(relative_file_path, line, char)] = original_name
 
         return normalized_name
-
-    @override
-    def _document_symbols_cache_fingerprint(self) -> int:
-        normalize_symbol_name_version = 1
-        return normalize_symbol_name_version
 
     @override
     def request_hover(

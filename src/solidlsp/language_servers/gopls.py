@@ -170,12 +170,6 @@ class Gopls(SolidLanguageServer):
     _CACHE_CONTEXT_ENV_KEYS = ("GOFLAGS", "GOOS", "GOARCH", "CGO_ENABLED")
 
     @override
-    def _document_symbols_cache_fingerprint(self) -> Hashable:
-        normalize_symbol_name_version = 1
-        build_document_symbols_impl_version = 3
-        return normalize_symbol_name_version, build_document_symbols_impl_version
-
-    @override
     def _raw_document_symbols_cache_fingerprint(self) -> Hashable:
         gopls_settings_raw = self._custom_settings.settings.get("gopls_settings")
 
@@ -216,7 +210,6 @@ class Gopls(SolidLanguageServer):
         # causes replace_symbol_body to drop the keyword from the symbol body and replacement range;
         # a natural keyword-inclusive round-trip edit would then corrupt the file (e.g. `type Foo`
         # becomes `type type Foo`). See _extend_go_symbol_range_to_include_leading_keyword.
-        # IMPORTANT: Update _document_symbols_cache_fingerprint() when changing this method.
         document_symbols = super()._build_document_symbols_from_raw_symbols(relative_file_path, file_buffer=file_buffer)
         if not document_symbols.root_symbols:
             return document_symbols

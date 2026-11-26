@@ -4,7 +4,6 @@ import logging
 import os
 import subprocess
 import time
-from collections.abc import Hashable
 
 from overrides import override
 
@@ -103,11 +102,6 @@ class SourceKitLSP(SolidLanguageServer):
         self.request_id = 0
         self._did_sleep_before_requesting_references = False
         self._initialization_timestamp: float | None = None
-
-    @override
-    def _document_symbols_cache_fingerprint(self) -> Hashable:
-        normalize_symbol_name_version = 1
-        return normalize_symbol_name_version
 
     @override
     def _normalize_symbol_name(self, symbol: RawDocumentSymbol, relative_file_path: str) -> str:

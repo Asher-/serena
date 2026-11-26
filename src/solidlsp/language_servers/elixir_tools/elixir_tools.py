@@ -6,7 +6,6 @@ import pathlib
 import shutil
 import stat
 import threading
-from collections.abc import Hashable
 from typing import Any
 
 from overrides import override
@@ -249,11 +248,6 @@ class ElixirTools(SolidLanguageServer):
 
         # Set generous timeout for Expert which can be slow to initialize and respond
         self.set_request_timeout(180.0)
-
-    @override
-    def _document_symbols_cache_fingerprint(self) -> Hashable:
-        normalize_symbol_name_version = 1
-        return normalize_symbol_name_version
 
     @override
     def _normalize_symbol_name(self, symbol: RawDocumentSymbol, relative_file_path: str) -> str:

@@ -3,7 +3,6 @@
 import logging
 import os
 import threading
-from collections.abc import Hashable
 
 from overrides import override
 
@@ -84,11 +83,6 @@ class DartLanguageServer(SolidLanguageServer):
         # package the whole tree is analysed and the server burns CPU at idle (oraios/serena#2045).
         # Omit rootUri/rootPath and rely on workspaceFolders alone.
         return DefaultInitializeParamsBuilder(self, set_root_uri=False)
-
-    @override
-    def _document_symbols_cache_fingerprint(self) -> Hashable:
-        normalize_symbol_name_version = 1
-        return normalize_symbol_name_version
 
     @override
     def _normalize_symbol_name(self, symbol: RawDocumentSymbol, relative_file_path: str) -> str:

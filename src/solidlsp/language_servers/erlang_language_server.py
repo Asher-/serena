@@ -5,7 +5,6 @@ import logging
 import os
 import subprocess
 import time
-from collections.abc import Hashable
 from typing import ClassVar
 
 from overrides import override
@@ -144,11 +143,6 @@ class ErlangLanguageServer(SolidLanguageServer):
     @override
     def _create_dependency_provider(self) -> LanguageServerDependencyProvider:
         return self.DependencyProvider(self._custom_settings, self._ls_resources_dir)
-
-    @override
-    def _document_symbols_cache_fingerprint(self) -> Hashable:
-        normalize_symbol_name_version = 1
-        return normalize_symbol_name_version
 
     @override
     def _normalize_symbol_name(self, symbol: RawDocumentSymbol, relative_file_path: str) -> str:

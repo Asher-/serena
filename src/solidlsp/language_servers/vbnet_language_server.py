@@ -6,7 +6,7 @@ import logging
 import os
 import platform
 import threading
-from collections.abc import Callable, Hashable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any, cast
 
@@ -204,10 +204,6 @@ class VBNetLanguageServer(SolidLanguageServer):
                 contents["value"] = prefix + contents["value"]
 
         return hover
-
-    def _document_symbols_cache_fingerprint(self) -> Hashable | None:
-        normalize_symbol_name_version = 1
-        return normalize_symbol_name_version
 
     def _normalize_symbol_name(self, symbol: RawDocumentSymbol, relative_file_path: str) -> str:
         original_name = symbol.get("name") or ""

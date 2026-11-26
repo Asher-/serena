@@ -10,7 +10,6 @@ You can pass the following entries in ``ls_specific_settings["lua"]``:
 import logging
 import platform
 import shutil
-from collections.abc import Hashable
 from pathlib import Path
 
 from overrides import override
@@ -197,11 +196,6 @@ class LuaLanguageServer(SolidLanguageServer):
             config, repository_root_path, ProcessLaunchInfo(cmd=lua_ls_path, cwd=repository_root_path), "lua", solidlsp_settings
         )
         self.request_id = 0
-
-    @override
-    def _document_symbols_cache_fingerprint(self) -> Hashable:
-        normalize_symbol_name_version = 1
-        return normalize_symbol_name_version
 
     @override
     def _normalize_symbol_name(self, symbol: RawDocumentSymbol, relative_file_path: str) -> str:

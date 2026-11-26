@@ -9,7 +9,6 @@ import re
 import shutil
 import threading
 import time
-from collections.abc import Hashable
 from typing import Any
 
 from overrides import override
@@ -690,12 +689,6 @@ class TypeScriptLanguageServer(SolidLanguageServer):
         return prefer_non_node_modules_definition(definitions)
 
     @override
-    def _document_symbols_cache_fingerprint(self) -> Hashable:
-        # bump whenever _build_document_symbols_from_raw_symbols below changes what it returns,
-        # so a pre-existing on-disk cache from before this override existed gets invalidated
-        return 3
-
-    @override
     def _build_document_symbols_from_raw_symbols(self, relative_file_path: str, file_buffer: LSPFileBuffer) -> DocumentSymbols:
         # Override to extend single `const`/`let`/`var` declaration ranges on both ends: a leading
         # `export` and the declaration keyword, and a trailing statement-terminating semicolon.
@@ -707,7 +700,6 @@ class TypeScriptLanguageServer(SolidLanguageServer):
         # itself a full statement) produces a harmless but incorrect double semicolon. See
         # _extend_ts_symbol_range_to_include_leading_keyword and
         # _extend_ts_symbol_range_to_include_trailing_semicolon.
-        # IMPORTANT: Update _document_symbols_cache_fingerprint() when changing this method.
         document_symbols = super()._build_document_symbols_from_raw_symbols(relative_file_path, file_buffer=file_buffer)
         if not document_symbols.root_symbols:
             return document_symbols

@@ -19,7 +19,6 @@ import logging
 import os
 import shutil
 import threading
-from collections.abc import Hashable
 from pathlib import Path
 
 from overrides import override
@@ -350,11 +349,6 @@ class NextflowLanguageServer(SolidLanguageServer):
     def _get_wait_time_for_cross_file_referencing(self) -> float:
         """No blind wait is needed: _send_references_request synchronises with the server explicitly."""
         return 0.0
-
-    @override
-    def _document_symbols_cache_fingerprint(self) -> Hashable:
-        normalize_symbol_name_version = 1
-        return normalize_symbol_name_version
 
     @override
     def _normalize_symbol_name(self, symbol: RawDocumentSymbol, relative_file_path: str) -> str:

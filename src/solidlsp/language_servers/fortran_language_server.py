@@ -5,7 +5,6 @@ Fortran Language Server implementation using fortls.
 
 import logging
 import re
-from collections.abc import Hashable
 
 from overrides import override
 
@@ -141,15 +140,9 @@ class FortranLanguageServer(SolidLanguageServer):
         return symbol
 
     @override
-    def _document_symbols_cache_fingerprint(self) -> Hashable | None:
-        build_document_symbols_version = 2
-        return build_document_symbols_version
-
-    @override
     def _build_document_symbols_from_raw_symbols(self, relative_file_path: str, file_buffer: LSPFileBuffer) -> DocumentSymbols:
         # Override to fix fortls's incorrect selectionRange bug.
         #
-        # IMPORTANT: Update _document_symbols_cache_fingerprint() when changing this method.
         #
         # fortls returns selectionRange pointing to line start (character 0) instead of the
         # identifier name position. This breaks MCP server features that rely on exact positions.

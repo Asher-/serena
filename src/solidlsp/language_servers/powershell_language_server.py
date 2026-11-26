@@ -16,7 +16,6 @@ import platform
 import shutil
 import tempfile
 import threading
-from collections.abc import Hashable
 from pathlib import Path
 
 from overrides import override
@@ -266,11 +265,6 @@ class PowerShellLanguageServer(SolidLanguageServer):
             solidlsp_settings,
         )
         self.server_ready = threading.Event()
-
-    @override
-    def _document_symbols_cache_fingerprint(self) -> Hashable:
-        normalize_symbol_name_version = 1
-        return normalize_symbol_name_version
 
     @override
     def _normalize_symbol_name(self, symbol: RawDocumentSymbol, relative_file_path: str) -> str:

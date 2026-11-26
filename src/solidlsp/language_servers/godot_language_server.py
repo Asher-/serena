@@ -39,10 +39,6 @@ class GodotLanguageServer(SolidLanguageServer):
         - ``request_timeout`` (float): seconds to wait for an LSP response (default: 30.0).
     """
 
-    # Bump whenever _fix_range_end/_fix_symbol_ranges below changes, so a stale cached
-    # high-level result (from before this fix existed) is not served back to callers.
-    _DOCUMENT_SYMBOLS_CACHE_VERSION = 1
-
     def __init__(self, config: LanguageServerConfig, repository_root_path: str, solidlsp_settings: SolidLSPSettings) -> None:
         self._godot_version = self._detect_godot_version(repository_root_path)
         if self._godot_version is not None:
@@ -161,9 +157,6 @@ class GodotLanguageServer(SolidLanguageServer):
         for root_symbol in document_symbols.root_symbols:
             self._fix_symbol_ranges(root_symbol, lines)
         return document_symbols
-
-    def _document_symbols_cache_fingerprint(self) -> int:
-        return self._DOCUMENT_SYMBOLS_CACHE_VERSION
 
     @staticmethod
     def _fix_range_end(rng: Any, lines: list[str]) -> None:
