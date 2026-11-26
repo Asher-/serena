@@ -182,29 +182,28 @@ class TestCppDocumentSymbolCache:
 
     def test_cache_invalidates_when_clangd_context_changes(self, tmp_path: Path) -> None:
         repo_path = self._copy_cpp_fixture(tmp_path)
-        ls_settings_alt = {
-            LanguageServerId.CPP: {
-                "compile_commands_dir": ".serena-alt",
-            }
-        }
-
-        main_cpp = os.path.join("a.cpp")
-
-        def _served_by(requested: mock.Mock, ls_specific_settings: dict | None = None) -> int:
-            """:return: how many times a new server asks the language server for a.cpp's symbols to serve them"""
-            before = requested.call_count
-            with start_ls_context(
-                LanguageServerId.CPP, repo_path=str(repo_path), ls_specific_settings=ls_specific_settings, solidlsp_dir=tmp_path
-            ) as ls:
-                ls.request_document_symbols(main_cpp)
-            return requested.call_count - before
+        ls_settings_alt = {LanguageServerId.CPP: {"compile_commands_dir": ".serena-alt"}}
 
         with scripted_process(ClangdLanguageServer, lambda _path: [function_symbol("main")]) as requested:
             # the symbols are asked of the language server and persisted at the stop
-            assert _served_by(requested) == 1
+            assert self._requests_of_a_new_server(requested, repo_path, tmp_path) == 1
 
             # the persisted symbols are served without asking the language server
-            assert _served_by(requested) == 0
+            assert self._requests_of_a_new_server(requested, repo_path, tmp_path) == 0
 
             # the persisted symbols of the default clangd context are not served in another
-            assert _served_by(requested, ls_settings_alt) == 1
+            assert self._requests_of_a_new_server(requested, repo_path, tmp_path, ls_settings_alt) == 1
+
+    @staticmethod
+    def _requests_of_a_new_server(
+        requested: mock.Mock, repo_path: Path, solidlsp_dir: Path, ls_specific_settings: dict | None = None
+    ) -> int:
+        """
+        :return: how many times a new server asks the language server for a.cpp's symbols to serve them
+        """
+        before = requested.call_count
+        with start_ls_context(
+            LanguageServerId.CPP, repo_path=str(repo_path), ls_specific_settings=ls_specific_settings, solidlsp_dir=solidlsp_dir
+        ) as ls:
+            ls.request_document_symbols("a.cpp")
+        return requested.call_count - before

@@ -227,6 +227,52 @@ def test_a_file_the_language_server_answers_nothing_for_is_asked_again(tmp_path:
     assert counts == {"requests": 2, "builds": 2}
 
 
+def test_a_file_changed_while_its_symbols_are_held_is_served_its_new_symbols(tmp_path: Path) -> None:
+    root = _project(tmp_path / "project", 1)
+    with _running(root) as server:
+        assert _names(server, "module_0.py") == ["function_0"]
+        (root / "module_0.py").write_text("def renamed():\n    return 0\n", encoding="utf-8")
+        assert _names(server, "module_0.py") == ["renamed"]
+
+
+def test_a_position_outside_every_symbol_has_no_containing_symbol(tmp_path: Path) -> None:
+    root = _project(tmp_path / "project", 1)
+    (root / "module_0.py").write_text("def function_0():\n    return 0\n# end\n", encoding="utf-8")
+    with _running(root) as server:
+        assert server.request_containing_symbol("module_0.py", 2, 0) is None
+
+
+def test_an_empty_line_has_no_containing_symbol_and_its_request_is_logged(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    root = _project(tmp_path / "project", 1)
+    (root / "module_0.py").write_text("def function_0():\n    return 0\n\n# end\n", encoding="utf-8")
+    with _running(root) as server, caplog.at_level("ERROR", logger="solidlsp.ls"):
+        assert server.request_containing_symbol("module_0.py", 2, 0) is None
+    assert "empty lines" in caplog.text
+
+
+def test_a_stop_whose_cache_store_fails_to_close_logs_the_failure_and_raises_nothing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _project(tmp_path / "project", 1)
+    server = _create(root, None, None)
+    server.start()
+    _names(server, "module_0.py")
+
+    def refuse(_store: object) -> None:
+        raise OSError("the cache dir is gone")
+
+    monkeypatch.setattr("solidlsp.util.symbol_store.SymbolStore.close", refuse)
+    raised: Exception | None = None
+    with caplog.at_level("ERROR", logger="solidlsp.ls"):
+        try:
+            server.stop()
+        except Exception as error:
+            raised = error
+
+    assert raised is None
+    assert "Failed to save the raw document symbols cache" in caplog.text
+
+
 def test_a_files_persisted_symbols_are_served_while_another_files_persisted_entry_cannot_be_loaded(tmp_path: Path) -> None:
     root = _project(tmp_path / "project", 2)
     # a value of a class the cache's loader refuses, so that the entry holding it is saved and cannot be loaded

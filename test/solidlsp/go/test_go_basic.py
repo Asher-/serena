@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -259,42 +260,37 @@ class TestGoBuildTags:
 
     def test_disk_cache_is_invalidated_on_build_context_switch(self, tmp_path: Path) -> None:
         """Go build context switches must not reuse persisted SolidLSP document-symbol caches."""
-        from unittest import mock
-
         from solidlsp.language_servers.gopls import Gopls
-        from test.conftest import start_ls_context
         from test.solidlsp.util.scripted_process import function_symbol, scripted_process
 
         repo_path = self._copy_go_fixture(tmp_path)
-
-        ls_settings_foo = {
-            LanguageServerId.GO: {
-                "gopls_settings": {
-                    "buildFlags": ["-tags=foo"],
-                },
-            },
-        }
-
-        main_go = os.path.join("main.go")
-
-        def _served_by(requested: mock.Mock, ls_specific_settings: dict | None = None) -> int:
-            """:return: how many times a new server asks the language server for main.go's symbols to serve them"""
-            before = requested.call_count
-            with start_ls_context(
-                LanguageServerId.GO, repo_path=str(repo_path), ls_specific_settings=ls_specific_settings, solidlsp_dir=tmp_path
-            ) as ls:
-                ls.request_document_symbols(main_go)
-            return requested.call_count - before
+        ls_settings_foo = {LanguageServerId.GO: {"gopls_settings": {"buildFlags": ["-tags=foo"]}}}
 
         with scripted_process(Gopls, lambda _path: [function_symbol("main")]) as requested:
             # Run 1 (default context): the symbols are asked of the language server and persisted at the stop.
-            assert _served_by(requested) == 1
+            assert self._requests_of_a_new_server(requested, repo_path, tmp_path) == 1
 
             # Run 2 (default context again): the persisted symbols are served without asking the language server.
-            assert _served_by(requested) == 0
+            assert self._requests_of_a_new_server(requested, repo_path, tmp_path) == 0
 
             # Run 3 (foo context): the persisted symbols of the default context are not served.
-            assert _served_by(requested, ls_settings_foo) == 1
+            assert self._requests_of_a_new_server(requested, repo_path, tmp_path, ls_settings_foo) == 1
+
+    @staticmethod
+    def _requests_of_a_new_server(
+        requested: mock.Mock, repo_path: Path, solidlsp_dir: Path, ls_specific_settings: dict | None = None
+    ) -> int:
+        """
+        :return: how many times a new server asks the language server for main.go's symbols to serve them
+        """
+        from test.conftest import start_ls_context
+
+        before = requested.call_count
+        with start_ls_context(
+            LanguageServerId.GO, repo_path=str(repo_path), ls_specific_settings=ls_specific_settings, solidlsp_dir=solidlsp_dir
+        ) as ls:
+            ls.request_document_symbols("main.go")
+        return requested.call_count - before
 
     @pytest.mark.parametrize("language_server", [LanguageServerId.GO], indirect=True)
     def test_bare_symbol_names(self, language_server) -> None:

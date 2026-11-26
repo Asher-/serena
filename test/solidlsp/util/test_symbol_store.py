@@ -173,21 +173,7 @@ def test_a_submit_returns_before_its_rows_are_written_and_a_close_writes_them_an
 def test_concurrent_saves_of_one_file_by_several_stores_leave_every_row_readable(tmp_path: Path) -> None:
     path = tmp_path / "store.sqlite"
     stores = [SymbolStore(path, version=(1,), loader=_LOADER) for _ in range(8)]
-    errors: list[BaseException] = []
-
-    def save_repeatedly(index: int) -> None:
-        try:
-            for save in range(50):
-                stores[index].put(f"store_{index}/module_{save}.py", f"hash-{save}", _entry(f"function_{save}"))
-                stores[index].submit()
-        except BaseException as error:
-            errors.append(error)
-
-    threads = [threading.Thread(target=save_repeatedly, args=(index,)) for index in range(len(stores))]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    errors = _save_concurrently(stores, saves=50)
     # every writer ended, after which no store holds the file: the rows a save deferred, as another store held it, are
     # written by the next save
     for store in stores:
@@ -203,6 +189,30 @@ def test_concurrent_saves_of_one_file_by_several_stores_leave_every_row_readable
                 assert reopened.get(f"store_{index}/module_{save}.py") == (f"hash-{save}", _entry(f"function_{save}"))
     finally:
         reopened.close()
+
+
+def _save_concurrently(stores: list[SymbolStore], saves: int) -> list[BaseException]:
+    """
+    Puts and submits rows of files of its own on a thread per store, one row per save.
+
+    :return: the errors the saves raised
+    """
+    errors: list[BaseException] = []
+
+    def save_repeatedly(index: int) -> None:
+        try:
+            for save in range(saves):
+                stores[index].put(f"store_{index}/module_{save}.py", f"hash-{save}", _entry(f"function_{save}"))
+                stores[index].submit()
+        except BaseException as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=save_repeatedly, args=(index,)) for index in range(len(stores))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    return errors
 
 
 def test_an_entry_that_cannot_be_pickled_is_refused_and_leaves_the_saved_rows_as_they_were(tmp_path: Path) -> None:
@@ -368,26 +378,8 @@ def test_a_close_while_reads_are_in_flight_on_several_threads_leaves_none_of_the
     store.close()
     # one connection open before the threads read, as for the concurrent readers above
     assert store.get("a.py") == ("hash-a", _entry("a"))
-    reading = threading.Barrier(9)
-    closed = threading.Event()
-    read_before: list[object] = []
-    read_through: list[object] = []
 
-    def read_until_closed() -> None:
-        # one read each before the close, after which the threads read on through it
-        read_before.append(store.get("a.py"))
-        reading.wait()
-        while not closed.is_set():
-            read_through.append(store.get("a.py"))
-
-    threads = [threading.Thread(target=read_until_closed) for _ in range(8)]
-    for thread in threads:
-        thread.start()
-    reading.wait()
-    store.close()
-    closed.set()
-    for thread in threads:
-        thread.join()
+    read_before, read_through = _read_through_a_close(store, "a.py", readers=8)
     # the reads that began after the close opened the store's next reading connections, which its next close closes
     store.close()
 
@@ -395,6 +387,34 @@ def test_a_close_while_reads_are_in_flight_on_several_threads_leaves_none_of_the
     # a read meeting the last connection's close, which holds the database, is a miss
     assert [read for read in read_through if read not in (("hash-a", _entry("a")), None)] == []
     assert _open_connections(path) == 0
+
+
+def _read_through_a_close(store: SymbolStore, key: str, readers: int) -> tuple[list[object], list[object]]:
+    """
+    Reads the key on several threads, once each before a close of the store and on through it until it returned.
+
+    :return: the results read before the close, and those read through it
+    """
+    reading = threading.Barrier(readers + 1)
+    closed = threading.Event()
+    read_before: list[object] = []
+    read_through: list[object] = []
+
+    def read_until_closed() -> None:
+        read_before.append(store.get(key))
+        reading.wait()
+        while not closed.is_set():
+            read_through.append(store.get(key))
+
+    threads = [threading.Thread(target=read_until_closed) for _ in range(readers)]
+    for thread in threads:
+        thread.start()
+    reading.wait()
+    store.close()
+    closed.set()
+    for thread in threads:
+        thread.join()
+    return read_before, read_through
 
 
 def test_a_save_after_a_close_writes_in_the_caller_and_starts_no_writer(tmp_path: Path) -> None:

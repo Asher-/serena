@@ -28,20 +28,24 @@ def scripted_process(server_class: type[SolidLanguageServer], answer: Callable[[
     :return: the double of the documentSymbol request, which counts its calls
     """
     document_symbol = mock.Mock(side_effect=lambda params: answer(Path(PathUtils.uri_to_path(params["textDocument"]["uri"]))))
-
-    def create_process(self: SolidLanguageServer, logging_fn: object) -> mock.MagicMock:
-        process = mock.MagicMock()
-        process.send.document_symbol = document_symbol
-        process.is_running.return_value = False
-        process.process_id.return_value = None
-        process.start.side_effect = lambda: process.is_running.configure_mock(return_value=True)
-        process.stop.side_effect = lambda **_kwargs: process.is_running.configure_mock(return_value=False)
-        return process
-
     replaced: dict[str, object] = {
-        "_create_language_server_interface": create_process,
+        "_create_language_server_interface": lambda self, logging_fn: _process_double(document_symbol),
         "_start_server": lambda self: self.server.start(),
         "_setup_runtime_dependency": staticmethod(lambda *_args, **_kwargs: True),
     }
     with mock.patch.multiple(server_class, **{name: replacement for name, replacement in replaced.items() if hasattr(server_class, name)}):
         yield document_symbol
+
+
+def _process_double(document_symbol: mock.Mock) -> mock.MagicMock:
+    """
+    :param document_symbol: the double of the documentSymbol request
+    :return: a double of a language server process, which runs from its start to its stop
+    """
+    process = mock.MagicMock()
+    process.send.document_symbol = document_symbol
+    process.is_running.return_value = False
+    process.process_id.return_value = None
+    process.start.side_effect = lambda: process.is_running.configure_mock(return_value=True)
+    process.stop.side_effect = lambda **_kwargs: process.is_running.configure_mock(return_value=False)
+    return process
