@@ -841,6 +841,7 @@ class SolidLanguageServer(ABC):
         language_id: str,
         solidlsp_settings: SolidLSPSettings,
         cache_version_raw_document_symbols: Hashable = 1,
+        symbol_store_factory: Callable[[Path, Hashable, SafePickleLoader], SymbolStore] = SymbolStore,
     ):
         """
         Initializes a LanguageServer instance.
@@ -862,6 +863,8 @@ class SolidLanguageServer(ABC):
             from this specific language server. This should be incremented by subclasses calling this constructor
             whenever the format of the raw document symbols changes (typically because the language server
             improves/fixes its output).
+        :param symbol_store_factory: the factory of the store the raw document symbols are persisted in, called with
+            the store's database file, the version of its entries and the loader they are unpickled with
         """
         self.config = config
         self._solidlsp_settings = solidlsp_settings
@@ -906,7 +909,7 @@ class SolidLanguageServer(ABC):
         self._remove_legacy_caches()
         # * raw document symbols, persisted one file at a time
         self._ls_specific_raw_document_symbols_cache_version = cache_version_raw_document_symbols
-        self._raw_document_symbols_store = SymbolStore(
+        self._raw_document_symbols_store = symbol_store_factory(
             self.cache_dir / self.RAW_DOCUMENT_SYMBOL_STORE_FILENAME, self._raw_document_symbols_cache_version(), self._cache_loader
         )
         """maps relative file paths to (file_content_hash, raw_root_symbols)"""

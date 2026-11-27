@@ -87,3 +87,8 @@ def test_get_text_end_line_past_eof_with_nonzero_col_raises() -> None:
     body = _factory().create_symbol_body(_symbol(0, 0, len(LINES), 5))
     with pytest.raises(InvalidTextLocationError):
         body.get_text()
+
+
+def test_get_text_of_a_range_ending_within_its_last_line_leaves_out_the_rest_of_that_line() -> None:
+    body = _factory().create_symbol_body(_symbol(0, 6, 1, 9))
+    assert body.get_text() == "Foo:\n    var x"

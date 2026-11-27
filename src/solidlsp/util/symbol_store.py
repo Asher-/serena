@@ -61,7 +61,7 @@ class SymbolStore:
         self._unwritten: dict[str, _Row] = {}
         """the newest row of each file whose write has not yet ended, which reads are served from"""
         self._writer = _Writer(self)
-        """a writer whose last successor is the current one"""
+        """the current writer, which reopen replaces once it has ended"""
 
     def get(self, key: str) -> tuple[str, Any] | None:
         """
@@ -143,17 +143,13 @@ class SymbolStore:
         """
         writer = self._current_writer()
         if writer.is_ended():
-            writer.replace(_Writer(self))
+            self._writer = writer.replace(_Writer(self))
 
     def _current_writer(self) -> "_Writer":
         """
         :return: the last writer the store was given
         """
-        writer = self._writer
-        while (successor := writer.successor()) is not None:
-            writer = successor
-        self._writer = writer
-        return writer
+        return self._writer
 
     def _take_pending(self) -> dict[str, _Row]:
         """
@@ -395,6 +391,8 @@ class _Writer:
         """holds a token once the loop has ended, or will never run"""
         self._thread = threading.Thread(target=self._run, name=f"{SymbolStore.WRITER_THREAD_NAME_PREFIX}:{store._path.name}", daemon=True)
         self._successor: dict[str, _Writer] = {}
+        self._is_ended = False
+        """whether the end of the chain was appended"""
 
     def send(self, batch: dict[str, _Row]) -> bool:
         """
@@ -428,25 +426,14 @@ class _Writer:
         """
         :return: whether the writer was stopped, and so accepts no batch
         """
-        return self._last().is_end
+        return self._is_ended
 
-    def successor(self) -> "_Writer | None":
-        """
-        :return: the writer that replaced this one, None if none did
-        """
-        return self._successor.get("writer")
-
-    def replace(self, successor: "_Writer") -> None:
+    def replace(self, successor: "_Writer") -> "_Writer":
         """
         :param successor: the writer that replaces this one, unless another has replaced it before
+        :return: the writer that replaced this one
         """
-        self._successor.setdefault("writer", successor)
-
-    def _last(self) -> _Link:
-        link = self._head
-        while (following := link.next()) is not None:
-            link = following
-        return link
+        return self._successor.setdefault("writer", successor)
 
     def _append(self, link: _Link) -> _Link | None:
         """
@@ -457,6 +444,8 @@ class _Writer:
         while not preceding.is_end:
             following = preceding.decide_next(link)
             if following is link:
+                if link.is_end:
+                    self._is_ended = True
                 self._accepted.put(None)
                 return preceding
             preceding = following

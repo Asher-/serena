@@ -25,6 +25,8 @@ def _make_server(is_running: bool) -> _RaisingLanguageServer:
     server.server_started = False
     server.server = MagicMock()
     server.server.is_running.return_value = is_running
+    server._raw_document_symbols_store = MagicMock()
+    server._solidlsp_settings = MagicMock(document_symbols_cache_max_entries=1)
     return server
 
 

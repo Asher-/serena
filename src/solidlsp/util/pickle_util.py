@@ -1,7 +1,6 @@
 import builtins
 import io
 import pickle
-from collections.abc import Sequence
 from typing import Any
 
 
@@ -23,13 +22,10 @@ class _SafeUnpickler(pickle.Unpickler):
         "tuple",
     }
 
-    def __init__(self, file, allowed_classes: Sequence[type] = ()):
+    def __init__(self, file):
         super().__init__(file)
 
         self._allowed_globals = {("builtins", name): getattr(builtins, name) for name in self._SAFE_BUILTINS}
-
-        for cls in allowed_classes:
-            self._allowed_globals[(cls.__module__, cls.__qualname__)] = cls
 
     def find_class(self, module, name):
         try:
@@ -42,17 +38,9 @@ class _SafeUnpickler(pickle.Unpickler):
 
 
 class SafePickleLoader:
-    def __init__(self, allowed_classes: Sequence[type] = ()):
-        self._allowed_classes = allowed_classes
-
-    def load(self, path: str) -> Any:
-        with open(path, "rb") as f:
-            unpickler = _SafeUnpickler(f, self._allowed_classes)
-            return unpickler.load()
-
     def loads(self, data: bytes) -> Any:
         """
         :param data: a pickled object
-        :return: the object, unpickled as :meth:`load` unpickles a file's content
+        :return: the object, unpickled with only safe builtins allowed as globals
         """
-        return _SafeUnpickler(io.BytesIO(data), self._allowed_classes).load()
+        return _SafeUnpickler(io.BytesIO(data)).load()

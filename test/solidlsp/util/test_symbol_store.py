@@ -761,6 +761,30 @@ def test_two_reopens_racing_install_one_writer(tmp_path: Path) -> None:
     assert set(_writer_threads()) <= writers_before
 
 
+def test_a_row_another_submit_takes_while_a_submit_hands_its_rows_over_is_written_by_that_other(tmp_path: Path) -> None:
+    path = tmp_path / "store.sqlite"
+    store = SymbolStore(path, version=(1,), loader=_LOADER)
+    key = _SteppedKey("a.py")
+    store.put(key, "hash-a", _entry("a"))
+
+    def submit_meanwhile() -> None:
+        key.step = None
+        other = threading.Thread(target=store.submit)
+        other.start()
+        other.join()
+
+    # the submit's take of the row is preceded by the other thread's submit, which takes it first
+    key.step = submit_meanwhile
+    store.submit()
+    store.close()
+
+    reopened = SymbolStore(path, version=(1,), loader=_LOADER)
+    try:
+        assert reopened.get("a.py") == ("hash-a", _entry("a"))
+    finally:
+        reopened.close()
+
+
 def test_a_key_no_utf8_text_holds_is_refused_at_put_and_every_other_row_is_written(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

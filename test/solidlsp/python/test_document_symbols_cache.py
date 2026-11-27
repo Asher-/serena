@@ -32,6 +32,7 @@ from solidlsp.ls_process import LanguageServerInterface
 from solidlsp.ls_utils import PathUtils
 from solidlsp.lsp_protocol_handler.server import StringDict
 from solidlsp.settings import SolidLSPSettings
+from solidlsp.util.symbol_store import SymbolStore
 
 # the files whose former whole-file caches a server removes when it is made
 _LEGACY_CACHE_FILES = ("document_symbols.pkl", "raw_document_symbols.pkl")
@@ -43,11 +44,12 @@ class _ScriptedLanguageServer(SolidLanguageServer):
     file defines in its first two lines, and with nothing for a file of fewer lines.
     """
 
-    def __init__(self, root: Path, settings: SolidLSPSettings, details: dict[str, object]) -> None:
+    def __init__(self, root: Path, settings: SolidLSPSettings, details: dict[str, object], store_factory: type[SymbolStore]) -> None:
         """
         :param root: the project directory
         :param settings: the settings of the server
         :param details: the detail of the symbols the double answers, by the relative path of their file
+        :param store_factory: the store the server persists its raw document symbols in
         """
         self._details = details
         self._running = False
@@ -57,7 +59,7 @@ class _ScriptedLanguageServer(SolidLanguageServer):
         config = LanguageServerConfig(
             ls_id=LanguageServerId.PYTHON, ignore_spec_of=IgnoreSpecs(str(root), [], read_gitignore_files=True).spec_of
         )
-        super().__init__(config, str(root), None, "python", settings)
+        super().__init__(config, str(root), None, "python", settings, symbol_store_factory=store_factory)
 
     def _create_language_server_interface(self, logging_fn: Callable[[str, str, StringDict | str], None] | None) -> LanguageServerInterface:
         server = MagicMock()
@@ -116,12 +118,18 @@ def _project(root: Path, file_count: int, padding: str = "") -> Path:
     return root
 
 
-def _create(root: Path, max_cached_files: int | None = None, details: dict[str, object] | None = None) -> _ScriptedLanguageServer:
+def _create(
+    root: Path,
+    max_cached_files: int | None = None,
+    details: dict[str, object] | None = None,
+    store_factory: type[SymbolStore] = SymbolStore,
+) -> _ScriptedLanguageServer:
     """
     :param root: the project directory
     :param max_cached_files: the number of files whose document symbols the server holds in memory, or None for the
         default
     :param details: the detail of the symbols the language server answers, by the relative path of their file
+    :param store_factory: the store the server persists its raw document symbols in
     :return: a language server for the project, not yet started
     """
     settings_kwargs = {} if max_cached_files is None else {"document_symbols_cache_max_entries": max_cached_files}
@@ -130,7 +138,7 @@ def _create(root: Path, max_cached_files: int | None = None, details: dict[str, 
         project_data_path=os.path.join(root, SERENA_MANAGED_DIR_NAME),
         **settings_kwargs,
     )
-    return _ScriptedLanguageServer(root, settings, details or {})
+    return _ScriptedLanguageServer(root, settings, details or {}, store_factory)
 
 
 @contextmanager
@@ -207,6 +215,26 @@ def test_symbols_served_before_a_stop_are_served_by_the_next_server_without_aski
     assert counts["requests"] == 0
 
 
+def test_a_server_started_again_after_its_stop_saves_its_symbols_in_a_writer_for_the_next_server(tmp_path: Path) -> None:
+    root = _project(tmp_path / "project", 1)
+    writers_before = {thread for thread in threading.enumerate() if thread.name.startswith("SymbolStoreWriter")}
+    server = _create(root)
+    server.start()
+    server.stop()
+    server.start()
+    try:
+        _names(server, "module_0.py")
+        server.save_cache()
+        writers = [t for t in threading.enumerate() if t.name.startswith("SymbolStoreWriter") and t not in writers_before]
+    finally:
+        server.stop()
+
+    assert len(writers) == 1
+    with _running(root) as server, _counting(server) as counts:
+        assert _names(server, "module_0.py") == ["function_0"]
+    assert counts["requests"] == 0
+
+
 def test_a_changed_file_is_asked_of_the_language_server_again(tmp_path: Path) -> None:
     root = _project(tmp_path / "project", 1)
     with _running(root) as server:
@@ -251,18 +279,23 @@ def test_an_empty_line_has_no_containing_symbol_and_its_request_is_logged(tmp_pa
     assert "empty lines" in caplog.text
 
 
+class _UnclosableStore(SymbolStore):
+    """
+    A store whose close fails as it does when its directory is gone.
+    """
+
+    def close(self) -> None:
+        raise OSError("the cache dir is gone")
+
+
 def test_a_stop_whose_cache_store_fails_to_close_logs_the_failure_and_raises_nothing(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     root = _project(tmp_path / "project", 1)
-    server = _create(root, None, None)
+    server = _create(root, None, None, _UnclosableStore)
     server.start()
     _names(server, "module_0.py")
 
-    def refuse(_store: object) -> None:
-        raise OSError("the cache dir is gone")
-
-    monkeypatch.setattr("solidlsp.util.symbol_store.SymbolStore.close", refuse)
     raised: Exception | None = None
     with caplog.at_level("ERROR", logger="solidlsp.ls"):
         try:
