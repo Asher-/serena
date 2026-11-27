@@ -573,37 +573,44 @@ class SymbolRangeIndex:
     ) -> None:
         candidates: list[tuple[int, int, int, int, int, ls_types.UnifiedSymbolInformation, ls_types.UnifiedSymbolInformation]] = []
 
-        # collect container-kind candidates that span more than one line plus all variables, each with the root it
-        # was reached from; one-line entries of container kinds are excluded to avoid matching imports.
+        # collect the candidates, each with the root it was reached from
         for root in document_symbols.root_symbols:
             for symbol in DocumentSymbols([root]).iter_symbols():
-                kind = symbol["kind"]
-                s_range = symbol["location"]["range"]  # type: ignore[typeddict-item]
-                start = s_range["start"]
-                end = s_range["end"]
-                start_line = start["line"]
-                end_line = end["line"]
-                if kind in container_symbol_kinds and start_line != end_line:
-                    priority = self._CONTAINER_KIND_PRIORITY
-                elif kind in {ls_types.SymbolKind.Variable, ls_types.SymbolKind.Constant}:
-                    priority = self._VARIABLE_KIND_PRIORITY
-                else:
-                    continue
-                candidates.append((start_line, start["character"], end_line, end["character"], priority, symbol, root))
+                candidate = self._candidate(symbol, root, container_symbol_kinds)
+                if candidate is not None:
+                    candidates.append(candidate)
 
         # sort by start_line ascending, then priority so containers precede variables at ties;
         # preserves the original two-pass iteration order that seeded ``max`` tie-breaking.
         candidates.sort(key=lambda c: (c[0], c[4], c[1]))
         self._candidates = candidates
 
+    @classmethod
+    def _candidate(
+        cls,
+        symbol: ls_types.UnifiedSymbolInformation,
+        root: ls_types.UnifiedSymbolInformation,
+        container_symbol_kinds: set[ls_types.SymbolKind],
+    ) -> tuple[int, int, int, int, int, ls_types.UnifiedSymbolInformation, ls_types.UnifiedSymbolInformation] | None:
+        """
+        :return: the symbol's range, priority, the symbol and its root, if it is a container-kind symbol spanning more
+            than one line or a variable or constant; else None. One-line container-kind symbols are excluded so that
+            imports are not matched.
+        """
+        s_range = symbol["location"]["range"]  # type: ignore[typeddict-item]
+        start = s_range["start"]
+        end = s_range["end"]
+        if symbol["kind"] in container_symbol_kinds and start["line"] != end["line"]:
+            priority = cls._CONTAINER_KIND_PRIORITY
+        elif symbol["kind"] in {ls_types.SymbolKind.Variable, ls_types.SymbolKind.Constant}:
+            priority = cls._VARIABLE_KIND_PRIORITY
+        else:
+            return None
+        return start["line"], start["character"], end["line"], end["character"], priority, symbol, root
+
     def find_innermost_container(self, line: int, column: int | None, strict: bool) -> "SymbolRangeIndex.Container | None":
         """
         Return the innermost candidate whose range contains ``(line, column)``.
-
-        Matches the containment semantics previously expressed by the
-        ``is_position_in_range`` closure inside ``request_containing_symbol``:
-        in non-strict mode the range is inclusive on both ends; in strict mode
-        the start line is excluded.
 
         :param line: 0-indexed target line.
         :param column: 0-indexed target column; ``None`` uses line-only
@@ -615,29 +622,30 @@ class SymbolRangeIndex:
         best: SymbolRangeIndex.Container | None = None
         best_start_line = -1
 
-        # candidates are sorted by start_line ascending so we can terminate once past the target.
+        # candidates are sorted by start_line ascending so we can terminate once past the target;
+        # innermost = greatest start_line, and equality preserves first-encountered (sort order).
         for start_line, start_char, end_line, _end_char, _priority, symbol, root in self._candidates:
             if start_line > line:
                 break
-
-            # containment check mirrors the original is_position_in_range helper
-            if strict:
-                if not (end_line >= line > start_line):
-                    continue
-                if column is not None and line == start_line and not (column > start_char):
-                    continue
-            else:
-                if not (end_line >= line >= start_line):
-                    continue
-                if column is not None and line == start_line and not (column >= start_char):
-                    continue
-
-            # innermost = greatest start_line; equality preserves first-encountered (sort order).
-            if start_line > best_start_line:
+            if self._contains(start_line, start_char, end_line, line, column, strict) and start_line > best_start_line:
                 best = self.Container(symbol, root)
                 best_start_line = start_line
 
         return best
+
+    @staticmethod
+    def _contains(start_line: int, start_char: int, end_line: int, line: int, column: int | None, strict: bool) -> bool:
+        """
+        :return: whether the range contains the position: inclusive on both ends, or with the start line excluded when
+            strict; a column given is compared with the start character on the start line only
+        """
+        if strict:
+            if not (end_line >= line > start_line):
+                return False
+            return column is None or line != start_line or column > start_char
+        if not (end_line >= line >= start_line):
+            return False
+        return column is None or line != start_line or column >= start_char
 
 
 _Held = TypeVar("_Held")
