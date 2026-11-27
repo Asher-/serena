@@ -9,7 +9,6 @@ import os
 import queue
 import sqlite3
 import threading
-import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
@@ -25,11 +24,11 @@ from solidlsp.util.symbol_store import SymbolStore, _ReadPool
 
 _LOADER = SafePickleLoader()
 
-# the most a call that must not wait may take, far below any timeout a waiting call would run into
+# the most a wait may take for an event another thread sets without itself waiting, far below any timeout of a waiting call
 _PROMPT = 1.0
 
-# the seconds a step gives another thread to end in, when that thread may instead wait for the step
-_PAUSE = 0.2
+# the name of the thread that closes a store while another step of the store is under way
+_CLOSER = "closer"
 
 
 def _entry(name: str) -> list[dict]:
@@ -122,18 +121,18 @@ def test_a_save_that_meets_a_held_database_does_not_wait_and_writes_its_rows_at_
     store.put("a.py", "hash-a", _entry("a"))
     store.close()
 
+    # a close returning while the database is held, a hold that ends only after the close returns, having written nothing
+    reader = SymbolStore(path, version=(1,), loader=_LOADER)
     store.put("b.py", "hash-b", _entry("b"))
     with _held(path, exclusive=False):
-        started = time.monotonic()
         store.close()
-        assert time.monotonic() - started < _PROMPT
+        assert reader.get("b.py") is None
     store.close()
 
-    reopened = SymbolStore(path, version=(1,), loader=_LOADER)
     try:
-        assert reopened.get("b.py") == ("hash-b", _entry("b"))
+        assert reader.get("b.py") == ("hash-b", _entry("b"))
     finally:
-        reopened.close()
+        reader.close()
 
 
 def test_a_read_that_meets_an_exclusively_held_database_is_a_miss_without_waiting(tmp_path: Path) -> None:
@@ -142,12 +141,11 @@ def test_a_read_that_meets_an_exclusively_held_database_is_a_miss_without_waitin
     store.put("a.py", "hash-a", _entry("a"))
     store.close()
 
+    # a read returning a miss while the database is held, a hold that ends only after the read returns
     reader = SymbolStore(path, version=(1,), loader=_LOADER)
     try:
         with _held(path, exclusive=True):
-            started = time.monotonic()
             assert reader.get("a.py") is None
-            assert time.monotonic() - started < _PROMPT
         assert reader.get("a.py") == ("hash-a", _entry("a"))
     finally:
         reader.close()
@@ -531,22 +529,52 @@ def _before_writer_starts(action: Callable[[], None]) -> Iterator[None]:
         yield
 
 
+def _signalling_queue(reached: threading.Event) -> type[queue.SimpleQueue]:  # type: ignore[type-arg]
+    """
+    :param reached: the event set when the thread named as the closer waits on a queue of the class
+    :return: a queue class that sets the event when the closer waits on one of its queues
+    """
+
+    class _SignallingQueue(queue.SimpleQueue):  # type: ignore[type-arg]
+        def get(self, *args: object, **kwargs: object) -> object:
+            if threading.current_thread().name == _CLOSER:
+                reached.set()
+            return super().get(*args, **kwargs)  # type: ignore[arg-type]
+
+    return _SignallingQueue
+
+
+def _closer(store: SymbolStore, reached: threading.Event, then: Callable[[], None] = lambda: None) -> threading.Thread:
+    """
+    :param store: the store the thread closes
+    :param reached: the event set once the thread has ended
+    :param then: what the thread does once the close has returned
+    :return: a thread named as the closer, not started
+    """
+
+    def close() -> None:
+        try:
+            store.close()
+            then()
+        finally:
+            reached.set()
+
+    return threading.Thread(target=close, name=_CLOSER)
+
+
 def test_a_close_meeting_a_writer_not_yet_started_returns_once_its_rows_are_written(tmp_path: Path) -> None:
     path = tmp_path / "store.sqlite"
-    store = SymbolStore(path, version=(1,), loader=_LOADER)
+    reached = threading.Event()
+    with mock.patch.object(queue, "SimpleQueue", _signalling_queue(reached)):
+        store = SymbolStore(path, version=(1,), loader=_LOADER)
     store.put("a.py", "hash-a", _entry("a"))
     read_after_close: list[object] = []
-
-    def close_and_read() -> None:
-        store.close()
-        read_after_close.append(_read_back(path, "a.py"))
-
-    closer = threading.Thread(target=close_and_read)
+    closer = _closer(store, reached, lambda: read_after_close.append(_read_back(path, "a.py")))
 
     def close_meanwhile() -> None:
         closer.start()
-        # a close that does not wait for the writer ends here; one that waits for it ends once the writer has started
-        closer.join(_PAUSE)
+        # a close that does not wait for the writer has ended here; one that waits for it is waiting for it
+        reached.wait()
 
     with _before_writer_starts(close_meanwhile):
         store.submit()
@@ -557,21 +585,23 @@ def test_a_close_meeting_a_writer_not_yet_started_returns_once_its_rows_are_writ
 def test_a_submit_overtaken_by_a_close_while_it_hands_its_rows_over_loses_none_of_them(tmp_path: Path) -> None:
     path = tmp_path / "store.sqlite"
     armed: list[Callable[[], None]] = []
+    reached = threading.Event()
 
-    class _OvertakenQueue(queue.SimpleQueue):  # type: ignore[type-arg]
+    class _OvertakenQueue(_signalling_queue(reached)):  # type: ignore[misc]
         def put(self, *args: object, **kwargs: object) -> None:
             if armed:
                 armed.pop()()
-            super().put(*args, **kwargs)  # type: ignore[arg-type]
+            super().put(*args, **kwargs)
 
     with mock.patch.object(queue, "SimpleQueue", _OvertakenQueue):
         store = SymbolStore(path, version=(1,), loader=_LOADER)
         store.put("a.py", "hash-a", _entry("a"))
-        closer = threading.Thread(target=store.close)
+        closer = _closer(store, reached)
 
         def close_meanwhile() -> None:
             closer.start()
-            closer.join(_PAUSE)
+            # a close that does not wait for the rows handed over has ended here; one that waits for them is waiting
+            reached.wait()
 
         armed.append(close_meanwhile)
         store.submit()

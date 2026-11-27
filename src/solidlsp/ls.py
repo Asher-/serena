@@ -461,8 +461,8 @@ class DocumentSymbols:
     def slim(self) -> "DocumentSymbols":
         """
         :return: a copy of the symbol tree that holds none of the file's text and none of its paths but the relative
-            one: each body holds only its range, and each location lacks ``absolutePath`` and ``uri``. Symbols of the
-            copy are new dictionaries; their other values are shared with this tree.
+            one: each body holds only its range, and each location lacks ``absolutePath`` and ``uri``. The dictionaries
+            and lists of the copy are new; the other values they hold are shared with this tree.
         """
 
         def slim_symbol(symbol: ls_types.UnifiedSymbolInformation) -> None:
@@ -484,8 +484,8 @@ class DocumentSymbols:
         :param absolute_path: the absolute path of the file
         :param uri: the URI of the file
         :return: a copy of the symbol tree whose bodies extract their text from the given lines and whose locations
-            carry the given absolute path and URI. Symbols of the copy are new dictionaries; their other values are
-            shared with this tree.
+            carry the given absolute path and URI. The dictionaries and lists of the copy are new; the other values
+            they hold are shared with this tree.
         """
 
         def bind_symbol(symbol: ls_types.UnifiedSymbolInformation) -> None:
@@ -656,8 +656,9 @@ class _PerFileCache(Generic[_Held]):
     An in-memory map from the relative path of a file to a value derived from the file's content, holding the values of
     at most a fixed number of files: putting the value of a file not held lets go of the value used least recently.
     A value is served only for the content hash it was put for. Each operation is a single atomic step of the
-    underlying ordered map or tolerates another thread's step in between, so the map takes no lock; a put racing a
-    put of another file in another thread may let the map hold one value more than its maximum until the next put.
+    underlying ordered map or tolerates another thread's step in between, so the map takes no lock. A put lets go of
+    values until the map holds no more than its maximum, after it holds the value put, so once every put has returned
+    the map holds no more than its maximum.
     """
 
     def __init__(self, max_entries: int) -> None:
@@ -688,15 +689,16 @@ class _PerFileCache(Generic[_Held]):
         :param content_hash: the hash of the file content the value derives from
         :param value: the value
         """
-        if relative_path not in self._entries:
-            while len(self._entries) >= self._max_entries:
-                try:
-                    self._entries.popitem(last=False)
-                except KeyError:
-                    break
         self._entries[relative_path] = (content_hash, value)
         with contextlib.suppress(KeyError):
             self._entries.move_to_end(relative_path)
+
+        # values used least recently, let go of while the map holds more than its maximum
+        while len(self._entries) > self._max_entries:
+            try:
+                self._entries.popitem(last=False)
+            except KeyError:
+                break
 
 
 class SolidLanguageServer(ABC):
@@ -3588,8 +3590,9 @@ class SolidLanguageServer(ABC):
     def save_cache(self) -> None:
         """
         Saves the raw document symbols served since the last save. While the server runs, they are handed to the
-        cache's writer and this returns without waiting for them to be written; once it is stopped, they are written
-        before this returns.
+        cache's writer and this returns without waiting for them to be written. Once it is stopped, the rows that were
+        dirty or accepted for writing when this began are written before this returns, except rows that a database held
+        by another connection keeps from being written, which stay dirty for the next save.
         """
         if self.server_started and self.is_running():
             self._raw_document_symbols_store.submit()
@@ -3755,8 +3758,10 @@ class SolidLanguageServer(ABC):
 
     def stop(self, shutdown_timeout: float = 2.0) -> None:
         """
-        Stops the language server process, writes the raw document symbols served since the last save and waits for them
-        to be written, which ends the cache's writer, and releases the symbols held in memory.
+        Stops the language server process and writes the raw document symbols that were dirty or accepted for writing
+        when the stop began, waiting for the writes to end, which ends the cache's writer; rows that a database held by
+        another connection keeps from being written stay dirty for the next save. Then releases the symbols held in
+        memory.
         This function never raises an exception (any exceptions during shutdown are logged).
 
         :param shutdown_timeout: time, in seconds, to wait for the server to shutdown gracefully before killing it
@@ -3771,8 +3776,9 @@ class SolidLanguageServer(ABC):
 
     def _release_symbol_caches(self) -> None:
         """
-        Writes the raw document symbols not yet saved, waiting for them to be written, and releases the high-level
-        document symbols and range indices held in memory.
+        Writes the raw document symbols that were dirty or accepted for writing when this began, waiting for the writes
+        to end; rows that a database held by another connection keeps from being written stay dirty for the next save.
+        Then releases the high-level document symbols and range indices held in memory.
         """
         try:
             self._raw_document_symbols_store.close()

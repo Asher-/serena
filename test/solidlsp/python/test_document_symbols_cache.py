@@ -543,14 +543,14 @@ class _EmptiedByAnotherThread(OrderedDict):
         return super().popitem(last=last)
 
 
-def test_a_value_put_into_a_full_cache_that_another_thread_empties_meanwhile_is_held() -> None:
+def test_a_put_into_a_full_cache_that_other_threads_empty_meanwhile_raises_nothing() -> None:
     cache: _PerFileCache[str] = _PerFileCache(1)
     cache.put("a.py", "hash-a", "a")
     cache._entries = _EmptiedByAnotherThread(cache._entries)
 
     cache.put("b.py", "hash-b", "b")
 
-    assert cache.get("b.py", "hash-b") == "b"
+    assert [cache.get(f"{name}.py", f"hash-{name}") for name in "ab"] == [None, None]
 
 
 class _LetGoByAnotherThread(OrderedDict):
@@ -578,6 +578,45 @@ def test_a_put_whose_value_another_thread_lets_go_of_meanwhile_raises_nothing() 
     cache.put("a.py", "hash-a", "a")
 
     assert cache.get("a.py", "hash-a") is None
+
+
+class _OvertakenByAnotherThreadsPut(OrderedDict):
+    """
+    An ordered map in which another thread, just before the map first holds a value, puts the value of another file into
+    the cache owning the map and finishes that put.
+    """
+
+    def __init__(self, entries: OrderedDict, overtaking: Callable[[], None]) -> None:
+        """
+        :param entries: the values held, least recently used first
+        :param overtaking: the put the other thread finishes
+        """
+        self._overtaking: Callable[[], None] | None = None
+        super().__init__(entries)
+        self._overtaking = overtaking
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        overtaking, self._overtaking = self._overtaking, None
+        if overtaking is not None:
+            other = threading.Thread(target=overtaking)
+            other.start()
+            other.join()
+        super().__setitem__(key, value)
+
+
+def test_two_puts_of_new_files_racing_into_a_cache_one_value_short_of_full_leave_it_holding_its_maximum() -> None:
+    cache: _PerFileCache[str] = _PerFileCache(2)
+    cache.put("a.py", "hash-a", "a")
+    cache._entries = _OvertakenByAnotherThreadsPut(cache._entries, lambda: cache.put("c.py", "hash-c", "c"))
+
+    cache.put("b.py", "hash-b", "b")
+
+    assert [cache.get(f"{name}.py", f"hash-{name}") for name in "abc"] == [None, "b", "c"]
+
+
+def test_a_cache_that_would_hold_the_value_of_no_file_is_refused() -> None:
+    with pytest.raises(ValueError, match="at least one"):
+        _PerFileCache(0)
 
 
 def test_the_store_grows_with_the_number_of_files(tmp_path: Path) -> None:

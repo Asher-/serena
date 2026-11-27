@@ -14,6 +14,8 @@ import signal
 import threading
 import weakref
 from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import psutil
@@ -23,6 +25,7 @@ from serena.agent import SerenaAgent
 from serena.config.serena_config import ProjectConfig, SerenaConfig
 from serena.cursor import CursorManager
 from serena.language_backend import BuiltinLanguageBackend
+from serena.ls_manager import LanguageServerManager
 from serena.project import Project
 from serena.tools.config_tools import GetCurrentConfigTool
 from solidlsp.ls import DocumentSymbols, SolidLanguageServer
@@ -197,38 +200,68 @@ def _saved_root_symbol_names(server: SolidLanguageServer, relative_path: str) ->
     return None if row is None else [symbol["name"] for symbol in row[1]]
 
 
-def test_an_idle_stop_of_a_crashed_server_saves_its_symbols_and_keeps_none_of_them_alive(tmp_path: Path) -> None:
-    root = _looped_tree(tmp_path / "project")
+@dataclass
+class _IdleStoppingSession:
+    """
+    An agent whose project's language servers are stopped once idle, with the manager of those servers.
+    """
+
+    agent: SerenaAgent
+    manager: LanguageServerManager
+    stopped: threading.Event
+    """the event set at each idle stop"""
+
+
+@contextmanager
+def _past_its_first_idle_stop(tmp_path: Path) -> Iterator[_IdleStoppingSession]:
+    """
+    Activates a looped project in an agent that stops its language servers once idle, and waits for the first idle stop,
+    after which the project is not stopped again until it is used. Stops the servers and shuts the agent down on exit.
+
+    :param tmp_path: the directory the project is created in
+    :return: the session, its event cleared
+    """
     stopped = threading.Event()
-    agent = _idle_stopping_agent(root, stopped)
+    agent = _idle_stopping_agent(_looped_tree(tmp_path / "project"), stopped)
     project = agent.get_active_project()
     assert project is not None
     manager = project.create_language_server_manager()
     try:
-        # the idle stop of the newly activated project, after which it is not stopped again until it is used
         assert stopped.wait(_WAIT)
         stopped.clear()
-
-        # symbols served by the restarted server, whose cache on disk is then removed
-        server = manager.get_language_server("pkg/module_0.py")
-        served = weakref.ref(server.request_document_symbols("pkg/module_0.py"))
-        saved = server.cache_dir / server.RAW_DOCUMENT_SYMBOL_STORE_FILENAME
-        saved.unlink(missing_ok=True)
-
-        # the server's process ends on its own, then a tool call on the project, from whose end the next idle stop counts
-        pid = server.process_id()
-        assert pid is not None
-        os.kill(pid, signal.SIGKILL)
-        psutil.Process(pid).wait(timeout=_WAIT)
-        agent.get_tool(GetCurrentConfigTool).apply_ex(log_call=False)
-
-        assert stopped.wait(_WAIT)
-        gc.collect()
-        assert _saved_root_symbol_names(server, "pkg/module_0.py") == ["function_0"]
-        assert served() is None
+        yield _IdleStoppingSession(agent, manager, stopped)
     finally:
         manager.stop_all()
         agent.on_shutdown(timeout=1.0)
+
+
+def _crash(server: SolidLanguageServer) -> None:
+    """
+    Ends the process of a server on its own, as a crash does, and waits for it to have ended.
+
+    :param server: the server
+    """
+    pid = server.process_id()
+    assert pid is not None
+    os.kill(pid, signal.SIGKILL)
+    psutil.Process(pid).wait(timeout=_WAIT)
+
+
+def test_an_idle_stop_of_a_crashed_server_saves_its_symbols_and_keeps_none_of_them_alive(tmp_path: Path) -> None:
+    with _past_its_first_idle_stop(tmp_path) as session:
+        # symbols served by the restarted server, whose cache on disk is then removed
+        server = session.manager.get_language_server("pkg/module_0.py")
+        served = weakref.ref(server.request_document_symbols("pkg/module_0.py"))
+        (server.cache_dir / server.RAW_DOCUMENT_SYMBOL_STORE_FILENAME).unlink(missing_ok=True)
+
+        # the server's process ends on its own, then a tool call on the project, from whose end the next idle stop counts
+        _crash(server)
+        session.agent.get_tool(GetCurrentConfigTool).apply_ex(log_call=False)
+
+        assert session.stopped.wait(_WAIT)
+        gc.collect()
+        assert _saved_root_symbol_names(server, "pkg/module_0.py") == ["function_0"]
+        assert served() is None
 
 
 def test_removing_the_language_of_a_crashed_server_saves_its_symbols(looped_project: Project) -> None:
@@ -239,10 +272,7 @@ def test_removing_the_language_of_a_crashed_server_saves_its_symbols(looped_proj
     saved.unlink(missing_ok=True)
 
     # the server's process ends on its own
-    pid = server.process_id()
-    assert pid is not None
-    os.kill(pid, signal.SIGKILL)
-    psutil.Process(pid).wait(timeout=_WAIT)
+    _crash(server)
 
     manager.remove_language_server(LanguageServerId.PYTHON, save_cache=True)
 
