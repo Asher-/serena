@@ -391,9 +391,7 @@ def test_a_close_while_reads_are_in_flight_on_several_threads_leaves_none_of_the
 
 def _read_through_a_close(store: SymbolStore, key: str, readers: int) -> tuple[list[object], list[object]]:
     """
-    Reads the key on several threads, once each before a close of the store and on through it until it returned.
-
-    :return: the results read before the close, and those read through it
+    :return: the results of reads of the key on several threads made once each before a close of the store, and through it
     """
     reading = threading.Barrier(readers + 1)
     closed = threading.Event()
