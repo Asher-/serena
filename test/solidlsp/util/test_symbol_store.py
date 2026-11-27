@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from fractions import Fraction
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import psutil
@@ -151,21 +152,30 @@ def test_a_read_that_meets_an_exclusively_held_database_is_a_miss_without_waitin
         reader.close()
 
 
-def test_a_submit_returns_before_its_rows_are_written_and_a_close_writes_them_and_ends_the_writer(tmp_path: Path) -> None:
+def test_a_submit_returns_before_its_rows_are_written_and_a_close_writes_them_and_ends_the_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     path = tmp_path / "store.sqlite"
     writers_before = set(_writer_threads())
     store = SymbolStore(path, version=(1,), loader=_LOADER)
-    for index in range(2000):
-        store.put(f"pkg/module_{index}.py", f"hash-{index}", _entry(f"function_{index}"))
+    released = threading.Event()
+    write_rows = store._write_rows
+
+    def write_rows_once_released(batch: dict, connection: sqlite3.Connection) -> None:
+        if threading.current_thread().name.startswith(SymbolStore.WRITER_THREAD_NAME_PREFIX):
+            released.wait()
+        write_rows(batch, connection)
+
+    monkeypatch.setattr(store, "_write_rows", write_rows_once_released)
+    store.put("a.py", "hash-a", _entry("a"))
     store.submit()
+    # the writer writes only once released, which happens only after the submit has returned
+    assert _read_back(path, "a.py") is None
+    released.set()
     store.close()
 
     assert [thread for thread in _writer_threads() if thread not in writers_before] == []
-    reopened = SymbolStore(path, version=(1,), loader=_LOADER)
-    try:
-        assert reopened.get("pkg/module_1999.py") == ("hash-1999", _entry("function_1999"))
-    finally:
-        reopened.close()
+    assert _read_back(path, "a.py") == ("hash-a", _entry("a"))
 
 
 def test_concurrent_saves_of_one_file_by_several_stores_leave_every_row_readable(tmp_path: Path) -> None:
@@ -520,6 +530,45 @@ def test_a_row_put_while_a_save_writes_an_older_row_of_its_file_is_read_and_writ
         reopened.close()
 
 
+class _PutMeanwhile(dict):
+    """
+    A map of the rows whose write has not ended, in which another thread puts a newer row of a file and finishes that
+    put just after a row is first looked up.
+    """
+
+    def __init__(self, rows: dict, put_newer: Callable[[], None]) -> None:
+        """
+        :param rows: the rows held
+        :param put_newer: the put the other thread finishes
+        """
+        super().__init__(rows)
+        self._put_newer: Callable[[], None] | None = put_newer
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        row = super().get(key, default)
+        put_newer, self._put_newer = self._put_newer, None
+        if put_newer is not None:
+            other = threading.Thread(target=put_newer)
+            other.start()
+            other.join()
+        return row
+
+
+def test_a_row_put_while_the_write_of_an_older_row_of_its_file_is_settled_is_read_and_written_by_the_next_save(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "store.sqlite"
+    store = SymbolStore(path, version=(1,), loader=_LOADER)
+    store.put("a.py", "hash-old", _entry("old"))
+    store._unwritten = _PutMeanwhile(store._unwritten, lambda: store.put("a.py", "hash-new", _entry("new")))
+
+    store.close()
+
+    assert store.get("a.py") == ("hash-new", _entry("new"))
+    store.close()
+    assert _read_back(path, "a.py") == ("hash-new", _entry("new"))
+
+
 def _read_back(path: Path, key: str) -> object:
     """
     :return: what a new store on the file reads for the key
@@ -600,10 +649,12 @@ def test_a_close_meeting_a_writer_not_yet_started_returns_once_its_rows_are_writ
     assert read_after_close == [("hash-a", _entry("a"))]
 
 
-def test_a_submit_overtaken_by_a_close_while_it_hands_its_rows_over_loses_none_of_them(tmp_path: Path) -> None:
-    path = tmp_path / "store.sqlite"
-    armed: list[Callable[[], None]] = []
-    reached = threading.Event()
+def _overtaking_queue(reached: threading.Event, armed: list[Callable[[], None]]) -> type[queue.SimpleQueue]:  # type: ignore[type-arg]
+    """
+    :param reached: the event set when the thread named as the closer waits on a queue of the class
+    :param armed: the steps to run, one before each of the next puts on a queue of the class
+    :return: a queue class that runs an armed step before a put and sets the event when the closer waits on it
+    """
 
     class _OvertakenQueue(_signalling_queue(reached)):  # type: ignore[misc]
         def put(self, *args: object, **kwargs: object) -> None:
@@ -611,7 +662,14 @@ def test_a_submit_overtaken_by_a_close_while_it_hands_its_rows_over_loses_none_o
                 armed.pop()()
             super().put(*args, **kwargs)
 
-    with mock.patch.object(queue, "SimpleQueue", _OvertakenQueue):
+    return _OvertakenQueue
+
+
+def test_a_submit_overtaken_by_a_close_while_it_hands_its_rows_over_loses_none_of_them(tmp_path: Path) -> None:
+    path = tmp_path / "store.sqlite"
+    armed: list[Callable[[], None]] = []
+    reached = threading.Event()
+    with mock.patch.object(queue, "SimpleQueue", _overtaking_queue(reached, armed)):
         store = SymbolStore(path, version=(1,), loader=_LOADER)
         store.put("a.py", "hash-a", _entry("a"))
         closer = _closer(store, reached)
@@ -877,6 +935,43 @@ def _open_failing_in_the_writer(
         return open_for_writing()
 
     return open_failing
+
+
+class _HeldAtWalSwitch(sqlite3.Connection):
+    """
+    A connection on which switching to WAL mode meets a database another connection holds.
+    """
+
+    def execute(self, sql: str, parameters: object = (), /) -> sqlite3.Cursor:
+        if sql.startswith("PRAGMA journal_mode"):
+            raise sqlite3.OperationalError("database is locked")
+        return super().execute(sql, parameters)
+
+
+def test_a_writer_whose_connections_cannot_be_configured_closes_them_and_the_close_writes_its_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "store.sqlite"
+    store = SymbolStore(path, version=(1,), loader=_LOADER)
+    opened: list[sqlite3.Connection] = []
+    connect = sqlite3.connect
+
+    def connect_held_in_the_writer(*args: object, **kwargs: object) -> sqlite3.Connection:
+        if not threading.current_thread().name.startswith(SymbolStore.WRITER_THREAD_NAME_PREFIX):
+            return connect(*args, **kwargs)  # type: ignore[call-overload]
+        opened.append(connect(*args, factory=_HeldAtWalSwitch, **kwargs))  # type: ignore[call-overload]
+        return opened[-1]
+
+    monkeypatch.setattr(sqlite3, "connect", connect_held_in_the_writer)
+    store.put("a.py", "hash-a", _entry("a"))
+    store.submit()
+    store.close()
+
+    assert _read_back(path, "a.py") == ("hash-a", _entry("a"))
+    assert opened != []
+    for connection in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
 
 
 def test_a_save_meeting_a_held_database_reported_only_by_its_message_writes_its_rows_at_the_next_save(

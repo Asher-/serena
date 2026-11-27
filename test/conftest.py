@@ -42,6 +42,7 @@ from serena.util.file_system import IgnoreSpecs
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.settings import SolidLSPSettings
+from solidlsp.util.symbol_store import SymbolStore
 
 from .fixture_repositories import FixtureRepositories
 from .language_server_installation import TestLanguageServerInstallation
@@ -99,6 +100,23 @@ def get_repo_path(language: LanguageServerId) -> Path:
     """
     repo_language = _LANGUAGE_REPO_ALIASES.get(language, language)
     return get_repos_dir(repo_language.get_key()) / "test_repo"
+
+
+def saved_root_symbol_names(server: SolidLanguageServer, relative_path: str) -> list[str] | None:
+    """
+    :param server: a language server, whose raw document symbols are read as it saved them
+    :param relative_path: the relative path of the file
+    :return: the names of the file's raw root symbols that a new store on the server's cache file reads, or None if it
+        reads no entry of the file
+    """
+    store = SymbolStore(
+        server.cache_dir / server.RAW_DOCUMENT_SYMBOL_STORE_FILENAME, server._raw_document_symbols_cache_version(), server._cache_loader
+    )
+    try:
+        row = store.get(relative_path)
+    finally:
+        store.close()
+    return None if row is None else [symbol["name"] for symbol in row[1]]
 
 
 def _create_ls(

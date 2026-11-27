@@ -10,9 +10,8 @@ from pathlib import Path
 import pytest
 
 from serena.constants import SERENA_MANAGED_DIR_NAME
-from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
-from test.conftest import get_repo_path, language_server_tests_enabled, start_ls_context
+from test.conftest import get_repo_path, language_server_tests_enabled, saved_root_symbol_names, start_ls_context
 
 pytestmark = [
     pytest.mark.svelte,
@@ -29,17 +28,12 @@ def test_a_stop_writes_the_symbols_the_companion_served_to_the_companion_cache(t
     # a copy of the fixture repository of this run only, whose companion cache no other run writes
     repo = tmp_path / "test_repo"
     shutil.copytree(get_repo_path(LanguageServerId.SVELTE), repo, symlinks=True, ignore=shutil.ignore_patterns(SERENA_MANAGED_DIR_NAME))
-    cache_file = (
-        repo
-        / SERENA_MANAGED_DIR_NAME
-        / SolidLanguageServer.CACHE_FOLDER_NAME
-        / LanguageServerId.TYPESCRIPT.get_key()
-        / SolidLanguageServer.RAW_DOCUMENT_SYMBOL_STORE_FILENAME
-    )
 
     with start_ls_context(LanguageServerId.SVELTE, repo_path=str(repo)) as language_server:
         served = [symbol["name"] for symbol in language_server.request_document_symbols(GAME_TS).root_symbols]
         assert "GAME_VERSION" in served
-        assert not cache_file.exists()
+        companion = language_server._ts_server
+        assert companion is not None
+        assert saved_root_symbol_names(companion, GAME_TS) is None
 
-    assert cache_file.is_file()
+    assert "GAME_VERSION" in (saved_root_symbol_names(companion, GAME_TS) or [])

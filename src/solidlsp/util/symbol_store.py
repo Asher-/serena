@@ -267,7 +267,10 @@ class SymbolStore:
             if dirty:
                 self._pending.setdefault(key, row)
             else:
-                self._unwritten.pop(key, None)
+                removed = self._unwritten.pop(key, None)
+                # a newer row put since the check above is held again, unless a newer one still was put meanwhile
+                if removed is not None and removed is not row:
+                    self._unwritten.setdefault(key, removed)
 
 
 def _is_busy(error: Exception) -> bool:

@@ -185,7 +185,7 @@ def _bytes_in(directory: Path) -> int:
 
 
 def test_the_cache_of_a_file_holds_its_symbols_and_not_its_text(tmp_path: Path) -> None:
-    # one function and 400 kB of comment, which defines no symbol
+    # one function and 380 kB of comment, which defines no symbol
     root = _project(tmp_path / "project", 1, padding="# padding text that defines no symbol\n" * 10_000)
 
     with _running(root) as server:

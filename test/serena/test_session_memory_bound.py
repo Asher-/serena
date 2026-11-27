@@ -30,7 +30,7 @@ from serena.project import Project
 from serena.tools.config_tools import GetCurrentConfigTool
 from solidlsp.ls import DocumentSymbols, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
-from solidlsp.util.symbol_store import SymbolStore
+from test.conftest import saved_root_symbol_names
 
 pytestmark = pytest.mark.python
 
@@ -183,23 +183,6 @@ def test_an_idle_stop_releases_the_symbols_its_servers_served_and_the_next_call_
         agent.on_shutdown(timeout=1.0)
 
 
-def _saved_root_symbol_names(server: SolidLanguageServer, relative_path: str) -> list[str] | None:
-    """
-    :param server: a language server, whose raw document symbols are read as it saved them
-    :param relative_path: the relative path of the file
-    :return: the names of the file's raw root symbols that a new store on the server's cache file reads, or None if it
-        reads no entry of the file
-    """
-    store = SymbolStore(
-        server.cache_dir / server.RAW_DOCUMENT_SYMBOL_STORE_FILENAME, server._raw_document_symbols_cache_version(), server._cache_loader
-    )
-    try:
-        row = store.get(relative_path)
-    finally:
-        store.close()
-    return None if row is None else [symbol["name"] for symbol in row[1]]
-
-
 @dataclass
 class _IdleStoppingSession:
     """
@@ -260,7 +243,7 @@ def test_an_idle_stop_of_a_crashed_server_saves_its_symbols_and_keeps_none_of_th
 
         assert session.stopped.wait(_WAIT)
         gc.collect()
-        assert _saved_root_symbol_names(server, "pkg/module_0.py") == ["function_0"]
+        assert saved_root_symbol_names(server, "pkg/module_0.py") == ["function_0"]
         assert served() is None
 
 
@@ -276,7 +259,7 @@ def test_removing_the_language_of_a_crashed_server_saves_its_symbols(looped_proj
 
     manager.remove_language_server(LanguageServerId.PYTHON, save_cache=True)
 
-    assert _saved_root_symbol_names(server, "pkg/module_0.py") == ["function_0"]
+    assert saved_root_symbol_names(server, "pkg/module_0.py") == ["function_0"]
 
 
 def test_restarting_the_language_of_a_crashed_server_saves_its_symbols_and_holds_a_running_replacement(
@@ -285,19 +268,15 @@ def test_restarting_the_language_of_a_crashed_server_saves_its_symbols_and_holds
     manager = looped_project.create_language_server_manager()
     server = manager.get_language_server("pkg/module_0.py")
     server.request_document_symbols("pkg/module_0.py")
-    saved = server.cache_dir / server.RAW_DOCUMENT_SYMBOL_STORE_FILENAME
-    saved.unlink(missing_ok=True)
+    (server.cache_dir / server.RAW_DOCUMENT_SYMBOL_STORE_FILENAME).unlink(missing_ok=True)
 
     # the server's process ends on its own
-    pid = server.process_id()
-    assert pid is not None
-    os.kill(pid, signal.SIGKILL)
-    psutil.Process(pid).wait(timeout=_WAIT)
+    _crash(server)
 
     try:
         replacement = manager.restart_language_server(LanguageServerId.PYTHON)
 
-        assert saved.is_file()
+        assert saved_root_symbol_names(server, "pkg/module_0.py") == ["function_0"]
         assert replacement is not server
         assert replacement.is_running()
         assert list(manager.iter_language_servers()) == [replacement]

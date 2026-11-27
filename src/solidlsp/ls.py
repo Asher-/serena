@@ -347,26 +347,7 @@ class SymbolBody(ToStringMixin):
 
     def get_text(self) -> str:
         assert self._lines is not None, "the text of a body holding only its range cannot be extracted"
-        end_line = self._end_line
-        end_col = self._end_col
-        if end_line >= len(self._lines):
-            if end_line == len(self._lines) and end_col == 0:
-                # LSP convention: a range covering whole lines through EOF sometimes ends
-                # at the start of the following, non-existent line (exactly one line past
-                # the last valid index, at column 0). That is well-defined: it means
-                # "through EOF", so treat it as ending at the end of the actual last line.
-                end_line = len(self._lines) - 1
-                end_col = len(self._lines[end_line])
-            else:
-                # Any other out-of-range end position (further past EOF, or exactly one
-                # line past EOF but not at column 0) is not the well-defined convention
-                # above; applying the same correction there would silently assume that
-                # a column meant for a nonexistent line still applies to the corrected
-                # one, which can produce a garbage body. Reject it instead of guessing.
-                raise InvalidTextLocationError(
-                    f"Symbol range end (line {self._end_line}, col {self._end_col}) is out of bounds "
-                    f"for a file with {len(self._lines)} lines"
-                )
+        end_line, end_col = self._resolved_end(self._lines)
 
         # extract relevant lines
         symbol_body = "\n".join(self._lines[self._start_line : end_line + 1])
@@ -381,6 +362,23 @@ class SymbolBody(ToStringMixin):
             symbol_body = symbol_body[: -(len(last_line) - end_col)]
 
         return symbol_body
+
+    def _resolved_end(self, lines: list[str]) -> tuple[int, int]:
+        """
+        :param lines: the lines of the file the body is in
+        :return: the line and column the body ends at. A range ending at column 0 of the line one past the last, which
+            LSP servers send for a range through EOF, ends at the end of the last line.
+        """
+        if self._end_line < len(lines):
+            return self._end_line, self._end_col
+        if self._end_line == len(lines) and self._end_col == 0:
+            return len(lines) - 1, len(lines[-1])
+
+        # any other end past EOF is no convention; applying the correction above to it would assume that a column meant
+        # for a nonexistent line still applies to the last one, which can produce a garbage body
+        raise InvalidTextLocationError(
+            f"Symbol range end (line {self._end_line}, col {self._end_col}) is out of bounds for a file with {len(lines)} lines"
+        )
 
 
 class SymbolBodyFactory:
