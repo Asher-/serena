@@ -424,16 +424,12 @@ class SymbolTreeCopy:
         """maps the identity of an original to its copy"""
         self.root = self._copy(root, None)
 
-    @classmethod
-    def of_symbol(cls, symbol: ls_types.UnifiedSymbolInformation) -> ls_types.UnifiedSymbolInformation:
+    def copy_of(self, symbol: ls_types.UnifiedSymbolInformation) -> ls_types.UnifiedSymbolInformation:
         """
-        :param symbol: a symbol of a tree
-        :return: its copy, within a copy of the whole tree
+        :param symbol: a symbol reached from the copied root through children
+        :return: the copy of the symbol
         """
-        root = symbol
-        while (parent := root.get("parent")) is not None:
-            root = parent
-        return cls(root)._copies[id(symbol)]
+        return self._copies[id(symbol)]
 
     def _copy(
         self, symbol: ls_types.UnifiedSymbolInformation, parent: ls_types.UnifiedSymbolInformation | None
@@ -560,36 +556,47 @@ class SymbolRangeIndex:
     _CONTAINER_KIND_PRIORITY = 0
     _VARIABLE_KIND_PRIORITY = 1
 
+    @dataclass(frozen=True)
+    class Container:
+        """
+        A container symbol found for a position, with the root symbol it was reached from through children.
+        """
+
+        symbol: ls_types.UnifiedSymbolInformation
+        root: ls_types.UnifiedSymbolInformation
+        """the root symbol of the document whose tree, descended through children, holds the symbol"""
+
     def __init__(
         self,
         document_symbols: "DocumentSymbols",
         container_symbol_kinds: set[ls_types.SymbolKind],
     ) -> None:
-        candidates: list[tuple[int, int, int, int, int, ls_types.UnifiedSymbolInformation]] = []
+        candidates: list[tuple[int, int, int, int, int, ls_types.UnifiedSymbolInformation, ls_types.UnifiedSymbolInformation]] = []
 
-        # collect container-kind candidates that span more than one line plus all variables;
-        # one-line entries of container kinds are excluded to avoid matching imports.
-        for symbol in document_symbols.iter_symbols():
-            kind = symbol["kind"]
-            s_range = symbol["location"]["range"]  # type: ignore[typeddict-item]
-            start = s_range["start"]
-            end = s_range["end"]
-            start_line = start["line"]
-            end_line = end["line"]
-            if kind in container_symbol_kinds and start_line != end_line:
-                priority = self._CONTAINER_KIND_PRIORITY
-            elif kind in {ls_types.SymbolKind.Variable, ls_types.SymbolKind.Constant}:
-                priority = self._VARIABLE_KIND_PRIORITY
-            else:
-                continue
-            candidates.append((start_line, start["character"], end_line, end["character"], priority, symbol))
+        # collect container-kind candidates that span more than one line plus all variables, each with the root it
+        # was reached from; one-line entries of container kinds are excluded to avoid matching imports.
+        for root in document_symbols.root_symbols:
+            for symbol in DocumentSymbols([root]).iter_symbols():
+                kind = symbol["kind"]
+                s_range = symbol["location"]["range"]  # type: ignore[typeddict-item]
+                start = s_range["start"]
+                end = s_range["end"]
+                start_line = start["line"]
+                end_line = end["line"]
+                if kind in container_symbol_kinds and start_line != end_line:
+                    priority = self._CONTAINER_KIND_PRIORITY
+                elif kind in {ls_types.SymbolKind.Variable, ls_types.SymbolKind.Constant}:
+                    priority = self._VARIABLE_KIND_PRIORITY
+                else:
+                    continue
+                candidates.append((start_line, start["character"], end_line, end["character"], priority, symbol, root))
 
         # sort by start_line ascending, then priority so containers precede variables at ties;
         # preserves the original two-pass iteration order that seeded ``max`` tie-breaking.
         candidates.sort(key=lambda c: (c[0], c[4], c[1]))
         self._candidates = candidates
 
-    def find_innermost_container(self, line: int, column: int | None, strict: bool) -> "ls_types.UnifiedSymbolInformation | None":
+    def find_innermost_container(self, line: int, column: int | None, strict: bool) -> "SymbolRangeIndex.Container | None":
         """
         Return the innermost candidate whose range contains ``(line, column)``.
 
@@ -603,13 +610,13 @@ class SymbolRangeIndex:
             containment.
         :param strict: if ``True``, require the position to lie strictly inside
             the candidate range (start line excluded).
-        :return: the matching symbol or ``None`` if no candidate matches.
+        :return: the matching symbol with the root it was reached from, or ``None`` if no candidate matches.
         """
-        best: ls_types.UnifiedSymbolInformation | None = None
+        best: SymbolRangeIndex.Container | None = None
         best_start_line = -1
 
         # candidates are sorted by start_line ascending so we can terminate once past the target.
-        for start_line, start_char, end_line, _end_char, _priority, symbol in self._candidates:
+        for start_line, start_char, end_line, _end_char, _priority, symbol, root in self._candidates:
             if start_line > line:
                 break
 
@@ -627,7 +634,7 @@ class SymbolRangeIndex:
 
             # innermost = greatest start_line; equality preserves first-encountered (sort order).
             if start_line > best_start_line:
-                best = symbol
+                best = self.Container(symbol, root)
                 best_start_line = start_line
 
         return best
@@ -3226,9 +3233,9 @@ class SolidLanguageServer(ABC):
             log.error(f"Passing empty lines to request_container_symbol is currently not supported, {relative_file_path=}, {line=}")
             return None
 
-        symbol = self._get_symbol_range_index(relative_file_path, file_data).find_innermost_container(line, column, strict)
+        container = self._get_symbol_range_index(relative_file_path, file_data).find_innermost_container(line, column, strict)
         # a copy, so that no change of the caller's reaches the symbols the cached index holds
-        return None if symbol is None else SymbolTreeCopy.of_symbol(symbol)
+        return None if container is None else SymbolTreeCopy(container.root).copy_of(container.symbol)
 
     def request_container_of_symbol(
         self, symbol: ls_types.UnifiedSymbolInformation, include_body: bool = False

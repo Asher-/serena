@@ -10,6 +10,7 @@ No language marker: the language server process is replaced by a double answerin
 import logging
 import os
 import threading
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from fractions import Fraction
@@ -25,7 +26,7 @@ from serena.config.serena_config import SerenaPaths
 from serena.constants import SERENA_MANAGED_DIR_NAME
 from serena.util.file_system import IgnoreSpecs
 from solidlsp import ls_types
-from solidlsp.ls import SolidLanguageServer
+from solidlsp.ls import DocumentSymbols, LSPFileBuffer, SolidLanguageServer, _PerFileCache
 from solidlsp.ls_config import LanguageServerConfig, LanguageServerId
 from solidlsp.ls_process import LanguageServerInterface
 from solidlsp.ls_utils import PathUtils
@@ -490,6 +491,60 @@ def test_a_change_of_the_parent_of_a_contained_symbol_a_caller_makes_is_not_serv
             assert (parent["name"], _start_lines(parent)) == ("function_0", [0, 0, 0])
             parent["name"] = "changed"
             _displace(parent)
+
+
+def test_the_containing_symbol_of_a_build_that_leaves_parent_links_to_the_symbols_it_replaced_is_in_the_tree_it_was_found_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _project(tmp_path / "project", 1)
+    inner_range = {"start": {"line": 1, "character": 4}, "end": {"line": 1, "character": 12}}
+    with _running(root) as server:
+        build = server._build_document_symbols_from_raw_symbols
+
+        def build_replacing_children(relative_file_path: str, file_buffer: LSPFileBuffer) -> DocumentSymbols:
+            # as the TypeScript and Gopls servers do: each child is replaced by a changed copy, whose parent is
+            # still the symbol it was built under, while its new parent is a copy of that symbol
+            replaced_roots = []
+            for root_symbol in build(relative_file_path, file_buffer).root_symbols:
+                replaced = root_symbol.copy()
+                replaced["children"] = [
+                    cast(ls_types.UnifiedSymbolInformation, {**child, "name": child["name"] + "_replaced"})
+                    for child in root_symbol["children"]
+                ]
+                replaced_roots.append(replaced)
+            return DocumentSymbols(replaced_roots)
+
+        monkeypatch.setattr(server, "_build_document_symbols_from_raw_symbols", build_replacing_children)
+        kind = ls_types.SymbolKind.Variable.value
+        server.children = [{"name": "inner", "kind": kind, "range": inner_range, "selectionRange": inner_range, "children": []}]
+        inner = server.request_containing_symbol("module_0.py", 1, 6)
+
+    assert inner is not None
+    assert inner["name"] == "inner_replaced"
+    parent = inner["parent"]
+    assert parent is not None
+    assert parent["name"] == "function_0"
+    assert [child is inner for child in parent["children"]] == [True]
+
+
+class _EmptiedByAnotherThread(OrderedDict):
+    """
+    An ordered map that another thread empties each time just before it lets go of its least recently used value.
+    """
+
+    def popitem(self, last: bool = True) -> tuple[Any, Any]:
+        self.clear()
+        return super().popitem(last=last)
+
+
+def test_a_value_put_into_a_full_cache_that_another_thread_empties_meanwhile_is_held() -> None:
+    cache: _PerFileCache[str] = _PerFileCache(1)
+    cache.put("a.py", "hash-a", "a")
+    cache._entries = _EmptiedByAnotherThread(cache._entries)
+
+    cache.put("b.py", "hash-b", "b")
+
+    assert cache.get("b.py", "hash-b") == "b"
 
 
 def test_the_store_grows_with_the_number_of_files(tmp_path: Path) -> None:

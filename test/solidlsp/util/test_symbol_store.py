@@ -21,7 +21,7 @@ import psutil
 import pytest
 
 from solidlsp.util.pickle_util import SafePickleLoader
-from solidlsp.util.symbol_store import SymbolStore
+from solidlsp.util.symbol_store import SymbolStore, _ReadPool
 
 _LOADER = SafePickleLoader()
 
@@ -695,3 +695,120 @@ def test_an_unwritten_entry_its_loader_refuses_is_a_miss(tmp_path: Path) -> None
         assert found is None
     finally:
         store.close()
+
+
+class _UnconfigurableConnection(sqlite3.Connection):
+    """
+    A connection on which setting the busy timeout fails.
+    """
+
+    def execute(self, sql: str, parameters: object = (), /) -> sqlite3.Cursor:
+        if sql.startswith("PRAGMA busy_timeout"):
+            raise sqlite3.OperationalError("disk I/O error")
+        return super().execute(sql, parameters)
+
+
+def test_a_read_whose_new_connection_cannot_be_configured_is_a_miss_and_closes_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "store.sqlite"
+    store = SymbolStore(path, version=(1,), loader=_LOADER)
+    store.put("a.py", "hash-a", _entry("a"))
+    store.close()
+    reader = SymbolStore(path, version=(1,), loader=_LOADER)
+    opened: list[sqlite3.Connection] = []
+    connect = sqlite3.connect
+
+    def connect_unconfigurable(*args: object, **kwargs: object) -> sqlite3.Connection:
+        connection = connect(*args, factory=_UnconfigurableConnection, **kwargs)
+        opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", connect_unconfigurable)
+    try:
+        assert reader.get("a.py") is None
+    finally:
+        monkeypatch.undo()
+        reader.close()
+
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        opened[0].execute("SELECT 1")
+
+
+class _IdleTakenByAnotherGiver:
+    """
+    The idle connections of a pool, whose surplus another giver takes each time between this giver's look at their
+    number and its take.
+    """
+
+    def __init__(self) -> None:
+        self.held: list[sqlite3.Connection] = []
+
+    def put(self, connection: sqlite3.Connection) -> None:
+        self.held.append(connection)
+
+    def qsize(self) -> int:
+        return _ReadPool.SIZE + 1
+
+    def get_nowait(self) -> sqlite3.Connection:
+        raise queue.Empty
+
+
+def test_a_connection_given_back_while_another_giver_takes_the_surplus_is_kept(tmp_path: Path) -> None:
+    pool = _ReadPool(f"file:{tmp_path / 'store.sqlite'}?mode=rwc")
+    idle = _IdleTakenByAnotherGiver()
+    pool._idle = idle  # type: ignore[assignment]
+    with closing(sqlite3.connect(":memory:")) as connection:
+        pool.give_back(connection)
+
+        assert idle.held == [connection]
+
+
+def test_a_writer_whose_write_raises_ends_and_its_batches_are_written_by_the_close(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "store.sqlite"
+    store = SymbolStore(path, version=(1,), loader=_LOADER)
+    write_rows = store._write_rows
+    writing = threading.Event()
+    second_submitted = threading.Event()
+
+    def write_rows_raising_in_the_writer(batch: dict, connection: sqlite3.Connection) -> None:
+        if threading.current_thread().name.startswith(SymbolStore.WRITER_THREAD_NAME_PREFIX):
+            # the writer raises once the second batch is accepted behind the one it writes
+            writing.set()
+            second_submitted.wait(_PROMPT)
+            raise RuntimeError("the write failed")
+        write_rows(batch, connection)
+
+    monkeypatch.setattr(store, "_write_rows", write_rows_raising_in_the_writer)
+    store.put("a.py", "hash-a", _entry("a"))
+    store.submit()
+    assert writing.wait(_PROMPT)
+    store.put("b.py", "hash-b", _entry("b"))
+    store.submit()
+    second_submitted.set()
+    store.close()
+
+    assert _read_back(path, "a.py") == ("hash-a", _entry("a"))
+    assert _read_back(path, "b.py") == ("hash-b", _entry("b"))
+
+
+def test_a_save_meeting_a_held_database_reported_only_by_its_message_writes_its_rows_at_the_next_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "store.sqlite"
+    store = SymbolStore(path, version=(1,), loader=_LOADER)
+    store.close()
+    write_rows = store._write_rows
+    errors = [sqlite3.OperationalError("database is locked")]
+
+    def write_rows_held_once(batch: dict, connection: sqlite3.Connection) -> None:
+        if errors:
+            raise errors.pop()
+        write_rows(batch, connection)
+
+    monkeypatch.setattr(store, "_write_rows", write_rows_held_once)
+    store.put("a.py", "hash-a", _entry("a"))
+    store.submit()
+    store.submit()
+
+    assert errors == []
+    assert _read_back(path, "a.py") == ("hash-a", _entry("a"))
