@@ -888,6 +888,7 @@ def test_a_connection_given_back_while_another_giver_takes_the_surplus_is_kept(t
     idle = _IdleTakenByAnotherGiver()
     pool._idle = idle  # type: ignore[assignment]
     with closing(sqlite3.connect(":memory:")) as connection:
+        connection.execute("PRAGMA busy_timeout = 0")
         raised: Exception | None = None
         try:
             pool.give_back(connection)
