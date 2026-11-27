@@ -758,30 +758,58 @@ def test_a_connection_given_back_while_another_giver_takes_the_surplus_is_kept(t
     idle = _IdleTakenByAnotherGiver()
     pool._idle = idle  # type: ignore[assignment]
     with closing(sqlite3.connect(":memory:")) as connection:
-        pool.give_back(connection)
+        raised: Exception | None = None
+        try:
+            pool.give_back(connection)
+        except Exception as error:
+            raised = error
 
-        assert idle.held == [connection]
+        assert (raised, idle.held) == (None, [connection])
 
 
-def test_a_writer_whose_write_raises_ends_and_its_batches_are_written_by_the_close(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_write_that_raises_in_the_writer_is_logged_and_its_rows_are_written_by_the_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     path = tmp_path / "store.sqlite"
     store = SymbolStore(path, version=(1,), loader=_LOADER)
     write_rows = store._write_rows
-    writing = threading.Event()
-    second_submitted = threading.Event()
 
     def write_rows_raising_in_the_writer(batch: dict, connection: sqlite3.Connection) -> None:
         if threading.current_thread().name.startswith(SymbolStore.WRITER_THREAD_NAME_PREFIX):
-            # the writer raises once the second batch is accepted behind the one it writes
-            writing.set()
-            second_submitted.wait(_PROMPT)
             raise RuntimeError("the write failed")
         write_rows(batch, connection)
 
     monkeypatch.setattr(store, "_write_rows", write_rows_raising_in_the_writer)
     store.put("a.py", "hash-a", _entry("a"))
+    with caplog.at_level(logging.ERROR):
+        store.submit()
+        store.close()
+
+    assert any("the write failed" in record.getMessage() for record in caplog.records)
+    assert _read_back(path, "a.py") == ("hash-a", _entry("a"))
+
+
+def test_a_writer_whose_connection_cannot_be_opened_ends_and_the_close_writes_every_batch_it_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "store.sqlite"
+    store = SymbolStore(path, version=(1,), loader=_LOADER)
+    open_for_writing = store._open_for_writing
+    opening = threading.Event()
+    second_submitted = threading.Event()
+
+    def open_failing_in_the_writer() -> sqlite3.Connection:
+        if threading.current_thread().name.startswith(SymbolStore.WRITER_THREAD_NAME_PREFIX):
+            # the open fails once the second batch is accepted behind the one the writer took
+            opening.set()
+            second_submitted.wait(_PROMPT)
+            raise RuntimeError("the database cannot be opened")
+        return open_for_writing()
+
+    monkeypatch.setattr(store, "_open_for_writing", open_failing_in_the_writer)
+    store.put("a.py", "hash-a", _entry("a"))
     store.submit()
-    assert writing.wait(_PROMPT)
+    assert opening.wait(_PROMPT)
     store.put("b.py", "hash-b", _entry("b"))
     store.submit()
     second_submitted.set()

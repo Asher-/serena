@@ -547,6 +547,33 @@ def test_a_value_put_into_a_full_cache_that_another_thread_empties_meanwhile_is_
     assert cache.get("b.py", "hash-b") == "b"
 
 
+class _LetGoByAnotherThread(OrderedDict):
+    """
+    An ordered map that another thread lets go of a value of each time just before it is marked as used most recently.
+    """
+
+    def move_to_end(self, key: Any, last: bool = True) -> None:
+        del self[key]
+        super().move_to_end(key, last=last)
+
+
+def test_a_held_value_another_thread_lets_go_of_while_it_is_served_is_still_served() -> None:
+    cache: _PerFileCache[str] = _PerFileCache(2)
+    cache.put("a.py", "hash-a", "a")
+    cache._entries = _LetGoByAnotherThread(cache._entries)
+
+    assert cache.get("a.py", "hash-a") == "a"
+
+
+def test_a_put_whose_value_another_thread_lets_go_of_meanwhile_raises_nothing() -> None:
+    cache: _PerFileCache[str] = _PerFileCache(2)
+    cache._entries = _LetGoByAnotherThread()
+
+    cache.put("a.py", "hash-a", "a")
+
+    assert cache.get("a.py", "hash-a") is None
+
+
 def test_the_store_grows_with_the_number_of_files(tmp_path: Path) -> None:
     sizes = []
     for count in (1, 200):

@@ -483,7 +483,13 @@ class _Writer:
         connection: sqlite3.Connection | None = None
         try:
             while (batch := self._take()) is not None:
-                connection = connection or self._open()
+                if connection is None:
+                    try:
+                        connection = self._open()
+                    except BaseException:
+                        # the taken batch is no link's any more, so no end of the loop gives it back
+                        self._store._settle(batch, dirty=True)
+                        raise
                 self._write(batch, connection)
         finally:
             if connection is not None:
