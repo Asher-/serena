@@ -863,8 +863,7 @@ class SolidLanguageServer(ABC):
             from this specific language server. This should be incremented by subclasses calling this constructor
             whenever the format of the raw document symbols changes (typically because the language server
             improves/fixes its output).
-        :param symbol_store_factory: the factory of the store the raw document symbols are persisted in, called with
-            the store's database file, the version of its entries and the loader they are unpickled with
+        :param symbol_store_factory: the factory of the store the raw document symbols are persisted in
         """
         self.config = config
         self._solidlsp_settings = solidlsp_settings
@@ -909,10 +908,7 @@ class SolidLanguageServer(ABC):
         self._remove_legacy_caches()
         # * raw document symbols, persisted one file at a time
         self._ls_specific_raw_document_symbols_cache_version = cache_version_raw_document_symbols
-        self._raw_document_symbols_store = symbol_store_factory(
-            self.cache_dir / self.RAW_DOCUMENT_SYMBOL_STORE_FILENAME, self._raw_document_symbols_cache_version(), self._cache_loader
-        )
-        """maps relative file paths to (file_content_hash, raw_root_symbols)"""
+        self._raw_document_symbols_store = self._open_raw_document_symbols_store(symbol_store_factory)
         # * high-level document symbols and the range indices built on them, held in memory for a bounded number of files
         max_cached_files = self._solidlsp_settings.document_symbols_cache_max_entries
         self._document_symbols_cache: _PerFileCache[DocumentSymbols] = _PerFileCache(max_cached_files)
@@ -947,6 +943,16 @@ class SolidLanguageServer(ABC):
         but which are not indexed by SolidLSP, i.e. not traversed for full symbol tree
         """
         self._abs_workspace_folders_all = self._abs_workspace_folders_indexed + self._abs_workspace_folders_additional
+
+    def _open_raw_document_symbols_store(self, factory: Callable[[Path, Hashable, SafePickleLoader], SymbolStore]) -> SymbolStore:
+        """
+        :param factory: the factory of the store, called with its database file, the version of its entries and the loader
+            they are unpickled with
+        :return: the store mapping relative file paths to (file_content_hash, raw_root_symbols)
+        """
+        return factory(
+            self.cache_dir / self.RAW_DOCUMENT_SYMBOL_STORE_FILENAME, self._raw_document_symbols_cache_version(), self._cache_loader
+        )
 
     @property
     def custom_settings(self) -> SolidLSPSettings.CustomLSSettings:
@@ -3222,7 +3228,7 @@ class SolidLanguageServer(ABC):
         :param strict: whether the position must be strictly within the symbol's range, as for finding a symbol's parent
         :param include_body: whether to include the body of the symbol in the result
         :return: the innermost function, method, class, struct, interface, variable or constant containing the position,
-            or the last one starting above the line if none does, as a copy with the symbols around it; None if neither
+            as a copy with the symbols around it; None if none does
         """
         with self.open_file(relative_file_path) as file_data:
             symbol = self._find_container(relative_file_path, file_data, line, column, strict)

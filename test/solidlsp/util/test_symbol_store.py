@@ -492,6 +492,7 @@ def test_a_save_the_database_refuses_midway_is_logged_and_leaves_the_saved_rows_
 ) -> None:
     path = tmp_path / "store.sqlite"
     with closing(sqlite3.connect(str(path), isolation_level=None)) as connection:
+        connection.execute("PRAGMA busy_timeout = 0")
         # a table of entries that refuses every row the store writes, as each lacks the value of its last column
         connection.execute("CREATE TABLE entries (key TEXT PRIMARY KEY, content_hash TEXT NOT NULL, entry BLOB NOT NULL, x NOT NULL)")
         connection.execute("INSERT INTO entries VALUES ('z.py', 'hash-z', x'00', 'kept')")
@@ -502,6 +503,7 @@ def test_a_save_the_database_refuses_midway_is_logged_and_leaves_the_saved_rows_
 
     assert "Failed to save" in caplog.text
     with closing(sqlite3.connect(str(path))) as connection:
+        connection.execute("PRAGMA busy_timeout = 0")
         assert connection.execute("SELECT key FROM entries").fetchall() == [("z.py",)]
 
 
@@ -947,14 +949,16 @@ def _open_failing_in_the_writer(
 ) -> Callable[[], sqlite3.Connection]:
     """
     :return: the store's open for writing, made to fail in the writer thread once the second batch is accepted behind
-        the one the writer took: it sets ``opening``, then waits for ``second_submitted``
+        the one the writer took: it sets ``opening``, then waits for ``second_submitted``, and fails with another error
+        if that never comes, so that no test passes without the order it sets up
     """
     open_for_writing = store._open_for_writing
 
     def open_failing() -> sqlite3.Connection:
         if threading.current_thread().name.startswith(SymbolStore.WRITER_THREAD_NAME_PREFIX):
             opening.set()
-            second_submitted.wait(_PROMPT)
+            if not second_submitted.wait(_PROMPT):
+                raise RuntimeError("the second batch was not accepted behind the taken one")
             raise RuntimeError("the database cannot be opened")
         return open_for_writing()
 

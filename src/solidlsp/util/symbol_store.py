@@ -252,7 +252,9 @@ class SymbolStore:
 
     def _settle(self, batch: dict[str, _Row], dirty: bool) -> None:
         """
-        Ends the write of the rows, leaving alone each file a newer row was put for.
+        Ends the write of the rows, leaving alone each file a newer row was put for. A get of a file whose newer row is
+        put while its written row is settled may read the written row from the database, which then carries the older
+        content hash: the get never returns a row older than the one last written, and its hash tells it from the newer.
 
         :param batch: the rows
         :param dirty: whether the rows go back to the pending rows
@@ -385,6 +387,8 @@ class _Writer:
         self._store = store
         self._head = _Link(is_first=True)
         """the last link the loop has taken; advanced by the loop alone, so that no written link is kept"""
+        self._tail = self._head
+        """the link last appended, from which an append looks for the chain's end; links appended meanwhile follow it"""
         self._accepted: queue.SimpleQueue[None] = queue.SimpleQueue()
         """a token for each link appended, which the loop waits for"""
         self._ended: queue.SimpleQueue[None] = queue.SimpleQueue()
@@ -440,10 +444,11 @@ class _Writer:
         :param link: the link to append to the chain
         :return: the link it follows, None if the chain has ended
         """
-        preceding = self._head
+        preceding = self._tail
         while not preceding.is_end:
             following = preceding.decide_next(link)
             if following is link:
+                self._tail = link
                 if link.is_end:
                     self._is_ended = True
                 self._accepted.put(None)
