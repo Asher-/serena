@@ -499,22 +499,8 @@ def test_the_containing_symbol_of_a_build_that_leaves_parent_links_to_the_symbol
     root = _project(tmp_path / "project", 1)
     inner_range = {"start": {"line": 1, "character": 4}, "end": {"line": 1, "character": 12}}
     with _running(root) as server:
-        build = server._build_document_symbols_from_raw_symbols
-
-        def build_replacing_children(relative_file_path: str, file_buffer: LSPFileBuffer) -> DocumentSymbols:
-            # as the TypeScript and Gopls servers do: each child is replaced by a changed copy, whose parent is
-            # still the symbol it was built under, while its new parent is a copy of that symbol
-            replaced_roots = []
-            for root_symbol in build(relative_file_path, file_buffer).root_symbols:
-                replaced = root_symbol.copy()
-                replaced["children"] = [
-                    cast(ls_types.UnifiedSymbolInformation, {**child, "name": child["name"] + "_replaced"})
-                    for child in root_symbol["children"]
-                ]
-                replaced_roots.append(replaced)
-            return DocumentSymbols(replaced_roots)
-
-        monkeypatch.setattr(server, "_build_document_symbols_from_raw_symbols", build_replacing_children)
+        build = _replacing_children(server._build_document_symbols_from_raw_symbols)
+        monkeypatch.setattr(server, "_build_document_symbols_from_raw_symbols", build)
         kind = ls_types.SymbolKind.Variable.value
         server.children = [{"name": "inner", "kind": kind, "range": inner_range, "selectionRange": inner_range, "children": []}]
         inner = server.request_containing_symbol("module_0.py", 1, 6)
@@ -525,6 +511,26 @@ def test_the_containing_symbol_of_a_build_that_leaves_parent_links_to_the_symbol
     assert parent is not None
     assert parent["name"] == "function_0"
     assert [child is inner for child in parent["children"]] == [True]
+
+
+def _replacing_children(build: Callable[[str, LSPFileBuffer], DocumentSymbols]) -> Callable[[str, LSPFileBuffer], DocumentSymbols]:
+    """
+    :param build: a server's build of a file's document symbols
+    :return: the build changed as the TypeScript and Gopls servers change it: each child of a root is replaced by a
+        changed copy, whose parent is still the symbol it was built under, while its new parent is a copy of that symbol
+    """
+
+    def build_replacing_children(relative_file_path: str, file_buffer: LSPFileBuffer) -> DocumentSymbols:
+        replaced_roots = []
+        for root_symbol in build(relative_file_path, file_buffer).root_symbols:
+            replaced = root_symbol.copy()
+            replaced["children"] = [
+                cast(ls_types.UnifiedSymbolInformation, {**child, "name": child["name"] + "_replaced"}) for child in root_symbol["children"]
+            ]
+            replaced_roots.append(replaced)
+        return DocumentSymbols(replaced_roots)
+
+    return build_replacing_children
 
 
 class _EmptiedByAnotherThread(OrderedDict):

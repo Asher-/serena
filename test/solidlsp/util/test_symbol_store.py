@@ -794,20 +794,10 @@ def test_a_writer_whose_connection_cannot_be_opened_ends_and_the_close_writes_ev
 ) -> None:
     path = tmp_path / "store.sqlite"
     store = SymbolStore(path, version=(1,), loader=_LOADER)
-    open_for_writing = store._open_for_writing
     opening = threading.Event()
     second_submitted = threading.Event()
     unhandled: list[threading.ExceptHookArgs] = []
-
-    def open_failing_in_the_writer() -> sqlite3.Connection:
-        if threading.current_thread().name.startswith(SymbolStore.WRITER_THREAD_NAME_PREFIX):
-            # the open fails once the second batch is accepted behind the one the writer took
-            opening.set()
-            second_submitted.wait(_PROMPT)
-            raise RuntimeError("the database cannot be opened")
-        return open_for_writing()
-
-    monkeypatch.setattr(store, "_open_for_writing", open_failing_in_the_writer)
+    monkeypatch.setattr(store, "_open_for_writing", _open_failing_in_the_writer(store, opening, second_submitted))
     monkeypatch.setattr(threading, "excepthook", unhandled.append)
     store.put("a.py", "hash-a", _entry("a"))
     with caplog.at_level(logging.ERROR):
@@ -822,6 +812,25 @@ def test_a_writer_whose_connection_cannot_be_opened_ends_and_the_close_writes_ev
     assert any("the database cannot be opened" in record.getMessage() for record in caplog.records)
     assert _read_back(path, "a.py") == ("hash-a", _entry("a"))
     assert _read_back(path, "b.py") == ("hash-b", _entry("b"))
+
+
+def _open_failing_in_the_writer(
+    store: SymbolStore, opening: threading.Event, second_submitted: threading.Event
+) -> Callable[[], sqlite3.Connection]:
+    """
+    :return: the store's open for writing, made to fail in the writer thread once the second batch is accepted behind
+        the one the writer took: it sets ``opening``, then waits for ``second_submitted``
+    """
+    open_for_writing = store._open_for_writing
+
+    def open_failing() -> sqlite3.Connection:
+        if threading.current_thread().name.startswith(SymbolStore.WRITER_THREAD_NAME_PREFIX):
+            opening.set()
+            second_submitted.wait(_PROMPT)
+            raise RuntimeError("the database cannot be opened")
+        return open_for_writing()
+
+    return open_failing
 
 
 def test_a_save_meeting_a_held_database_reported_only_by_its_message_writes_its_rows_at_the_next_save(
