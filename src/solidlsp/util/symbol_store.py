@@ -486,10 +486,11 @@ class _Writer:
                 if connection is None:
                     try:
                         connection = self._open()
-                    except BaseException:
+                    except Exception as error:
                         # the taken batch is no link's any more, so no end of the loop gives it back
                         self._store._settle(batch, dirty=True)
-                        raise
+                        log.error("Cannot open %s for writing, whose writer ends: %s", self._store._path, error, exc_info=error)
+                        return
                 self._write(batch, connection)
         finally:
             if connection is not None:

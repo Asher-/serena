@@ -790,13 +790,14 @@ def test_a_write_that_raises_in_the_writer_is_logged_and_its_rows_are_written_by
 
 
 def test_a_writer_whose_connection_cannot_be_opened_ends_and_the_close_writes_every_batch_it_accepted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     path = tmp_path / "store.sqlite"
     store = SymbolStore(path, version=(1,), loader=_LOADER)
     open_for_writing = store._open_for_writing
     opening = threading.Event()
     second_submitted = threading.Event()
+    unhandled: list[threading.ExceptHookArgs] = []
 
     def open_failing_in_the_writer() -> sqlite3.Connection:
         if threading.current_thread().name.startswith(SymbolStore.WRITER_THREAD_NAME_PREFIX):
@@ -807,14 +808,18 @@ def test_a_writer_whose_connection_cannot_be_opened_ends_and_the_close_writes_ev
         return open_for_writing()
 
     monkeypatch.setattr(store, "_open_for_writing", open_failing_in_the_writer)
+    monkeypatch.setattr(threading, "excepthook", unhandled.append)
     store.put("a.py", "hash-a", _entry("a"))
-    store.submit()
-    assert opening.wait(_PROMPT)
-    store.put("b.py", "hash-b", _entry("b"))
-    store.submit()
-    second_submitted.set()
-    store.close()
+    with caplog.at_level(logging.ERROR):
+        store.submit()
+        assert opening.wait(_PROMPT)
+        store.put("b.py", "hash-b", _entry("b"))
+        store.submit()
+        second_submitted.set()
+        store.close()
 
+    assert [args.exc_value for args in unhandled] == []
+    assert any("the database cannot be opened" in record.getMessage() for record in caplog.records)
     assert _read_back(path, "a.py") == ("hash-a", _entry("a"))
     assert _read_back(path, "b.py") == ("hash-b", _entry("b"))
 
