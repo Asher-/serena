@@ -477,6 +477,24 @@ def test_a_store_over_a_file_that_is_no_database_misses_every_read_and_logs_its_
     store.close()
 
 
+def test_a_save_the_database_refuses_midway_is_logged_and_leaves_the_saved_rows_as_they_were(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = tmp_path / "store.sqlite"
+    with closing(sqlite3.connect(str(path), isolation_level=None)) as connection:
+        # a table of entries that refuses every row the store writes, as each lacks the value of its last column
+        connection.execute("CREATE TABLE entries (key TEXT PRIMARY KEY, content_hash TEXT NOT NULL, entry BLOB NOT NULL, x NOT NULL)")
+        connection.execute("INSERT INTO entries VALUES ('z.py', 'hash-z', x'00', 'kept')")
+    store = SymbolStore(path, version=(1,), loader=_LOADER)
+    store.put("a.py", "hash-a", _entry("a"))
+    with caplog.at_level(logging.ERROR):
+        store.close()
+
+    assert "Failed to save" in caplog.text
+    with closing(sqlite3.connect(str(path))) as connection:
+        assert connection.execute("SELECT key FROM entries").fetchall() == [("z.py",)]
+
+
 def test_a_row_put_while_a_save_writes_an_older_row_of_its_file_is_read_and_written_by_the_next_save(tmp_path: Path) -> None:
     path = tmp_path / "store.sqlite"
     store = SymbolStore(path, version=(1,), loader=_LOADER)

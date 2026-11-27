@@ -460,6 +460,20 @@ def test_a_change_of_nested_ranges_a_caller_makes_is_not_served_to_the_next(tmp_
             _displace(served)
 
 
+def test_a_change_of_a_list_in_a_symbol_a_caller_makes_is_not_served_to_the_next(tmp_path: Path) -> None:
+    root = _project(tmp_path / "project", 1)
+    inner_range = {"start": {"line": 1, "character": 4}, "end": {"line": 1, "character": 12}}
+    with _running(root) as server:
+        kind = ls_types.SymbolKind.Variable.value
+        inner = {"name": "inner", "kind": kind, "range": inner_range, "selectionRange": inner_range, "tags": [1], "children": []}
+        server.children = [inner]
+        for _ in range(3):
+            [served] = server.request_document_symbols("module_0.py").root_symbols
+            [served_inner] = served["children"]
+            assert served_inner["tags"] == [1]
+            served_inner["tags"].append(2)
+
+
 def test_a_change_of_a_contained_symbol_and_those_around_it_is_not_served_to_the_next(tmp_path: Path) -> None:
     root = _project(tmp_path / "project", 1)
     inner = {"start": {"line": 1, "character": 4}, "end": {"line": 1, "character": 12}}
@@ -531,6 +545,51 @@ def _replacing_children(build: Callable[[str, LSPFileBuffer], DocumentSymbols]) 
         return DocumentSymbols(replaced_roots)
 
     return build_replacing_children
+
+
+def test_a_function_on_one_line_inside_a_function_is_not_the_containing_symbol_of_a_position_on_that_line(tmp_path: Path) -> None:
+    root = _project(tmp_path / "project", 1)
+    one_line = {"start": {"line": 1, "character": 4}, "end": {"line": 1, "character": 12}}
+    with _running(root) as server:
+        kind = ls_types.SymbolKind.Function.value
+        server.children = [{"name": "inner", "kind": kind, "range": one_line, "selectionRange": one_line, "children": []}]
+        container = server.request_containing_symbol("module_0.py", 1, 6)
+
+    assert container is not None
+    assert container["name"] == "function_0"
+
+
+def test_a_position_strictly_contained_is_one_below_the_first_line_of_its_symbol(tmp_path: Path) -> None:
+    root = _project(tmp_path / "project", 1)
+    with _running(root) as server:
+        below_first_line = server.request_containing_symbol("module_0.py", 1, 2, strict=True)
+        on_first_line = server.request_containing_symbol("module_0.py", 0, 6, strict=True)
+
+    assert below_first_line is not None
+    assert below_first_line["name"] == "function_0"
+    assert on_first_line is None
+
+
+def test_the_containing_symbol_of_a_build_that_leaves_its_symbols_without_a_location_is_located_in_its_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _project(tmp_path / "project", 1)
+    with _running(root) as server:
+        build = server._build_document_symbols_from_raw_symbols
+
+        def build_without_locations(relative_file_path: str, file_buffer: LSPFileBuffer) -> DocumentSymbols:
+            document_symbols = build(relative_file_path, file_buffer)
+            for symbol in document_symbols.iter_symbols():
+                cast(dict, symbol).pop("location", None)
+            return document_symbols
+
+        monkeypatch.setattr(server, "_build_document_symbols_from_raw_symbols", build_without_locations)
+        container = server.request_containing_symbol("module_0.py", 1, 6)
+        expected_path = str(Path(server.repository_root_path) / "module_0.py")
+
+    assert container is not None
+    assert (container["name"], container["location"]["relativePath"]) == ("function_0", "module_0.py")
+    assert container["location"]["absolutePath"] == expected_path
 
 
 class _EmptiedByAnotherThread(OrderedDict):
