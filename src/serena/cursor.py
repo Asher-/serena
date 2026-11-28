@@ -22,7 +22,7 @@ from serena.util.line_numbers import format_line_range, to_display_line, to_inte
 from serena.util.staleness import check_stale, read_file_version
 from serena.util.text_utils import MatchedConsecutiveLines, TextLine, expand_braces
 from serena.util.windowing import InvalidContinuation, WindowRequest, decode_continuation, window_body
-from solidlsp.ls import DocumentSymbols, SymbolRangeIndex
+from solidlsp.ls import DocumentSymbols, SymbolRangeIndex, SymbolTreeCopy
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_utils import PathUtils
 from solidlsp.lsp_protocol_handler.lsp_types import (
@@ -489,6 +489,8 @@ class _FileSymbolTree:
         container_kinds = {symbol["kind"] for symbol in document_symbols.iter_symbols() if SymbolKind.is_container(symbol["kind"])}
         self._index = SymbolRangeIndex(document_symbols, container_kinds)
         self._root_symbols = [LanguageServerSymbol(symbol) for symbol in document_symbols.root_symbols]
+        self._tree_copies: dict[int, SymbolTreeCopy] = {}
+        """maps the identity of a root symbol a container was reached from to the copy of that root's tree"""
 
     def enclosing_symbol(self, line: TextLine) -> LanguageServerSymbol | None:
         """
@@ -509,7 +511,14 @@ class _FileSymbolTree:
         if not code.strip():
             return None
         container = self._index.find_innermost_container(line.line_number, len(content) - len(code), strict=False)
-        return LanguageServerSymbol(container.symbol) if container is not None else None
+        if container is None:
+            return None
+
+        # the container's copy from the tree it was reached in, whose parent links lead to that tree's root
+        tree_copy = self._tree_copies.get(id(container.root))
+        if tree_copy is None:
+            tree_copy = self._tree_copies[id(container.root)] = SymbolTreeCopy(container.root)
+        return LanguageServerSymbol(tree_copy.copy_of(container.symbol))
 
     def _narrowest_root_symbol(self, line_number: int) -> LanguageServerSymbol | None:
         """
