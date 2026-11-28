@@ -486,11 +486,12 @@ class _FileSymbolTree:
         """
         :param document_symbols: the file's document symbols.
         """
-        container_kinds = {symbol["kind"] for symbol in document_symbols.iter_symbols() if SymbolKind.is_container(symbol["kind"])}
-        self._index = SymbolRangeIndex(document_symbols, container_kinds)
-        self._root_symbols = [LanguageServerSymbol(symbol) for symbol in document_symbols.root_symbols]
-        self._tree_copies: dict[int, SymbolTreeCopy] = {}
-        """maps the identity of a root symbol a container was reached from to the copy of that root's tree"""
+        # a copy of each root's tree, whose parent links lead to that root whatever links the server left
+        tree_copies = DocumentSymbols([SymbolTreeCopy(root).root for root in document_symbols.root_symbols])
+
+        container_kinds = {symbol["kind"] for symbol in tree_copies.iter_symbols() if SymbolKind.is_container(symbol["kind"])}
+        self._index = SymbolRangeIndex(tree_copies, container_kinds)
+        self._root_symbols = [LanguageServerSymbol(symbol) for symbol in tree_copies.root_symbols]
 
     def enclosing_symbol(self, line: TextLine) -> LanguageServerSymbol | None:
         """
@@ -511,14 +512,7 @@ class _FileSymbolTree:
         if not code.strip():
             return None
         container = self._index.find_innermost_container(line.line_number, len(content) - len(code), strict=False)
-        if container is None:
-            return None
-
-        # the container's copy from the tree it was reached in, whose parent links lead to that tree's root
-        tree_copy = self._tree_copies.get(id(container.root))
-        if tree_copy is None:
-            tree_copy = self._tree_copies[id(container.root)] = SymbolTreeCopy(container.root)
-        return LanguageServerSymbol(tree_copy.copy_of(container.symbol))
+        return LanguageServerSymbol(container.symbol) if container is not None else None
 
     def _narrowest_root_symbol(self, line_number: int) -> LanguageServerSymbol | None:
         """

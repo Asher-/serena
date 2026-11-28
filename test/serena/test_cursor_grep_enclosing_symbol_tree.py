@@ -4,7 +4,7 @@ server leaves on the symbols.
 """
 
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -34,7 +34,7 @@ def test_a_grep_names_an_enclosing_symbol_by_the_tree_it_was_found_in(
         for root in roots:
             for symbol in _iter_symbols(root):
                 if symbol["name"] == "find_me":
-                    symbol["parent"] = {**symbol["parent"], "name": "Stale", "parent": None}  # type: ignore[typeddict-item]
+                    symbol["parent"] = cast(ls_types.UnifiedSymbolInformation, {**symbol["parent"], "name": "Stale", "parent": None})
         return DocumentSymbols(roots)
 
     monkeypatch.setattr(language_server, "request_document_symbols", symbols_with_a_stale_parent_link)
