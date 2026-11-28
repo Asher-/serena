@@ -22,7 +22,7 @@ from serena.util.line_numbers import format_line_range, to_display_line, to_inte
 from serena.util.staleness import check_stale, read_file_version
 from serena.util.text_utils import MatchedConsecutiveLines, TextLine, expand_braces
 from serena.util.windowing import InvalidContinuation, WindowRequest, decode_continuation, window_body
-from solidlsp.ls import DocumentSymbols, SymbolRangeIndex, SymbolTreeCopy
+from solidlsp.ls import DocumentSymbols, SymbolRangeIndex
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_utils import PathUtils
 from solidlsp.lsp_protocol_handler.lsp_types import (
@@ -486,12 +486,9 @@ class _FileSymbolTree:
         """
         :param document_symbols: the file's document symbols.
         """
-        # a copy of each root's tree, whose parent links lead to that root whatever links the server left
-        tree_copies = DocumentSymbols([SymbolTreeCopy(root).root for root in document_symbols.root_symbols])
-
-        container_kinds = {symbol["kind"] for symbol in tree_copies.iter_symbols() if SymbolKind.is_container(symbol["kind"])}
-        self._index = SymbolRangeIndex(tree_copies, container_kinds)
-        self._root_symbols = [LanguageServerSymbol(symbol) for symbol in tree_copies.root_symbols]
+        container_kinds = {symbol["kind"] for symbol in document_symbols.iter_symbols() if SymbolKind.is_container(symbol["kind"])}
+        self._index = SymbolRangeIndex(document_symbols, container_kinds)
+        self._root_symbols = [LanguageServerSymbol(symbol) for symbol in document_symbols.root_symbols]
 
     def enclosing_symbol(self, line: TextLine) -> LanguageServerSymbol | None:
         """

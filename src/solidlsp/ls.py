@@ -2463,17 +2463,15 @@ class SolidLanguageServer(ABC):
         with self._open_file_context(relative_file_path, file_buffer, open_in_ls=False) as file_data:
             content_hash = file_data.content_hash
             held = self._document_symbols_cache.get(relative_file_path, content_hash)
-            if held is not None:
-                log.debug("Returning cached document symbols for %s (hash=%s)", relative_file_path, content_hash)
-                absolute_path = os.path.join(self.repository_root_path, relative_file_path)
-                return held.bound(file_data.split_lines(), absolute_path, pathlib.Path(absolute_path).as_uri())
-
-            document_symbols = self._build_document_symbols_from_raw_symbols(relative_file_path, file_buffer=file_data)
-            # only cache non-empty results to avoid permanently caching unindexed responses
-            if document_symbols.root_symbols:
-                log.debug("Updating cached document symbols for %s (hash=%s)", relative_file_path, content_hash)
-                self._document_symbols_cache.put(relative_file_path, content_hash, document_symbols.slim())
-            return document_symbols
+            if held is None:
+                # the slim copy, whose parent links lead to its roots whatever links the build left
+                held = self._build_document_symbols_from_raw_symbols(relative_file_path, file_buffer=file_data).slim()
+                # only cache non-empty results to avoid permanently caching unindexed responses
+                if held.root_symbols:
+                    log.debug("Updating cached document symbols for %s (hash=%s)", relative_file_path, content_hash)
+                    self._document_symbols_cache.put(relative_file_path, content_hash, held)
+            absolute_path = os.path.join(self.repository_root_path, relative_file_path)
+            return held.bound(file_data.split_lines(), absolute_path, pathlib.Path(absolute_path).as_uri())
 
     def _build_document_symbols_from_raw_symbols(self, relative_file_path: str, file_buffer: LSPFileBuffer) -> DocumentSymbols:
         """
