@@ -509,7 +509,7 @@ class _FileSymbolTree:
         if not code.strip():
             return None
         container = self._index.find_innermost_container(line.line_number, len(content) - len(code), strict=False)
-        return LanguageServerSymbol(container) if container is not None else None
+        return LanguageServerSymbol(container.symbol) if container is not None else None
 
     def _narrowest_root_symbol(self, line_number: int) -> LanguageServerSymbol | None:
         """
