@@ -99,6 +99,14 @@ def test_a_grep_groups_every_hit_under_its_enclosing_symbol(
     assert [(path, _lines(hits)) for path, hits in unsymboled] == expected_unsymboled
 
 
+def test_a_grep_groups_a_hit_on_a_blank_line_under_the_root_symbol_covering_it(python_serena_agent: SerenaAgent) -> None:
+    # a match that starts on a blank line: the newline right after another newline
+    groups, _ = _grep(python_serena_agent, r"(?<=\n)\n", "test_repo/nested.py")
+
+    name_paths_by_line = {line.line_number: symbol.get_name_path() for symbol, hits in groups for hit in hits for line in hit.matched_lines}
+    assert name_paths_by_line[4] == "OuterClass"
+
+
 def test_a_grep_requests_the_symbols_of_each_file_with_matches_once(
     python_serena_agent: SerenaAgent, monkeypatch: pytest.MonkeyPatch
 ) -> None:
